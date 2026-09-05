@@ -282,6 +282,12 @@ tools appear inline in graphical Emacs and as a type-and-size
 placeholder in terminals; the limits are described under =Images= in
 Advanced.
 
+Hover completed replies, thinking, or tool blocks for timestamps and details:
+reply provider/model and message-level token/cache usage, thinking line counts,
+or short tool command/path hints.  Native =C-h .= shows full help at point,
+including in terminals.  Stream durations, output rates, and tool timings are
+approximate and live-only; reload or resume drops them.
+
 Press =RET= on a file target to visit it: a file-content row in tool
 output, a plain path reference, or the label of a local Markdown
 link.  Locations are honored — =src/app.el:12:3= opens line 12,
