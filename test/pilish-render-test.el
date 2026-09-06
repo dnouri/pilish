@@ -869,44 +869,237 @@ The banner is toggled before thinking blocks and outline cycling."
     (search-forward "TAB details")
     (pilish-toggle-tool-section)
     (let ((text (buffer-string)))
-      (should (string-match-p "^pi v0\.84\.2 · pilish 3\.0\.0 · TAB collapse$" text))
-      (should (string-match-p "^\\[Skills\\] aws-sso, uv$" text))
-      (should (string-match-p "^\\[Prompts\\] /create-todo, /fix-tests$" text)))
+      (should (string-match-p "TAB collapse · RET opens source" text))
+      (should (string-match-p "\n\n## Skills 🧠\n\n### Other\n\n- `aws-sso` — AWS SSO\n- `uv` — uv runner" text))
+      (should (string-match-p "\n\n## Prompts ✍️\n\n### Other\n\n- `/create-todo` — New todo\n- `/fix-tests` — Fix tests" text)))
     ;; TAB again restores the compact form.
     (pilish-toggle-tool-section)
     (let ((text (buffer-string)))
       (should (string-match-p
                "^pi v0\.84\.2 · pilish 3\.0\.0 · 2 skills · 2 prompts · TAB details$"
                text))
-      (should-not (string-match-p "\\[Skills\\]" text))
-      (should-not (string-match-p "\\[Prompts\\]" text))
+      (should-not (string-match-p "^## " text))
+      (should (string-match-p "C-c C-p   menu\n\npi v" text))
       (should-not (string-match-p "TAB collapse" text)))))
 
-(ert-deftest pilish-test-startup-banner-details-list-skills-and-prompts ()
-  "Expanded banner strips the skill: prefix, prefixes prompts with /, and
-joins context files with comma and space."
+(ert-deftest pilish-test-startup-banner-details-group-resources ()
+  "Details use Markdown headings and source lists ordered by scope and name."
   (with-temp-buffer
     (pilish-chat-mode)
-    (setq pilish--process-version "0.84.2"
-          pilish--commands
-          (list '(:name "create-todo" :description "New todo" :source "prompt")
-                '(:name "fix-tests" :description "Fix tests" :source "prompt")
-                '(:name "skill:aws-sso" :description "AWS SSO" :source "skill")
-                '(:name "skill:uv" :description "uv runner" :source "skill")))
+    (setq pilish--commands
+          '((:name "skill:uv" :source "skill" :location "user"
+             :path "/home/u/skills/uv/SKILL.md" :description "Run scripts")
+            (:name "skill:z-tests" :source "skill" :location "project"
+             :path "/p/skills/z-tests/SKILL.md")
+            (:name "skill:a-tests" :source "skill" :location "project"
+             :path "/p/skills/a-tests/SKILL.md" :description "Run tests")
+            (:name "review" :source "prompt" :location "user"
+             :path "/home/u/prompts/review.md")
+            (:name "commit" :source "prompt" :location "project"
+             :path "/p/prompts/commit.md")
+            (:name "inspect" :source "extension" :location "path"
+             :path "/tmp/inspect.ts" :description "Inspect state")
+            (:name "user-tool" :source "extension" :location "user"
+             :path "/home/u/extensions/tool.ts")
+            (:name "project-tool" :source "extension" :location "project"
+             :path "/p/extensions/tool.ts")
+            (:name "no-source" :source "extension")))
     (cl-letf (((symbol-function 'pilish--startup-context-files)
-               (lambda (&optional _directory _user-agent-dir)
-                 '("/home/u/.pi/agent/AGENTS.md" "/p/AGENTS.md"))))
+               (lambda () '("/p/AGENTS.md"))))
       (pilish--display-startup-header)
       (goto-char (point-min))
       (search-forward "TAB details")
       (pilish-toggle-tool-section)
-      (let ((text (buffer-string)))
-        (should (string-match-p "^\\[Skills\\] aws-sso, uv$" text))
-        (should-not (string-match-p "skill:" text))
-        (should (string-match-p "^\\[Prompts\\] /create-todo, /fix-tests$" text))
-        (should (string-match-p
-                 "^\\[Context\\] /home/u/.pi/agent/AGENTS.md, /p/AGENTS.md$"
-                 text))))))
+      (let* ((region (pilish--startup-banner-region))
+             (details (buffer-substring-no-properties
+                       (car region) (cdr region))))
+        (should
+         (equal details
+                (concat
+                 "pilish 3.0.0 · TAB collapse · RET opens source\n\n"
+                 "## Context files 📚\n\n"
+                 "- [`/p/AGENTS.md`](</p/AGENTS.md>)\n\n"
+                 "## Skills 🧠\n\n### Project\n\n"
+                 "- [`a-tests`](</p/skills/a-tests/SKILL.md>) — Run tests\n"
+                 "- [`z-tests`](</p/skills/z-tests/SKILL.md>)\n\n"
+                 "### User\n\n"
+                 "- [`uv`](</home/u/skills/uv/SKILL.md>) — Run scripts\n\n"
+                 "## Prompts ✍️\n\n### Project\n\n"
+                 "- [`/commit`](</p/prompts/commit.md>)\n\n"
+                 "### User\n\n- [`/review`](</home/u/prompts/review.md>)\n\n"
+                 "## Extension commands 🧩\n\n### Project\n\n"
+                 "- [`/project-tool`](</p/extensions/tool.ts>)\n\n"
+                 "### User\n\n- [`/user-tool`](</home/u/extensions/tool.ts>)\n\n"
+                 "### Explicit paths\n\n- [`/inspect`](</tmp/inspect.ts>) — Inspect state\n\n"
+                 "### Other\n\n- `/no-source`"))))
+      ;; The formatter must produce actual Markdown structure, not just faces.
+      (let* ((root (treesit-buffer-root-node 'markdown))
+             (headings (treesit-query-capture root '((atx_heading) @heading)))
+             (items (treesit-query-capture root '((list_item) @item))))
+        (should (= 12 (length headings)))
+        (should (= 10 (length items)))))))
+
+(ert-deftest pilish-test-startup-banner-source-links-visit-real-files ()
+  "RET on each kind of source opens its file, including unusual path names."
+  (let ((dir (pilish-test--make-temp-directory "pilish-test-banner-links-"))
+        visited)
+    (unwind-protect
+        (save-window-excursion
+          (with-temp-buffer
+            (switch-to-buffer (current-buffer))
+            (pilish-chat-mode)
+            (pilish--set-chat-session-identity dir)
+            (let* ((paths (mapcar
+                           (lambda (name) (expand-file-name name dir))
+                           '("AGENTS.md" "skills/a [b] (c)#1%/SKILL.md"
+                             "prompts/my prompt.md" "extensions/a&b.ts")))
+                   (names '("AGENTS.md" "browse" "/review" "/inspect")))
+              (dolist (path paths)
+                (make-directory (file-name-directory path) t)
+                (with-temp-file path (insert (file-name-nondirectory path))))
+              (setq pilish--commands
+                    (cl-mapcar
+                     (lambda (source name path)
+                       (list :source source :name name :path path
+                             :location "project"))
+                     '("skill" "prompt" "extension")
+                     '("skill:browse" "review" "inspect") (cdr paths)))
+              (cl-letf (((symbol-function 'pilish--startup-context-files)
+                         (lambda () (list (car paths)))))
+                (pilish--display-startup-header)
+                (let ((compact (buffer-string)))
+                  (goto-char (point-min))
+                  (search-forward "TAB details")
+                  (execute-kbd-macro (kbd "TAB"))
+                  ;; Refontification must preserve source identity.
+                  (font-lock-flush)
+                  (font-lock-ensure)
+                  (cl-mapc
+                   (lambda (name path)
+                     (goto-char (point-min))
+                     (search-forward name)
+                     (backward-char)
+                     (let ((target (pilish--file-target-at-point)))
+                       (should (eq :link (plist-get target :source)))
+                       (should (equal path (plist-get target :emacs-path))))
+                     (save-window-excursion
+                       (execute-kbd-macro (kbd "RET"))
+                       (push (current-buffer) visited)
+                       (should (equal path (buffer-file-name)))
+                       (should (equal (file-name-nondirectory path)
+                                      (buffer-string)))))
+                   names paths)
+                  ;; Collapse from the final item, not only the hint line.
+                  (execute-kbd-macro (kbd "TAB"))
+                  (should (equal compact (buffer-string))))))))
+      (dolist (buffer visited)
+        (when (buffer-live-p buffer) (kill-buffer buffer)))
+      (delete-directory dir t))))
+
+(ert-deftest pilish-test-startup-banner-source-links-keep-remote-host ()
+  "Source links reuse normalized command paths without probing the remote host."
+  (with-temp-buffer
+    (pilish-chat-mode)
+    (let ((anchor "/ssh:bastion|sudo:root@pi-host:/home/pi/project/"))
+      (pilish--set-chat-session-identity anchor)
+      (setq pilish--commands
+            (list (pilish--normalize-command
+                   '(:name "skill:remote" :source "skill"
+                     :sourceInfo (:scope "project"
+                                  :path "/home/pi/project/skills/my skill/SKILL.md"))
+                   anchor)))
+      (cl-letf (((symbol-function 'pilish--startup-context-files) #'ignore))
+        (pilish--display-startup-header)
+        (goto-char (point-min))
+        (search-forward "TAB details")
+        (pilish-toggle-tool-section))
+      (goto-char (point-min))
+      (search-forward "remote")
+      (backward-char)
+      (should (equal
+               "/ssh:bastion|sudo:root@pi-host:/home/pi/project/skills/my skill/SKILL.md"
+               (plist-get (pilish--file-target-at-point) :emacs-path))))))
+
+(ert-deftest pilish-test-startup-banner-refresh-preserves-open-source-links ()
+  "A refresh leaves open details alone; reopening uses the new command sources."
+  (with-temp-buffer
+    (pilish-chat-mode)
+    (setq pilish--commands
+          '((:name "review" :source "prompt" :location "project"
+             :path "/p/old.md")))
+    (cl-letf (((symbol-function 'pilish--startup-context-files) #'ignore))
+      (pilish--display-session-history
+       (pilish-test--startup-banner-history) (current-buffer))
+      (let* ((region (pilish--startup-banner-region))
+             (history (buffer-substring (cdr region) (point-max))))
+        (goto-char (car region))
+        (pilish-toggle-tool-section)
+        (search-forward "/review")
+        (backward-char)
+        (let ((expanded (buffer-string)))
+          (pilish--set-commands
+           '((:name "review" :source "prompt" :location "project"
+              :path "/p/new.md")))
+          (should (equal-including-properties expanded (buffer-string)))
+          (should (equal "/p/old.md"
+                         (plist-get (pilish--file-target-at-point) :emacs-path))))
+        (pilish-toggle-tool-section)
+        (pilish-toggle-tool-section)
+        (goto-char (car (pilish--startup-banner-region)))
+        (search-forward "/review")
+        (backward-char)
+        (should (equal "/p/new.md"
+                       (plist-get (pilish--file-target-at-point) :emacs-path)))
+        (should (equal history
+                       (buffer-substring
+                        (cdr (pilish--startup-banner-region)) (point-max))))))))
+
+(ert-deftest pilish-test-startup-banner-source-links-require-header-ownership ()
+  "Known-source metadata cannot loosen ordinary chat link parsing."
+  (with-temp-buffer
+    (pilish-chat-mode)
+    (let ((inhibit-read-only t))
+      (insert (pilish--startup-banner-item "source" "/p/my files/source.md")))
+    (font-lock-ensure)
+    (goto-char (point-min))
+    (search-forward "source")
+    (backward-char)
+    (should-not (pilish--file-target-at-point))))
+
+(ert-deftest pilish-test-startup-banner-keeps-descriptions-inline ()
+  "Descriptions stay in one list item; names preserve literal punctuation."
+  (with-temp-buffer
+    (pilish-chat-mode)
+    (setq pilish--commands
+          '((:name "inspect[all]" :source "extension" :location "user"
+             :path "/p/inspect.ts"
+             :description "Inspect **all**\n\n## Not a heading")))
+    (cl-letf (((symbol-function 'pilish--startup-context-files) #'ignore))
+      (let ((inhibit-read-only t))
+        (insert (pilish--format-startup-banner-expanded))))
+    (font-lock-ensure)
+    (let* ((root (treesit-buffer-root-node 'markdown))
+           (headings (treesit-query-capture root '((atx_heading) @heading)))
+           (items (treesit-query-capture root '((list_item) @item))))
+      (should (= 2 (length headings)))
+      (should (= 1 (length items))))
+    (should (string-match-p
+             (regexp-quote "/inspect[all] — Inspect all ## Not a heading")
+             (pilish--visible-text (point-min) (point-max))))))
+
+(ert-deftest pilish-test-startup-banner-omits-empty-sections ()
+  "Without resources, expansion contains only versions and the key hints."
+  (with-temp-buffer
+    (pilish-chat-mode)
+    (cl-letf (((symbol-function 'pilish--startup-context-files) #'ignore))
+      (pilish--display-startup-header)
+      (goto-char (point-min))
+      (search-forward "TAB details")
+      (pilish-toggle-tool-section))
+    (let ((region (pilish--startup-banner-region)))
+      (should (equal "pilish 3.0.0 · TAB collapse · RET opens source"
+                     (buffer-substring-no-properties
+                      (car region) (cdr region)))))))
 
 (ert-deftest pilish-test-display-session-history-includes-startup-summary ()
   "History replay renders the compact startup summary above session messages."
@@ -952,7 +1145,7 @@ joins context files with comma and space."
                (regexp-quote
                 "pi v0.84.2 · pilish 3.0.0 · 2 skills · 2 prompts · TAB details")
                text))
-      (should-not (string-match-p "\\[Skills\\]" text))
+      (should-not (string-match-p "^## Skills" text))
       (should-not (string-match-p "TAB collapse" text)))))
 
 (defun pilish-test--history-with-toggleable-thinking ()

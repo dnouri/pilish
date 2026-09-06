@@ -299,8 +299,14 @@ messages, and =f= to fork the conversation from the turn at point.
 
 The chat header ends with a session summary line showing the pi and
 Pilish versions plus skill and prompt-template counts.  Press =TAB= on
-that line to expand it into the loaded context files, skills, and
-prompt templates; =TAB= again collapses it back to the summary line.
+that line to show context files, skills, prompt templates, and extension
+commands in Markdown sections.  Skills, prompts, and extension commands
+are grouped by Project and User, with explicit paths and resources of
+unknown scope kept separate.  Names link to their source files when
+available: press =RET= on a link to open the file, just as in chat output.
+Descriptions help you explore what is available; use =C-c C-p= to run
+commands from the menu.  =TAB= anywhere in the details collapses the summary.
+The extension section lists registered commands, not extensions without commands.
 
 #+html: <a id="sessions-and-context"></a>
 ** Sessions and context 🗂️

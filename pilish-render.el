@@ -46,6 +46,7 @@
 (require 'cl-lib)
 (require 'ansi-color)
 (require 'image)
+(require 'url-util)
 
 ;; Forward references for functions in other modules
 (declare-function pilish-compact "pilish-menu" (&optional custom-instructions))
@@ -3532,42 +3533,83 @@ was toggled successfully."
                       (min original-pos (max new-start (1- new-end))))))
     t))
 
-(defun pilish--startup-banner-section (label names)
-  "Return the LABEL detail line listing NAMES for the startup banner.
-NAMES is a list of strings; returns nil when empty so empty sections are
-omitted from the expanded banner entirely."
-  (when names
-    (concat label " " (mapconcat #'identity names ", "))))
+(defun pilish--startup-banner-label (name)
+  "Return NAME as a Markdown code span, preserving literal punctuation."
+  (let ((delimiter "`"))
+    (while (string-match-p (regexp-quote delimiter) name)
+      (setq delimiter (concat delimiter "`")))
+    (concat delimiter
+            (if (or (string-prefix-p "`" name) (string-suffix-p "`" name))
+                (concat " " name " ")
+              name)
+            delimiter)))
+
+(defun pilish--startup-banner-item (name path &optional description)
+  "Format a Markdown list item for NAME, source PATH, and DESCRIPTION.
+PATH is an already normalized Emacs source path, or nil when unavailable.
+Keep it on the link label so the existing file visitor can open known sources
+without imposing the stricter path grammar used for arbitrary chat prose."
+  (let ((label (pilish--startup-banner-label name))
+        (description (string-join (split-string (or description "")) " ")))
+    (concat
+     "- "
+     (if path
+         (format "[%s](<%s>)"
+                 (propertize label 'pilish-startup-source path)
+                 (mapconcat #'url-hexify-string
+                            (split-string (pilish--local-name-for-process path) "/")
+                            "/"))
+       label)
+     (unless (string-empty-p description) (concat " — " description)))))
+
+(defun pilish--startup-banner-section (heading contents)
+  "Return Markdown HEADING followed by CONTENTS, omitting empty sections."
+  (when contents
+    (concat heading "\n\n" (string-join contents "\n"))))
+
+(defun pilish--startup-banner-commands (heading source)
+  "Format a HEADING section for commands of SOURCE, grouped by scope."
+  (let ((groups (seq-group-by (lambda (command) (plist-get command :location))
+                              (pilish--commands-by-source source)))
+        sections)
+    (dolist (scope '(("project" . "Project") ("user" . "User")
+                     ("path" . "Explicit paths") (nil . "Other")))
+      (when-let* ((commands (cdr (assoc (car scope) groups))))
+        (push
+         (pilish--startup-banner-section
+          (concat "### " (cdr scope))
+          (mapcar
+           (lambda (command)
+             (let ((name (plist-get command :name)))
+               (pilish--startup-banner-item
+                (if (equal source "skill")
+                    (string-remove-prefix "skill:" name)
+                  (concat "/" name))
+                (plist-get command :path) (plist-get command :description))))
+           commands))
+         sections)))
+    (when sections
+      (concat heading "\n\n" (string-join (nreverse sections) "\n\n")))))
 
 (defun pilish--format-startup-banner-expanded ()
-  "Return the propertized expanded startup banner text.
-Line one carries the version segments and a TAB collapse hint; then one
-line per non-empty section with context files, skill names (the skill:
-prefix stripped), and prompt names (each prefixed with a slash), all in
-`pilish--commands' order."
-  (let ((sections
-         (delq nil
-               (list
-                (pilish--startup-banner-section
-                 "[Context]" (pilish--startup-context-files))
-                (pilish--startup-banner-section
-                 "[Skills]"
-                 (mapcar (lambda (name) (string-remove-prefix "skill:" name))
-                         (pilish--startup-banner-command-names "skill")))
-                (pilish--startup-banner-section
-                 "[Prompts]"
-                 (mapcar (lambda (name) (concat "/" name))
-                         (pilish--startup-banner-command-names "prompt")))))))
-    (pilish--propertize-startup-banner
-     (mapconcat
-      #'identity
-      (cons (concat (mapconcat #'identity
-                               (pilish--startup-banner-version-segments)
-                               " · ")
-                   " · TAB collapse")
-            sections)
-      "\n")
-     'expanded)))
+  "Return Markdown session details with source links and scoped command lists."
+  (pilish--propertize-startup-banner
+   (string-join
+    (delq nil
+          (list
+           (concat (string-join (pilish--startup-banner-version-segments) " · ")
+                   " · TAB collapse · RET opens source")
+           (pilish--startup-banner-section
+            "## Context files 📚"
+            (mapcar (lambda (path)
+                      (pilish--startup-banner-item
+                       (pilish--route-preserving-abbreviate-file-name path) path))
+                    (pilish--startup-context-files)))
+           (pilish--startup-banner-commands "## Skills 🧠" "skill")
+           (pilish--startup-banner-commands "## Prompts ✍️" "prompt")
+           (pilish--startup-banner-commands "## Extension commands 🧩" "extension")))
+    "\n\n")
+   'expanded))
 
 (defun pilish--startup-banner-probe-pos (pos)
   "Return a position inside the startup banner at POS, or nil.
@@ -5648,7 +5690,8 @@ and collapsed references always own and suppress fallback."
 
 (defun pilish--semantic-link-target (owner)
   "Return the valid local file target for semantic link OWNER, or nil.
-Only an inline link or inline image with a strict local destination qualifies.
+Generated startup source links carry their known Emacs paths.  Otherwise,
+only an inline link or inline image with a strict local destination qualifies.
 URL schemes, mailto links, protocol-relative links, fragment-only links, empty
 or malformed destinations, bare filenames, and reference forms are owned but
 invalid.  A local fragment is returned separately and is never interpreted as
@@ -5679,14 +5722,19 @@ line metadata."
                             source))
              (fragment (and fragment-index
                             (substring source (1+ fragment-index))))
-             (path (pilish--semantic-link-unescape path-source))
+             (source-path
+              (and (eq (get-text-property position 'pilish-startup-banner)
+                       'expanded)
+                   (get-text-property position 'pilish-startup-source)))
+             (path (or source-path (pilish--semantic-link-unescape path-source)))
              (case-fold-search t))
-        (when (and (not (string-empty-p path))
-                   (not (string-prefix-p "#" source))
-                   (not (string-prefix-p "//" source))
-                   (not (string-match-p
-                         "\\`[[:alpha:]][[:alnum:]+.-]*:" source))
-                   (pilish--strict-text-file-path-p path angle))
+        (when (or source-path
+                  (and (not (string-empty-p path))
+                       (not (string-prefix-p "#" source))
+                       (not (string-prefix-p "//" source))
+                       (not (string-match-p
+                             "\\`[[:alpha:]][[:alnum:]+.-]*:" source))
+                       (pilish--strict-text-file-path-p path angle)))
           (let* ((anchor (pilish--chat-session-directory))
                  (emacs-path (pilish--emacs-path path anchor))
                  (label (plist-get label-projection :text)))

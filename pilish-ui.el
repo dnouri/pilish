@@ -1658,9 +1658,17 @@ Descriptions come from the handler's docstring.")
   "Return non-nil when TEXT names a client-side built-in command."
   (and (pilish--builtin-command-name text) t))
 
+(defun pilish--commands-by-source (source)
+  "Return commands filtered by SOURCE, sorted alphabetically."
+  (sort (seq-filter (lambda (c) (equal (plist-get c :source) source))
+                    pilish--commands)
+        (lambda (a b)
+          (string< (plist-get a :name) (plist-get b :name)))))
+
 (defun pilish--set-commands (commands)
   "Set COMMANDS in current buffer and propagate to sibling session buffers.
-COMMANDS is a list of plists with :name, :description, :source.
+COMMANDS is a list of plists with :name, :source, and optional
+:description, :location, and normalized Emacs :path metadata.
 Both chat and input buffers share the same commands list, so this
 setter updates all of them to keep them in sync."
   (setq pilish--commands commands)
@@ -2335,7 +2343,7 @@ Ends with the compact, toggleable banner line built by
      "C-c C-c   send prompt\n"
      "C-c C-k   abort\n"
      "C-c C-r   sessions\n"
-     "C-c C-p   menu\n"
+     "C-c C-p   menu\n\n"
      (pilish--format-startup-banner-compact) "\n")))
 
 (defun pilish--display-startup-header ()
@@ -2384,19 +2392,6 @@ per directory."
           (setq dir parent))))
     files))
 
-(defun pilish--startup-banner-command-names (source)
-  "Return names of `pilish--commands' entries whose :source equals SOURCE.
-Order follows `pilish--commands' so the banner preserves command order."
-  (delq nil
-        (mapcar (lambda (command)
-                  (when (equal (plist-get command :source) source)
-                    (plist-get command :name)))
-                pilish--commands)))
-
-(defun pilish--startup-banner-count-commands (source)
-  "Return how many `pilish--commands' entries have :source equal to SOURCE."
-  (length (pilish--startup-banner-command-names source)))
-
 (defun pilish--startup-banner-version-segments ()
   "Return version segments for the startup banner summary.
 Includes \"pi V\" only when `pilish--process-version' is set and always
@@ -2425,11 +2420,9 @@ counts."
       (setq segments
             (append segments
                     (list (format "%d skills"
-                                  (pilish--startup-banner-count-commands
-                                   "skill"))
+                                  (length (pilish--commands-by-source "skill")))
                           (format "%d prompts"
-                                  (pilish--startup-banner-count-commands
-                                   "prompt"))))))
+                                  (length (pilish--commands-by-source "prompt")))))))
     (pilish--propertize-startup-banner
      (concat (mapconcat #'identity segments " · ") " · TAB details")
      'compact)))

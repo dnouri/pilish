@@ -1404,21 +1404,10 @@ future attachment kinds such as video or files."
 
 ;;;; Command Submenus (Templates, Extensions, Skills)
 
-(defun pilish--commands-by-source (source)
-  "Return commands filtered by SOURCE, sorted alphabetically."
-  (sort (seq-filter (lambda (c) (equal (plist-get c :source) source))
-                    pilish--commands)
-        (lambda (a b)
-          (string< (plist-get a :name) (plist-get b :name)))))
-
 (defun pilish--commands-by-source-and-location (source location)
   "Return commands filtered by SOURCE and LOCATION, sorted alphabetically."
-  (sort (seq-filter (lambda (c)
-                      (and (equal (plist-get c :source) source)
-                           (equal (plist-get c :location) location)))
-                    pilish--commands)
-        (lambda (a b)
-          (string< (plist-get a :name) (plist-get b :name)))))
+  (seq-filter (lambda (c) (equal (plist-get c :location) location))
+              (pilish--commands-by-source source)))
 
 (defun pilish--submenu-commands-ordered (source)
   "Return commands for SOURCE ordered by location then name.
