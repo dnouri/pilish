@@ -857,7 +857,8 @@ without an input window."
   (let ((header (pilish--format-startup-header)))
     (should (string-match-p "C-c C-c" header))
     (should (string-match-p "send" header))
-    (should (string-match-p "C-c C-r   sessions" header))))
+    (should (string-match-p "C-c C-r   sessions" header))
+    (should (string-match-p "C-c C-p   menu\n\npilish" header))))
 
 (ert-deftest pilish-test-startup-header-shows-label ()
   "Startup header labels the buffer with the project title."
