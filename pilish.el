@@ -10,7 +10,7 @@
 ;; Assisted-by: pi:claude-opus-4.6
 ;; URL: https://github.com/dnouri/pilish
 ;; Keywords: ai llm ai-pair-programming tools
-;; Version: 3.0.0
+;; Version: 3.0.1
 ;; Package-Requires: ((emacs "29.1") (transient "0.9.0") (magit-section "4.0.0") (md-ts-mode "0.3.0") (markdown-table-wrap "0.2.0"))
 
 ;; SPDX-License-Identifier: GPL-3.0-or-later

@@ -915,7 +915,7 @@ The banner is toggled before thinking blocks and outline cycling."
     (pilish-toggle-tool-section)
     (let ((text (buffer-string)))
       (should (string-match-p
-               "^pi v0\.84\.2 · pilish 3\.0\.0 · 2 skills · 2 prompts · TAB details$"
+               "^pi v0\.84\.2 · pilish 3\.0\.1 · 2 skills · 2 prompts · TAB details$"
                text))
       (should-not (string-match-p "^## " text))
       (should (string-match-p "C-c C-p   menu\n\npi v" text))
@@ -955,7 +955,7 @@ The banner is toggled before thinking blocks and outline cycling."
         (should
          (equal details
                 (concat
-                 "pilish 3.0.0 · TAB collapse · RET opens source\n\n"
+                 "pilish 3.0.1 · TAB collapse · RET opens source\n\n"
                  "## Context files 📚\n\n"
                  "- [`/p/AGENTS.md`](</p/AGENTS.md>)\n\n"
                  "## Skills 🧠\n\n### Project\n\n"
@@ -1136,7 +1136,7 @@ The banner is toggled before thinking blocks and outline cycling."
       (search-forward "TAB details")
       (pilish-toggle-tool-section))
     (let ((region (pilish--startup-banner-region)))
-      (should (equal "pilish 3.0.0 · TAB collapse · RET opens source"
+      (should (equal "pilish 3.0.1 · TAB collapse · RET opens source"
                      (buffer-substring-no-properties
                       (car region) (cdr region)))))))
 
@@ -1156,7 +1156,7 @@ The banner is toggled before thinking blocks and outline cycling."
     (let ((text (buffer-string)))
       (should (string-match-p
                (regexp-quote
-                "pi v0.84.2 · pilish 3.0.0 · 2 skills · 2 prompts · TAB details")
+                "pi v0.84.2 · pilish 3.0.1 · 2 skills · 2 prompts · TAB details")
                text))
       ;; The summary line sits above the first session message.
       (should (< (match-beginning 0) (string-match "Question\\?" text))))))
@@ -1182,7 +1182,7 @@ The banner is toggled before thinking blocks and outline cycling."
     (let ((text (buffer-string)))
       (should (string-match-p
                (regexp-quote
-                "pi v0.84.2 · pilish 3.0.0 · 2 skills · 2 prompts · TAB details")
+                "pi v0.84.2 · pilish 3.0.1 · 2 skills · 2 prompts · TAB details")
                text))
       (should-not (string-match-p "^## Skills" text))
       (should-not (string-match-p "TAB collapse" text)))))
