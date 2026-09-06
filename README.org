@@ -250,6 +250,12 @@ tool block to expand or collapse it.  Long-running commands stream
 output live, file operations (=read=, =write=, =edit=) get syntax
 highlighting, and edit diffs highlight what changed.
 
+Hover completed replies, thinking, or tool blocks for timestamps and details:
+reply provider/model and message-level token/cache usage, thinking line counts,
+or short tool command/path hints.  Native =C-h .= shows full help at point,
+including in terminals.  Stream durations, output rates, and tool timings are
+approximate and live-only; reload or resume drops them.
+
 Image content in sent user turns and completed tool results is shown inline in
 graphical Emacs and as a useful type-and-size placeholder in terminals.  Sent
 and returned image content share the same bounded renderer.  Pi's built-in

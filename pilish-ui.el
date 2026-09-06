@@ -59,6 +59,8 @@
 (declare-function pilish--dispatch-button "pilish-render")
 (declare-function pilish--cleanup-on-kill "pilish-render")
 (declare-function pilish--restore-tool-properties "pilish-render")
+(declare-function pilish--fontify-with-hover-help "pilish-render")
+(declare-function pilish--hover-clear-live-state "pilish-render")
 (declare-function pilish--maybe-refresh-hot-tail-tables "pilish-table")
 
 ;; pilish-input.el (input buffer commands)
@@ -900,6 +902,9 @@ This is a read-only buffer showing the conversation history."
 
   ;; Run after font-lock to undo markdown damage in tool overlays.
   (jit-lock-register #'pilish--restore-tool-properties)
+  ;; Let native Markdown help take precedence over completed-block fallback.
+  (add-function :around (local 'font-lock-fontify-region-function)
+                #'pilish--fontify-with-hover-help)
 
   ;; Compute theme-derived faces used by chat overlays.
   (pilish--update-theme-derived-faces)
@@ -1159,7 +1164,11 @@ CHAT-BUFFER defaults to the current buffer."
 Resets cached process version and starts a delayed version probe for
 new live processes in interactive sessions."
   (unless (eq process pilish--process)
-    (pilish--invalidate-model-change))
+    (pilish--invalidate-model-change)
+    ;; Reload can replace a process without its exit handler or a successful
+    ;; subsequent history refresh.  End live measurements at this boundary.
+    (when (fboundp 'pilish--hover-clear-live-state)
+      (pilish--hover-clear-live-state)))
   (setq pilish--process process
         pilish--process-version nil)
   (when (and (processp process)
