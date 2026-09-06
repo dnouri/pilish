@@ -451,6 +451,31 @@ logical block and should not start following later streamed output."
             (should (> (cdr size) 0))))
       (kill-buffer buffer))))
 
+(ert-deftest pilish-gui-test-startup-logo-renders-real-image ()
+  "The startup heading renders the real SVG logo on image-capable displays.
+The 1.5em image glyph makes the heading row taller than a text row and
+pushes the heading text right of the logo box."
+  (unless (and (display-images-p) (image-type-available-p 'svg))
+    (ert-skip "This Emacs display cannot render SVG images"))
+  (let ((buffer (get-buffer-create "*pi-gui-startup-logo*")))
+    (unwind-protect
+        (progn
+          (switch-to-buffer buffer)
+          (pilish-chat-mode)
+          (let ((inhibit-read-only t))
+            (insert (pilish--format-startup-header))
+            (font-lock-ensure)
+            (goto-char (point-min))
+            (set-window-start (selected-window) (point-min))
+            (redisplay)
+            (should (get-text-property 1 'line-prefix))
+            ;; A rendered 1.5em image makes this row taller than a text row.
+            (should (> (line-pixel-height) (frame-char-height)))
+            ;; Heading text starts right of the logo box plus gap.
+            (should (> (car (posn-x-y (posn-at-point (point-min))))
+                       (frame-char-width)))))
+      (kill-buffer buffer))))
+
 (ert-deftest pilish-gui-test-read-svg-has-real-display-property ()
   "A complete standalone SVG returned by read renders graphically."
   (unless (and (display-images-p) (image-type-available-p 'svg))

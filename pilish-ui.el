@@ -2333,11 +2333,97 @@ Stores the result in CHAT-BUF and emits a minibuffer notice when available."
                ;; already re-established the chat-buffer context above.
                (pilish--refresh-startup-banner)))))))))
 
+;;;; Startup Logo
+
+(defconst pilish--logo-file
+  (expand-file-name
+   "assets/pilish-logo.svg"
+   (file-name-directory
+    (or load-file-name
+        (ignore-errors (symbol-file 'pilish--make-separator 'defun))
+        (locate-library "pilish-ui")
+        "pilish-ui.el")))
+  "Absolute path of the canonical Hornbridge logo SVG shipped with Pilish.
+Resolved from the installed pilish-ui library location, never from
+`default-directory', so the logo also works from package installs,
+byte-compiled load paths, and TRAMP chat buffers.")
+
+(defvar pilish--logo-svg-cache nil
+  "Cached adapted SVG source for the startup logo, or nil when unread.
+See `pilish--logo-svg-data'.")
+
+(defun pilish--logo-svg-data ()
+  "Return adapted SVG source text for the startup logo, or nil.
+Reads `pilish--logo-file' and adapts it in memory: the dark backplate
+rectangle is dropped and the three body path fills become `currentColor'
+so the logo body tracks the heading face foreground on every theme.
+The violet horn fills and all path geometry stay identical to the
+shipped asset, which remains the single canonical source.  Returns nil
+when the asset cannot be read; callers then omit the logo silently."
+  (or pilish--logo-svg-cache
+      (setq pilish--logo-svg-cache
+            (ignore-errors
+              (with-temp-buffer
+                (insert-file-contents pilish--logo-file)
+                (goto-char (point-min))
+                (when (re-search-forward
+                       "[ \t]*<rect[^>]*fill=\"#07100F\"[^>]*/>[ \t]*\n?" nil t)
+                  (replace-match ""))
+                (goto-char (point-min))
+                (while (search-forward "#EEF2E8" nil t)
+                  (replace-match "currentColor" t t))
+                (buffer-string))))))
+
+(defun pilish--startup-logo-displayable-p ()
+  "Return non-nil when the display being drawn can show the startup logo.
+Used inside conditional display specifications, where redisplay
+evaluates it for the frame actually being drawn.  Both image-capable
+display and SVG support are required: batch and terminal Emacs can
+report SVG available without being able to display any image."
+  (and (display-images-p) (image-type-available-p 'svg)))
+
+(defun pilish--startup-logo-line-prefix ()
+  "Return the display-only prefix for the startup heading line.
+Contains the logo image glyph and one font-relative gap glyph, both
+carrying the `md-ts-heading-1' face so the body fill (currentColor)
+matches the heading.  Each glyph's display value is a list pairing its
+real spec, wrapped in `(when (pilish--startup-logo-displayable-p)
+...)', with a zero-width space fallback: text terminals and graphical
+displays without SVG render no logo and no gap, while the same buffer
+shows the logo on image-capable frames.  The glyphs never enter the
+buffer text or the kill ring."
+  (when-let* ((data (pilish--logo-svg-data)))
+    (let* ((image (list 'image :type 'svg :data data
+                        :height '(1.5 . em) :scale 1 :ascent 'center))
+           (conditional
+            (lambda (spec)
+              (list (cons 'when
+                          (cons '(pilish--startup-logo-displayable-p) spec))
+                    '(space . (:width 0))))))
+      (propertize
+       (concat (propertize " " 'display (funcall conditional image))
+               (propertize " " 'display
+                           (funcall conditional '(space . (:width 0.75)))))
+       'face 'md-ts-heading-1))))
+
+(defun pilish--startup-heading-with-logo (separator)
+  "Return SEPARATOR with the startup logo prefix on its heading line.
+The label line (through its newline) alone receives the display-only
+`line-prefix'; the returned string content and the setext underline
+stay unchanged.  Returns SEPARATOR as-is when the logo is unavailable."
+  (let* ((newline (string-match "\n" separator))
+         (prefix (and newline (pilish--startup-logo-line-prefix))))
+    (when prefix
+      (put-text-property 0 (1+ newline) 'line-prefix prefix separator))
+    separator))
+
 (defun pilish--format-startup-header ()
   "Format the startup header string with separator and session summary.
-Ends with the compact, toggleable banner line built by
-`pilish--format-startup-banner-compact'."
-  (let ((separator (pilish--make-separator "Pilish")))
+The heading line carries the Hornbridge logo as a display-only prefix
+on image-capable displays.  Ends with the compact, toggleable banner
+line built by `pilish--format-startup-banner-compact'."
+  (let ((separator (pilish--startup-heading-with-logo
+                    (pilish--make-separator "Pilish"))))
     (concat
      separator "\n"
      "C-c C-c   send prompt\n"

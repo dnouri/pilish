@@ -847,6 +847,45 @@ agent_end + next section's leading newline must not create triple newlines."
       (should (< first-pos custom-pos))
       (should (< custom-pos second-pos)))))
 
+(ert-deftest pilish-test-session-history-rebuild-keeps-single-logo-decoration ()
+  "A full history rebuild decorates the startup heading exactly once.
+Reloads and resumes reuse `pilish--format-startup-header', so the logo
+prefix must not duplicate or leak image display properties into the
+rendered turns."
+  (with-temp-buffer
+    (pilish-chat-mode)
+    (pilish--display-session-history
+     [(:role "user"
+       :content [(:type "text" :text "Question?")]
+       :timestamp 1704067200000)
+      (:role "assistant"
+       :content [(:type "text" :text "Answer.")]
+       :timestamp 1704067201000)]
+     (current-buffer))
+    (should (equal "Pilish\n======"
+                   (buffer-substring-no-properties 1 14)))
+    ;; Heading line decorated, underline and turns plain.
+    (let ((decorated 0) (images 0) (pos (point-min)))
+      (while (< pos (point-max))
+        (when (get-text-property pos 'line-prefix)
+          (cl-incf decorated))
+        (when (and (get-text-property pos 'display)
+                   (not (get-text-property pos 'line-prefix)))
+          (cl-incf images))
+        (setq pos (1+ pos)))
+      (should (= 7 decorated))
+      (should (= 0 images))
+      ;; Rebuilding the same history again stays single.
+      (pilish--display-session-history [] (current-buffer))
+      (goto-char (point-min))
+      (should (get-text-property 1 'line-prefix))
+      (setq decorated 0 pos (point-min))
+      (while (< pos (point-max))
+        (when (get-text-property pos 'line-prefix)
+          (cl-incf decorated))
+        (setq pos (1+ pos)))
+      (should (= 7 decorated)))))
+
 (defun pilish-test--startup-banner-history ()
   "Return a one-turn history used by startup banner tests."
   [(:role "user"

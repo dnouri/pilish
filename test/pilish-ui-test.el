@@ -865,6 +865,145 @@ without an input window."
   (let ((header (pilish--format-startup-header)))
     (should (string-equal "Pilish" (car (split-string header "\n"))))))
 
+;;;; Startup Logo
+
+(ert-deftest pilish-test-startup-header-decorates-heading-with-logo ()
+  "Startup heading carries the logo as a display-only line-prefix.
+The raw separator text stays byte-identical; the property covers the
+label line through its newline and never the setext underline."
+  (let ((header (pilish--format-startup-header)))
+    (should (string-equal "Pilish\n======\n"
+                          (substring-no-properties header 0 14)))
+    (should (get-text-property 0 'line-prefix header))
+    (should (get-text-property 6 'line-prefix header))
+    (should-not (get-text-property 7 'line-prefix header))))
+
+(ert-deftest pilish-test-logo-file-form-evaluates-without-load-file-name ()
+  "The `pilish--logo-file' form evaluates when `load-file-name' is nil.
+Covers the eval-buffer/eval-region dev flow over already-loaded
+Pilish: the fallback chain must answer via `symbol-file' without
+signaling, or evaluation of pilish-ui.el aborts at the defconst."
+  (let* ((lib (or (symbol-file 'pilish--make-separator 'defun)
+                  (locate-library "pilish-ui")))
+         (source (and lib
+                      (if (string-suffix-p ".elc" lib)
+                          (concat (substring lib 0 -1))
+                        lib))))
+    (if (not (and source (file-exists-p source)))
+        (ert-skip "pilish-ui.el source not readable")
+      (let ((form (catch 'found
+                    (with-temp-buffer
+                      (insert-file-contents source)
+                      (goto-char (point-min))
+                      (condition-case nil
+                          (while t
+                            (let ((f (read (current-buffer))))
+                              (when (eq (nth 1 f) 'pilish--logo-file)
+                                (throw 'found f))))
+                        (end-of-file)))))
+            (load-file-name nil))
+        (should (eq 'defconst (car-safe form)))
+        (let ((value (eval (nth 2 form))))
+          (should (stringp value))
+          (should (file-name-absolute-p value))
+          (should (string-suffix-p "assets/pilish-logo.svg" value)))))))
+
+(defun pilish-test--startup-logo-glyph-specs (prefix)
+  "Return the two display specs of logo PREFIX for structural checks."
+  (mapcar (lambda (i) (get-text-property i 'display prefix)) '(0 1)))
+
+(ert-deftest pilish-test-startup-logo-prefix-structure ()
+  "Logo prefix glyphs are conditional and collapse on plain displays.
+Each glyph's display value pairs a `(when ...)' spec gated on
+`pilish--startup-logo-displayable-p' with a zero-width space fallback,
+so text terminals and no-SVG displays show neither logo nor gap.  The
+image glyph renders the shipped asset adapted for theme matching: no
+backplate, currentColor body, violet horns kept, 1.5em height."
+  (let* ((header (pilish--format-startup-header))
+         (prefix (get-text-property 0 'line-prefix header))
+         (specs (pilish-test--startup-logo-glyph-specs prefix)))
+    (should (stringp prefix))
+    (should (= 2 (length prefix)))
+    (dolist (i '(0 1))
+      (should (eq 'md-ts-heading-1 (get-text-property i 'face prefix))))
+    ;; Inert decoration: no interactive properties on either glyph.
+    (dolist (i '(0 1))
+      (should-not (get-text-property i 'keymap prefix))
+      (should-not (get-text-property i 'mouse-face prefix))
+      (should-not (get-text-property i 'help-echo prefix)))
+    (pcase-let ((`(,logo-display ,gap-display) specs))
+      (dolist (display (list logo-display gap-display))
+        (let ((conditional (nth 0 display))
+              (fallback (nth 1 display)))
+          (should (eq 'when (car conditional)))
+          (should (equal '(pilish--startup-logo-displayable-p)
+                         (nth 1 conditional)))
+          (should (equal '(space . (:width 0)) fallback))))
+      (let* ((logo-conditional (nth 0 logo-display))
+             (payload (nthcdr 2 logo-conditional)))
+        (should (eq 'image (car payload)))
+        (should (eq 'svg (plist-get (cdr payload) :type)))
+        (should (equal '(1.5 . em) (plist-get (cdr payload) :height)))
+        (should (eq 1 (plist-get (cdr payload) :scale)))
+        (should (eq 'center (plist-get (cdr payload) :ascent)))
+        (let ((data (plist-get (cdr payload) :data)))
+          (should (string-match-p "currentColor" data))
+          (should (string-match-p "#A970FF" data))
+          (should-not (string-match-p "#EEF2E8" data))
+          (should-not (string-match-p "#07100F" data))
+          (should-not (string-match-p "<rect" data))))
+      (should (equal '(space . (:width 0.75))
+                     (nthcdr 2 (nth 0 gap-display)))))))
+
+(ert-deftest pilish-test-startup-logo-displayable-p-gates-both-display-and-svg ()
+  "The predicate needs image display AND SVG support.
+Batch Emacs reports SVG available with no display, so either alone
+must not enable the logo."
+  (cl-letf (((symbol-function 'display-images-p) (lambda (&optional _f) t))
+            ((symbol-function 'image-type-available-p) (lambda (&optional _t) t)))
+    (should (pilish--startup-logo-displayable-p)))
+  (cl-letf (((symbol-function 'display-images-p) (lambda (&optional _f) nil))
+            ((symbol-function 'image-type-available-p) (lambda (&optional _t) t)))
+    (should-not (pilish--startup-logo-displayable-p)))
+  (cl-letf (((symbol-function 'display-images-p) (lambda (&optional _f) t))
+            ((symbol-function 'image-type-available-p) (lambda (&optional _t) nil)))
+    (should-not (pilish--startup-logo-displayable-p))))
+
+(ert-deftest pilish-test-startup-header-omits-logo-when-asset-missing ()
+  "Missing asset means a plain heading: no prefix, no error, no warning."
+  (let ((pilish--logo-file "/nonexistent/pilish-logo.svg")
+        (pilish--logo-svg-cache nil)
+        (warnings nil))
+    (cl-letf (((symbol-function 'display-warning)
+               (lambda (&rest args) (push args warnings))))
+      (let ((header (pilish--format-startup-header)))
+        (should (string-equal "Pilish\n======\n"
+                              (substring-no-properties header 0 14)))
+        (should-not (get-text-property 0 'line-prefix header))
+        (should (null warnings))))))
+
+(ert-deftest pilish-test-startup-header-logo-preserves-copy-and-single-decoration ()
+  "Displayed startup header copies as plain text with one decoration.
+The filtered copy still returns the bare heading; exactly one heading
+carries the prefix; font-lock-ensure keeps the decoration and the
+heading face in place."
+  (with-temp-buffer
+    (pilish-chat-mode)
+    (let ((inhibit-read-only t))
+      (insert (pilish--format-startup-header)))
+    (font-lock-ensure)
+    (should (equal "Pilish\n" (pilish--filter-buffer-substring 1 8)))
+    (should (equal "Pilish\n======"
+                   (buffer-substring-no-properties 1 14)))
+    ;; Exactly the seven heading-line characters carry the prefix.
+    (let ((decorated 0) (pos (point-min)))
+      (while (< pos (point-max))
+        (when (get-text-property pos 'line-prefix)
+          (cl-incf decorated))
+        (setq pos (1+ pos)))
+      (should (= 7 decorated))
+      (should (eq 'md-ts-heading-1 (get-text-property 1 'face))))))
+
 (defun pilish-test--banner-commands ()
   "Return a command fixture with two prompts and two skills."
   (list '(:name "create-todo" :description "New todo" :source "prompt")

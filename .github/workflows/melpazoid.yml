@@ -25,7 +25,7 @@ jobs:
     - name: Run
       env:
         LOCAL_REPO: ${{ github.workspace }}
-        RECIPE: (pilish :fetcher github :repo "dnouri/pilish" :old-names (pi-coding-agent))
+        RECIPE: (pilish :fetcher github :repo "dnouri/pilish" :old-names (pi-coding-agent) :files (:defaults ("assets" "assets/pilish-logo.svg")))
         WARN_IS_ERROR: false
         EXIST_OK: false
       run: make -C ~/melpazoid
