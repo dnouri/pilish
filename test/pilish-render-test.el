@@ -484,6 +484,95 @@
         (when (equal reason "error")
           (should (string-match-p "Expected interruption" (buffer-string))))))))
 
+(defun pilish-test--hover-interrupted-thinking (reason)
+  "Check unfinished thinking ownership after terminal REASON, alone and mixed."
+  (dolist (mixed '(nil t))
+    (with-temp-buffer
+      (pilish-chat-mode)
+      (let* ((prefix (if mixed
+                         [(:type "thinking" :thinking "Completed thought")
+                          (:type "text" :text "Ordinary reply.")]
+                       []))
+             (thought '(:type "thinking" :thinking "Unfinished thought\nStill thinking"))
+             (message (pilish-test--hover-message
+                       (vconcat prefix (vector thought))
+                       :stopReason reason :errorMessage "Expected interruption"))
+             (next (pilish-test--hover-message
+                    [(:type "thinking" :thinking "Next thought")
+                     (:type "text" :text "Next reply.")]
+                    :timestamp 1784817180000 :provider "next" :model "owned"
+                    :usage '(:input 0 :output 0))))
+        (pilish--handle-display-event '(:type "agent_start"))
+        (pilish--handle-display-event
+         `(:type "message_start" :message ,(pilish-test--hover-message [])))
+        (pilish-test--hover-stream-content (pilish-test--hover-message prefix))
+        (pilish-test--send-assistant-message-update
+         `(:type "thinking_start" :contentIndex ,(length prefix)))
+        (pilish-test--send-assistant-message-update
+         `(:type "thinking_delta" :contentIndex ,(length prefix)
+           :delta ,(plist-get thought :thinking)))
+        (should-not (pilish-test--hover-help "Unfinished thought"))
+        (goto-char (+ 2 (pilish-test--hover-pos "Unfinished thought")))
+        (let ((source (buffer-substring-no-properties (point-min) (point-max)))
+              (saved-point (point)))
+          ;; No thinking_end: abort/error is a valid terminal path by itself.
+          (pilish--handle-display-event `(:type "message_end" :message ,message))
+          (should (= (point) saved-point))
+          ;; Completion may append its newline/error, never rewrite the stream.
+          (should (equal source (buffer-substring-no-properties
+                                 (point-min) (+ (point-min) (length source))))))
+        (should pilish--thinking-start-marker)
+        (should pilish--thinking-marker)
+        (should (equal pilish--thinking-raw (plist-get thought :thinking)))
+        (pilish--handle-display-event `(:type "agent_end" :messages [,message]))
+        (font-lock-ensure)
+        (should-not pilish--thinking-start-marker)
+        (should-not pilish--thinking-marker)
+        (should-not (get-text-property (pilish-test--hover-pos "Unfinished thought")
+                                       'pilish-thinking-block))
+        (should (equal (pilish-test--hover-displayed-help "Unfinished thought")
+                       "No local help at point"))
+        (should (equal (pilish-test--hover-displayed-help "Still thinking")
+                       "No local help at point"))
+        (when mixed
+          (should (equal (pilish-test--hover-displayed-help "Ordinary reply")
+                         (pilish-test--hover-reply-help)))
+          (should (equal (pilish-test--hover-displayed-help "Completed thought")
+                         (concat "Thinking · "
+                                 (pilish--format-message-timestamp
+                                  (pilish--ms-to-time 1784817120000))
+                                 " · 1 line\nanthropic / claude-sonnet-4-6"))))
+        (let ((source (buffer-substring-no-properties (point-min) (point-max))))
+          (cl-letf (((symbol-function 'current-time) (lambda () (seconds-to-time 10))))
+            (pilish--handle-display-event '(:type "agent_start"))
+            (pilish--handle-display-event `(:type "message_start" :message ,next))
+            (pilish-test--hover-stream-content next)
+            (pilish--handle-display-event `(:type "message_end" :message ,next))
+            (pilish--handle-display-event `(:type "agent_end" :messages [,next])))
+          (font-lock-ensure)
+          (should (equal source (buffer-substring-no-properties
+                                 (point-min) (+ (point-min) (length source))))))
+        (should (equal (pilish-test--hover-displayed-help "Unfinished thought")
+                       "No local help at point"))
+        (should (equal (pilish-test--hover-displayed-help "Next thought")
+                       (concat "Thinking · "
+                               (pilish--format-message-timestamp
+                                (pilish--ms-to-time 1784817180000))
+                               " · 1 line\nnext / owned")))
+        (should (equal (pilish-test--hover-displayed-help "Next reply")
+                       (concat "Reply · "
+                               (pilish--format-message-timestamp
+                                (pilish--ms-to-time 1784817180000))
+                               "\nnext / owned\nMessage tokens: input 0 · output 0")))))))
+
+(ert-deftest pilish-test-hover-aborted-thinking-is-not-reply ()
+  "An aborted final message without thinking_end must not label thinking Reply."
+  (pilish-test--hover-interrupted-thinking "aborted"))
+
+(ert-deftest pilish-test-hover-error-thinking-is-not-reply ()
+  "An error final message without thinking_end must not label thinking Reply."
+  (pilish-test--hover-interrupted-thinking "error"))
+
 (ert-deftest pilish-test-hover-tool-missing-and-nonpositive-boundaries ()
   "Tool execution without both ordered local boundaries never invents time."
   (dolist (start '(nil 12 13))
@@ -671,6 +760,52 @@ execution cannot retain a temporary record on this setup's evaluator stack."
     (should (= 0 (hash-table-count pilish--hover-pending-tool-blocks)))
     (should (string-prefix-p "Bash\nsame command"
                              (pilish-test--hover-help "Output A")))))
+
+(ert-deftest pilish-test-hover-metadata-update-is-silent ()
+  "Metadata updates skip content notifications without losing native help."
+  (dolist (modified '(nil t))
+    (with-temp-buffer
+      (pilish-chat-mode)
+      (pilish--display-session-history
+       (vector (pilish-test--hover-message
+                [(:type "text" :text "Plain [native link](https://example.org/silent) tail.")])))
+      (font-lock-ensure)
+      (should (button-at (pilish-test--hover-pos "native link")))
+      (goto-char (pilish-test--hover-pos "Plain"))
+      (set-buffer-modified-p modified)
+      (let* ((source (buffer-substring-no-properties (point-min) (point-max)))
+             (saved-point (point))
+             (help "Reply\nMessage tokens: input 0")
+             (before-count 0)
+             (after-count 0)
+             ;; Keep the mode's actual native change hooks, adding observers.
+             (before-change-functions
+              (cons (lambda (&rest _) (cl-incf before-count)) before-change-functions))
+             (after-change-functions
+              (cons (lambda (&rest _) (cl-incf after-count)) after-change-functions)))
+        (pilish--set-hover-help (point) (point-max) help)
+        (should (equal (list before-count after-count (buffer-modified-p))
+                       (list 0 0 modified)))
+        (should (= (point) saved-point))
+        (should (equal source (buffer-substring-no-properties (point-min) (point-max))))
+        (should buffer-read-only)
+        (should (equal (pilish-test--hover-displayed-help "Plain") help))
+        (should (equal (get-text-property (pilish-test--hover-pos "native link")
+                                          'pilish-hover-help)
+                       help))
+        (font-lock-flush)
+        (font-lock-ensure)
+        (should (equal (pilish-test--hover-displayed-help "Plain") help))
+        (should (equal (pilish-test--hover-displayed-help "native link")
+                       "https://example.org/silent"))
+        (should (button-at (pilish-test--hover-pos "native link")))
+        ;; Suppression is local to metadata; real edits still notify the mode.
+        (setq before-count 0 after-count 0)
+        (let ((inhibit-read-only t))
+          (goto-char (point-max))
+          (insert "New content"))
+        (should (> before-count 0))
+        (should (> after-count 0))))))
 
 (ert-deftest pilish-test-hover-completion-preserves-source-point-and-exact-boundary ()
   "Hover changes no Markdown text or point, and is nonsticky at the exact end."

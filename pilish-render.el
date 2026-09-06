@@ -1966,16 +1966,18 @@ throughout the span, including underneath specific help, but only replace
 absent or previously owned help.  Links, images and buttons keep precedence."
   (let ((inhibit-read-only t)
         (pos start))
-    (while (< pos end)
-      (let* ((existing (get-text-property pos 'help-echo object))
-             (next (min (next-single-property-change pos 'help-echo object end)
-                        (next-single-property-change pos 'pilish-hover-help object end))))
-        (when (or (null existing)
-                  (equal existing (get-text-property pos 'pilish-hover-help object)))
-          (put-text-property pos next 'help-echo help object))
-        (setq pos next)))
-    (add-text-properties start end
-                         `(pilish-hover-help ,help rear-nonsticky t) object)))
+    ;; These properties do not change Markdown content or require reparsing.
+    (with-silent-modifications
+      (while (< pos end)
+        (let* ((existing (get-text-property pos 'help-echo object))
+               (next (min (next-single-property-change pos 'help-echo object end)
+                          (next-single-property-change pos 'pilish-hover-help object end))))
+          (when (or (null existing)
+                    (equal existing (get-text-property pos 'pilish-hover-help object)))
+            (put-text-property pos next 'help-echo help object))
+          (setq pos next)))
+      (add-text-properties start end
+                           `(pilish-hover-help ,help rear-nonsticky t) object))))
 
 (defun pilish--fontify-with-hover-help (function start end &rest args)
   "Fontify START..END with FUNCTION and ARGS, letting native help win.
@@ -2016,7 +2018,18 @@ cached fallback after native links have supplied their more-specific help."
           (end (marker-position pilish--streaming-marker)))
       ;; Tools have their own ownership.  Work only inside this message, not
       ;; the shared Assistant heading or content indexes reused next message.
-      (dolist (range (pilish--ranges-excluding-property start end 'pilish-thinking-block))
+      ;; Abort/error may omit thinking_end.  Leave that active span unfinished,
+      ;; without completed help, rather than assigning it reply usage.
+      (dolist (range (append
+                      (pilish--ranges-excluding-property
+                       start (if pilish--thinking-start-marker
+                                 (marker-position pilish--thinking-start-marker)
+                               end)
+                       'pilish-thinking-block)
+                      (when pilish--thinking-marker
+                        (pilish--ranges-excluding-property
+                         (marker-position pilish--thinking-marker) end
+                         'pilish-thinking-block))))
         (let ((pos (car range)))
           (dolist (ov (pilish--tool-block-overlays-in-region (car range) (cdr range)))
             (pilish--set-hover-help pos (max pos (overlay-start ov)) help)
