@@ -20,14 +20,13 @@
 #+html: <a href="#advanced-features-and-configuration">Advanced</a> ·
 #+html: <a href="#development">Development</a></p>
 
-* What is Pilish? 🦬
+* What is Pilish?
 
-Pilish is an Emacs frontend for [[https://pi.dev][Pi]].  The Pi CLI still runs
-the agent, talks to models, and executes tools.  This package wraps Pi
-in an ergonomic Emacs interface: a Markdown chat buffer for the
-conversation and a separate prompt buffer where you compose the next
-message.  Persistent Pi history is available through disk-backed
-session and conversation-tree browsers.
+#+html: <img align="right" src="assets/pilish-logo.svg" alt="Pilish Hornbridge logo" width="96" height="96">
+
+Pilish is a [[https://pi.dev][Pi]] porcelain inside Emacs: a mnemonic,
+buffer-native harness where chat stream and prompt composition are
+separate windows; with all of Emacs wired in.
 
 The immediate advantage is that your prompt is no longer trapped in a
 terminal text box.  You can edit it like any other Emacs buffer,

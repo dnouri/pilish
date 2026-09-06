@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" width="96" height="96" role="img" aria-label="Pilish Hornbridge logo">
+  <rect width="100" height="100" rx="20" fill="#07100F"/>
+  <path fill="#EEF2E8" d="M9 12Q11 10 14 13C21 19 30 23 39 24H61C70 23 79 19 86 13Q89 10 91 12V20C91 31 84 39 73 43H27C16 39 9 31 9 20Z"/>
+  <path fill="#EEF2E8" d="M29 40H46L43 86H24Z"/>
+  <path fill="#EEF2E8" d="M54 40H71L76 86H57Z"/>
+  <path fill="#A970FF" d="M9 12Q11 10 14 13C19 17 24 20 30 22L27 32C20 30 14 26 9 20Z"/>
+  <path fill="#A970FF" d="M91 12Q89 10 86 13C81 17 76 20 70 22L73 32C80 30 86 26 91 20Z"/>
+</svg>
