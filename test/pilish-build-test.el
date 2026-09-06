@@ -196,5 +196,62 @@
             nil t)
       (should called))))
 
+;;;; Packaging invariants (MELPA recipe / melpazoid CI / shipped asset)
+
+(defconst pilish-test-build--logo-asset "assets/pilish-logo.svg"
+  "Canonical runtime path of the logo, relative to the package root.
+Single source of truth for the packaging tests: the MELPA recipe and the
+melpazoid CI recipe must map this file unflattened so that the installed
+`pilish--logo-file' resolves beside the installed libraries.")
+
+(ert-deftest pilish-test-build-logo-asset-present ()
+  "The logo asset ships at the canonical path with the adaptation contract."
+  (let ((asset (expand-file-name pilish-test-build--logo-asset
+                                 pilish-test-build--repo-root)))
+    (should (file-exists-p asset))
+    (with-temp-buffer
+      (insert-file-contents asset)
+      ;; The runtime adapter (`pilish--logo-svg-data') rewrites exactly
+      ;; these fills; a regenerated asset must keep the same contract.
+      (should (= 1 (how-many "fill=\"#07100F\"" (point-min) (point-max))))
+      (should (= 3 (how-many "fill=\"#EEF2E8\"" (point-min) (point-max))))
+      (should (= 2 (how-many "fill=\"#A970FF\"" (point-min) (point-max)))))))
+
+(ert-deftest pilish-test-build-recipe-files-mapping ()
+  "The melpazoid CI recipe maps the logo unflattened into the install root.
+MELPA's default file set omits `assets/'; the recipe therefore appends a
+files mapping that must keep the subdirectory (a bare glob would flatten
+the directory and break `pilish--logo-file' on package installs)."
+  (let* ((workflow (expand-file-name ".github/workflows/melpazoid.yml"
+                                     pilish-test-build--repo-root))
+         (recipe (with-temp-buffer
+                   (skip-unless (file-exists-p workflow))
+                   (insert-file-contents workflow)
+                   (goto-char (point-min))
+                   (should (re-search-forward "^\\s-*RECIPE:\\s-+" nil t))
+                   (read (current-buffer))))
+         (files (plist-get (cdr recipe) :files))
+         covered)
+    (should (eq (car recipe) 'pilish))
+    ;; `:defaults' must stay the first element of the files spec.
+    (should (eq (car files) :defaults))
+    (dolist (entry (cdr files))
+      (pcase-exhaustive entry
+        ;; A bare string entry is copied to the package root, flattening
+        ;; any subdirectory; the mapping must use (TARGET-DIR SOURCE...).
+        ((pred stringp) (should-not entry))
+        (`(,dest . ,sources)
+         (dolist (src sources)
+           ;; Anti-flatten: the destination directory equals the source
+           ;; file's own directory, so the installed path is unchanged.
+           (should (string-equal (file-name-as-directory dest)
+                                 (or (file-name-directory src) "")))
+           ;; The mapped source must exist in the repository.
+           (should (file-exists-p
+                    (expand-file-name src pilish-test-build--repo-root)))
+           (when (string-equal src pilish-test-build--logo-asset)
+             (setq covered t))))))
+    (should covered)))
+
 (provide 'pilish-build-test)
 ;;; pilish-build-test.el ends here
