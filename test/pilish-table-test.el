@@ -543,6 +543,77 @@ markdown faces do."
         (should (string-match-p "alice" display))
         (should (pilish-test--string-has-face-attr-p display :weight 'bold))))))
 
+(defun pilish-test--table-row-tokens (lines)
+  "Recover whitespace-free cell tokens from wrapped display LINES."
+  (let ((rows
+         (mapcar
+          (lambda (line)
+            (let ((bare (string-remove-prefix "> " line)))
+              (mapcar #'string-trim
+                      (if pilish-prettify-tables
+                          (butlast (cdr (split-string bare "│")))
+                        (markdown-table-wrap--split-table-row bare)))))
+          lines)))
+    (apply #'cl-mapcar (lambda (&rest chunks) (apply #'concat chunks)) rows)))
+
+(ert-deftest pilish-test-decorate-ragged-table-retains-all-cells ()
+  "Ragged rows keep every cell and full-width separators when wrapped."
+  (dolist (pretty '(t nil))
+    (dolist (prefix '("" "> "))
+      (dolist (width '(38 80 140))
+        (with-temp-buffer
+          (pilish-chat-mode)
+          (let* ((pilish-prettify-tables pretty)
+                 (inhibit-read-only t)
+                 (raw-lines
+                  '("| H1 | H2 |" "|:---|---:|"
+                    "| Cell01 | Cell02 | Cell03 | Cell04 | Cell05 | Cell06 | Cell07 | Cell08 |"))
+                 (raw (concat (mapconcat (lambda (line) (concat prefix line))
+                                        raw-lines "\n")
+                              "\n")))
+            (insert raw)
+            (font-lock-ensure)
+            (pilish--decorate-tables-in-region (point-min) (point-max) width)
+            (let* ((displays (pilish-test--table-overlay-displays-in-region
+                              (point-min) (point-max)))
+                   (groups (mapcar (lambda (display)
+                                     (split-string
+                                      (string-trim-right display "\n+") "\n"))
+                                   displays)))
+              (should (= (length groups) 3))
+              ;; Reassemble wrapped columns: substring checks would miss
+              ;; cells split across lines, or silently dropped columns.
+              (should (equal (pilish-test--table-row-tokens (nth 2 groups))
+                             '("Cell01" "Cell02" "Cell03" "Cell04"
+                               "Cell05" "Cell06" "Cell07" "Cell08")))
+              (should (equal (pilish-test--table-row-tokens (car groups))
+                             '("H1" "H2" "" "" "" "" "" "")))
+              (should (apply #'= (mapcar #'string-width
+                                        (apply #'append groups))))
+              (should (equal raw (buffer-substring-no-properties
+                                  (point-min) (point-max)))))))))))
+
+(ert-deftest pilish-test-ragged-table-keeps-alignment-and-empty-cells ()
+  "Extra columns default to left alignment without changing existing cells."
+  (dolist (pretty '(t nil))
+    (let* ((pilish-prettify-tables pretty)
+           (groups (pilish--table-display-groups
+                    '("| LongLeft | LongRight | Center |" "|:---|---:|:---:|"
+                      "| a | b | c | D4 |" "| short | | | LongerD4 |"
+                      "| left\\|right | right | center | E4 |" "| one |")
+                    140)))
+      (should (apply #'= (mapcar #'string-width (apply #'append groups))))
+      (should (equal (car (nth 2 groups))
+                     (if pretty
+                         "│ a           │         b │   c    │ D4       │"
+                       "| a           |         b |   c    | D4       |")))
+      (should (equal (pilish-test--table-row-tokens (nth 3 groups))
+                     '("short" "" "" "LongerD4")))
+      (should (equal (pilish-test--table-row-tokens (nth 4 groups))
+                     '("left\\|right" "right" "center" "E4")))
+      (should (equal (pilish-test--table-row-tokens (nth 5 groups))
+                     '("one" "" "" ""))))))
+
 (ert-deftest pilish-test-decorate-table-keeps-blockquote-prefix ()
   "Display-only wrapping preserves blockquote prefixes on every visual line."
   (with-temp-buffer

@@ -1218,6 +1218,111 @@ The banner is toggled before thinking blocks and outline cycling."
   (pilish--thinking-hidden-stub
    (pilish--thinking-normalize-text text)))
 
+(defconst pilish-test--thinking-with-table
+  "Weigh options:\n| A | B |\n|---|---|\n| keep | details |\n"
+  "Thinking ending in a table, for display invalidation tests.")
+
+(ert-deftest pilish-test-thinking-table-collapse-clears-stale-display ()
+  "Collapsing live or replayed thinking removes only its table displays."
+  (dolist (source '(stream history))
+    (dolist (action '(tab display-mode))
+      (let ((pilish-thinking-display 'visible)
+            (reply "| Reply | Value |\n|---|---|\n| yes | retained |\n"))
+        (with-temp-buffer
+          (pilish-chat-mode)
+          (if (eq source 'stream)
+              (progn
+                (pilish--display-agent-start)
+                (pilish--display-thinking-start)
+                (pilish--display-thinking-delta pilish-test--thinking-with-table)
+                (pilish--display-thinking-end "")
+                (pilish--display-message-delta reply)
+                (pilish--render-complete-message))
+            (pilish--display-session-history
+             `[(:role "assistant"
+                :content [(:type "thinking"
+                           :thinking ,pilish-test--thinking-with-table)
+                          (:type "text" :text ,reply)])]
+             (current-buffer)))
+          (goto-char (text-property-any (point-min) (point-max)
+                                        'pilish-thinking-block 0))
+          (let* ((bounds (pilish--thinking-block-bounds-at-pos (point)))
+                 (thinking-overlays
+                  (seq-filter (lambda (ov) (overlay-get ov 'pilish-table-display))
+                              (overlays-in (car bounds) (cdr bounds))))
+                 (reply-overlays
+                  (seq-filter (lambda (ov) (overlay-get ov 'pilish-table-display))
+                              (overlays-in (cdr bounds) (point-max))))
+                 ;; The thinking table may overlap the separator newline.
+                 (reply-overlays (seq-difference reply-overlays thinking-overlays))
+                 (reply-displays (mapcar (lambda (ov) (overlay-get ov 'display))
+                                         reply-overlays)))
+            (should (= (length thinking-overlays) 3))
+            (should (= (length reply-overlays) 3))
+            (should (seq-some (lambda (ov) (> (overlay-end ov) (cdr bounds)))
+                              thinking-overlays))
+            (if (eq action 'tab)
+                (pilish-toggle-tool-section)
+              (pilish--set-chat-thinking-display 'hidden))
+            ;; Checking raw text alone misses an old display over the stub.
+            (should-not (seq-some #'overlay-buffer thinking-overlays))
+            (should (string-match-p
+                     (regexp-quote (pilish-test--collapsed-thinking-stub
+                                    pilish-test--thinking-with-table))
+                     (buffer-string)))
+            (should (cl-every (lambda (ov) (eq (overlay-buffer ov) (current-buffer)))
+                              reply-overlays))
+            (should (equal reply-displays
+                           (mapcar (lambda (ov) (overlay-get ov 'display))
+                                   reply-overlays)))
+            (should (string-match-p (regexp-quote reply) (buffer-string)))
+            (goto-char (text-property-any (point-min) (point-max)
+                                          'pilish-thinking-block 0))
+            (if (eq action 'tab)
+                (pilish-toggle-tool-section)
+              (pilish--set-chat-thinking-display 'visible))
+            ;; Expanded thinking still supports table decoration.
+            (pilish--decorate-tables-in-region (point-min) (point-max) 80)
+            (should (= (pilish-test--count-overlays-with-prop
+                        'pilish-table-display) 6))))))))
+
+(ert-deftest pilish-test-thinking-table-end-invalidates-only-replaced-display ()
+  "Hidden completion clears stale tables; equal-text completion keeps them."
+  (dolist (display '(hidden visible))
+    (let ((pilish-thinking-display display))
+      (pilish-test--with-streaming-assistant
+        (pilish--display-thinking-start)
+        (pilish--display-thinking-delta pilish-test--thinking-with-table)
+        ;; A streamed tool header adds a newline outside the live thinking
+        ;; marker.  Resize decoration includes it in the last table overlay.
+        (pilish-test--send-assistant-message-update
+         '(:type "toolcall_start" :contentIndex 1
+           :id "call_1" :toolName "read"))
+        (pilish-test--send-assistant-message-update
+         '(:type "toolcall_delta" :contentIndex 1
+           :delta "{\"path\":\"/tmp/example.txt\"}"))
+        (pilish--refresh-hot-tail-tables 70)
+        (let* ((overlays (seq-filter
+                          (lambda (ov) (overlay-get ov 'pilish-table-display))
+                          (overlays-in (point-min) (point-max))))
+               (displays (mapcar (lambda (ov) (overlay-get ov 'display)) overlays)))
+          (should (= (length overlays) 3))
+          (should (seq-some (lambda (ov) (> (overlay-end ov) pilish--thinking-marker))
+                            overlays))
+          (pilish--display-thinking-end "")
+          (if (eq display 'hidden)
+              (progn
+                (should-not (seq-some #'overlay-buffer overlays))
+                (should (string-match-p
+                         (regexp-quote (pilish-test--collapsed-thinking-stub
+                                        pilish-test--thinking-with-table))
+                         (buffer-string))))
+            (should (cl-every (lambda (ov) (eq (overlay-buffer ov) (current-buffer)))
+                              overlays))
+            (should (equal displays
+                           (mapcar (lambda (ov) (overlay-get ov 'display)) overlays))))
+          (should (string-match-p "read /tmp/example\\.txt" (buffer-string))))))))
+
 (defun pilish-test--long-thinking-text (&optional count)
   "Return COUNT lines of long thinking text."
   (mapconcat (lambda (n)

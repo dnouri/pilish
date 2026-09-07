@@ -477,6 +477,7 @@ non-empty."
                 (pilish--apply-completed-thinking-properties
                  start end order normalized display))
             (goto-char start)
+            (pilish--remove-table-overlays start end)
             (delete-region start end)
             (insert text)
             (set-marker pilish--thinking-marker (point))))
@@ -3394,6 +3395,8 @@ Returns the new bounds as (START . NEW-END)."
         new-end)
     (save-excursion
       (goto-char start)
+      ;; A table overlay may include a trailing newline outside this block.
+      (pilish--remove-table-overlays start end)
       (delete-region start end)
       (insert rendered)
       (setq new-end (point))

@@ -429,6 +429,8 @@ Plain tables (no prefix) take a fast path that skips prefix splitting."
                             (if display-rows
                                 (apply #'max (mapcar #'length display-rows))
                               0)))
+             (aligns (append aligns
+                             (make-list (- num-cols (length aligns)) nil)))
              (content-width (max 1 (- width prefix-width)))
              (col-widths
               (markdown-table-wrap-compute-widths
