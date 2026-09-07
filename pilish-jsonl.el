@@ -25,7 +25,7 @@
 
 ;;; Commentary:
 
-;; Pure functions over pi session JSONL files: reading entries, building
+;; Disk-data APIs over pi session JSONL files: reading entries, building
 ;; the raw nested session tree, projecting that tree to the flat display
 ;; dialect the tree browser consumes, formatting tool-call previews,
 ;; computing tree-navigation targets and byte-preserving rewritten line
@@ -35,8 +35,9 @@
 ;; This ports pi's session-manager getTree (plus label folding), the RPC tree
 ;; projection, navigateTree's
 ;; leaf rule, core format-tool-call, and config/session-dir path munging.
-;; Depends only on core; nothing here touches buffers, processes, or
-;; state.
+;; Depends only on core; does not manage UI/session state or processes.
+;; Reading uses temporary buffers.  Resumable scans expose caller-owned
+;; parser state whose decoded scratch buffer must be explicitly closed.
 ;;
 ;; Normalization conventions (JSON in, plists out):
 ;;
@@ -253,84 +254,143 @@ carries no trailing slash; Windows drives munge like \"C:\\x\" to
          (munged (replace-regexp-in-string "[/\\:]" "-" stripped)))
     (concat (file-name-as-directory base) "--" munged "--")))
 
-(defun pilish--jsonl-scan-session-info (path mtime)
-  "Scan the current buffer for session metadata.
-PATH and MTIME feed the :path and :modified keys; see
-`pilish-jsonl-read-session-info' for the full contract.
-Return the session plist, or nil when the first nonblank line is not
-the session header (`pilish--jsonl-parse-session-header's
-rule)."
-  (goto-char (point-min))
-  ;; Same trim rule as `pilish-jsonl-read-file': skip
-  ;; whitespace-only leading lines (CR included) for the header check;
-  ;; they are never entries.
-  (while (and (not (eobp))
-              (looking-at-p "[ \t\r]*$"))
-    (forward-line 1))
-  (let ((header (pilish--jsonl-parse-session-header
-                 (buffer-substring-no-properties
-                  (point) (line-end-position))))
-        (name nil)
-        (message-count 0)
-        (first-message nil)
-        (fallback-message nil)
-        (parsed-messages 0))
-    (when header
-      (forward-line 1)
-      (while (not (eobp))
-        (cond
-         ((pilish--jsonl-line-type-p "message")
-          (setq message-count (1+ message-count))
-          (when (and (null first-message) (< parsed-messages 5))
-            (setq parsed-messages (1+ parsed-messages))
-            (let ((data (pilish--jsonl-parse-current-line)))
-              (when (consp data)
-                (let* ((message (plist-get data :message))
-                       (text (pilish--jsonl-extract-text
-                              (plist-get message :content))))
-                  (cond
-                   ((and (equal (plist-get message :role) "user")
-                         (not (string-empty-p text)))
-                    (setq first-message text))
-                   ((null fallback-message)
-                    (setq fallback-message text))))))))
-         ((pilish--jsonl-line-type-p "session_info")
-          (when-let* ((data (pilish--jsonl-parse-current-line)))
-            (let ((raw (pilish--normalize-string-or-null
-                        (plist-get data :name))))
-              ;; Latest parseable entry wins; absent or blank names clear.
-              (setq name
-                    (when raw
-                      (let ((trimmed (string-trim raw)))
-                        (unless (string-empty-p trimmed) trimmed)))))))
-         ;; Later session lines, blanks, label/custom/unknown lines:
-         ;; skip without parsing.
-         (t nil))
-        (forward-line 1))
-      (let ((id (pilish--normalize-string-or-null
-                 (plist-get header :id)))
-            (cwd (pilish--normalize-string-or-null
-                  (plist-get header :cwd)))
-            (parent (pilish--normalize-string-or-null
-                     (plist-get header :parentSession)))
-            (created (pilish--normalize-string-or-null
-                      (plist-get header :timestamp)))
-            (first (or first-message
-                       (and (not (string-empty-p
-                                  (or fallback-message "")))
-                            fallback-message))))
-        (append (list :path path)
-                (when id (list :id id))
-                (when cwd (list :cwd cwd))
-                (when name (list :name name))
-                (when parent (list :parentSessionPath parent))
-                (when created (list :created created))
-                (list :modified
-                      (format-time-string "%Y-%m-%dT%H:%M:%SZ" mtime t)
-                      :messageCount message-count)
-                (when first (list :firstMessage first)))))))
+(cl-defstruct (pilish--jsonl-info
+               (:constructor pilish--jsonl-info-create))
+  "Resumable session scan; the decoded buffer's point is its cursor."
+  buffer path mtime header name first fallback texts search-text
+  (phase 'header) (message-count 0) (parsed-messages 0))
 
-(defun pilish-jsonl-read-session-info (path)
+(defun pilish-jsonl-open-session-info (path &optional search-text)
+  "Open PATH for a resumable metadata scan, optionally collecting SEARCH-TEXT.
+Return an opaque state, or nil on an ordinary read/stat failure.  The
+caller must close the state with `pilish-jsonl-close-session-info',
+including after errors or quit.  Whole-file IO and decoding are atomic;
+line processing starts in `pilish-jsonl-step-session-info'."
+  (let (buffer state)
+    (unwind-protect
+        (condition-case nil
+            (when (file-readable-p path)
+              (setq buffer (generate-new-buffer " *pilish-session-scan*"))
+              (with-current-buffer buffer
+                (insert-file-contents path)
+                (goto-char (point-min))
+                (setq state
+                      (pilish--jsonl-info-create
+                       :buffer buffer :path path :search-text search-text
+                       :mtime (file-attribute-modification-time
+                               (file-attributes path))))))
+          (error nil))
+      (unless state
+        (when (buffer-live-p buffer) (kill-buffer buffer))))))
+
+(defun pilish-jsonl-close-session-info (state)
+  "Release STATE's decoded buffer and accumulated text; safe to call twice."
+  (when state
+    (when (buffer-live-p (pilish--jsonl-info-buffer state))
+      (kill-buffer (pilish--jsonl-info-buffer state)))
+    (setf (pilish--jsonl-info-buffer state) nil
+          (pilish--jsonl-info-header state) nil
+          (pilish--jsonl-info-name state) nil
+          (pilish--jsonl-info-first state) nil
+          (pilish--jsonl-info-fallback state) nil
+          (pilish--jsonl-info-texts state) nil)))
+
+(defun pilish--jsonl-info-scan-line (state)
+  "Reduce the current message or name line into STATE.
+Keep the legacy preview budget independent of optional full-text parsing."
+  (cond
+   ((pilish--jsonl-line-type-p "message")
+    (cl-incf (pilish--jsonl-info-message-count state))
+    (let ((preview-p (and (null (pilish--jsonl-info-first state))
+                         (< (pilish--jsonl-info-parsed-messages state) 5))))
+      ;; Malformed lines consume a preview attempt too.
+      (when preview-p (cl-incf (pilish--jsonl-info-parsed-messages state)))
+      (when (or preview-p (pilish--jsonl-info-search-text state))
+        (let ((data (pilish--jsonl-parse-current-line)))
+          (when (consp data)
+            (let* ((message (plist-get data :message))
+                   (role (plist-get message :role))
+                   (search-p (and (pilish--jsonl-info-search-text state)
+                                  (member role '("user" "assistant"))))
+                   (text (when (or preview-p search-p)
+                           (pilish--jsonl-extract-text
+                            (plist-get message :content)))))
+              (when preview-p
+                (cond
+                 ((and (equal role "user") (not (string-empty-p text)))
+                  (setf (pilish--jsonl-info-first state) text))
+                 ((null (pilish--jsonl-info-fallback state))
+                  (setf (pilish--jsonl-info-fallback state) text))))
+              (when (and search-p (not (string-empty-p text)))
+                (push text (pilish--jsonl-info-texts state)))))))))
+   ((pilish--jsonl-line-type-p "session_info")
+    (when-let* ((data (pilish--jsonl-parse-current-line)))
+      (let ((raw (pilish--normalize-string-or-null (plist-get data :name))))
+        ;; Latest parseable entry wins; absent or blank names clear.
+        (setf (pilish--jsonl-info-name state)
+              (when raw
+                (let ((trimmed (string-trim raw)))
+                  (unless (string-empty-p trimmed) trimmed)))))))))
+
+(defun pilish--jsonl-info-result (state)
+  "Build STATE's metadata and optional single prepared search corpus."
+  (when-let* ((header (pilish--jsonl-info-header state)))
+    (let ((id (pilish--normalize-string-or-null (plist-get header :id)))
+          (cwd (pilish--normalize-string-or-null (plist-get header :cwd)))
+          (parent (pilish--normalize-string-or-null
+                   (plist-get header :parentSession)))
+          (created (pilish--normalize-string-or-null
+                    (plist-get header :timestamp)))
+          (name (pilish--jsonl-info-name state))
+          (first (or (pilish--jsonl-info-first state)
+                     (let ((fallback (pilish--jsonl-info-fallback state)))
+                       (unless (string-empty-p (or fallback "")) fallback)))))
+      (append (list :path (pilish--jsonl-info-path state))
+              (when id (list :id id))
+              (when cwd (list :cwd cwd))
+              (when name (list :name name))
+              (when parent (list :parentSessionPath parent))
+              (when created (list :created created))
+              (list :modified
+                    (format-time-string "%Y-%m-%dT%H:%M:%SZ"
+                                        (pilish--jsonl-info-mtime state) t)
+                    :messageCount (pilish--jsonl-info-message-count state))
+              (when first (list :firstMessage first))
+              (when (pilish--jsonl-info-search-text state)
+                ;; Join once, including the legacy prefix.  Do not retain
+                ;; a second history-sized string or deduplicate firstMessage.
+                (let ((texts (nreverse (pilish--jsonl-info-texts state))))
+                  (list :searchText
+                        (mapconcat #'identity
+                                   (cons (or name "")
+                                         (cons (or first "") (or texts '(""))))
+                                   " "))))))))
+
+(defun pilish-jsonl-step-session-info (state &optional deadline)
+  "Advance STATE until DEADLINE, an absolute `float-time', or completion.
+Return nil while incomplete, or (done . INFO); INFO is nil for a
+non-session file.  Nil DEADLINE runs to completion without clock checks.
+Check between decoded lines, including leading blanks, and before result
+joining.  IO, one JSON line, joining and GC can exceed the caller's budget.
+Close STATE after completion or failure; do not step a completed state."
+  (with-current-buffer (pilish--jsonl-info-buffer state)
+    (while (and (not (eobp))
+                (not (eq (pilish--jsonl-info-phase state) 'invalid))
+                (or (null deadline) (< (float-time) deadline)))
+      (if (eq (pilish--jsonl-info-phase state) 'header)
+          (unless (looking-at-p "[ \t\r]*$")
+            (setf (pilish--jsonl-info-header state)
+                  (pilish--jsonl-parse-session-header
+                   (buffer-substring-no-properties (point) (line-end-position)))
+                  (pilish--jsonl-info-phase state)
+                  (if (pilish--jsonl-info-header state) 'messages 'invalid)))
+        (pilish--jsonl-info-scan-line state))
+      (forward-line 1))
+    (when (and (or (eobp) (eq (pilish--jsonl-info-phase state) 'invalid))
+               (or (null deadline) (< (float-time) deadline)))
+      (cons 'done (pilish--jsonl-info-result state)))))
+
+(defun pilish-jsonl-read-session-info (path &optional search-text)
   "Read session metadata for the file at PATH, without building trees.
 Return a plist in the browse session dialect — (:path :id :cwd :name?
 :parentSessionPath? :created? :modified :messageCount :firstMessage?)
@@ -348,16 +408,21 @@ otherwise the first parsed message of any role is the fallback.
 :name replays session_info lines in file order with latest-wins
 trimming.  label and custom entries are ignored.  :created is the
 header timestamp; :modified is the file mtime as a second-resolution
-UTC ISO string (see the deviation note in the Commentary)."
-  (condition-case nil
-      (when (file-readable-p path)
-        (with-temp-buffer
-          (insert-file-contents path)
-          (pilish--jsonl-scan-session-info
-           path
-           (file-attribute-modification-time
-            (file-attributes path)))))
-    (error nil)))
+UTC ISO string (see the deviation note in the Commentary).
+
+Non-nil SEARCH-TEXT additionally parses every type-first message line,
+collecting user/assistant string content and text blocks across all disk
+branches, not thinking, tools, images or summaries.  :searchText is one
+prepared corpus: name, firstMessage, then these texts, separated by spaces.
+The legacy firstMessage prefix is preserved even for an any-role fallback.
+Nil SEARCH-TEXT retains the cheap metadata-only parsing budget and keys."
+  (let (state)
+    (unwind-protect
+        (condition-case nil
+            (when (setq state (pilish-jsonl-open-session-info path search-text))
+              (cdr (pilish-jsonl-step-session-info state)))
+          (error nil))
+      (pilish-jsonl-close-session-info state))))
 
 ;;;; Building Raw Trees
 

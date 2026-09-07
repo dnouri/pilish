@@ -1308,6 +1308,137 @@ through `date-to-time' and orders lexicographically like time."
       (should (string< mod-a mod-b))
       (should (string> mod-b mod-a)))))
 
+;;;; Optional Session Search Corpus
+
+(ert-deftest pilish-test-jsonl-session-search-corpus-scope-and-metadata ()
+  "Opt-in search includes text on all branches, never hidden payloads."
+  (let* ((dir (pilish-test--make-temp-directory "pi-jsonl-search"))
+         (path (expand-file-name "session.jsonl" dir)))
+    (pilish-test--write-jsonl
+     path
+     (list '(:type "session" :id "headerneedle" :cwd "/metadata-needle")
+           '(:type "message" :id "u1" :parentId nil
+             :message (:role "user" :content "opening"))
+           '(:type "message" :id "a1" :parentId "u1"
+             :message (:role "assistant" :content "inactive alpha"))
+           '(:type "message" :id "u2" :parentId "u1"
+             :message (:role "user"
+                       :content [(:type "text" :text "active")
+                                 (:type "image" :data "imageneedle" :text "imagetextneedle")
+                                 (:type "text" :text "beta")]))
+           '(:type "message" :id "a2" :parentId "u2"
+             :message (:role "assistant"
+                       :content [(:type "thinking" :thinking "thinkingneedle")
+                                 (:type "toolCall" :name "toolnameneedle"
+                                  :arguments (:text "argsneedle"))
+                                 (:type "text" :text "omega")
+                                 (:type "text" :text "")
+                                 (:type "text" :text 42)]))
+           '(:type "message" :message (:role "toolResult" :content "toolneedle"))
+           '(:type "message" :message (:role "custom" :content "customroleneedle"))
+           '(:type "message" :message (:role "system" :content "systemneedle"))
+           '(:type "message" :message (:role "user" :content nil))
+           '(:type "branch_summary" :summary "branchneedle")
+           '(:type "compaction" :summary "compactneedle")
+           '(:type "custom" :message (:role "user" :content "customentryneedle"))
+           '(:type "label" :label "labelneedle")
+           '(:type "session_info" :name " Name ")))
+    ;; Canonical type-first routing remains intentional, and malformed late
+    ;; message/name lines neither lose prior text nor clear the latest name.
+    (with-temp-buffer
+      (insert "{\"id\":\"noncanonical\",\"type\":\"message\",\"message\":{\"role\":\"user\",\"content\":\"orderneedle\"}}\n"
+              "{\"type\":\"message\",broken\n"
+              "{\"type\":\"session_info\",broken\n")
+      (write-region (point-min) (point-max) path t 'silent))
+    (let* ((metadata (pilish-jsonl-read-session-info path))
+           (full (pilish-jsonl-read-session-info path t))
+           (without-corpus (copy-sequence full)))
+      (cl-remf without-corpus :searchText)
+      (should (equal without-corpus metadata))
+      (should-not (plist-member metadata :searchText))
+      (should-not (plist-member full :allMessagesText))
+      (should (equal (plist-get full :searchText)
+                     "Name opening opening inactive alpha active beta omega ")))))
+
+(ert-deftest pilish-test-jsonl-session-search-unicode-eof-and-decoding ()
+  "Full search preserves Unicode and embedded whitespace through decoded EOF."
+  (let* ((dir (pilish-test--make-temp-directory "pi-jsonl-search-utf8"))
+         (path (expand-file-name "session.jsonl" dir)))
+    (dolist (coding '(utf-8-unix utf-8-dos utf-8-with-signature-dos))
+      (let ((coding-system-for-write coding))
+        (with-temp-file path
+          (insert " \t\n"
+                  (json-encode pilish-test--jsonl-header) "\n"
+                  (json-encode '(:type "message" :message (:role "user" :content "first")))
+                  "\n"
+                  ;; Deliberately no final newline, regardless of encoding.
+                  (json-encode '(:type "message"
+                                 :message (:role "assistant" :content "finál\n東京\t🚀"))))))
+      (should (equal (plist-get (pilish-jsonl-read-session-info path t) :searchText)
+                     " first first finál\n東京\t🚀")))))
+
+(ert-deftest pilish-test-jsonl-session-search-default-preview-budget ()
+  "Default metadata parses only the legacy preview budget and name records."
+  (let* ((dir (pilish-test--make-temp-directory "pi-jsonl-search-budget"))
+         (path (expand-file-name "session.jsonl" dir))
+         (original (symbol-function 'pilish--jsonl-parse-current-line))
+         (parsed 0))
+    (with-temp-file path
+      (insert (json-encode pilish-test--jsonl-header) "\n"
+              "{\"type\":\"message\",broken\n")
+      (dotimes (_ 4)
+        (insert (json-encode '(:type "message" :message (:role "toolResult" :content "legacy fallback"))) "\n"))
+      (dotimes (_ 20)
+        (insert (json-encode '(:type "message" :message (:role "user" :content "late user"))) "\n"))
+      (insert (json-encode '(:type "session_info" :name " Old ")) "\n"
+              (json-encode '(:type "session_info" :name "  ")) "\n"))
+    (cl-letf (((symbol-function 'pilish--jsonl-parse-current-line)
+               (lambda () (cl-incf parsed) (funcall original))))
+      (let ((metadata (pilish-jsonl-read-session-info path)))
+        (should (= parsed 7))
+        (should (= (plist-get metadata :messageCount) 25))
+        (should (equal (plist-get metadata :firstMessage) "legacy fallback"))
+        (should-not (plist-member metadata :name))
+        (should-not (plist-member metadata :searchText))))))
+
+(ert-deftest pilish-test-jsonl-session-search-legacy-empty-fallback ()
+  "Full extraction doesn't overwrite the first-five any-role preview choice."
+  (let* ((dir (pilish-test--make-temp-directory "pi-jsonl-search-fallback"))
+         (path (expand-file-name "session.jsonl" dir)))
+    (dolist (first '("" "legacy tool"))
+      (pilish-test--write-jsonl
+       path
+       (append (list pilish-test--jsonl-header
+                     `(:type "message" :message (:role "toolResult" :content ,first)))
+               (make-list 4 '(:type "message" :message (:role "toolResult" :content "excluded later tool")))
+               (list '(:type "message" :message (:role "user" :content "late user")))))
+      (let* ((metadata (pilish-jsonl-read-session-info path))
+             (full (pilish-jsonl-read-session-info path t))
+             (without-corpus (copy-sequence full)))
+        (cl-remf without-corpus :searchText)
+        (should (equal metadata without-corpus))
+        (should (equal (plist-get full :searchText) (concat " " first " late user")))
+        (should (equal (plist-get full :firstMessage) (unless (equal first "") first)))))))
+
+(ert-deftest pilish-test-jsonl-session-search-invalid-and-unreadable-files ()
+  "Opt-in reading skips bad headers and read failures, like metadata-only."
+  (let* ((dir (pilish-test--make-temp-directory "pi-jsonl-search-invalid"))
+         (path (expand-file-name "session.jsonl" dir)))
+    (dolist (contents '("" "garbage\n{\"type\":\"session\"}\n"
+                        "{\"type\":\"message\"}\n"))
+      (with-temp-file path (insert contents))
+      (should-not (pilish-jsonl-read-session-info path t)))
+    (should-not (pilish-jsonl-read-session-info (expand-file-name "missing.jsonl" dir) t))
+    (pilish-test--write-jsonl path (list pilish-test--jsonl-header))
+    (let (scan-buffer)
+      (cl-letf (((symbol-function 'insert-file-contents)
+                 (lambda (&rest _)
+                   (setq scan-buffer (current-buffer))
+                   (signal 'file-error '("read failed")))))
+        (should-not (pilish-jsonl-read-session-info path t)))
+      (should (bufferp scan-buffer))
+      (should-not (buffer-live-p scan-buffer)))))
+
 ;;;; Navigation
 
 (defun pilish-test--jsonl-line-string (line)

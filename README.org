@@ -332,6 +332,15 @@ scope, =f= for named sessions only, =r= to rename, and =d= to delete a
 closed session after confirmation (using Emacs's trash when configured).
 Press =?= to see these commands in a small browser menu.
 
+Session search matches names, first messages, and all saved user/assistant
+text, including inactive branches.  It does not add thinking, tool
+arguments/results, images, or summaries to the searchable text; the
+existing first-message fallback can still contain text from any role.
+Whitespace-separated regexp tokens must all match.  Large scans yield
+between lines, but file reads, individual records, text joining, and
+searching/rendering results remain synchronous and can pause Emacs.
+Press =q= to hide the browser without cancelling its scan.
+
 In the main transient (=C-c C-p=), Session =r= opens =sessions= and
 Context =w= opens the disk-backed conversation =tree=.  In the tree
 browser, =f= cycles no-tools/default/user-only/labeled-only/all
