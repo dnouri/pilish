@@ -2255,7 +2255,7 @@ warnings for missing dependencies."
 
 ;;;; Startup Header
 
-(defconst pilish-version "3.0.1"
+(defconst pilish-version "3.0.2"
   "Version of Pilish.")
 
 (defconst pilish--version-probe-delay 0.1

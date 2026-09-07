@@ -1025,7 +1025,8 @@ Counts come from `pilish--commands' and the pi version from
               (pilish--display-startup-header)
               (should (string-match-p
                        (regexp-quote
-                        "pi v0.84.2 · pilish 3.0.1 · 2 skills · 2 prompts · TAB details")
+                        (format "pi v0.84.2 · pilish %s · 2 skills · 2 prompts · TAB details"
+                                pilish-version))
                        (buffer-string))))))
       (delete-directory dir t))))
 
@@ -1038,7 +1039,8 @@ Never renders misleading zero counts."
           (let* ((chat (get-buffer (pilish-test--chat-buffer-name dir)))
                  (text (with-current-buffer chat (buffer-string)))
                  (lines (split-string text "\n")))
-            (should (member "pilish 3.0.1 · TAB details" lines))
+            (should (member (format "pilish %s · TAB details" pilish-version)
+                            lines))
             (should-not (string-match-p "pi v" text))
             (should-not (string-match-p "[0-9]+ skills" text))
             (should-not (string-match-p "[0-9]+ prompts" text))))
@@ -1057,9 +1059,10 @@ Never renders misleading zero counts."
               (pilish--refresh-startup-banner)
               (should (string-match-p
                        (regexp-quote
-                        "pi v0.84.2 · pilish 3.0.1 · 2 skills · 2 prompts · TAB details")
+                        (format "pi v0.84.2 · pilish %s · 2 skills · 2 prompts · TAB details"
+                                pilish-version))
                        (buffer-string)))
-              (should-not (member "pilish 3.0.1 · TAB details"
+              (should-not (member (format "pilish %s · TAB details" pilish-version)
                                   (split-string (buffer-string) "\n")))
               (let ((after-first (buffer-string)))
                 (pilish--refresh-startup-banner)
