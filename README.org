@@ -186,7 +186,9 @@ Type in the input buffer and press =C-c C-c= to send.  If Pi is
 already working, =C-c C-c= queues the text as a follow-up and sends it
 when the current turn finishes.  Press =C-c C-s= while Pi is busy to
 send a steering message: it is delivered after the current tool call
-and interrupts the remaining queued tools.  Press =C-c C-k= to abort the
+and interrupts the remaining queued tools.  During compaction or while
+waiting for a run to settle, =C-c C-s= queues a local follow-up instead,
+sent when Pi is ready for another prompt.  Press =C-c C-k= to abort the
 current response or compaction.
 
 Press =C-c C-p= for the transient menu which allows you to

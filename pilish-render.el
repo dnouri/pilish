@@ -1380,7 +1380,7 @@ Updates buffer-local state and renders display updates."
     ("auto_retry_end"
      (pilish--display-retry-end event)
      (unless (eq (plist-get event :success) t)
-       (pilish--restore-followup-queue-to-input)))
+       (pilish--recover-followups-after-retry-failure)))
     ("extension_error"
      (pilish--display-extension-error event))
     ("extension_ui_request"

@@ -901,6 +901,10 @@ Only processes successful responses for state-modifying commands."
            (plist-put pilish--state :thinking-level (plist-get data :level))))
         ("get_state"
          (let ((new-state (pilish--extract-state-from-response response)))
+           ;; Retry activity is event-owned, not reported by get_state.
+           (setq new-state
+                 (plist-put new-state :is-retrying
+                            (plist-get pilish--state :is-retrying)))
            (setq pilish--status
                  (pilish--merge-state-response-status
                   (plist-get new-state :status)))

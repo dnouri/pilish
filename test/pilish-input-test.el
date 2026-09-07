@@ -638,6 +638,99 @@ not claim to distinguish those otherwise identical sending-state traces."
                          '("clear_queue" "abort")))
           (should pilish--aborted))))))
 
+(ert-deftest pilish-test-adversarial-steering-after-agent-end-stays-local ()
+  "Steering after agent_end waits locally, including before a late prompt ack."
+  (dolist (late-ack '(nil t))
+    (pilish-test-with-rpc-session (chat input proc commands)
+      (let (notice)
+        (cl-letf (((symbol-function 'message)
+                   (lambda (fmt &rest args)
+                     (setq notice (apply #'format fmt args)))))
+          (with-current-buffer chat
+            (pilish--prepare-and-send "/extension-run")
+            (let ((request (car commands)))
+              (unless late-ack
+                (pilish--dispatch-response
+                 proc (list :type "response" :id (plist-get request :id)
+                            :command "prompt" :success t)))
+              (pilish--handle-display-event '(:type "agent_start"))
+              (pilish--handle-display-event '(:type "agent_end" :messages []))
+              ;; Pi may now be awaiting agent_settled hooks with its backend
+              ;; queue drain already finished.  No steer RPC is safe here.
+              (with-current-buffer input
+                (insert "after the run")
+                (pilish-queue-steering)
+                (should (string-empty-p (buffer-string))))
+              (should (= 1 (length commands)))
+              (should (equal notice "Pi: Steering queued (will send when Pi is ready)"))
+              (should (equal pilish--followup-queue '("after the run")))
+              (pilish--handle-display-event '(:type "agent_settled"))
+              (when late-ack
+                (should (= 1 (length commands)))
+                (pilish--dispatch-response
+                 proc (list :type "response" :id (plist-get request :id)
+                            :command "prompt" :success t)))
+              (should (equal (mapcar (lambda (cmd) (plist-get cmd :type))
+                                    (reverse commands))
+                             '("prompt" "prompt")))
+              (let ((followup (car commands)))
+                (should (equal (plist-get followup :message) "after the run"))
+                (pilish--dispatch-response
+                 proc (list :type "response" :id (plist-get followup :id)
+                            :command "prompt" :success t)))
+              (should-not pilish--followup-queue))))))))
+
+(defun pilish-test--retry-failure-with-late-ack (success)
+  "Check retry exhaustion before a FIFO owner's late SUCCESS response."
+  (pilish-test-with-rpc-session (chat input proc commands)
+    (let (notice)
+      (cl-letf (((symbol-function 'message)
+                 (lambda (fmt &rest args)
+                   (setq notice (apply #'format fmt args)))))
+        (with-current-buffer input (insert "new draft"))
+        (with-current-buffer chat
+          (setq pilish--followup-queue '("next" "/extension-run"))
+          (pilish--process-followup-queue)
+          (let ((request (car commands)))
+            (dolist (event '((:type "agent_start")
+                             (:type "agent_end" :messages [] :willRetry t)
+                             (:type "auto_retry_start" :attempt 1 :maxAttempts 1)
+                             (:type "agent_start")
+                             (:type "agent_end" :messages [])
+                             (:type "auto_retry_end" :success :false :attempt 1
+                              :finalError "overloaded")))
+              (pilish--handle-display-event event))
+            (should (string-match-p "Retry failed" (buffer-string)))
+            (with-current-buffer input
+              (should (equal (buffer-string) "new draft")))
+            (should (equal pilish--followup-queue '("next" "/extension-run")))
+            (pilish--handle-display-event '(:type "agent_settled"))
+            (should (pilish--session-busy-p))
+            (should (= 1 (length commands)))
+            (pilish--dispatch-response
+             proc (list :type "response" :id (plist-get request :id)
+                        :command "prompt" :success success :error "command rejected"))
+            (should-not (pilish--session-busy-p))
+            (should-not pilish--followup-queue)
+            ;; Exhaustion recovers only unsent work; accepting the owner must
+            ;; neither restore that command nor automatically run its successor.
+            (should (= 1 (length commands)))
+            (with-current-buffer input
+              (should (equal (buffer-string)
+                             (if (eq success t)
+                                 "next\n\nnew draft"
+                               "/extension-run\n\nnext\n\nnew draft"))))
+            (unless (eq success t)
+              (should (equal notice "Pi: Send failed: command rejected")))))))))
+
+(ert-deftest pilish-test-adversarial-retry-failure-before-late-success ()
+  "Late acceptance removes a submitted FIFO owner before restoring its successor."
+  (pilish-test--retry-failure-with-late-ack t))
+
+(ert-deftest pilish-test-adversarial-retry-failure-before-late-rejection ()
+  "Late rejection restores the unresolved FIFO owner and successor exactly once."
+  (pilish-test--retry-failure-with-late-ack :false))
+
 (ert-deftest pilish-test-review-fixes-queued-extension-ack-after-run ()
   "An extension awaiting waitForIdle accepts late, without resending its FIFO item."
   (pilish-test-with-rpc-session (chat _input proc commands)
@@ -1115,31 +1208,91 @@ When user aborts, they want to stop everything - including queued messages."
       (kill-buffer input-buf))))
 
 (ert-deftest pilish-test-queue-steering-when-sending-sends-steer ()
-  "Queue steering sends steer RPC while waiting for agent_start."
-  (let ((chat-buf (get-buffer-create "*pilish-test-queue-steer-sending*"))
-        (input-buf (get-buffer-create "*pilish-test-queue-steer-sending-input*"))
-        (sent-command nil))
-    (unwind-protect
-        (progn
-          (with-current-buffer chat-buf
-            (pilish-chat-mode)
-            (setq pilish--status 'sending)
-            (setq pilish--input-buffer input-buf))
-          (with-current-buffer input-buf
-            (pilish-input-mode)
-            (setq pilish--chat-buffer chat-buf)
-            (insert "Steer the pending retry")
-            (cl-letf (((symbol-function 'pilish--get-process) (lambda () 'mock-proc))
-                      ((symbol-function 'process-live-p) (lambda (_) t))
-                      ((symbol-function 'pilish--rpc-async)
-                       (lambda (_proc cmd _cb) (setq sent-command cmd))))
-              (pilish-queue-steering))
-            (should sent-command)
-            (should (equal (plist-get sent-command :type) "steer"))
-            (should (equal (plist-get sent-command :message) "Steer the pending retry"))
-            (should (string-empty-p (buffer-string)))))
-      (kill-buffer chat-buf)
-      (kill-buffer input-buf))))
+  "Steer an unstarted prompt or an announced retry, not a bare sending status."
+  (dolist (phase '(preflight accepted retry))
+    (pilish-test-with-rpc-session (chat input proc commands)
+      (let (notice)
+        (cl-letf (((symbol-function 'message)
+                   (lambda (fmt &rest args)
+                     (setq notice (apply #'format fmt args)))))
+          (with-current-buffer chat
+            (setq pilish--state (list :status 'idle))
+            (pilish--prepare-and-send "original")
+            (unless (eq phase 'preflight)
+              (pilish--dispatch-response
+               proc (list :type "response" :id (plist-get (car commands) :id)
+                          :command "prompt" :success t)))
+            (when (eq phase 'retry)
+              (pilish--handle-display-event '(:type "agent_start"))
+              (pilish--handle-display-event '(:type "agent_end" :messages []))
+              (pilish--handle-display-event
+               '(:type "auto_retry_start" :attempt 1 :maxAttempts 3))))
+          (with-current-buffer input
+            (insert "Steer the upcoming run")
+            (pilish-queue-steering)
+            (should (string-empty-p (buffer-string))))
+          (should (= 2 (length commands)))
+          (should (equal (plist-get (car commands) :type) "steer"))
+          (should (equal (plist-get (car commands) :message) "Steer the upcoming run"))
+          (should (equal notice "Pi: Steering message sent")))))))
+
+(defun pilish-test--retry-steering-after-state-refresh (path)
+  "Check retry steering across correlated state refreshes through PATH."
+  (pilish-test-with-rpc-session (chat input proc commands)
+    (let (notice)
+      (cl-letf (((symbol-function 'message)
+                 (lambda (fmt &rest args)
+                   (setq notice (apply #'format fmt args)))))
+        (with-current-buffer chat
+          (setq pilish--state (list :thinking-level "low"))
+          (dolist (event '((:type "agent_start")
+                           (:type "agent_end" :messages [] :willRetry t)
+                           (:type "auto_retry_start" :attempt 1 :maxAttempts 3)))
+            (pilish--handle-display-event event))
+          (should (pilish--session-steerable-p))
+          (dolist (retrying '(t nil))
+            ;; Reuse the actual core response callback or the thinking-level
+            ;; refresh's UI callback, with production request correlation.
+            (if (eq path 'core)
+                (pilish--rpc-async proc '(:type "get_state")
+                                   #'pilish--update-state-from-response)
+              (pilish--refresh-thinking-level-state proc chat))
+            (let ((request (car commands)))
+              (unless retrying
+                ;; Events may finish the retry after a refresh is requested.
+                ;; Its delayed snapshot must not resurrect that retry either.
+                (pilish--handle-display-event '(:type "agent_start"))
+                (pilish--handle-display-event '(:type "agent_end" :messages [])))
+              (pilish--dispatch-response
+               proc (list :type "response" :id (plist-get request :id)
+                          :command "get_state" :success t
+                          :data '(:isStreaming t :isCompacting :false
+                                  :thinkingLevel "high"))))
+            (should (equal (plist-get pilish--state :thinking-level) "high"))
+            (should (eq pilish--status 'sending))
+            (with-current-buffer input
+              (insert (if retrying "steer the retry" "after the run"))
+              (pilish-queue-steering)
+              (should (string-empty-p (buffer-string))))
+            (if retrying
+                (progn
+                  (should (equal (plist-get (car commands) :type) "steer"))
+                  (should (equal (plist-get (car commands) :message) "steer the retry"))
+                  (should (equal notice "Pi: Steering message sent"))
+                  (should (= 2 (length commands)))
+                  (should-not pilish--followup-queue))
+              (should (= 3 (length commands)))
+              (should (equal pilish--followup-queue '("after the run")))
+              (should (equal notice "Pi: Steering queued (will send when Pi is ready)")))
+            (should (eq (plist-get pilish--state :is-retrying) retrying))))))))
+
+(ert-deftest pilish-test-retry-steering-survives-core-state-refresh ()
+  "A core get_state response cannot erase event-owned retry steering."
+  (pilish-test--retry-steering-after-state-refresh 'core))
+
+(ert-deftest pilish-test-retry-steering-survives-thinking-state-refresh ()
+  "A thinking-level get_state callback cannot erase event-owned retry steering."
+  (pilish-test--retry-steering-after-state-refresh 'ui))
 
 (ert-deftest pilish-test-queue-steering-refuses-during-session-transition ()
   "Steering must not bypass the session-transition send guard."

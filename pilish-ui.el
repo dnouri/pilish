@@ -1562,7 +1562,7 @@ example, after prompt or image transformation).")
 
 (cl-defstruct (pilish--prompt-wait (:constructor pilish--make-prompt-wait))
   "Ownership of one prompt request, separate from observed run activity."
-  process accepted started echoed)
+  process accepted started echoed restore-followups)
 
 (defvar-local pilish--prompt-wait nil
   "Current prompt request record, or nil after acceptance and observed start.
@@ -1592,6 +1592,29 @@ transitions, prompt requests and correlated manual compaction requests."
         (pilish--session-transition-active-p)
         (pilish--prompt-start-wait-active-p)
         (pilish--command-pending-p (pilish--get-process) "compact"))))
+
+(defun pilish--session-steerable-p (&optional chat-buf)
+  "Return non-nil when CHAT-BUF has a run that can receive backend steering.
+When CHAT-BUF is nil, inspect the current buffer.  An unstarted local prompt
+or an announced retry can receive steering for its upcoming run.  A bare
+sending status may instead be waiting for settlement after Pi stopped
+checking its backend queues."
+  (with-current-buffer (or chat-buf (current-buffer))
+    (or (eq pilish--status 'streaming)
+        (and (eq pilish--status 'sending)
+             (or (plist-get pilish--state :is-retrying)
+                 (and (pilish--prompt-start-wait-active-p)
+                      (not (pilish--prompt-wait-started pilish--prompt-wait))))))))
+
+(defun pilish--recover-followups-after-retry-failure ()
+  "Restore unsent follow-ups without recovering an unresolved FIFO owner.
+An extension may have started a run before acknowledging its prompt.  Keep
+that request's text out of the editor until the correlated response decides
+whether to accept or restore it."
+  (if (and (pilish--prompt-start-wait-active-p)
+           (not (pilish--prompt-wait-accepted pilish--prompt-wait)))
+      (setf (pilish--prompt-wait-restore-followups pilish--prompt-wait) t)
+    (pilish--restore-followup-queue-to-input)))
 
 (defun pilish--canonical-rerender-safe-p ()
   "Return non-nil when the chat buffer may rebuild from canonical messages.
@@ -2775,6 +2798,10 @@ Safely handles dead buffers by checking liveness first."
                          response
                          (pilish--chat-session-directory chat-buf)))
              (new-session-id (plist-get new-state :session-id)))
+        ;; Retry activity is event-owned, not reported by get_state.
+        (setq new-state
+              (plist-put new-state :is-retrying
+                         (plist-get pilish--state :is-retrying)))
         (when (and old-session-id
                    new-session-id
                    (not (equal old-session-id new-session-id)))
@@ -2967,6 +2994,12 @@ ON-NO-AGENT-START runs only for accepted requests confirmed to have no turn."
                        (unwind-protect
                            (when on-success (funcall on-success))
                          (when (pilish--prompt-start-current-p wait)
+                           ;; Acceptance has now removed any FIFO owner.  A
+                           ;; retry failure restores only its unsent successors.
+                           (when (pilish--prompt-wait-restore-followups wait)
+                             (if pilish--aborted
+                                 (pilish--clear-followup-queue)
+                               (pilish--restore-followup-queue-to-input)))
                            (if (pilish--prompt-wait-started wait)
                                (progn
                                  (pilish--invalidate-prompt-start-wait)
