@@ -1962,13 +1962,13 @@ and non-munged directories.  scope=current scans one directory."
 
 (ert-deftest pilish-test-load-sessions-chunked ()
   "--browse-load-sessions chunks long scans and reports once.
-The per-file reader is slowed past the 25 ms slice budget so the scan
-spans several slices.  Synchronous timers deliver exactly one final
-callback with every item, and a superseded fetch's callback is dropped
+The resumable reader is slowed so the scan spans several slices.
+Synchronous timers deliver exactly one final callback with every item, and a superseded fetch's callback is dropped
 by the fetch token."
   (let* ((root (pilish-test--make-temp-directory "pi-chunk-root"))
          (sessions (expand-file-name "sessions" root))
          (dir (expand-file-name "--home-fake-a--" sessions))
+         (step-session-info (symbol-function 'pilish-jsonl-step-session-info))
          (paths nil))
     (make-directory dir t)
     (dotimes (i 60)
@@ -1986,16 +1986,11 @@ by the fetch token."
                    process-environment)))
         (cl-letf (((symbol-function 'pilish--session-list-directory)
                    (lambda (&optional _chat-buf) nil))
-                  ;; 2 ms per file: 60 files need several 25 ms slices.
-                  ((symbol-function 'pilish-jsonl-read-session-info)
-                   (lambda (path)
+                  ;; 2 ms per step: 60 files need several 10 ms slices.
+                  ((symbol-function 'pilish-jsonl-step-session-info)
+                   (lambda (state &optional deadline)
                      (sleep-for 0 2)
-                     (list :path path
-                           :id (file-name-nondirectory path)
-                           :cwd "/home/fake/a"
-                           :created pilish-test--browse-timestamp
-                           :modified "2026-03-02T10:00:00Z"
-                           :messageCount 0))))
+                     (funcall step-session-info state deadline))))
           ;; Synchronous timers: one final callback, all 60 items.
           (let ((calls nil))
             (cl-letf (((symbol-function 'run-at-time)
@@ -2027,7 +2022,7 @@ by the fetch token."
             (pcase-let ((`(,items ,error) (car calls-b)))
               (should-not error)
               (should (= (length items) 60))))
-          ;; Mid-flight supersession: A completes one slice (~12 files)
+          ;; Mid-flight supersession: A completes one slice (a few files)
           ;; before B supersedes it; the token still drops A at its next
           ;; slice boundary, and B reports alone with every item.
           (let ((calls-a nil) (calls-b nil) (queue nil))
@@ -2097,8 +2092,8 @@ and the browser names the interruption."
                    process-environment)))
         (cl-letf (((symbol-function 'pilish--session-list-directory)
                    (lambda (&optional _chat-buf) nil))
-                  ((symbol-function 'pilish-jsonl-read-session-info)
-                   (lambda (_path) (signal 'quit nil)))
+                  ((symbol-function 'pilish-jsonl-step-session-info)
+                   (lambda (&rest _) (signal 'quit nil)))
                   ((symbol-function 'run-at-time)
                    (lambda (_secs _repeat fn &rest args) (apply fn args))))
           ;; The seam reports the interruption exactly once.
@@ -2115,6 +2110,317 @@ and the browser names the interruption."
         (should (string-match-p "interrupted"
                                 pilish--session-browser-error))
         (should (string-match-p "interrupted" (buffer-string)))))))
+
+;;;; Full-message Search Regressions
+
+(ert-deftest pilish-test-browse-search-late-messages-from-disk ()
+  "The real browser and search command find later text on either disk branch."
+  (let* ((root (pilish-test--make-temp-directory "pi-search-disk"))
+         (default-directory root)
+         (process-environment (copy-sequence process-environment))
+         browser)
+    (setenv "PI_CODING_AGENT_DIR" root)
+    (let* ((dir (pilish-jsonl-session-dir-for-cwd root))
+           (path (expand-file-name "session.jsonl" dir)))
+      (make-directory dir t)
+      (pilish-test--write-session-lines
+       path
+       (list (pilish-test--make-session-header "search-disk")
+             (pilish-test--user-line "opening" nil "plain opening")
+             (pilish-test--jsonl-line
+              "message" "inactive" "opening"
+              :message '(:role "assistant"
+                         :content [(:type "text" :text "quasar269token 東京")]))
+             (pilish-test--user-line "active" "opening" "nebula269token")
+             (pilish-test--jsonl-line
+              "session_info" "name" "active" :name "Search fixture")))
+      (save-window-excursion
+        (unwind-protect
+            (cl-letf (((symbol-function 'project-current) (lambda (&rest _) nil)))
+              ;; Real discovery, reader, timers, and final Magit rendering.
+              (pilish-session-browser)
+              (setq browser (current-buffer))
+              (let ((deadline (+ (float-time) pilish-test-rpc-timeout)))
+                (while (and pilish--session-browser-loading
+                            (< (float-time) deadline))
+                  (sit-for 0.01)))
+              (should-not pilish--session-browser-loading)
+              (should-not pilish--session-browser-error)
+              (should (equal (mapcar (lambda (i) (plist-get i :path))
+                                    pilish--session-browser-items)
+                             (list path)))
+              (dolist (query '("Search" "plain" "quasar269token" "nebula269token"
+                               "東京" "Search nebula269token"
+                               "quasar269token.*nebula269token"))
+                (cl-letf (((symbol-function 'read-string) (lambda (&rest _) query)))
+                  (call-interactively #'pilish-session-browser-search))
+                (ert-info ((format "Disk-backed search query: %S" query))
+                  (should-not (string-match-p "No matching sessions" (buffer-string)))
+                  (should (string-match-p "Search fixture" (buffer-string))))))
+          (when (buffer-live-p browser) (kill-buffer browser)))))))
+
+(ert-deftest pilish-test-session-search-prepared-corpus-semantics ()
+  "Prepared text preserves regexp AND, case folding, boundaries and anchors."
+  (let* ((text "Name first first Alpha\nBeta omega 東京")
+         (prepared (list :name "Name" :firstMessage "first" :searchText text))
+         (legacy '(:name "Name" :firstMessage "first"
+                   :allMessagesText "first Alpha\nBeta omega 東京")))
+    (dolist (case-fold-search '(t nil))
+      (dolist (tokens '(nil ("Name") ("first.*Alpha") ("Beta.*omega")
+                           ("Name" "東京") ("alpha") ("Alpha")
+                           ("\\`Name") ("東京\\'") ("Alpha.*Beta")
+                           ("missing") ("Name" "missing")))
+        (should (eq (not (null (pilish--session-filter-search (list prepared) tokens)))
+                    (not (null (pilish--session-filter-search (list legacy) tokens)))))))))
+
+(ert-deftest pilish-test-session-search-prepared-corpus-not-rejoined ()
+  "Searching a prepared item does not copy its corpus for each query."
+  (let* ((item '(:name "Name" :firstMessage "first"
+                 :searchText "Name first first late"))
+         (original (symbol-function 'concat))
+         (copies 0))
+    (cl-letf (((symbol-function 'concat)
+               (lambda (&rest strings)
+                 (cl-incf copies)
+                 (apply original strings))))
+      (should (equal (pilish--session-filter-search (list item) '("late"))
+                     (list item))))
+    (should (= copies 0))))
+
+(ert-deftest pilish-test-session-search-loading-error-do-not-filter-old-items ()
+  "Loading and error screens don't search the previous full-text snapshot."
+  (dolist (state '(loading error))
+    (with-temp-buffer
+      (pilish-session-browser-mode)
+      (setq pilish--session-browser-items
+            '((:name "Old session" :searchText "old full text"))
+            pilish--session-browser-search-tokens '("full")
+            pilish--session-browser-loading (eq state 'loading)
+            pilish--session-browser-error (and (eq state 'error) "test failure"))
+      (let ((filters 0)
+            (original (symbol-function 'pilish--session-filter-search)))
+        (cl-letf (((symbol-function 'pilish--session-filter-search)
+                   (lambda (&rest args)
+                     (cl-incf filters)
+                     (apply original args))))
+          (pilish--session-browser-render (current-buffer)))
+        (should (string-match-p (if (eq state 'loading) "Loading sessions" "test failure")
+                                (buffer-string)))
+        (should (= filters 0))))))
+
+(defmacro pilish-test--with-search-scan (&rest body)
+  "Run BODY with a disk PATH, owner BROWSER, queued timers and scan tracking.
+QUEUE contains (DELAY FUNCTION . ARGS); CALLS records final deliveries.
+SCAN-BUFFERS tracks actual file-read buffers, not private scanner fields.
+The controlled clock forces line-level yielding without elapsed-time assertions."
+  (declare (indent 0) (debug t))
+  `(let* ((dir (pilish-test--make-temp-directory "pi-search-slice"))
+          (path (expand-file-name "session.jsonl" dir))
+          (browser (generate-new-buffer " *pi-search-owner*"))
+          (queue nil) (calls nil) (scan-buffers nil) (clock 0.0)
+          (read-file (symbol-function 'insert-file-contents)))
+     (pilish-test--write-session-lines
+      path
+      (append (list (pilish-test--make-session-header "sliced")
+                    (pilish-test--user-line "first" nil "opening"))
+              (cl-loop for n below 40 collect
+                       (pilish-test--jsonl-line
+                        "message" (format "a%d" n) "first"
+                        :message (list :role "assistant" :content (format "text%d" n))))
+              (list (pilish-test--user-line "last" "first" "finál 東京 🚀"))))
+     (unwind-protect
+         (with-current-buffer browser
+           (pilish-session-browser-mode)
+           (setq pilish--session-browser-fetch-token 1)
+           (cl-letf (((symbol-function 'float-time)
+                      (lambda (&optional _time) (cl-incf clock 0.002)))
+                     ((symbol-function 'run-at-time)
+                      (lambda (delay _repeat fn &rest args)
+                        (setq queue (nconc queue (list (cons delay (cons fn args)))))))
+                     ((symbol-function 'insert-file-contents)
+                      (lambda (file &rest args)
+                        (when (equal file path) (push (current-buffer) scan-buffers))
+                        (apply read-file file args))))
+             ,@body))
+       (when (buffer-live-p browser) (kill-buffer browser))
+       ;; Dispose queued work even when an assertion interrupted BODY.
+       (dolist (job queue) (apply (cadr job) (cddr job)))
+       (dolist (buffer scan-buffers)
+         (when (buffer-live-p buffer) (kill-buffer buffer))))))
+
+(ert-deftest pilish-test-session-search-scan-yields-within-one-file ()
+  "A single file stays incomplete across positive-delay continuations."
+  (pilish-test--with-search-scan
+    (pilish--browse-scan-session-files
+     browser 1 (list path) nil (lambda (items error) (push (list items error) calls)))
+    (should-not calls)
+    (should (= (length queue) 1))
+    (should (cl-some #'buffer-live-p scan-buffers))
+    (let ((slices 0))
+      (while queue
+        (should (< (cl-incf slices) 200))
+        (let ((job (pop queue)))
+          (should (> (car job) 0))
+          (apply (cadr job) (cddr job))))
+      (should (> slices 1)))
+    (should (= (length calls) 1))
+    (should-not (cadar calls))
+    (should (equal (mapcar (lambda (i) (plist-get i :path)) (caar calls)) (list path)))
+    (should (pilish--session-filter-search (caar calls) '("text0.*text39" "finál" "東京" "🚀")))
+    (should-not (cl-some #'buffer-live-p scan-buffers))))
+
+(ert-deftest pilish-test-session-search-scan-stale-and-dead-cleanup ()
+  "Superseded and dead owners drop in-flight same-file work and its buffer."
+  (dolist (cancel '(supersede kill))
+    (pilish-test--with-search-scan
+      (pilish--browse-scan-session-files
+       browser 1 (list path) nil (lambda (&rest args) (push args calls)))
+      (should queue)
+      (should-not calls)
+      (should (cl-some #'buffer-live-p scan-buffers))
+      (if (eq cancel 'supersede)
+          (cl-incf pilish--session-browser-fetch-token)
+        (kill-buffer browser))
+      (let ((job (pop queue))) (apply (cadr job) (cddr job)))
+      (should-not queue)
+      (should-not calls)
+      (should-not (cl-some #'buffer-live-p scan-buffers)))))
+
+(ert-deftest pilish-test-session-search-scan-reentrant-invalidation ()
+  "An owner invalidated inside file IO cannot receive even a final callback."
+  (dolist (cancel '(supersede kill))
+    (pilish-test--with-search-scan
+      (let ((original (symbol-function 'insert-file-contents)))
+        (cl-letf (((symbol-function 'insert-file-contents)
+                   (lambda (&rest args)
+                     (prog1 (apply original args)
+                       (if (eq cancel 'supersede)
+                           (with-current-buffer browser
+                             (cl-incf pilish--session-browser-fetch-token))
+                         (kill-buffer browser))))))
+          (pilish--browse-scan-session-files
+           browser 1 (list path) nil (lambda (&rest args) (push args calls)))))
+      (should-not calls)
+      (should-not queue)
+      (should-not (cl-some #'buffer-live-p scan-buffers)))))
+
+(ert-deftest pilish-test-session-search-scan-callback-error-once-after-cleanup ()
+  "A signaling consumer is called only once, after file resources are released."
+  (pilish-test--with-search-scan
+    (let ((callback (lambda (&rest args)
+                      (push args calls)
+                      (should-not (cl-some #'buffer-live-p scan-buffers))
+                      (error "consumer failed"))))
+      ;; No artificial deadline: isolate delivery from scheduling assertions.
+      (cl-letf (((symbol-function 'float-time) (lambda (&optional _) 0.0)))
+        (should (equal
+                 (should-error
+                  (pilish--browse-scan-session-files browser 1 (list path) nil callback)
+                  :type 'error)
+                 '(error "consumer failed")))))
+    (should (= (length calls) 1))
+    (should (= (length (caar calls)) 1))
+    (should-not (cadar calls))
+    (should-not queue)))
+
+(ert-deftest pilish-test-session-search-scan-late-error-skips-file ()
+  "An ordinary late parse failure skips its file, not the remaining sessions."
+  (pilish-test--with-search-scan
+    (let ((good (expand-file-name "good.jsonl" dir))
+          (original (symbol-function 'pilish--jsonl-parse-current-line)))
+      (pilish-test--write-session-lines
+       good (list (pilish-test--make-session-header "survivor")))
+      (cl-letf (((symbol-function 'pilish--jsonl-parse-current-line)
+                 (lambda ()
+                   (when (looking-at-p ".*text5") (error "injected late failure"))
+                   (funcall original))))
+        (pilish--browse-scan-session-files
+         browser 1 (list path (expand-file-name "missing.jsonl" dir) good) nil
+         (lambda (&rest args) (push args calls)))
+        (while queue
+          (let ((job (pop queue))) (apply (cadr job) (cddr job)))))
+      (should (= (length calls) 1))
+      (should-not (cadar calls))
+      (should (equal (mapcar (lambda (i) (plist-get i :id)) (caar calls))
+                     '("survivor")))
+      (should-not (cl-some #'buffer-live-p scan-buffers)))))
+
+(ert-deftest pilish-test-session-search-scan-late-quit-cleans-up ()
+  "Quit during later text extraction reports once rather than leaving loading."
+  (pilish-test--with-search-scan
+    (let ((original (symbol-function 'pilish--jsonl-parse-current-line)))
+      (cl-letf (((symbol-function 'pilish--jsonl-parse-current-line)
+                 (lambda ()
+                   (when (looking-at-p ".*text5") (signal 'quit nil))
+                   (funcall original))))
+        (pilish--browse-scan-session-files
+         browser 1 (list path) nil (lambda (&rest args) (push args calls)))
+        (while queue
+          (let ((job (pop queue))) (apply (cadr job) (cddr job)))))
+      (should (equal calls '((nil "Session scan was interrupted"))))
+      (should-not (cl-some #'buffer-live-p scan-buffers)))))
+
+(ert-deftest pilish-test-session-search-scan-slice-error-cleans-up ()
+  "A scan-level scheduling failure releases the retained file and reports once."
+  (pilish-test--with-search-scan
+    (pilish--browse-scan-session-files
+     browser 1 (list path) nil (lambda (&rest args) (push args calls)))
+    (should queue)
+    (should-not calls)
+    (should (cl-some #'buffer-live-p scan-buffers))
+    ;; The next slice owns an already open file, including while it sets
+    ;; its deadline.  Budget/timer errors must not bypass that ownership.
+    (cl-letf (((symbol-function 'float-time)
+               (lambda (&optional _) (error "clock failed"))))
+      (let ((job (pop queue))) (apply (cadr job) (cddr job))))
+    (should (equal calls '((nil "Session scan failed: clock failed"))))
+    (should-not queue)
+    (should-not (cl-some #'buffer-live-p scan-buffers))))
+
+(ert-deftest pilish-test-session-search-quit-window-keeps-inflight-scan ()
+  "The q binding hides the browser without cancelling its in-flight scan."
+  (pilish-test--with-search-scan
+    (save-window-excursion
+      (pop-to-buffer browser)
+      (pilish--browse-scan-session-files
+       browser 1 (list path) nil (lambda (&rest args) (push args calls)))
+      (should queue)
+      (call-interactively (key-binding (kbd "q")))
+      (should (buffer-live-p browser))
+      (should-not (get-buffer-window browser t))
+      (should (= (buffer-local-value 'pilish--session-browser-fetch-token browser) 1))
+      (while queue
+        (let ((job (pop queue))) (apply (cadr job) (cddr job))))
+      (should (= (length calls) 1))
+      (should (pilish--session-filter-search (caar calls) '("finál")))
+      (should-not (get-buffer-window browser t))
+      (should-not (cl-some #'buffer-live-p scan-buffers)))))
+
+(ert-deftest pilish-test-session-search-invalid-and-cleared-query ()
+  "Invalid regexps preserve the previous query; clearing restores all rows."
+  (with-temp-buffer
+    (pilish-session-browser-mode)
+    (setq pilish--session-browser-items
+          '((:path "/fake/one" :name "One" :searchText "One first late")
+            (:path "/fake/two" :name "Two" :searchText "Two other text")))
+    (cl-letf (((symbol-function 'read-string) (lambda (&rest _) "One")))
+      (call-interactively #'pilish-session-browser-search))
+    (let ((before (buffer-string)) (messages nil))
+      (cl-letf (((symbol-function 'read-string) (lambda (&rest _) "["))
+                ((symbol-function 'message)
+                 (lambda (format-string &rest args)
+                   (push (apply #'format format-string args) messages))))
+        (call-interactively #'pilish-session-browser-search))
+      (should (= (length messages) 1))
+      (should (string-match-p "Pi: Invalid regexp:" (car messages)))
+      (should (equal pilish--session-browser-search-query "One"))
+      (should (equal pilish--session-browser-search-tokens '("One")))
+      (should (equal (buffer-string) before)))
+    (cl-letf (((symbol-function 'read-string) (lambda (&rest _) "")))
+      (call-interactively #'pilish-session-browser-search))
+    (should-not pilish--session-browser-search-tokens)
+    (should (string-match-p "One" (buffer-string)))
+    (should (string-match-p "Two" (buffer-string)))))
 
 ;;;; Phase 2: Fetch Relaxation
 

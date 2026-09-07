@@ -484,17 +484,15 @@ Returns the updated RESULT list."
 
 (defun pilish--session-filter-search (items tokens)
   "Filter ITEMS by search TOKENS.
-Matches against session name, first message, and allMessagesText."
+Match prepared :searchText, or name/first-message text for metadata items."
   (if (null tokens)
       items
     (cl-remove-if-not
      (lambda (item)
-       (let ((text (concat
-                    (or (plist-get item :name) "")
-                    " "
-                    (or (plist-get item :firstMessage) "")
-                    " "
-                    (or (plist-get item :allMessagesText) ""))))
+       (let ((text (or (plist-get item :searchText)
+                       (concat (or (plist-get item :name) "") " "
+                               (or (plist-get item :firstMessage) "") " "
+                               (or (plist-get item :allMessagesText) "")))))
          (pilish--matches-filter-p text tokens)))
      items)))
 
@@ -695,14 +693,17 @@ Inherits section navigation from `magit-section-mode'."
   "Render the session browser in BUF from its buffer-local state."
   (with-current-buffer buf
     (let* ((inhibit-read-only t)
-           (items (or pilish--session-browser-items '()))
-           ;; Apply filters
-           (filtered (if pilish--session-browser-named-only
-                        (pilish--session-filter-named items)
-                      items))
-           (filtered (pilish--session-filter-search
-                      filtered
-                      pilish--session-browser-search-tokens)))
+           (items pilish--session-browser-items)
+           ;; Loading/error screens retain the old snapshot but need not
+           ;; search its potentially large corpus just to display status.
+           (filtered
+            (unless (or pilish--session-browser-loading
+                        pilish--session-browser-error (null items))
+              (pilish--session-filter-search
+               (if pilish--session-browser-named-only
+                   (pilish--session-filter-named items)
+                 items)
+               pilish--session-browser-search-tokens))))
       (magit-insert-section (root)
         (cond
          (pilish--session-browser-loading
@@ -839,7 +840,10 @@ Message count and age are rendered as a right-margin overlay."
   (message "Pi: Scope: %s" pilish--session-browser-scope))
 
 (defun pilish-session-browser-search ()
-  "Set or clear search filter in the session browser."
+  "Search names, first messages and all user/assistant text on disk.
+Whitespace-separated regexp tokens must all match.  Text on inactive
+branches is included; thinking, tools, images and summaries are not added.
+The legacy first-message fallback can still match text from any role."
   (interactive)
   (let ((query (read-string "Filter (regexp tokens): "
                             pilish--session-browser-search-query))
@@ -1773,67 +1777,73 @@ Unreadable or missing directories are skipped silently (empty)."
                      (error nil)))
                  dirs)))
 
-(defun pilish--browse-scan-session-files (buf token files items callback)
-  "Scan FILES for sessions in 25 ms time slices, then call CALLBACK once.
-Each slice processes whole files until 25 ms elapse (a single huge file
-is atomic — one ~0.2 s hiccup is possible, documented), then defers
-the rest to the next slice via `(run-at-time 0 nil ...)`.  The FIRST
-slice is scheduled the same way, so a superseding fetch drops an older
-scan before any slice runs and the callback is uniformly asynchronous.
-A slice is dropped when BUF died or a newer fetch bumped the fetch
-TOKEN, and a dropped scan never calls CALLBACK.  ITEMS accumulates the
-session plists (already in the browse dialect: the scan is an identity
-mapping over `pilish-jsonl-read-session-info' output).
+(defun pilish--browse-session-scan-current-p (buf token)
+  "Return non-nil if BUF still owns the session scan generation TOKEN."
+  (and (buffer-live-p buf)
+       (eq token (buffer-local-value 'pilish--session-browser-fetch-token buf))))
 
-The exactly-once contract also holds when a slice is interrupted: the
-slice loop runs inside a `condition-case' with explicit `quit' and
-`error' handlers, so a `quit' during a slice (C-g against a slow
-scan) or an `error' abandons the scan and reports through CALLBACK
-once with the failure string — `quit' is not an `error', so without
-its own handler the callback would never run and the browser would
-sit on its loading state forever (same contract as the deferred read
-in `pilish--browse-load-tree')."
-  (if (and (buffer-live-p buf)
-           (eq token (buffer-local-value
-                      'pilish--session-browser-fetch-token buf)))
-      (let ((deadline (+ (float-time) 0.025))
-            (failure nil)
-            (finished nil))
-        ;; CALLBACK is invoked only below, OUTSIDE the condition-case:
-        ;; a signaling callback must not re-enter a handler and report
-        ;; twice.
-        (condition-case err
-            (progn
-              (while (and files (< (float-time) deadline))
-                (let ((info (pilish-jsonl-read-session-info
-                             (car files))))
-                  (when info (push info items)))
-                (setq files (cdr files)))
-              (if files
-                  (run-at-time 0 nil #'pilish--browse-scan-session-files
-                               buf token files items callback)
-                (setq finished t)))
-          (quit
-           (setq failure "Session scan was interrupted"))
-          (error
-           (setq failure (format "Session scan failed: %s"
-                                 (error-message-string err)))))
-        (cond (failure
-               ;; Same one-shot report a failed fetch uses: nil items
-               ;; plus the error string (see
-               ;; `pilish--browse-load-sessions').
-               (funcall callback nil failure))
-              (finished
-               (funcall callback (nreverse items) nil))))
-    ;; Stale or orphaned fetch: drop silently.
-    nil))
+(defun pilish--browse-scan-session-files
+    (buf token files items callback &optional state)
+  "Advance FILES and accumulated ITEMS for BUF's generation TOKEN.
+STATE is the optional in-progress JSONL scan for the first file.  Each
+slice shares a 10 ms deadline across opens and line processing.  A
+positive-delay continuation allows a command-loop turn; it is not a
+latency guarantee.  Whole-file IO, individual records, joining, GC, and
+final synchronous filtering/rendering can exceed the budget.
+
+At most one file state is retained by a pending continuation.  Completion,
+errors and quit close it before CALLBACK receives (ITEMS ERROR).  A stale
+or dead owner drops work and closes its state when the continuation next
+runs, without a callback.  Hiding the browser with q does not cancel it."
+  (let (transferred finished failure)
+    (unwind-protect
+        (when (pilish--browse-session-scan-current-p buf token)
+          (condition-case err
+              (let ((deadline (+ (float-time) 0.010))
+                    yield)
+                (while (and files (not yield) (< (float-time) deadline))
+                  (let (result)
+                    (condition-case nil
+                        (progn
+                          (unless state
+                            (setq state (pilish-jsonl-open-session-info
+                                         (car files) t)))
+                          (when state
+                            (setq result (pilish-jsonl-step-session-info
+                                          state deadline))))
+                      ;; Ordinary file failures skip just this file.  Quit
+                      ;; instead reaches the scan-level interruption handler.
+                      (error (setq result '(done))))
+                    (if (or (null state) result)
+                        (progn
+                          (when (cdr result) (push (cdr result) items))
+                          (pilish-jsonl-close-session-info state)
+                          (setq state nil files (cdr files)))
+                      (setq yield t))))
+                ;; File handlers can run Lisp and supersede/kill the owner.
+                (when (pilish--browse-session-scan-current-p buf token)
+                  (if files
+                      (progn
+                        (run-at-time 0.001 nil #'pilish--browse-scan-session-files
+                                     buf token files items callback state)
+                        (setq transferred t))
+                    (setq finished t))))
+            (quit (setq failure "Session scan was interrupted"))
+            (error (setq failure (format "Session scan failed: %s"
+                                        (error-message-string err))))))
+      (unless transferred (pilish-jsonl-close-session-info state)))
+    ;; Outside handlers and after resource cleanup: a signaling consumer
+    ;; must not be called again as an error callback.
+    (when (pilish--browse-session-scan-current-p buf token)
+      (cond (failure (funcall callback nil failure))
+            (finished (funcall callback (nreverse items) nil))))))
 
 (defun pilish--browse-load-sessions (scope callback)
   "Load session items for SCOPE, then call CALLBACK with (ITEMS ERROR).
 ITEMS is a list of session plists in the browse session dialect:
 \(:path :id :cwd :name? :parentSessionPath? :created :modified
-:messageCount :firstMessage) — the identity over
-`pilish-jsonl-read-session-info' output.  ERROR is an error
+:messageCount :firstMessage :searchText) — the optional search-corpus
+output of `pilish-jsonl-read-session-info'.  ERROR is an error
 string or nil.  SCOPE is \"current\" (one project directory) or \"all\" (every
 munged directory under the sessions root).  The scan is
 chunked (see `pilish--browse-scan-session-files'), shows a
