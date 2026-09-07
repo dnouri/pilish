@@ -128,7 +128,7 @@ def session_state(session_file: Path) -> Json:
 def main(argv: list[str] | None = None) -> int:
     raw_argv = list(sys.argv[1:] if argv is None else argv)
     if raw_argv == ["--version"]:
-        print("0.79.1")
+        print("0.85.0")
         return 0
 
     parser = argparse.ArgumentParser()

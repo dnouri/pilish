@@ -379,8 +379,15 @@ class FakePiHarness:
             case "prompt":
                 self._handle_prompt(command)
             case "abort":
-                self._abort_requested.set()
+                self._stop_active_run()
                 self._respond(command)
+            case "clear_queue":
+                steering = self._take_pending_steer()
+                self._write_json({"type": "queue_update", "steering": [], "followUp": []})
+                self._respond(
+                    command,
+                    data={"steering": [steering] if steering is not None else [], "followUp": []},
+                )
             case "steer":
                 self._handle_steer(command)
             case "new_session":
@@ -647,8 +654,23 @@ class FakePiHarness:
                 ),
             )
             if not completed:
-                self._finish_aborted_run(assistant_message)
-                return
+                if assistant_message:
+                    self._persist_assistant_message(assistant_message)
+                    self._write_json({"type": "message_end", "message": assistant_message})
+                pending_steer = self._take_pending_steer()
+                self._finish_run(
+                    [assistant_message] if assistant_message else [],
+                    settled=pending_steer is None,
+                )
+                if pending_steer is None:
+                    return
+                # Like Pi, abort alone does not discard queued continuations.
+                self._abort_requested.clear()
+                emitted_messages = []
+                current_message = pending_steer
+                current_images = ()
+                self._write_json({"type": "agent_start"})
+                continue
             emitted_messages.append(assistant_message)
             pending_steer = self._take_pending_steer()
             if pending_steer is None:
@@ -1004,14 +1026,16 @@ class FakePiHarness:
         self._pending_steer_message = None
         return message
 
-    def _finish_run(self, messages: list[JsonDict]) -> None:
-        """Emit agent_end and reset transient run state."""
+    def _finish_run(self, messages: list[JsonDict], *, settled: bool = True) -> None:
+        """End a low-level run, settling only when no continuation remains."""
         self._write_json(
             {"type": "agent_end", "messages": messages, "willRetry": False}
         )
-        self.state.is_streaming = False
-        self._abort_requested.clear()
-        self._pending_steer_message = None
+        if settled:
+            self.state.is_streaming = False
+            self._abort_requested.clear()
+            self._pending_steer_message = None
+            self._write_json({"type": "agent_settled"})
 
     def _finish_aborted_run(self, message: JsonDict | None = None) -> None:
         """Finish the current run, emitting an active aborted MESSAGE first."""

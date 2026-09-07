@@ -758,12 +758,16 @@
     (pilish--update-state-from-event '(:type "agent_start"))
     (should (eq pilish--status 'streaming))))
 
-(ert-deftest pilish-test-event-agent-end-clears-streaming ()
-  "agent_end event sets pilish--status to idle."
-  (let ((pilish--status 'streaming)
-        (pilish--state nil))
-    (pilish--update-state-from-event '(:type "agent_end" :messages []))
-    (should (eq pilish--status 'idle))))
+(ert-deftest pilish-test-lifecycle-agent-end-waits-for-settled ()
+  "Only agent_settled releases a completed run, regardless of willRetry."
+  (dolist (retry '(nil :false t))
+    (let ((pilish--status 'streaming)
+          (pilish--state nil))
+      (pilish--update-state-from-event
+       `(:type "agent_end" :messages [] :willRetry ,retry))
+      (should (eq pilish--status 'sending))
+      (pilish--update-state-from-event '(:type "agent_settled"))
+      (should (eq pilish--status 'idle)))))
 
 (ert-deftest pilish-test-event-agent-end-will-retry-keeps-sending ()
   "agent_end with willRetry keeps the session busy for Pi's retry."
@@ -846,17 +850,40 @@ Display is handled by the display handler, not by state updates."
     (pilish--update-state-from-event '(:type "compaction_start" :reason "threshold"))
     (should (eq pilish--status 'compacting))))
 
-(ert-deftest pilish-test-event-compaction-end-sets-idle ()
-  "compaction_end event sets pilish--status to idle."
-  (let ((pilish--status 'compacting)
+(ert-deftest pilish-test-review-fixes-unpaired-overflow-keeps-sending ()
+  "Exhausted overflow recovery can end compaction without a start event."
+  (let ((pilish--status 'streaming)
+        (pilish--pre-compaction-status nil)
         (pilish--state nil))
-    (pilish--update-state-from-event '(:type "compaction_end" :reason "threshold" :aborted :false))
+    (pilish--update-state-from-event '(:type "agent_end" :messages []))
+    (pilish--update-state-from-event
+     '(:type "compaction_end" :reason "overflow" :aborted :false :willRetry :false
+       :result :null :errorMessage "Context overflow recovery failed after one retry"))
+    (should (eq pilish--status 'sending))
+    (pilish--update-state-from-event '(:type "agent_settled"))
     (should (eq pilish--status 'idle))))
 
+(ert-deftest pilish-test-lifecycle-manual-compaction-returns-idle ()
+  "Standalone manual compaction is terminal even on failure or cancellation."
+  (dolist (outcome '((:aborted :false :result (:summary "Summary"))
+                     (:aborted :false :result :null :errorMessage "quota")
+                     (:aborted t :result :null)))
+    (let ((pilish--status 'idle)
+          (pilish--pre-compaction-status nil)
+          (pilish--state nil))
+      (pilish--update-state-from-event
+       '(:type "compaction_start" :reason "manual"))
+      (pilish--update-state-from-event
+       (append '(:type "compaction_end" :willRetry :false) outcome))
+      (should (eq pilish--status 'idle))
+      (should-not pilish--pre-compaction-status))))
+
 (ert-deftest pilish-test-event-compaction-end-will-retry-sets-sending ()
-  "Successful compaction_end with willRetry keeps the session busy."
-  (let ((pilish--status 'compacting)
+  "Overflow recovery after agent_end keeps the session busy."
+  (let ((pilish--status 'sending)
+        (pilish--pre-compaction-status nil)
         (pilish--state nil))
+    (pilish--update-state-from-event '(:type "compaction_start" :reason "overflow"))
     (pilish--update-state-from-event
      '(:type "compaction_end"
        :reason "overflow"
@@ -879,6 +906,28 @@ Display is handled by the display handler, not by state updates."
        :errorMessage "recovery failed"))
     (should (eq pilish--status 'idle))))
 
+(ert-deftest pilish-test-lifecycle-interturn-compaction-restores-streaming ()
+  "Compaction between turns continues the same run without agent_start."
+  (dolist (outcome '((:aborted :false :result (:summary "Summary"))
+                     (:aborted :false :result :null :errorMessage "quota")
+                     (:aborted t :result :null)))
+    (ert-info ((format "Compaction outcome: %S" outcome))
+      (let ((pilish--status 'idle)
+            (pilish--pre-compaction-status nil)
+            (pilish--state nil))
+        (dolist (event '((:type "agent_start")
+                         (:type "turn_start")
+                         (:type "turn_end")
+                         (:type "compaction_start" :reason "threshold")))
+          (pilish--update-state-from-event event))
+        (should (eq pilish--status 'compacting))
+        (pilish--update-state-from-event
+         (append '(:type "compaction_end" :willRetry :false) outcome))
+        (should (eq pilish--status 'streaming))
+        (pilish--update-state-from-event '(:type "turn_start"))
+        (should (eq pilish--status 'streaming))
+        (should-not pilish--pre-compaction-status)))))
+
 (ert-deftest pilish-test-event-compaction-preserves-prompt-preflight-sending ()
   "Successful compaction during prompt preflight resumes that prompt."
   (let ((pilish--status 'sending)
@@ -897,8 +946,8 @@ Display is handled by the display handler, not by state updates."
     (should (eq pilish--status 'sending))
     (should (null pilish--pre-compaction-status))))
 
-(ert-deftest pilish-test-event-failed-compaction-does-not-resume-preflight-sending ()
-  "Failed compaction during prompt preflight settles instead of faking retry."
+(ert-deftest pilish-test-lifecycle-failed-compaction-resumes-preflight-sending ()
+  "Failed preflight compaction can still continue the original prompt."
   (let ((pilish--status 'sending)
         (pilish--pre-compaction-status nil)
         (pilish--state nil))
@@ -911,11 +960,11 @@ Display is handled by the display handler, not by state updates."
        :willRetry :false
        :result :null
        :errorMessage "quota exceeded"))
-    (should (eq pilish--status 'idle))
+    (should (eq pilish--status 'sending))
     (should (null pilish--pre-compaction-status))))
 
-(ert-deftest pilish-test-event-aborted-compaction-does-not-resume-preflight-sending ()
-  "Aborted compaction during prompt preflight is stop-everything, not sending."
+(ert-deftest pilish-test-lifecycle-cancelled-compaction-resumes-preflight-sending ()
+  "An extension cancelling preflight compaction does not cancel the prompt."
   (let ((pilish--status 'sending)
         (pilish--pre-compaction-status nil)
         (pilish--state nil))
@@ -927,7 +976,7 @@ Display is handled by the display handler, not by state updates."
        :aborted t
        :willRetry :false
        :result nil))
-    (should (eq pilish--status 'idle))
+    (should (eq pilish--status 'sending))
     (should (null pilish--pre-compaction-status))))
 
 (ert-deftest pilish-test-ensure-active-tools-from-nil ()
@@ -984,6 +1033,22 @@ Display is handled by the display handler, not by state updates."
       (delete-process fake-proc))))
 
 ;;;; State Management Tests
+
+(ert-deftest pilish-test-lifecycle-state-response-preserves-busy-status ()
+  "All snapshots preserve busy phases; idle initialization adopts remote status."
+  (dolist (status '(idle sending streaming compacting))
+    (dolist (snapshot '((:false :false idle) (t :false streaming)
+                        (:false t compacting) (t t streaming)))
+      (let ((pilish--status status)
+            (pilish--state nil)
+            (expected (if (eq status 'idle) (nth 2 snapshot) status)))
+        (pilish--update-state-from-response
+         (list :type "response" :command "get_state" :success t
+               :data (list :isStreaming (car snapshot)
+                           :isCompacting (cadr snapshot) :thinkingLevel "high")))
+        (should (equal (plist-get pilish--state :thinking-level) "high"))
+        (should (eq pilish--status expected))
+        (should (eq (plist-get pilish--state :status) expected))))))
 
 (ert-deftest pilish-test-state-from-get-state-response ()
   "State is initialized from get_state response data."
@@ -1133,7 +1198,7 @@ Display is handled by the display handler, not by state updates."
   (let ((pilish--status 'streaming)
         (pilish--state (list :is-retrying t)))
     (pilish--update-state-from-event '(:type "agent_end" :messages []))
-    (should (eq pilish--status 'idle))
+    (should (eq pilish--status 'sending))
     (should (eq (plist-get pilish--state :is-retrying) nil))))
 
 ;;;; Test Utilities

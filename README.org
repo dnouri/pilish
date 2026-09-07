@@ -49,16 +49,15 @@ is the shortest path to a usable session.
 
 - Emacs 29.1 or later, built with tree-sitter support
 - Node.js 22.19 or later for the pi CLI
-- [[https://pi.dev][pi coding agent]] =@earendil-works/pi-coding-agent@0.84.2= or later,
+- [[https://pi.dev][pi coding agent]] =@earendil-works/pi-coding-agent@0.85.0= or later,
   installed and in =PATH= on the host where Pi runs
 - Pi CLI authentication: a provider API key, or a one-time =/login= run
   in a terminal (see [[#install-pi-and-authenticate-][Install pi and authenticate]])
 - A C compiler if Emacs needs to compile tree-sitter grammars
 
-The published Pi 0.84.2 CLI omits tool identity metadata from
-=toolcall_start=.  It remains supported: tool blocks appear when the
-corresponding =toolcall_end= arrives.  Newer Pi builds that include =id= and
-=toolName= on the start event also show supported arguments while they stream.
+Upgrade older Pi installations before using Pilish.  Pi 0.85.0 or later is
+required for run settlement, queue clearing, and compaction abort handling;
+older protocol versions are not supported.
 
 ** Install pi and authenticate 🔐
 :PROPERTIES:
@@ -187,7 +186,9 @@ Type in the input buffer and press =C-c C-c= to send.  If Pi is
 already working, =C-c C-c= queues the text as a follow-up and sends it
 when the current turn finishes.  Press =C-c C-s= while Pi is busy to
 send a steering message: it is delivered after the current tool call
-and interrupts the remaining queued tools.  Press =C-c C-k= to abort the
+and interrupts the remaining queued tools.  During compaction or while
+waiting for a run to settle, =C-c C-s= queues a local follow-up instead,
+sent when Pi is ready for another prompt.  Press =C-c C-k= to abort the
 current response or compaction.
 
 Press =C-c C-p= for the transient menu which allows you to

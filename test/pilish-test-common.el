@@ -317,6 +317,35 @@ Uses tool call ID \"call_1\" and contentIndex 0."
 
 ;;;; Mock Session
 
+(cl-defmacro pilish-test-with-rpc-session ((chat input proc commands) &rest body)
+  "Run BODY with linked CHAT/INPUT buffers and real PROC request correlation.
+Capture outbound JSON as COMMANDS (newest first), without sending it to Pi.
+Tests can deliver events and correlated responses through the production
+handlers; no mock bypasses pending request registration or removal."
+  (declare (indent 1) (debug ((symbolp symbolp symbolp symbolp) body)))
+  `(let ((,chat (generate-new-buffer " *pilish-rpc-chat*"))
+         (,input (generate-new-buffer " *pilish-rpc-input*"))
+         (,proc (start-process "pilish-test-rpc" nil "cat"))
+         ,commands)
+     (unwind-protect
+         (progn
+           (set-process-query-on-exit-flag ,proc nil)
+           (with-current-buffer ,chat
+             (pilish-chat-mode)
+             (setq pilish--process ,proc pilish--input-buffer ,input))
+           (with-current-buffer ,input
+             (pilish-input-mode)
+             (setq pilish--chat-buffer ,chat))
+           (process-put ,proc 'pilish-chat-buffer ,chat)
+           (pilish--register-display-handler ,proc)
+           (cl-letf (((symbol-function 'pilish--send-string)
+                      (lambda (_process line)
+                        (push (pilish--parse-json-line line) ,commands)))
+                     ((symbol-function 'pilish--refresh-header) #'ignore))
+             ,@body))
+       (pilish-test--kill-live-buffers ,input ,chat)
+       (when (process-live-p ,proc) (delete-process ,proc)))))
+
 (defmacro pilish-test-with-mock-session (dir &rest body)
   "Execute BODY with a mocked pi session in DIR, cleaning up after.
 DIR should be a unique directory path, typically created with

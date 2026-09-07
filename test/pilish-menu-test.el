@@ -200,9 +200,8 @@ Also verifies that the new session-file is stored in state for reload to work."
   "New session cannot discard a prompt whose acceptance is unresolved."
   (with-temp-buffer
     (pilish-chat-mode)
-    (setq pilish--process 'mock-proc
-          pilish--status 'sending
-          pilish--prompt-start-wait-active t)
+    (setq pilish--process 'mock-proc pilish--status 'sending)
+    (pilish--begin-prompt-start-wait)
     (let (rpc-called feedback)
       (cl-letf (((symbol-function 'pilish--get-process)
                  (lambda () 'mock-proc))
@@ -1720,118 +1719,128 @@ Pi v0.51.3+ renamed SlashCommandSource from \"template\" to \"prompt\"."
                             (buffer-string)))))))
       (kill-buffer chat-buf))))
 
-(ert-deftest pilish-test-compact-completion-event-processes-queued-followup ()
-  "Manual compact queues local input until the compaction_end success event."
-  (let ((chat-buf (get-buffer-create "*pilish-test-compact-status*"))
-        (input-buf (get-buffer-create "*pilish-test-compact-status-input*"))
-        (compact-callback nil)
-        (prepared-texts nil)
-        (prompt-sent nil)
-        drain-callback
-        drain-args)
-    (unwind-protect
-        (progn
-          (with-current-buffer chat-buf
-            (pilish-chat-mode)
-            (setq pilish--status 'idle)
-            (setq pilish--process nil)
-            (setq pilish--input-buffer input-buf)
-            (setq pilish--followup-queue nil))
-          (with-current-buffer input-buf
-            (pilish-input-mode)
-            (setq pilish--chat-buffer chat-buf))
-          (cl-letf (((symbol-function 'pilish--get-process)
-                     (lambda () 'mock-proc))
-                    ((symbol-function 'process-live-p)
-                     (lambda (_proc) t))
-                    ((symbol-function 'pilish--rpc-async)
-                     (lambda (_proc cmd cb)
-                       (if (equal (plist-get cmd :type) "compact")
-                           (setq compact-callback cb)
-                         (setq prompt-sent t))))
-                    ((symbol-function 'pilish--handle-compaction-success) #'ignore)
-                    ((symbol-function 'pilish--prepare-and-send)
-                     (lambda (text &optional queued)
-                       (push text prepared-texts)
-                       (when queued
-                         (pilish--drop-followup text))))
-                    ((symbol-function 'run-at-time)
-                     (lambda (_secs _repeat fn &rest args)
-                       (setq drain-callback fn
-                             drain-args args)
-                       'fake-drain-timer))
-                    ((symbol-function 'message) #'ignore))
-            (with-current-buffer chat-buf
-              (pilish-compact)
-              (should (eq pilish--status 'compacting)))
+(ert-deftest pilish-test-review-fixes-manual-reservation-until-correlated-response ()
+  "Compaction end does not free its local RPC reservation or unlock a second command."
+  (pilish-test-with-rpc-session (chat _input proc commands)
+    (with-current-buffer chat
+      (let (shown-message)
+        (cl-letf (((symbol-function 'message)
+                   (lambda (fmt &rest args)
+                     (setq shown-message (apply #'format fmt args)))))
+          (pilish-compact)
+          (let ((request (car commands)))
+            (pilish--handle-display-event '(:type "compaction_start" :reason "manual"))
+            (pilish--handle-display-event
+             '(:type "compaction_end" :reason "manual" :aborted :false
+               :result :null :errorMessage "old failure"))
+            (should (pilish--session-busy-p))
+            (should-not (pilish--canonical-rerender-safe-p))
+            (pilish-compact)
+            (should (= 1 (length commands)))
+            (should-not (pilish--new-session-ready-p chat))
+            ;; An extension can still start independent B while A's RPC awaits
+            ;; session_compact_failed handlers.  A's reply must not idle B.
+            (pilish--handle-display-event '(:type "agent_start"))
+            (pilish-abort)
+            (pilish--dispatch-response
+             proc (list :type "response" :id (plist-get request :id)
+                        :command "compact" :success :false :error "old failure"))
+            (should (eq pilish--status 'streaming))
+            (should pilish--aborted)
+            (should (string-match-p "old failure" shown-message))
+            (pilish--handle-display-event '(:type "agent_end" :messages []))
+            (pilish--handle-display-event '(:type "agent_settled"))
+            (should-not (pilish--session-busy-p))
+            (pilish-compact)
+            (pilish-abort)
+            ;; Duplicate old replies cannot release the new correlated request.
+            (pilish--dispatch-response
+             proc (list :type "response" :id (plist-get request :id)
+                        :command "compact" :success :false :error "old failure"))
+            (should (pilish--session-busy-p))
+            (should pilish--aborted)))))))
 
-            (with-current-buffer input-buf
-              (insert "queued during compaction")
-              (pilish-send)
-              (should (string-empty-p (buffer-string))))
+(ert-deftest pilish-test-review-fixes-manual-success-releases-fifo-on-response ()
+  "Manual compaction's correlated response, not its end event, releases local FIFO."
+  (pilish-test-with-rpc-session (chat input proc commands)
+    (with-current-buffer chat
+      (cl-letf (((symbol-function 'message) #'ignore))
+        (pilish-compact)
+        (let ((request (car commands)))
+          (pilish--handle-display-event '(:type "compaction_start" :reason "manual"))
+          (with-current-buffer input (insert "next") (pilish-send))
+          (pilish--handle-display-event
+           '(:type "compaction_end" :reason "manual" :aborted :false
+             :result (:tokensBefore 1000 :summary "Done")))
+          (should (= 1 (length commands)))
+          (should (equal pilish--followup-queue '("next")))
+          (pilish--dispatch-response
+           proc (list :type "response" :id (plist-get request :id)
+                      :command "compact" :success t))
+          (should (equal (plist-get (car commands) :message) "next"))
+          (should (equal pilish--followup-queue '("next"))))))))
 
-            (with-current-buffer chat-buf
-              (should-not prompt-sent)
-              (should (equal pilish--followup-queue '("queued during compaction"))))
+(ert-deftest pilish-test-compact-refuses-unsettled-work ()
+  "Manual compact cannot overtake prompt preflight, a run or its settlement."
+  (dolist (status '(sending streaming compacting))
+    (with-temp-buffer
+      (pilish-chat-mode)
+      (setq pilish--status status
+            pilish--process 'mock-proc
+            pilish--followup-queue '("keep queued"))
+      (let (commands shown-message)
+        (cl-letf (((symbol-function 'process-live-p) (lambda (_) t))
+                  ((symbol-function 'pilish--rpc-async)
+                   (lambda (_proc command _callback) (push command commands)))
+                  ((symbol-function 'message)
+                   (lambda (fmt &rest args)
+                     (setq shown-message (apply #'format fmt args)))))
+          (pilish-compact)
+          (should-not commands)
+          (should (string-match-p "Cannot compact" shown-message))
+          (should (eq pilish--status status))
+          (should (equal pilish--followup-queue '("keep queued"))))))))
 
-            (with-current-buffer chat-buf
-              (pilish--handle-display-event
-               '(:type "compaction_end"
-                 :reason "manual"
-                 :aborted :false
-                 :willRetry :false
-                 :result (:tokensBefore 1234
-                          :summary "Done"
-                          :firstKeptEntryId "entry-1"
-                          :details nil)))
-              (should (eq pilish--status 'idle))
-              (should (functionp drain-callback))
-              (should (equal pilish--followup-queue
-                             '("queued during compaction")))
-              (apply drain-callback drain-args)
-              (should (null pilish--followup-queue)))
-            (should (equal (reverse prepared-texts) '("queued during compaction")))
-
-            (should (functionp compact-callback))
-            (funcall compact-callback
-                     '(:success t :data (:tokensBefore 1234 :summary "Done")))
-            (should (equal (reverse prepared-texts) '("queued during compaction")))))
-      (kill-buffer chat-buf)
-      (kill-buffer input-buf))))
+(ert-deftest pilish-test-aborted-manual-compaction-rejection-releases-stop ()
+  "A rejected manual compact command cannot leave stale local stop intent."
+  (pilish-test-with-rpc-session (chat _input proc commands)
+    (with-current-buffer chat
+      (let (shown-message)
+        (cl-letf (((symbol-function 'message)
+                   (lambda (fmt &rest args)
+                     (setq shown-message (apply #'format fmt args)))))
+          (pilish-compact)
+          (let ((request (car commands)))
+            (pilish-abort)
+            (should pilish--aborted)
+            (pilish--dispatch-response
+             proc (list :type "response" :id (plist-get request :id)
+                        :command "compact" :success :false :error "not started"))))
+        (should (equal shown-message "Pi: Compact failed: not started"))
+        (should-not (pilish--session-busy-p))
+        (should-not pilish--aborted)))))
 
 (ert-deftest pilish-test-compact-response-failure-reports-without-event ()
-  "A failed compact RPC response reports plumbing failure when no event ended it."
-  (let ((chat-buf (get-buffer-create "*pilish-test-compact-response-failure*"))
-        (input-buf (get-buffer-create "*pilish-test-compact-response-failure-input*"))
-        (shown-message nil))
-    (unwind-protect
-        (progn
-          (with-current-buffer input-buf
-            (pilish-input-mode)
-            (setq pilish--chat-buffer chat-buf))
-          (with-current-buffer chat-buf
-            (pilish-chat-mode)
-            (setq pilish--status 'compacting
-                  pilish--input-buffer input-buf
-                  pilish--followup-queue '("queued during failed compact"))
-            (pilish--set-activity-phase "compact"))
-          (cl-letf (((symbol-function 'message)
-                     (lambda (fmt &rest args)
-                       (setq shown-message (apply #'format fmt args)))))
-            (pilish--handle-manual-compaction-response
-             chat-buf
-             '(:success :false :error "transport failed before compaction event")))
-          (with-current-buffer chat-buf
-            (should (eq pilish--status 'idle))
-            (should (equal pilish--activity-phase "idle"))
-            (should (null pilish--followup-queue))
-            (should-not (string-match-p "Compacted from" (buffer-string))))
-          (with-current-buffer input-buf
-            (should (equal (buffer-string) "queued during failed compact")))
-          (should (equal shown-message
-                         "Pi: Compact failed: transport failed before compaction event")))
-      (kill-buffer chat-buf)
-      (kill-buffer input-buf))))
+  "A command-level failure releases its reservation and restores unsent FIFO."
+  (pilish-test-with-rpc-session (chat input proc commands)
+    (with-current-buffer chat
+      (let (shown-message)
+        (cl-letf (((symbol-function 'message)
+                   (lambda (fmt &rest args)
+                     (setq shown-message (apply #'format fmt args)))))
+          (pilish-compact)
+          (should (pilish--session-busy-p))
+          (setq pilish--followup-queue '("queued during failed compact"))
+          (pilish--dispatch-response
+           proc (list :type "response" :id (plist-get (car commands) :id)
+                      :command "compact" :success :false :error "not started")))
+        (should (equal shown-message "Pi: Compact failed: not started"))
+        (should-not (pilish--session-busy-p))
+        (should (equal pilish--activity-phase "idle"))
+        (should-not pilish--followup-queue)
+        (should-not (string-match-p "Compacted from" (buffer-string)))))
+    (with-current-buffer input
+      (should (equal (buffer-string) "queued during failed compact")))))
 
 (ert-deftest pilish-test-compact-dead-process-keeps-idle ()
   "Manual compact should not transition state when process is dead."
@@ -2766,12 +2775,11 @@ replaced by the resumed or forked history."
         (pilish-fork-at-point))
       (should-not rpc-called))))
 
-(ert-deftest pilish-test-fork-at-point-followup-drain-guard ()
-  "Fork-at-point skips RPC while a local follow-up drain is pending."
+(ert-deftest pilish-test-fork-at-point-settlement-guard ()
+  "Fork-at-point skips RPC while the run is awaiting settlement."
   (with-temp-buffer
     (pilish-chat-mode)
-    (let ((pilish--status 'idle)
-          (pilish--followup-drain-timer 'fake-drain-timer)
+    (let ((pilish--status 'sending)
           (pilish--process 'mock-proc)
           (rpc-called nil))
       (let ((inhibit-read-only t))

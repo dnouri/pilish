@@ -18,7 +18,7 @@
   (let* ((tool-path "/tmp/fake-tool.txt")
          (tool-marker "TOOL_CONTRACT_MARKER")
          (events nil)
-         (got-agent-end nil)
+         (got-agent-settled nil)
          (tool-execution-end nil))
     (unwind-protect
         (progn
@@ -29,8 +29,8 @@
                   (pcase (plist-get event :type)
                     ("tool_execution_end"
                      (setq tool-execution-end event))
-                    ("agent_end"
-                     (setq got-agent-end t))))
+                    ("agent_settled"
+                     (setq got-agent-settled t))))
                 pilish--event-handlers)
           (let ((prompt-response
                  (pilish--rpc-sync
@@ -71,15 +71,15 @@
                            tool-path))
             (should result-text)
             (should (string-match-p tool-marker result-text)))
-          (unless got-agent-end
+          (unless got-agent-settled
             (let ((abort-response (pilish--rpc-sync proc '(:type "abort")
                                                              pilish-test-rpc-timeout)))
               (should abort-response)
               (should (eq (plist-get abort-response :success) t))
               (should (equal (plist-get abort-response :command) "abort")))
             (with-timeout (pilish-test-rpc-timeout
-                           (ert-fail "Timeout waiting for agent_end after tool-contract abort"))
-              (while (not got-agent-end)
+                           (ert-fail "Timeout waiting for agent_settled after tool-contract abort"))
+              (while (not got-agent-settled)
                 (accept-process-output proc pilish-test-poll-interval))))
           (let* ((state (pilish--rpc-sync proc '(:type "get_state")
                                                    pilish-test-rpc-timeout))

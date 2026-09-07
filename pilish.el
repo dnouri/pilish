@@ -38,7 +38,7 @@
 ;;
 ;; Requirements:
 ;;   - Emacs 29.1 or later (tree-sitter support required)
-;;   - pi coding agent @earendil-works/pi-coding-agent 0.84.2 or later,
+;;   - pi coding agent @earendil-works/pi-coding-agent 0.85.0 or later,
 ;;     installed and in PATH on the host where Pi runs
 ;;   - tree-sitter grammars for markdown and markdown-inline
 ;;
