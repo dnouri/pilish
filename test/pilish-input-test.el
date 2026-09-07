@@ -5226,5 +5226,324 @@ no spurious faces are applied to plain colon-ending lines."
                         :type 'user-error))
       (kill-buffer chat-buf))))
 
+;;; Queued-count Input Header
+
+(defun pilish-test--queued-header-wire (proc event)
+  "Deliver EVENT as a framed JSON line through PROC's production filter."
+  (pilish--process-filter proc (concat (json-encode event) "\n")))
+
+(defun pilish-test--queued-header (input count)
+  "Check INPUT's queued COUNT and return its tooltip, or nil for zero."
+  (let* ((header (with-current-buffer input (pilish--header-line-string)))
+         (position (string-match " queued [0-9]+" header)))
+    (if (zerop count)
+        (progn
+          (should-not (string-match-p "queue" header))
+          nil)
+      (should position)
+      (should (equal (match-string 0 header) (format " queued %d" count)))
+      (let* ((start (1+ position))
+             (help (get-text-property start 'help-echo header)))
+        (should (stringp help))
+        (should (eq (get-text-property start 'mouse-face header) 'highlight))
+        (should-not (get-text-property start 'local-map header))
+        (should-not (get-text-property start 'keymap header))
+        help))))
+
+(ert-deftest pilish-test-queued-header-local-busy-sends-in-fifo-order ()
+  "Busy sends show the known local FIFO even without backend queue information."
+  (dolist (status '(sending streaming compacting))
+    (pilish-test-with-rpc-session (chat input _proc commands)
+      (with-current-buffer chat (setq pilish--status status))
+      (pilish-test--queued-header input 0)
+      (let (notices)
+        (cl-letf (((symbol-function 'message)
+                   (lambda (fmt &rest args)
+                     (push (apply #'format fmt args) notices))))
+          (dolist (text '("first local" "second local"))
+            (with-current-buffer input (insert text) (pilish-send))))
+        (should (= 2 (length notices))))
+      (should-not commands)
+      (with-current-buffer input (should (string-empty-p (buffer-string))))
+      (with-current-buffer chat
+        (should (equal (pilish--followups-in-fifo-order)
+                       '("first local" "second local"))))
+      (let ((help (pilish-test--queued-header input 2)))
+        (should (string-match-p "Follow-ups.*2" help))
+        (should (string-match-p "[-•] first local\n[-•] second local" help))
+        (should-not (string-match-p "Steering" help))))))
+
+(ert-deftest pilish-test-queued-header-steering-snapshots-not-acks ()
+  "Queue snapshots replace one another; steer send/ACK never invent entries."
+  (pilish-test-with-rpc-session (chat input proc commands)
+    (pilish-test--queued-header input 0)
+    (pilish-test--queued-header-wire
+     proc '(:type "queue_update" :steering [] :followUp []))
+    (pilish-test--queued-header input 0)
+    (with-current-buffer chat (setq pilish--status 'streaming))
+    (let (notice)
+      (cl-letf (((symbol-function 'message)
+                 (lambda (fmt &rest args)
+                   (setq notice (apply #'format fmt args)))))
+        (with-current-buffer input (insert "duplicate") (pilish-queue-steering)))
+      (should (string-match-p "[Ss]teering" notice)))
+    (should (equal (plist-get (car commands) :type) "steer"))
+    (let ((request (car commands)))
+      (pilish-test--queued-header input 0)
+      ;; A snapshot can precede its correlated steer response.  Split framing
+      ;; must not expose a partial snapshot or lose duplicate messages.
+      (pilish--process-filter
+       proc "{\"type\":\"queue_update\",\"steering\":[\"duplicate\",")
+      (pilish-test--queued-header input 0)
+      (pilish--process-filter proc "\"duplicate\"],\"followUp\":[]}\n")
+      (let ((help (pilish-test--queued-header input 2)))
+        (should (string-match-p "Steering.*2" help))
+        (should (string-match-p "[-•] duplicate\n[-•] duplicate" help))
+        (should-not (string-match-p "Follow-ups" help)))
+      (pilish-test--queued-header-wire
+       proc (list :type "response" :id (plist-get request :id)
+                  :command "steer" :success t))
+      (pilish-test--queued-header input 2))
+    (pilish-test--queued-header-wire
+     proc '(:type "queue_update" :steering ["replacement"] :followUp []))
+    (let ((help (pilish-test--queued-header input 1)))
+      (should (string-match-p "replacement" help))
+      (should-not (string-match-p "duplicate" help)))
+    (pilish-test--queued-header-wire
+     proc '(:type "queue_update" :steering [] :followUp []))
+    (pilish-test--queued-header input 0)
+    (should (= 1 (length commands)))))
+
+(ert-deftest pilish-test-queued-header-stats-order-and-exact-counts ()
+  "Queued text sits after cost/context and before session, without a count cap."
+  (dolist (count '(1 10 99 123))
+    (pilish-test-with-rpc-session (chat input proc _commands)
+      (with-current-buffer chat
+        (setq pilish--cached-stats
+              '(:cost 1.25 :contextUsage (:tokens 500 :percent 25.0
+                                        :contextWindow 2000))
+              pilish--session-name "my session"))
+      (pilish-test--queued-header-wire
+       proc (list :type "queue_update" :steering (make-vector count "next")
+                  :followUp []))
+      (pilish-test--queued-header input count)
+      (with-current-buffer input
+        (let ((header (pilish--header-line-string)))
+          (should (string-match-p
+                   (regexp-quote (format " │ $1.25 25.0%%%%/2k queued %d │ my session"
+                                         count))
+                   header)))))))
+
+(ert-deftest pilish-test-queued-header-tooltip-groups-and-source-order ()
+  "Follow-ups show backend order then local FIFO; groups do not deduplicate."
+  (pilish-test-with-rpc-session (chat input proc _commands)
+    (with-current-buffer chat
+      (pilish--push-followup "same")
+      (pilish--push-followup "local second"))
+    (pilish-test--queued-header-wire
+     proc '(:type "queue_update" :followUp ["backend first"]
+            :steering ["steer first" "steer second"]))
+    (let ((help (pilish-test--queued-header input 5)))
+      (should (string-match-p "Follow-ups.*3" help))
+      (should (string-match-p "Steering.*2" help))
+      (should (string-match-p
+               "[-•] backend first\n[-•] same\n[-•] local second\n\nSteering"
+               help))
+      (should (string-match-p "[-•] steer first\n[-•] steer second" help)))
+    (pilish-test--queued-header-wire
+     proc '(:type "queue_update" :followUp ["same"] :steering []))
+    (let ((help (pilish-test--queued-header input 3)))
+      (should (string-match-p "[-•] same\n[-•] same\n[-•] local second" help))
+      (should-not (string-match-p "Steering" help)))))
+
+(ert-deftest pilish-test-queued-header-tooltip-bounded-literal-and-read-only ()
+  "Hover previews are bounded plain literal text and never poll or mutate queues."
+  (pilish-test-with-rpc-session (chat input proc commands)
+    (with-current-buffer chat
+      (pilish--push-followup
+       (propertize "100% \\[save-buffer]\n\t literal"
+                   'display "WRONG" 'invisible t 'face 'error
+                   'help-echo "WRONG" 'keymap (make-sparse-keymap)))
+      (pilish--push-followup (concat "long " (make-string 500 ?x)))
+      ;; Bound source processing before whitespace flattening, not just the
+      ;; final preview length: this suffix must never reach the tooltip.
+      (pilish--push-followup (concat (make-string 513 ?\s) "AFTER-SOURCE-BOUND"))
+      (pilish--push-followup "hidden fourth")
+      (pilish--push-followup "hidden fifth"))
+    (pilish-test--queued-header-wire
+     proc '(:type "queue_update" :followUp []
+            :steering ["one" "two" "three" "hidden four" "hidden five" "hidden six" "hidden seven"]))
+    (let ((before (with-current-buffer chat
+                    (mapcar #'copy-sequence pilish--followup-queue)))
+          (pending (hash-table-count (pilish--get-pending-requests proc))))
+      (cl-letf (((symbol-function 'pilish--refresh-header)
+                 (lambda () (ert-fail "Formatting must not fetch stats"))))
+        (dotimes (_ 5)
+          (let ((help (pilish-test--queued-header input 12)))
+            (should (string-match-p "Follow-ups.*5" help))
+            (should (string-match-p "Steering.*7" help))
+            (let ((literal-position
+                   (string-match (regexp-quote "100% \\[save-buffer] literal") help)))
+              (should literal-position)
+              (should-not (get-text-property literal-position 'face help)))
+            (should (get-text-property 0 'help-echo-inhibit-substitution help))
+            (should-not (string-match-p "\t\\|hidden\\|WRONG" help))
+            (should-not (string-match-p "AFTER-SOURCE-BOUND" help))
+            (should (string-match-p "and 2 more" help))
+            (should (string-match-p "and 4 more" help))
+            (let ((previews (seq-filter
+                             (lambda (line) (string-match-p "^[-•] " line))
+                             (split-string help "\n"))))
+              (should (= 6 (length previews)))
+              (should (or (string-suffix-p "…" (nth 2 previews))
+                          (string-suffix-p "..." (nth 2 previews))))
+              ;; Allow the bullet and a short truncation marker around the
+              ;; approximately 120-character preview budget.
+              (dolist (line previews) (should (<= (length line) 125))))
+            (dotimes (i (length help))
+              (dolist (prop '(display invisible keymap local-map help-echo))
+                (should-not (get-text-property i prop help)))))))
+      (with-current-buffer chat
+        (should (equal-including-properties pilish--followup-queue before)))
+      (should (= pending (hash-table-count (pilish--get-pending-requests proc))))
+      (should-not commands))))
+
+(ert-deftest pilish-test-queued-header-process-owned-snapshots ()
+  "Snapshots precede display and survive state replacement and process adoption."
+  (pilish-test-with-rpc-session (chat input old commands)
+    (let ((candidate (start-process "pilish-test-queue-candidate" nil "cat")))
+      (unwind-protect
+          (progn
+            (set-process-query-on-exit-flag candidate nil)
+            ;; Candidates receive early events without a display handler.
+            (pilish-test--queued-header-wire
+             candidate '(:type "queue_update" :followUp ["candidate"] :steering []))
+            (pilish-test--queued-header input 0)
+            (let ((handler (process-get old 'pilish-display-handler)) observed)
+              (process-put old 'pilish-display-handler
+                           (lambda (event)
+                             (setq observed
+                                   (with-current-buffer input
+                                     (pilish--header-line-string)))
+                             (funcall handler event)))
+              (pilish-test--queued-header-wire
+               old '(:type "queue_update" :followUp ["old one" "old two"] :steering []))
+              (should (string-match-p " queued 2" observed))
+              (process-put old 'pilish-display-handler handler))
+            ;; A full get_state replacement must not erase the event snapshot.
+            (pilish--rpc-async old '(:type "get_state")
+                              (lambda (response)
+                                (pilish--apply-state-response chat response)))
+            (pilish-test--queued-header-wire
+             old (list :type "response" :command "get_state" :success t
+                       :id (plist-get (car commands) :id)
+                       :data '(:model (:name "replacement state") :isStreaming :false)))
+            (pilish-test--queued-header input 2)
+            (process-put candidate 'pilish-chat-buffer chat)
+            (pilish--register-display-handler candidate)
+            (with-current-buffer chat (pilish--set-process candidate))
+            (should (string-match-p "candidate" (pilish-test--queued-header input 1)))
+            ;; An old handler can still be installed while its late event arrives.
+            (pilish-test--queued-header-wire
+             old '(:type "queue_update" :followUp ["stale"] :steering ["stale too"]))
+            (let ((help (pilish-test--queued-header input 1)))
+              (should (string-match-p "candidate" help))
+              (should-not (string-match-p "stale" help)))
+            (delete-process old)
+            (pilish-test--queued-header input 1)
+            (delete-process candidate)
+            (pilish-test--queued-header input 0)
+            (with-current-buffer chat (pilish--push-followup "still local"))
+            (should (string-match-p "still local" (pilish-test--queued-header input 1))))
+        (when (process-live-p candidate) (delete-process candidate))))))
+
+(ert-deftest pilish-test-queued-header-submitted-head-accept-reject-abort ()
+  "A submitted FIFO head stays counted until acceptance, restoration, or Stop."
+  (dolist (outcome '(accept reject abort))
+    (pilish-test-with-rpc-session (chat input proc commands)
+      (with-current-buffer chat
+        (pilish--push-followup "first")
+        (pilish--push-followup "second")
+        (pilish--process-followup-queue))
+      (should (equal (plist-get (car commands) :message) "first"))
+      (let ((request (car commands)) notices)
+        ;; An extension may finish its run before accepting the prompt.  The
+        ;; existing FIFO owner remains present across start/end/settlement.
+        (dolist (event '((:type "agent_start") (:type "agent_end" :messages [])
+                         (:type "agent_settled")))
+          (pilish-test--queued-header-wire proc event))
+        (should (= 1 (length commands)))
+        (pilish-test--queued-header input 2)
+        (cl-letf (((symbol-function 'message)
+                   (lambda (fmt &rest args)
+                     (push (apply #'format fmt args) notices))))
+          (if (eq outcome 'abort)
+              (with-current-buffer input (pilish-abort))
+            (pilish-test--queued-header-wire
+             proc (list :type "response" :command "prompt"
+                        :id (plist-get request :id)
+                        :success (if (eq outcome 'accept) t :false)
+                        :error "preflight rejected"))))
+        (pcase outcome
+          ('accept
+           (should-not notices)
+           (let ((help (pilish-test--queued-header input 1)))
+             (should (string-match-p "second" help))
+             (should-not (string-match-p "first" help))))
+          ('reject
+           (should (member "Pi: Send failed: preflight rejected" notices))
+           (pilish-test--queued-header input 0)
+           (with-current-buffer input
+             (should (equal (buffer-string) "first\n\nsecond"))))
+          ('abort
+           (should (member "Pi: Aborting..." notices))
+           (should (equal (mapcar (lambda (cmd) (plist-get cmd :type))
+                                 (reverse commands))
+                          '("prompt" "clear_queue" "abort")))
+           (pilish-test--queued-header input 0)
+           ;; A late acceptance cannot resurrect cleared local work.
+           (pilish-test--queued-header-wire
+            proc (list :type "response" :command "prompt" :success t
+                       :id (plist-get request :id)))
+           (pilish-test--queued-header input 0)))))))
+
+(ert-deftest pilish-test-queued-header-local-and-current-events-request-redisplay ()
+  "Actual FIFO changes, current snapshots, and adoption redraw locally, not by RPC."
+  (pilish-test-with-rpc-session (chat input proc commands)
+    (let ((candidate (start-process "pilish-test-queue-redraw" nil "cat")) updates)
+      (unwind-protect
+          (save-window-excursion
+            (set-window-buffer (selected-window) input)
+            (cl-letf (((symbol-function 'force-mode-line-update)
+                       (lambda (&optional all)
+                         (push (cons (current-buffer) all) updates)))
+                      ((symbol-function 'pilish--refresh-header)
+                       (lambda () (ert-fail "Queue changes must not fetch stats"))))
+              (dolist (operation '(push pop clear snapshot adopt))
+                (when (eq operation 'clear)
+                  (with-current-buffer chat (pilish--push-followup "clear me")))
+                (setq updates nil)
+                (with-current-buffer chat
+                  (pcase operation
+                    ('push (pilish--push-followup "first"))
+                    ('pop (should (equal (pilish--dequeue-followup) "first")))
+                    ('clear (pilish--clear-followup-queue))
+                    ('snapshot (pilish-test--queued-header-wire
+                                proc '(:type "queue_update" :followUp [] :steering ["next"])))
+                    ('adopt
+                     (process-put candidate 'pilish-chat-buffer chat)
+                     (pilish--register-display-handler candidate)
+                     (pilish--set-process candidate))))
+                (ert-info ((format "Missing input redisplay for %s" operation))
+                  (should (seq-some (lambda (update)
+                                      (or (cdr update) (eq (car update) input)))
+                                    updates))))
+              (setq updates nil)
+              (pilish-test--queued-header-wire
+               proc '(:type "queue_update" :followUp [] :steering []))
+              (should-not updates)
+              (should-not commands)))
+        (when (process-live-p candidate) (delete-process candidate))))))
+
 (provide 'pilish-input-test)
 ;;; pilish-input-test.el ends here

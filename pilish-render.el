@@ -1154,7 +1154,10 @@ which asks upfront before any buffers are touched."
     (when-let* ((chat-buf (process-get process 'pilish-chat-buffer)))
       (when (buffer-live-p chat-buf)
         (with-current-buffer chat-buf
-          (pilish--handle-display-event event))))))
+          (if (equal (plist-get event :type) "queue_update")
+              (when (eq process pilish--process)
+                (force-mode-line-update t))
+            (pilish--handle-display-event event)))))))
 
 (defun pilish--make-process-exit-handler (process)
   "Create a frontend cleanup handler for PROCESS exit."
