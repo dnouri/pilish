@@ -585,9 +585,19 @@ id-less sole pending request. Non-response JSON is treated as an event."
       ;; Call only this process's handler, not all handlers
       (pilish--handle-event proc json))))
 
+(defun pilish--process-queue-snapshot (process)
+  "Return PROCESS's latest queue snapshot, or nil when unavailable.
+An observed empty queue is a non-nil event with empty arrays.  Snapshots
+from dead processes are unavailable."
+  (when (and (processp process) (process-live-p process))
+    (process-get process 'pilish-queue-snapshot)))
+
 (defun pilish--handle-event (proc event)
   "Handle an EVENT from pi PROC.
 Calls only the handler registered for this specific process."
+  ;; Observe before display registration or adoption, including reload candidates.
+  (when (equal (plist-get event :type) "queue_update")
+    (process-put proc 'pilish-queue-snapshot event))
   ;; Call only this process's handler
   (when-let* ((handler (process-get proc 'pilish-display-handler)))
     (funcall handler event)))

@@ -1161,7 +1161,8 @@ Resets cached process version and starts a delayed version probe for
 new live processes in interactive sessions."
   (unless (eq process pilish--process)
     (pilish--invalidate-model-change)
-    (pilish--invalidate-prompt-start-wait))
+    (pilish--invalidate-prompt-start-wait)
+    (force-mode-line-update t))
   (setq pilish--process process
         pilish--process-version nil)
   (when (and (processp process)
@@ -1482,7 +1483,8 @@ command.")
 
 (defun pilish--push-followup (message)
   "Push MESSAGE onto the follow-up queue."
-  (push message pilish--followup-queue))
+  (prog1 (push message pilish--followup-queue)
+    (force-mode-line-update t)))
 
 (defun pilish--dequeue-followup ()
   "Dequeue and return the oldest follow-up message, or nil if empty.
@@ -1491,11 +1493,15 @@ Follow-ups are processed in FIFO order: first pushed, first sent."
     (let ((text (car (last pilish--followup-queue))))
       (setq pilish--followup-queue
             (butlast pilish--followup-queue))
+      (force-mode-line-update t)
       text)))
 
 (defun pilish--clear-followup-queue ()
   "Clear all pending follow-up messages."
-  (setq pilish--followup-queue nil))
+  (when pilish--followup-queue
+    (setq pilish--followup-queue nil)
+    (force-mode-line-update t))
+  nil)
 
 (defun pilish--followups-in-fifo-order ()
   "Return queued follow-up messages in the order they would be sent."
@@ -2650,6 +2656,48 @@ Returns nil if STATS is nil."
        (format " $%.2f" cost)
        (pilish--header-format-context percent context-window)))))
 
+(defun pilish--queue-message-preview (message)
+  "Return a bounded, single-line plain-text preview of MESSAGE."
+  ;; Bound processing as well as the result, even for very large prompts.
+  (let* ((prefix (substring-no-properties message 0 (min 512 (length message))))
+         (text (string-trim (replace-regexp-in-string "[[:space:]]+" " " prefix))))
+    (pilish--truncate-string
+     (if (> (length message) 512) (concat text "…") text) 120)))
+
+(defun pilish--queue-tooltip-group (heading messages)
+  "Format HEADING and up to three previews from MESSAGES.
+Return nil when MESSAGES is empty; otherwise include its exact count."
+  (let ((count (length messages)))
+    (when (> count 0)
+      (concat (format "%s (%d)\n" heading count)
+              (mapconcat (lambda (message)
+                           (concat "• " (pilish--queue-message-preview message)))
+                         (seq-take messages 3) "\n")
+              (when (> count 3)
+                (format "\nand %d more" (- count 3)))))))
+
+(defun pilish--header-format-queue (chat-buffer)
+  "Format known queued messages belonging to CHAT-BUFFER.
+An unavailable backend snapshot contributes no entries, not a claim that
+its queues are empty.  Follow-ups retain backend order then FIFO order."
+  (when (buffer-live-p chat-buffer)
+    (with-current-buffer chat-buffer
+      (let* ((snapshot (pilish--process-queue-snapshot pilish--process))
+             (followups (append (plist-get snapshot :followUp)
+                                (pilish--followups-in-fifo-order)))
+             (steering (plist-get snapshot :steering))
+             (count (+ (length followups) (length steering))))
+        (when (> count 0)
+          (let ((help (mapconcat
+                       #'identity
+                       (delq nil (list (pilish--queue-tooltip-group "Follow-ups" followups)
+                                       (pilish--queue-tooltip-group "Steering" steering)))
+                       "\n\n")))
+            ;; Help text is literal user input, not command-key substitution.
+            (put-text-property 0 1 'help-echo-inhibit-substitution t help)
+            (propertize (format " queued %d" count)
+                        'help-echo help 'mouse-face 'highlight)))))))
+
 (defun pilish--header-escape-text (text)
   "Escape TEXT for use in `header-line-format'."
   (replace-regexp-in-string "%" "%%" text t t))
@@ -2762,6 +2810,7 @@ Accesses state from the linked chat buffer."
     (concat
      (pilish--header-format-identity model-short thinking activity-phase-str)
      (pilish--header-format-stats stats)
+     (pilish--header-format-queue chat-buf)
      (pilish--header-format-context-group session-name)
      (pilish--header-format-extension-group ext-status working-message)
      (pilish--header-format-prompt-image

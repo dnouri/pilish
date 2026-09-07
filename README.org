@@ -182,6 +182,12 @@ status when available.  When a prompt image is attached, it also shows
 the image's basename and source size.  The model and thinking fields
 can be clicked to change their values.
 
+After context usage, =queued N= shows the number of known queued messages
+and hides at zero.  Hover for bounded Follow-ups and Steering previews.
+Follow-ups include text waiting for prompt acceptance.  Backend queues
+are included only after Pi reports their contents; unavailable information
+is omitted.  Leaving a queue does not mean the work has completed.
+
 Type in the input buffer and press =C-c C-c= to send.  If Pi is
 already working, =C-c C-c= queues the text as a follow-up and sends it
 when the current turn finishes.  Press =C-c C-s= while Pi is busy to
