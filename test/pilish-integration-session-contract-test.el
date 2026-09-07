@@ -13,10 +13,10 @@
 (pilish-integration-deftest
     (session-contract-name-persists-across-session-file)
   "Setting a session name persists backend-visible session metadata."
-  (let ((got-agent-end nil))
+  (let ((got-agent-settled nil))
     (push (lambda (event)
-            (when (equal (plist-get event :type) "agent_end")
-              (setq got-agent-end t)))
+            (when (equal (plist-get event :type) "agent_settled")
+              (setq got-agent-settled t)))
           pilish--event-handlers)
     (let ((prompt-response (pilish--rpc-sync
                             proc
@@ -59,15 +59,15 @@
         (should (equal (plist-get data-after :sessionFile) session-file))
         (should (equal (plist-get data-after :sessionName)
                        "Integration Test Session")))
-      (unless got-agent-end
+      (unless got-agent-settled
         (let ((abort-response (pilish--rpc-sync proc '(:type "abort")
                                                          pilish-test-rpc-timeout)))
           (should abort-response)
           (should (eq (plist-get abort-response :success) t))
           (should (equal (plist-get abort-response :command) "abort")))
         (with-timeout (pilish-test-rpc-timeout
-                       (ert-fail "Timeout waiting for agent_end after session abort"))
-          (while (not got-agent-end)
+                       (ert-fail "Timeout waiting for agent_settled after session abort"))
+          (while (not got-agent-settled)
             (accept-process-output proc pilish-test-poll-interval))))
       (let* ((final-state (pilish--rpc-sync proc '(:type "get_state")
                                                      pilish-test-rpc-timeout))

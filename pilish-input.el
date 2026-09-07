@@ -459,21 +459,19 @@ sent to pi."
         (pilish--prepare-and-send text))))))
 
 (defun pilish-abort ()
-  "Abort the current pi operation.
-Works while streaming or compacting."
+  "Stop the current pi operation and discard queued continuations.
+Works while sending, streaming or compacting.  A stop during preflight is
+retained if Pi subsequently starts the accepted prompt."
   (interactive)
   (when-let* ((chat-buf (pilish--get-chat-buffer)))
-    (let ((status (buffer-local-value 'pilish--status chat-buf)))
-      (when (memq status '(streaming compacting))
-        (when (eq status 'streaming)
-          (with-current-buffer chat-buf
-            (pilish--set-aborted t)))
-        (when-let* ((proc (pilish--get-process)))
-          (pilish--rpc-async proc
-                         (list :type "abort")
-                         (lambda (_response)
-                           (run-with-timer 2 nil (lambda () (message nil)))
-                           (message "Pi: Aborted"))))))))
+    (with-current-buffer chat-buf
+      (when (or (memq pilish--status '(sending streaming compacting))
+                (pilish--prompt-start-wait-active-p)
+                (pilish--command-pending-p (pilish--get-process) "compact"))
+        (pilish--set-aborted t)
+        (pilish--clear-followup-queue)
+        (pilish--send-abort)
+        (message "Pi: Aborting...")))))
 
 (defun pilish-quit ()
   "Close the current pi session.
@@ -691,8 +689,8 @@ it back via message_start at the correct position (after current
 assistant output completes).
 
 When compaction is in progress, steering text is queued as a local
-follow-up.  It is sent after non-retry compaction, or after Pi's
-automatic overflow retry turn finishes.  Steering refuses a draft image."
+follow-up.  It is sent after the surrounding run and any local command
+reservation finish.  Steering refuses a draft image."
   (interactive)
   (let ((text (string-trim (buffer-string))))
     (if (pilish--get-prompt-image)

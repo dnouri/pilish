@@ -43,6 +43,19 @@ Cross-module state mutations use accessor functions defined in `ui.el`
 (e.g., `--set-process`, `--set-aborted`, `--push-followup`).  Within a
 module, direct `setq` is fine.
 
+`agent_end` finishes the low-level loop and finalizes tools. `agent_settled`
+releases waiting (`sending`) work, not observably newer streaming/compaction:
+Pi emits it *after* awaited extension hooks, which can start another operation.
+If that newer run has also ended, settlements have no wire identity and cannot
+be distinguished universally (even with `get_state`). Do not invent run IDs or
+timer-based settlement guarantees. Automatic compaction preserves its surrounding
+owner; explicit manual compaction does not inherit an older run's sending state.
+Locally initiated manual compaction reserves submission via the existing pending
+RPC table until its correlated response. Prompt request records separately track
+acceptance and observed start/echo, since an extension's acknowledgment can follow
+its run's settlement. Stop sends `clear_queue` before `abort` and reapplies its
+latch on delayed agent/compaction starts.
+
 ## Source Files
 
 | File | Purpose |

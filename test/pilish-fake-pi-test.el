@@ -674,7 +674,7 @@ SPEC is (SESSION SCENARIO &rest EXTRA-ARGS)."
                          :message prompt))))
         (should (eq (plist-get response :success) t)))
       (pilish-fake-pi-test--collect-until
-       proc (lambda (object) (equal (plist-get object :type) "agent_end")))
+       proc (lambda (object) (equal (plist-get object :type) "agent_settled")))
       (let* ((state-response
               (pilish-fake-pi-test--rpc
                proc '(:id "generated-state" :type "get_state")))
@@ -1277,6 +1277,24 @@ SPEC is (SESSION SCENARIO &rest EXTRA-ARGS)."
       (should (equal (plist-get response :command) "get_state"))
       (should (eq (plist-get response :success) t)))))
 
+(ert-deftest pilish-fake-pi-test-lifecycle-emits-settled-after-final-run ()
+  "The fake backend emits agent_settled after agent_end and is then idle."
+  (pilish-fake-pi-test-with-process (proc "prompt-lifecycle")
+    (pilish-fake-pi-test--send proc '(:type "prompt" :message "finish this run"))
+    (let ((events (pilish-fake-pi-test--collect-until
+                   proc (lambda (obj) (equal (plist-get obj :type) "agent_end")))))
+      (should (member "agent_start" (pilish-fake-pi-test--event-types events)))
+      (should (pilish-test-wait-until
+               (lambda () (process-get proc 'fake-pi-objects))
+               pilish-test-short-wait 0.01 proc))
+      (should (equal (plist-get (pilish-fake-pi-test--pop-object proc) :type)
+                     "agent_settled"))
+      (let* ((response (pilish-fake-pi-test--rpc proc '(:type "get_state")))
+             (data (plist-get response :data)))
+        (should (eq (plist-get response :success) t))
+        (should (eq (plist-get data :isStreaming) :false))
+        (should (eq (plist-get data :isCompacting) :false))))))
+
 (ert-deftest pilish-fake-pi-test-prompt-response-precedes-stream-events ()
   "prompt returns success first, then streams lifecycle events."
   (pilish-fake-pi-test-with-process (proc "prompt-lifecycle")
@@ -1284,7 +1302,7 @@ SPEC is (SESSION SCENARIO &rest EXTRA-ARGS)."
     (let* ((response (pilish-fake-pi-test--pop-object proc))
            (events (pilish-fake-pi-test--collect-until
                     proc
-                    (lambda (obj) (equal (plist-get obj :type) "agent_end"))))
+                    (lambda (obj) (equal (plist-get obj :type) "agent_settled"))))
            (assistant-start (seq-find
                              (lambda (obj)
                                (and (equal (plist-get obj :type) "message_start")
@@ -1306,8 +1324,8 @@ SPEC is (SESSION SCENARIO &rest EXTRA-ARGS)."
         (should-not (plist-member update :message))
         (should-not (plist-member (plist-get update :assistantMessageEvent)
                                   :partial)))
-      (should (equal (car (last (pilish-fake-pi-test--event-types events)))
-                     "agent_end")))))
+      (should (equal (last (pilish-fake-pi-test--event-types events) 2)
+                     '("agent_end" "agent_settled"))))))
 
 (ert-deftest pilish-fake-pi-test-tool-stream-emits-tool-events ()
   "tool_stream emits an ordered, correlated, delta-only RPC lifecycle."
@@ -1317,7 +1335,7 @@ SPEC is (SESSION SCENARIO &rest EXTRA-ARGS)."
                    "prompt"))
     (let* ((events (pilish-fake-pi-test--collect-until
                     proc
-                    (lambda (obj) (equal (plist-get obj :type) "agent_end"))))
+                    (lambda (obj) (equal (plist-get obj :type) "agent_settled"))))
            (assistant-starts
             (pilish-fake-pi-test--message-events
              events "message_start" "assistant"))
@@ -1351,7 +1369,7 @@ SPEC is (SESSION SCENARIO &rest EXTRA-ARGS)."
            (tool-execution-end
             (car (pilish-fake-pi-test--events-of-type
                   events "tool_execution_end")))
-           (agent-end (car (last events)))
+           (agent-end (car (pilish-fake-pi-test--events-of-type events "agent_end")))
            (lifecycle
             (mapcar
              (lambda (obj)
@@ -1379,7 +1397,7 @@ SPEC is (SESSION SCENARIO &rest EXTRA-ARGS)."
                 "message_start:assistant"
                 "text_delta" "text_delta"
                 "message_end:assistant"
-                "agent_end")))
+                "agent_end" "agent_settled")))
       (should (> (length toolcall-delta-updates) 1))
       (should (> (length text-delta-updates) 0))
       (dolist (update message-updates)
@@ -1468,6 +1486,37 @@ SPEC is (SESSION SCENARIO &rest EXTRA-ARGS)."
                        (plist-get tool-assistant-message :content)))
         (should (equal (plist-get (aref agent-messages 2) :toolCallId) call-id))
         (should (equal (plist-get agent-end :willRetry) :false))))))
+
+(ert-deftest pilish-fake-pi-test-clear-queue-before-abort-stops-continuation ()
+  "Only clear_queue discards steering; abort acknowledges after final settlement."
+  (dolist (clear '(t nil))
+    (pilish-fake-pi-test-with-process (proc "prompt-lifecycle")
+      (pilish-fake-pi-test--send proc '(:type "prompt" :message "first"))
+      (pilish-fake-pi-test--collect-until
+       proc (lambda (obj)
+              (equal (plist-get (plist-get obj :assistantMessageEvent) :type)
+                     "text_delta")))
+      (pilish-fake-pi-test--send proc '(:type "steer" :message "queued"))
+      (when clear
+        (pilish-fake-pi-test--send proc '(:id "clear" :type "clear_queue")))
+      (pilish-fake-pi-test--send proc '(:type "abort"))
+      (let* ((events (pilish-fake-pi-test--collect-until
+                      proc (lambda (obj) (equal (plist-get obj :command) "abort"))))
+             (types (pilish-fake-pi-test--event-types events))
+             (clear-response (seq-find (lambda (obj) (equal (plist-get obj :id) "clear"))
+                                       events)))
+        (should (eq (plist-get (car (last events)) :success) t))
+        (should (equal (last types 2) '("agent_settled" "response")))
+        (should (= 1 (cl-count "agent_settled" types :test #'equal)))
+        (should (= (if clear 1 2) (cl-count "agent_end" types :test #'equal)))
+        (should (= (if clear 0 1) (cl-count "agent_start" types :test #'equal)))
+        (when clear
+          (should (equal (plist-get clear-response :data)
+                         '(:steering ["queued"] :followUp [])))
+          (should (equal (pilish-fake-pi-test--events-of-type events "queue_update")
+                         '((:type "queue_update" :steering [] :followUp []))))))
+      (let ((state (pilish-fake-pi-test--rpc proc '(:type "get_state"))))
+        (should (eq (plist-get (plist-get state :data) :isStreaming) :false))))))
 
 (ert-deftest pilish-fake-pi-test-abort-stops-streaming ()
   "abort stops an in-flight prompt and leaves the fake idle."
@@ -1583,7 +1632,7 @@ SPEC is (SESSION SCENARIO &rest EXTRA-ARGS)."
                    "prompt"))
     (let ((seen-first-delta nil)
           (saw-steer-response nil)
-          (saw-agent-end nil)
+          (saw-agent-settled nil)
           (user-starts 0)
           (steered-reply nil))
       (while (not seen-first-delta)
@@ -1596,7 +1645,7 @@ SPEC is (SESSION SCENARIO &rest EXTRA-ARGS)."
                      (equal (plist-get msg-event :type) "text_delta"))
             (setq seen-first-delta t))))
       (pilish-fake-pi-test--send proc '(:type "steer" :message "second turn"))
-      (while (not saw-agent-end)
+      (while (not saw-agent-settled)
         (let ((obj (pilish-fake-pi-test--pop-object proc)))
           (pcase (plist-get obj :type)
             ("response"
@@ -1613,10 +1662,10 @@ SPEC is (SESSION SCENARIO &rest EXTRA-ARGS)."
                                                          :text)
                                               "")))
                  (setq steered-reply t))))
-            ("agent_end"
-             (setq saw-agent-end t)))))
+            ("agent_settled"
+             (setq saw-agent-settled t)))))
       (should saw-steer-response)
-      (should saw-agent-end)
+      (should saw-agent-settled)
       (should (= user-starts 2))
       (should steered-reply)
       (pilish-fake-pi-test--send proc '(:type "get_fork_messages"))
@@ -1632,7 +1681,7 @@ SPEC is (SESSION SCENARIO &rest EXTRA-ARGS)."
     (should (equal (plist-get (pilish-fake-pi-test--pop-object proc) :command)
                    "prompt"))
     (pilish-fake-pi-test--collect-until
-     proc (lambda (obj) (equal (plist-get obj :type) "agent_end")))
+     proc (lambda (obj) (equal (plist-get obj :type) "agent_settled")))
     (pilish-fake-pi-test--send proc '(:type "get_state"))
     (let* ((before-state (pilish-fake-pi-test--pop-object proc))
            (before-data (plist-get before-state :data))
@@ -1685,7 +1734,7 @@ SPEC is (SESSION SCENARIO &rest EXTRA-ARGS)."
     (should (equal (plist-get (pilish-fake-pi-test--pop-object proc) :command)
                    "prompt"))
     (pilish-fake-pi-test--collect-until
-     proc (lambda (obj) (equal (plist-get obj :type) "agent_end")))
+     proc (lambda (obj) (equal (plist-get obj :type) "agent_settled")))
     (pilish-fake-pi-test--send proc '(:type "get_state"))
     (let* ((state (pilish-fake-pi-test--pop-object proc))
            (session-file (plist-get (plist-get state :data) :sessionFile)))

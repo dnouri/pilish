@@ -2,7 +2,8 @@
 
 This note defines the supported fake-pi surface used by deterministic tests.
 The fake is a protocol double for the RPC subprocess boundary, not a mock
-of internal Emacs functions.
+of internal Emacs functions. It targets Pi 0.85.0 and later; references to
+older releases below are historical comparisons, not compatibility guarantees.
 
 ## Scope and seam
 
@@ -52,7 +53,7 @@ These are still worth covering at the real subprocess boundary:
   - `get_fork_messages`
 - Integration prompt lifecycle:
   - immediate `prompt` success plus delayed streamed events
-  - `agent_start` / `message_start` / `message_update` / `message_end` / `agent_end`
+  - `agent_start` / `message_start` / `message_update` / `message_end` / `agent_end` / `agent_settled`
   - idle state after completion
   - persisted message count change
 - Integration distinct behaviors:
@@ -94,6 +95,7 @@ The current fake supports:
 - `get_commands`
 - `prompt`
 - `abort`
+- `clear_queue`
 - `steer`
 - `new_session`
 - `get_fork_messages`
@@ -116,6 +118,8 @@ Required now:
 
 - `agent_start`
 - `agent_end`
+- `agent_settled`
+- `queue_update` (the empty queue notification from `clear_queue`)
 - `message_start`
 - `message_update`
 - `message_end`
@@ -173,8 +177,13 @@ Required behavior:
    `assistantMessageEvent.type: "text_delta"`
 5. emit `message_end`
 6. emit `agent_end`
-7. update `get_state.isStreaming` and `messageCount`
-8. persist enough session data to back session-file assertions
+7. expose idle state and emit `agent_settled` only after all continuations finish
+8. persist enough session data to back session-file and `messageCount` assertions
+
+`agent_end` is a low-level completion boundary, not permission to send a new
+prompt. Consumers waiting for the whole run must wait for `agent_settled`.
+Completed tool finalization and cooling in the frontend still happen at
+`agent_end`.
 
 A `prompt` may include `images`, which must be a JSON array.  Every item must
 be an object with `type: "image"`, nonempty string `data`, and nonempty string
@@ -188,6 +197,20 @@ prompt images on its ordinary user message.  The extension-owned
 `extension_dialog` and `custom_message` prompt behaviors reject nonempty image
 arrays before reporting prompt success.  No new scenario type is implied.
 
+### Abort and queue clearing
+
+`clear_queue` removes the pending text-only steering message and returns
+`data: {"steering": ["removed text"], "followUp": []}` (empty arrays when
+nothing was queued). It emits `queue_update` with empty arrays before its
+correlated response. The fake does not model a complete queue-update stream.
+
+`abort` waits for the worker to settle before acknowledging. Like Pi, abort
+alone does not discard a pending steering continuation: the text-stream
+scenario emits the aborted low-level `agent_end`, starts that continuation,
+and emits exactly one `agent_settled` after the final run. Sending `clear_queue`
+before `abort` prevents that continuation. The existing fake still has one
+pending steering slot, not a general follow-up queue.
+
 ### Tool execution path
 
 For deterministic GUI and benchmark tests, the fake must emit the current
@@ -200,12 +223,13 @@ lifecycle:
 4. `tool_execution_start`, optional updates with accumulated `partialResult`,
    and `tool_execution_end`;
 5. a correlated `toolResult` message; and
-6. the final assistant response before `agent_end`.
+6. the final assistant response before `agent_end`, then `agent_settled`.
 
 Every `message_update` carries cumulative `usage`, and carries neither the
-legacy top-level `message` nor nested `partial` fields.  Published Pi 0.84.2
-starts may omit `id` and `toolName`; `toolcall_end.toolCall` remains
-authoritative.
+legacy top-level `message` nor nested `partial` fields. `toolcall_start`
+carries `id` and `toolName`; `toolcall_end.toolCall` remains authoritative.
+The renderer's missing-metadata reconciliation handles incomplete events
+defensively; it does not promise support for below-minimum Pi releases.
 
 Required fields currently consumed by Emacs rendering:
 

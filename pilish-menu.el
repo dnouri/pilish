@@ -213,14 +213,16 @@ and another transition may not be discarded."
      ((pilish--session-transition-active-p)
       (message "Pi: Cannot start a new session while session is switching")
       nil)
+     ((pilish--command-pending-p (pilish--get-process) "compact")
+      (message "Pi: Cannot start a new session while manual compaction is pending")
+      nil)
      ((pilish--prompt-start-wait-active-p)
       (message "Pi: Cannot start a new session while prompt acceptance is pending")
       nil)
      ((pilish--model-change-pending-p)
       (message "Pi: Cannot start a new session while a model change is pending")
       nil)
-     ((or pilish--followup-queue
-          (pilish--followup-drain-pending-p))
+     (pilish--followup-queue
       (message "Pi: Cannot start a new session with queued follow-ups")
       nil)
      (pilish--local-user-message
@@ -374,7 +376,6 @@ Call this when starting a new session to ensure no stale state persists."
   (pilish--finish-session-transition
    pilish--session-transition-generation)
   ;; Use accessors for cross-module state
-  (pilish--cancel-followup-drain-timer)
   (pilish--invalidate-prompt-start-wait)
   (pilish--clear-followup-queue)
   (pilish--set-aborted nil)
@@ -804,7 +805,7 @@ Optional INITIAL-INPUT pre-fills the completion prompt for filtering."
                            (when (buffer-live-p chat-buf)
                              (with-current-buffer chat-buf
                                (if applied
-                                   (pilish--schedule-followup-queue-processing)
+                                   (pilish--process-followup-queue)
                                  (pilish--restore-followup-queue-to-input))))
                            (cond
                             (applied
@@ -1009,24 +1010,30 @@ Shows PID, status, and session file."
                (or (and session-file (file-name-nondirectory session-file)) "none"))))))
 
 (defun pilish--handle-manual-compaction-response (chat-buf response)
-  "Handle manual compact command RESPONSE for CHAT-BUF.
-Canonical compaction events render success, failure, and queue effects.
-This callback reports only command-level failure seen before any end event."
+  "Finish CHAT-BUF's correlated manual compaction RESPONSE.
+Core dispatch has removed this request's reservation.  Events render results
+and own activity; this callback must not idle independently started work."
   (when (buffer-live-p chat-buf)
     (with-current-buffer chat-buf
-      (unless (eq (plist-get response :success) t)
-        (when (eq pilish--status 'compacting)
-          (setq pilish--status 'idle)
-          (pilish--set-activity-phase "idle")
-          (pilish--restore-followup-queue-to-input)
+      (let ((success (eq (plist-get response :success) t)))
+        (unless success
           (message "Pi: Compact failed%s"
                    (if-let* ((error-text (plist-get response :error)))
                        (format ": %s" error-text)
-                     "")))))))
+                     "")))
+        (when (and (eq pilish--status 'idle) (not (pilish--session-busy-p)))
+          (pilish--set-activity-phase "idle")
+          (when pilish--aborted (pilish--clear-followup-queue))
+          (pilish--set-aborted nil)
+          (if success
+              (pilish--process-followup-queue)
+            (pilish--restore-followup-queue-to-input)))))))
 
 (defun pilish-compact (&optional custom-instructions)
-  "Compact conversation context to reduce token usage.
-Optional CUSTOM-INSTRUCTIONS provide guidance for the compaction summary."
+  "Compact idle conversation context to reduce token usage.
+Optional CUSTOM-INSTRUCTIONS provide guidance for the compaction summary.
+The pending RPC reserves local submission until its correlated response,
+including the gap after compaction_end while extension failure hooks run."
   (interactive)
   (when-let* ((chat-buf (pilish--get-chat-buffer)))
     (let ((proc (pilish--get-process)))
@@ -1035,18 +1042,19 @@ Optional CUSTOM-INSTRUCTIONS provide guidance for the compaction summary."
         (message "Pi: No process available - try M-x pilish-reload or C-c C-p R"))
        ((not (process-live-p proc))
         (message "Pi: Process died - try M-x pilish-reload or C-c C-p R"))
+       ((not (pilish--session-transition-ready-p chat-buf "compact")))
        (t
         (message "Pi: Compacting...")
-        (with-current-buffer chat-buf
-          (setq pilish--status 'compacting)
-          (pilish--set-activity-phase "compact"))
         (pilish--rpc-async
          proc
          (if custom-instructions
              (list :type "compact" :customInstructions custom-instructions)
            '(:type "compact"))
          (lambda (response)
-           (pilish--handle-manual-compaction-response chat-buf response))))))))
+           (when (and (buffer-live-p chat-buf)
+                      (with-current-buffer chat-buf (eq proc (pilish--get-process)))
+                      (not (plist-get response :processExit)))
+             (pilish--handle-manual-compaction-response chat-buf response)))))))))
 
 (defun pilish-export-html (&optional output-path)
   "Export session to HTML file.

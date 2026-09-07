@@ -139,7 +139,7 @@ TRACK-REGION is non-nil, return a marker pair bounding the inserted turn."
   "Release speculative local echo state, then process queued follow-ups."
   (unwind-protect
       (pilish--discard-local-user-message)
-    (pilish--schedule-followup-queue-processing)))
+    (pilish--process-followup-queue)))
 
 (defun pilish--content-has-image-p (content)
   "Return non-nil if CONTENT has an image block."
@@ -164,7 +164,6 @@ full content vector, so an authoritative image transformation cannot be lost."
   "Display separator for new agent turn.
 Only shows the Assistant header once per prompt, even during retries.
 Note: status is set to `streaming' by the event handler."
-  (pilish--set-aborted nil)  ; Reset abort flag for new turn
   ;; Only show header if not already shown for this prompt.
   (unless pilish--assistant-header-shown
     (pilish--append-to-chat
@@ -661,81 +660,43 @@ CONTENT is ignored - we use what was already streamed."
                (pilish--adjust-pos-after-region-replacements
                 pos replacements)))))))))
 
-(defconst pilish--followup-drain-delay 0.05
-  "Seconds to wait after agent_end before draining local follow-ups.
-Pi may emit post-run compaction or retry events immediately after agent_end;
-this short delay lets those events claim ordering before Emacs sends a local
-follow-up as a fresh prompt.")
-
-(defun pilish--cancel-followup-drain-timer ()
-  "Cancel any pending local follow-up queue drain timer."
-  (when (timerp pilish--followup-drain-timer)
-    (cancel-timer pilish--followup-drain-timer))
-  (setq pilish--followup-drain-timer nil))
-
 (defun pilish--ready-to-drain-followups-p ()
   "Return non-nil when a queued follow-up may become the next prompt."
   (and pilish--followup-queue
        (eq pilish--status 'idle)
-       (not (pilish--model-change-pending-p))
-       (not (pilish--session-transition-active-p))
-       (not (pilish--prompt-start-wait-active-p))
+       (not pilish--aborted)
+       (not (pilish--session-busy-p))
        (null pilish--local-user-message)))
 
-(defun pilish--drain-followup-queue-if-idle (buffer)
-  "Drain BUFFER's follow-up queue only if the session is still idle."
-  (when (buffer-live-p buffer)
-    (with-current-buffer buffer
-      (setq pilish--followup-drain-timer nil)
-      (when (pilish--ready-to-drain-followups-p)
-        (pilish--process-followup-queue)))))
-
-(defun pilish--schedule-followup-queue-processing ()
-  "Schedule local follow-up queue processing after post-run events settle."
-  (when (pilish--ready-to-drain-followups-p)
-    (pilish--cancel-followup-drain-timer)
-    (setq pilish--followup-drain-timer
-          (run-at-time pilish--followup-drain-delay nil
-                       #'pilish--drain-followup-queue-if-idle
-                       (current-buffer)))))
-
 (defun pilish--display-agent-end ()
-  "Finalize agent turn: normalize whitespace, handle abort, schedule queue."
-  ;; Reset per-turn state for clean next turn.
+  "Finalize the low-level run, leaving queue release to agent_settled."
   (setq pilish--local-user-message nil)
   (pilish--clear-local-user-message-region)
   (setq pilish--in-thinking-block nil)
   (pilish--reset-thinking-state)
-  (let ((was-aborted pilish--aborted))
-    (let ((inhibit-read-only t))
-      (pilish--finalize-live-tool-blocks 'pilish-tool-block-error)
-      (pilish--reset-toolcall-streams)
-      (when pilish--tool-args-cache
-        (clrhash pilish--tool-args-cache))
-      ;; Abort means "stop everything" — discard queued follow-ups too
-      (when pilish--aborted
-        (pilish--with-scroll-preservation
-          (save-excursion
-            (goto-char (point-max))
-            ;; Remove trailing whitespace before adding indicator
-            (skip-chars-backward " \t\n")
-            (delete-region (point) (point-max))
-            (insert "\n\n" (propertize "[Aborted]" 'face 'error) "\n")))
-        (pilish--set-aborted nil)
-        (pilish--clear-followup-queue))
+  (let ((inhibit-read-only t))
+    (pilish--finalize-live-tool-blocks 'pilish-tool-block-error)
+    (pilish--reset-toolcall-streams)
+    (when pilish--tool-args-cache
+      (clrhash pilish--tool-args-cache))
+    ;; Keep stop intent until settlement: Pi may still start a continuation.
+    (when pilish--aborted
       (pilish--with-scroll-preservation
         (save-excursion
           (goto-char (point-max))
-          (skip-chars-backward "\n")
+          (skip-chars-backward " \t\n")
           (delete-region (point) (point-max))
-          (insert "\n"))))
-    (pilish--set-activity-phase
-     (if (eq pilish--status 'sending) "thinking" "idle"))
-    (pilish--refresh-header)
-    ;; Give immediate post-run compaction/retry events a chance to arrive before
-    ;; turning a local follow-up into a new independent prompt.
-    (unless was-aborted
-      (pilish--schedule-followup-queue-processing))))
+          (insert "\n\n" (propertize "[Aborted]" 'face 'error) "\n")))
+      (pilish--clear-followup-queue))
+    (pilish--with-scroll-preservation
+      (save-excursion
+        (goto-char (point-max))
+        (skip-chars-backward "\n")
+        (delete-region (point) (point-max))
+        (insert "\n"))))
+  (pilish--set-activity-phase
+   (if (eq pilish--status 'sending) "thinking" "idle"))
+  (pilish--refresh-header))
 
 (defun pilish--dispatch-builtin-command (text)
   "Try to dispatch TEXT as a built-in slash command.
@@ -758,6 +719,14 @@ Returns non-nil if TEXT matched a built-in command and was handled."
                         (call-interactively handler)))
             (_ (funcall handler)))
           t)))))
+
+(defun pilish--display-accepted-prompt (text &optional content)
+  "Display accepted TEXT and optional CONTENT only before an observed run/echo."
+  (when (pilish--prompt-local-echo-p)
+    (setq pilish--local-user-message-region
+          (pilish--display-user-message text (current-time) content t))
+    (setq pilish--local-user-message (or content text))
+    (setq pilish--assistant-header-shown nil)))
 
 (defun pilish--prepare-and-send (text &optional queued prompt-image)
   "Prepare chat buffer state and send TEXT with optional PROMPT-IMAGE to pi.
@@ -790,7 +759,7 @@ transitions; prompt submission marks the local pre-event window as busy."
      (if queued
          #'pilish--restore-followup-queue-to-input
        (lambda () (pilish--restore-input-text text)))
-     #'pilish--schedule-followup-queue-processing))
+     #'pilish--process-followup-queue))
    ;; Regular text is displayed only after prompt preflight accepts it.  That
    ;; keeps rejected prompts out of the transcript and lets us restore them to
    ;; the input buffer for user recovery.
@@ -801,12 +770,7 @@ transitions; prompt submission marks the local pre-event window as busy."
             (vector (list :type "text" :text text) image-block)))
       (pilish--send-prompt
        text
-       (lambda ()
-         (setq pilish--local-user-message-region
-               (pilish--display-user-message
-                text (current-time) user-content t))
-         (setq pilish--local-user-message user-content)
-         (setq pilish--assistant-header-shown nil))
+       (lambda () (pilish--display-accepted-prompt text user-content))
        (lambda () (pilish--restore-input-text text prompt-image))
        #'pilish--handle-no-turn-local-prompt
        prompt-image)))
@@ -815,22 +779,13 @@ transitions; prompt submission marks the local pre-event window as busy."
      text
      (lambda ()
        (when (pilish--drop-followup text)
-         (setq pilish--local-user-message-region
-               (pilish--display-user-message
-                text (current-time) nil t))
-         (setq pilish--local-user-message text)
-         (setq pilish--assistant-header-shown nil)))
+         (pilish--display-accepted-prompt text)))
      #'pilish--restore-followup-queue-to-input
      #'pilish--handle-no-turn-local-prompt))
    (t
     (pilish--send-prompt
      text
-     (lambda ()
-       (setq pilish--local-user-message-region
-             (pilish--display-user-message
-              text (current-time) nil t))
-       (setq pilish--local-user-message text)
-       (setq pilish--assistant-header-shown nil))
+     (lambda () (pilish--display-accepted-prompt text))
      (lambda () (pilish--restore-input-text text))
      #'pilish--handle-no-turn-local-prompt))))
 
@@ -849,47 +804,30 @@ them."
     (pilish--display-error (format "Compaction failed: %s" error-text))
     (message "Pi: Compaction failed: %s" error-text)))
 
-(defun pilish--post-compaction-activity-phase ()
-  "Return activity phase after a compaction_end event."
-  (if (or (eq pilish--status 'sending)
-          (pilish--prompt-start-wait-active-p))
-      "thinking"
-    "idle"))
-
 (defun pilish--handle-compaction-end-event (event)
-  "Display canonical compaction_end EVENT and manage follow-up queues.
-Status transitions are handled by `pilish--update-state-from-event'."
-  (let ((result (pilish--compaction-result-from-event event)))
+  "Display compaction EVENT without releasing surrounding run ownership.
+Unreserved standalone manual compaction completes here.  Local prompt and
+manual RPC reservations still own FIFO/stop effects until their responses.
+Extension cancellation is not a local stop; core events own status transitions."
+  (let ((result (pilish--compaction-result-from-event event))
+        (cancelled (pilish--normalize-boolean (plist-get event :aborted))))
     (cond
-     ((pilish--normalize-boolean (plist-get event :aborted))
-      (pilish--set-activity-phase
-       (pilish--post-compaction-activity-phase))
-      (message "Pi: Compaction cancelled")
-      ;; Clear queue on abort (user wanted to stop).
-      (pilish--clear-followup-queue))
+     (cancelled (message "Pi: Compaction cancelled"))
      (result
       (pilish--handle-compaction-success
        (plist-get result :tokensBefore)
        (plist-get result :summary)
-       (pilish--ms-to-time (plist-get result :timestamp)))
-      (if (eq pilish--status 'sending)
-          (progn
-            ;; Pi is either retrying automatically or resuming a prompt whose
-            ;; preflight compacted first.  Keep local follow-ups behind that
-            ;; Pi-owned work.
-            (pilish--set-activity-phase "thinking"))
-        (pilish--set-activity-phase "idle")
-        (pilish--schedule-followup-queue-processing)))
-     (t
-      (pilish--set-activity-phase
-       (pilish--post-compaction-activity-phase))
-      (pilish--display-compaction-failure
-       (plist-get event :errorMessage))
-      ;; During prompt preflight, Pi reports compaction failure before the
-      ;; prompt RPC failure that owns the original prompt text.  Restore local
-      ;; follow-ups now; the prompt callback clears the wait and restores the
-      ;; direct prompt if Pi rejects it.
-      (pilish--restore-followup-queue-to-input)))))
+       (pilish--ms-to-time (plist-get result :timestamp))))
+     (t (pilish--display-compaction-failure (plist-get event :errorMessage))))
+    (pilish--set-activity-phase
+     (if (memq pilish--status '(sending streaming)) "thinking" "idle"))
+    (when (and (eq pilish--status 'idle) (not (pilish--session-busy-p)))
+      (cond
+       (pilish--aborted
+        (pilish--clear-followup-queue)
+        (pilish--set-aborted nil))
+       ((and result (not cancelled)) (pilish--process-followup-queue))
+       (t (pilish--restore-followup-queue-to-input))))))
 
 (defun pilish--display-retry-start (event)
   "Display retry notice from auto_retry_start EVENT.
@@ -1165,7 +1103,6 @@ Note: This runs from `kill-buffer-hook', which executes AFTER the kill
 decision is made.  For proper cancellation support, use `pilish-quit'
 which asks upfront before any buffers are touched."
   (when (derived-mode-p 'pilish-chat-mode)
-    (pilish--cancel-followup-drain-timer)
     (pilish--cancel-tool-update-flush)
     (pilish--cancel-tool-cooling)
     (pilish--invalidate-prompt-start-wait)
@@ -1253,7 +1190,7 @@ which asks upfront before any buffers are touched."
         (setq pilish--local-user-message nil)
         (pilish--clear-local-user-message-region)
         (setq pilish--pre-compaction-status nil)
-        (pilish--cancel-followup-drain-timer)
+        (pilish--set-aborted nil)
         (pilish--invalidate-prompt-start-wait)
         (pilish--restore-followup-queue-to-input)
         (force-mode-line-update t)))))
@@ -1271,14 +1208,17 @@ which asks upfront before any buffers are touched."
 (defun pilish--handle-display-event (event)
   "Handle EVENT for display purposes.
 Updates buffer-local state and renders display updates."
-  ;; Update state first (now buffer-local)
-  (pilish--update-state-from-event event)
+  ;; Most events update state first.  Settlement's return value gates its
+  ;; completion effects below, since it may belong to an older run.
+  (unless (equal (plist-get event :type) "agent_settled")
+    (pilish--update-state-from-event event))
   ;; Then handle display
   (pcase (plist-get event :type)
     ("agent_start"
-     (pilish--invalidate-prompt-start-wait)
-     (pilish--cancel-followup-drain-timer)
-     (pilish--display-agent-start))
+     (pilish--note-prompt-start)
+     (pilish--display-agent-start)
+     (when pilish--aborted
+       (pilish--send-abort)))
     ("message_start"
      (let* ((message (plist-get event :message))
             (role (plist-get message :role)))
@@ -1289,6 +1229,7 @@ Updates buffer-local state and renders display updates."
          (pilish--reset-toolcall-streams))
        (pcase role
          ("user"
+          (pilish--note-prompt-echo)
           ;; User message from pi - check if we displayed it locally
           (let* ((content (plist-get message :content))
                  (timestamp (plist-get message :timestamp))
@@ -1410,13 +1351,13 @@ Updates buffer-local state and renders display updates."
          ;; No toolCallId: render through the legacy compatibility block.
          (pilish--display-tool-update partial-result nil))))
     ("compaction_start"
-     (pilish--cancel-followup-drain-timer)
+     (when pilish--aborted
+       (pilish--send-abort))
      (pilish--set-activity-phase "compact")
      (message (if (equal (plist-get event :reason) "overflow")
                   "Pi: Context overflow, compacting..."
                 "Pi: Compacting...")))
     ("compaction_end"
-     (pilish--cancel-followup-drain-timer)
      (pilish--handle-compaction-end-event event))
     ("agent_end"
      ;; Defensively drop pending previews and cancel the flush timer; any
@@ -1427,13 +1368,18 @@ Updates buffer-local state and renders display updates."
      (pilish--display-agent-end)
      (pilish--update-hot-tail-boundary)
      (pilish--queue-tool-cooling-outside-hot-tail))
+    ("agent_settled"
+     (when (pilish--update-state-from-event event)
+       (when pilish--aborted
+         (pilish--clear-followup-queue))
+       (pilish--set-aborted nil)
+       (pilish--set-activity-phase "idle")
+       (pilish--process-followup-queue)))
     ("auto_retry_start"
-     (pilish--cancel-followup-drain-timer)
      (pilish--display-retry-start event))
     ("auto_retry_end"
      (pilish--display-retry-end event)
      (unless (eq (plist-get event :success) t)
-       (pilish--set-activity-phase "idle")
        (pilish--restore-followup-queue-to-input)))
     ("extension_error"
      (pilish--display-extension-error event))
@@ -6559,6 +6505,7 @@ TIMESTAMP is optional time when compaction occurred."
                          'face 'pilish-tool-name)
              (pilish--render-safe-string summary) "\n"))
     (with-current-buffer (pilish--get-chat-buffer)
+      (setq pilish--assistant-header-shown nil)
       (pilish--decorate-tables-unless-deferred start (point-max)))))
 
 (defun pilish--display-branch-summary (summary &optional timestamp)

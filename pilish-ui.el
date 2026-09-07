@@ -58,6 +58,7 @@
 (declare-function pilish-visit-file "pilish-render")
 (declare-function pilish--dispatch-button "pilish-render")
 (declare-function pilish--cleanup-on-kill "pilish-render")
+(declare-function pilish--process-followup-queue "pilish-render")
 (declare-function pilish--restore-tool-properties "pilish-render")
 (declare-function pilish--maybe-refresh-hot-tail-tables "pilish-table")
 
@@ -1159,7 +1160,8 @@ CHAT-BUFFER defaults to the current buffer."
 Resets cached process version and starts a delayed version probe for
 new live processes in interactive sessions."
   (unless (eq process pilish--process)
-    (pilish--invalidate-model-change))
+    (pilish--invalidate-model-change)
+    (pilish--invalidate-prompt-start-wait))
   (setq pilish--process process
         pilish--process-version nil)
   (when (and (processp process)
@@ -1383,7 +1385,9 @@ Returns non-nil when the phase changed."
 Updated after each agent turn completes.")
 
 (defvar-local pilish--aborted nil
-  "Non-nil if the current/last request was aborted.")
+  "Non-nil while an explicit local stop still owns the current operation.
+Retained across compaction and delayed agent_start until settlement, prompt
+rejection, no-turn completion, or process exit.")
 
 (defun pilish--set-aborted (value)
   "Set the aborted flag to VALUE."
@@ -1471,7 +1475,7 @@ Used to avoid duplicate headers during retry sequences.")
 (defvar-local pilish--followup-queue nil
   "List of follow-up messages queued while agent is busy.
 Messages are added when the user sends while streaming, compacting, or
-waiting for local prompt preflight, post-run drain, or automatic retry.  The
+waiting for local prompt preflight, run settlement, or automatic retry.  The
 oldest message is sent after the session settles, and dropped only after
 prompt preflight accepts it.  This is simpler than using pi's RPC follow_up
 command.")
@@ -1538,13 +1542,6 @@ prompt preflight succeeds, so rejected queued prompts remain available."
     (pilish--dequeue-followup)
     t))
 
-(defvar-local pilish--followup-drain-timer nil
-  "Timer waiting to drain the local follow-up queue after Pi settles.")
-
-(defun pilish--followup-drain-pending-p ()
-  "Return non-nil when a local follow-up drain is pending."
-  (and pilish--followup-drain-timer t))
-
 (defvar-local pilish--local-user-message nil
   "Locally displayed user turn awaiting pi's authoritative echo.
 A string records an existing text-only turn.  An image turn stores its full
@@ -1563,24 +1560,38 @@ example, after prompt or image transformation).")
     (set-marker (cdr pilish--local-user-message-region) nil))
   (setq pilish--local-user-message-region nil))
 
-(defvar-local pilish--prompt-start-wait-active nil
-  "Non-nil while a prompt is waiting for response, agent_start, or fallback.")
+(cl-defstruct (pilish--prompt-wait (:constructor pilish--make-prompt-wait))
+  "Ownership of one prompt request, separate from observed run activity."
+  process accepted started echoed)
+
+(defvar-local pilish--prompt-wait nil
+  "Current prompt request record, or nil after acceptance and observed start.
+An unacknowledged extension command retains this record even after its run
+settles.  Record identity and process identity invalidate stale callbacks.")
 
 (defun pilish--prompt-start-wait-active-p ()
-  "Return non-nil when local prompt preflight still owns the next turn."
-  (and pilish--prompt-start-wait-active t))
+  "Return non-nil when a current prompt request still owns local submission."
+  (and pilish--prompt-wait
+       (eq (pilish--prompt-wait-process pilish--prompt-wait)
+           (pilish--get-process))))
+
+(defun pilish--prompt-local-echo-p ()
+  "Return non-nil when acceptance may still display a speculative user turn."
+  (not (and pilish--prompt-wait
+            (or (pilish--prompt-wait-started pilish--prompt-wait)
+                (pilish--prompt-wait-echoed pilish--prompt-wait)))))
 
 (defun pilish--session-busy-p (&optional chat-buf)
   "Return non-nil when CHAT-BUF has active or locally pending work.
 When CHAT-BUF is nil, inspect the current buffer.  This includes Pi-owned
 activity from `pilish--status' plus model changes, session
-transitions, prompt preflight, and follow-up drain waits."
+transitions, prompt requests and correlated manual compaction requests."
   (with-current-buffer (or chat-buf (current-buffer))
     (or (memq pilish--status '(sending streaming compacting))
         (pilish--model-change-pending-p)
         (pilish--session-transition-active-p)
         (pilish--prompt-start-wait-active-p)
-        (pilish--followup-drain-pending-p))))
+        (pilish--command-pending-p (pilish--get-process) "compact"))))
 
 (defun pilish--canonical-rerender-safe-p ()
   "Return non-nil when the chat buffer may rebuild from canonical messages.
@@ -1588,7 +1599,7 @@ A locally displayed user prompt awaiting pi's echo is newer than the cached
 canonical history, so rebuilding now would erase that visible turn."
   (and (eq pilish--status 'idle)
        (not (pilish--prompt-start-wait-active-p))
-       (not (pilish--followup-drain-pending-p))
+       (not (pilish--command-pending-p (pilish--get-process) "compact"))
        (null pilish--local-user-message)))
 
 (defvar-local pilish--extension-status nil
@@ -2084,7 +2095,7 @@ Returns nil if MS is nil."
 (defconst pilish--pi-package "@earendil-works/pi-coding-agent"
   "Npm package name for the pi CLI supported by Pilish.")
 
-(defconst pilish--minimum-pi-version "0.84.2"
+(defconst pilish--minimum-pi-version "0.85.0"
   "Minimum supported pi CLI version.")
 
 (defun pilish--pi-install-command ()
@@ -2752,14 +2763,6 @@ Accesses state from the linked chat buffer."
                              (with-selected-window win
                                (force-mode-line-update))))))))))
 
-(defun pilish--merge-state-response-status (remote-status)
-  "Return status after merging REMOTE-STATUS with local pending work."
-  (if (and (eq remote-status 'idle)
-           (pilish--prompt-start-wait-active-p)
-           (memq pilish--status '(sending streaming compacting)))
-      pilish--status
-    remote-status))
-
 (defun pilish--apply-state-response (chat-buf response)
   "Apply get_state RESPONSE to CHAT-BUF.
 Updates buffer-local state variables and refreshes mode-line.
@@ -2786,6 +2789,14 @@ Safely handles dead buffers by checking liveness first."
 
 ;;;; Sending Infrastructure
 
+(defun pilish--send-abort ()
+  "Clear backend queues before aborting the current operation.
+Send both commands in wire order.  Their acknowledgments must not release
+local ownership or mutate a later operation on the same process."
+  (when-let* ((proc (pilish--get-process)))
+    (pilish--rpc-async proc '(:type "clear_queue") #'ignore)
+    (pilish--rpc-async proc '(:type "abort") #'ignore)))
+
 (defconst pilish--prompt-start-timeout 0.5
   "Seconds to wait for agent_start after a successful prompt response.
 Some extension commands can complete without a visible agent turn; this timeout
@@ -2794,9 +2805,6 @@ returns the frontend to idle for that no-turn success path.")
 (defvar-local pilish--prompt-start-timer nil
   "Timer waiting for agent_start after prompt preflight success.")
 
-(defvar-local pilish--prompt-start-generation 0
-  "Generation used to match prompt-start fallback timers to their prompt.")
-
 (defun pilish--cancel-prompt-start-timer ()
   "Cancel any pending prompt-start fallback timer."
   (when (timerp pilish--prompt-start-timer)
@@ -2804,110 +2812,116 @@ returns the frontend to idle for that no-turn success path.")
   (setq pilish--prompt-start-timer nil))
 
 (defun pilish--invalidate-prompt-start-wait ()
-  "Cancel and invalidate any pending wait for agent_start."
+  "Cancel the prompt probe and invalidate the current request record."
   (pilish--cancel-prompt-start-timer)
-  (setq pilish--prompt-start-wait-active nil)
-  (setq pilish--prompt-start-generation
-        (1+ pilish--prompt-start-generation)))
+  (setq pilish--prompt-wait nil))
 
 (defun pilish--begin-prompt-start-wait ()
-  "Mark the current prompt as waiting for agent_start and return its token."
+  "Reserve local submission for a prompt and return its opaque request record."
   (pilish--invalidate-prompt-start-wait)
-  (setq pilish--prompt-start-wait-active t)
-  pilish--prompt-start-generation)
+  (setq pilish--prompt-wait
+        (pilish--make-prompt-wait :process (pilish--get-process))))
 
-(defun pilish--prompt-start-current-p (generation)
-  "Return non-nil when GENERATION is still the active prompt-start wait."
-  (and generation
-       (pilish--prompt-start-wait-active-p)
-       (= generation pilish--prompt-start-generation)))
+(defun pilish--prompt-start-current-p (wait)
+  "Return non-nil when WAIT still owns the current process's prompt request."
+  (and wait (eq wait pilish--prompt-wait)
+       (pilish--prompt-start-wait-active-p)))
+
+(defun pilish--prompt-start-needed-p (wait)
+  "Return non-nil when accepted WAIT has not produced an observed start."
+  (and (pilish--prompt-start-current-p wait)
+       (pilish--prompt-wait-accepted wait)
+       (not (pilish--prompt-wait-started wait))))
+
+(defun pilish--note-prompt-start ()
+  "Record an observed agent_start without losing an unacknowledged request."
+  (pilish--cancel-prompt-start-timer)
+  (when (pilish--prompt-start-wait-active-p)
+    (setf (pilish--prompt-wait-started pilish--prompt-wait) t)
+    (when (pilish--prompt-wait-accepted pilish--prompt-wait)
+      (pilish--invalidate-prompt-start-wait))))
+
+(defun pilish--note-prompt-echo ()
+  "Record an authoritative user echo so late acceptance cannot duplicate it."
+  (when (pilish--prompt-start-wait-active-p)
+    (setf (pilish--prompt-wait-echoed pilish--prompt-wait) t)))
 
 (defun pilish--finish-prompt-without-agent-start
-    (chat-buf generation on-no-agent-start)
-  "Finish CHAT-BUF prompt GENERATION after Pi confirms no agent turn.
+    (chat-buf wait on-no-agent-start)
+  "Finish CHAT-BUF prompt WAIT after Pi confirms no agent turn.
 Call ON-NO-AGENT-START after releasing local ownership."
-  (when (and (buffer-live-p chat-buf)
-             (with-current-buffer chat-buf
-               (pilish--prompt-start-current-p generation)))
+  (when (buffer-live-p chat-buf)
     (with-current-buffer chat-buf
-      (setq pilish--prompt-start-wait-active nil)
-      (setq pilish--prompt-start-generation
-            (1+ pilish--prompt-start-generation))
-      (when (eq pilish--status 'sending)
-        (setq pilish--status 'idle)
-        (pilish--set-activity-phase "idle"))
-      (when on-no-agent-start
-        (funcall on-no-agent-start)))))
+      (when (and (pilish--prompt-start-needed-p wait)
+                 (not (memq pilish--status '(streaming compacting))))
+        (pilish--invalidate-prompt-start-wait)
+        (when (eq pilish--status 'sending)
+          (setq pilish--status 'idle)
+          (pilish--set-activity-phase "idle"))
+        (when pilish--aborted
+          (pilish--clear-followup-queue))
+        (setq pilish--aborted nil)
+        (when on-no-agent-start
+          (funcall on-no-agent-start))))))
 
-(defun pilish--probe-prompt-start-state
-    (chat-buf generation on-no-agent-start)
-  "Ask Pi whether CHAT-BUF prompt GENERATION started an agent turn.
-Call ON-NO-AGENT-START only after Pi authoritatively reports idle."
-  (let ((proc (and (buffer-live-p chat-buf)
-                   (with-current-buffer chat-buf
-                     pilish--process))))
+(defun pilish--probe-prompt-start-state (chat-buf wait on-no-agent-start)
+  "Ask whether CHAT-BUF's accepted WAIT produced no agent turn.
+Call ON-NO-AGENT-START only after Pi reports idle with no newer local start."
+  (let ((proc (pilish--prompt-wait-process wait)))
     (when (and proc (process-live-p proc))
       (condition-case nil
           (pilish--rpc-async
            proc '(:type "get_state")
            (lambda (response)
-             (when (and (buffer-live-p chat-buf)
-                        (with-current-buffer chat-buf
-                          (pilish--prompt-start-current-p generation)))
-               (let* ((data (plist-get response :data))
-                      (active
-                       (and (eq (plist-get response :success) t)
-                            (or (pilish--normalize-boolean
-                                 (plist-get data :isStreaming))
-                                (pilish--normalize-boolean
-                                 (plist-get data :isCompacting))))))
-                 (if (or active (not (eq (plist-get response :success) t)))
-                     (pilish--schedule-prompt-start-fallback
-                      chat-buf generation on-no-agent-start)
-                   (pilish--finish-prompt-without-agent-start
-                    chat-buf generation on-no-agent-start))))))
+             (when (buffer-live-p chat-buf)
+               (with-current-buffer chat-buf
+                 (when (pilish--prompt-start-needed-p wait)
+                   (let ((data (plist-get response :data)))
+                     (if (or (memq pilish--status '(streaming compacting))
+                             (not (eq (plist-get response :success) t))
+                             (pilish--normalize-boolean (plist-get data :isStreaming))
+                             (pilish--normalize-boolean (plist-get data :isCompacting)))
+                         (pilish--schedule-prompt-start-fallback
+                          chat-buf wait on-no-agent-start)
+                       (pilish--finish-prompt-without-agent-start
+                        chat-buf wait on-no-agent-start))))))))
         (error
-         (pilish--schedule-prompt-start-fallback
-          chat-buf generation on-no-agent-start))))))
+         (pilish--schedule-prompt-start-fallback chat-buf wait on-no-agent-start))))))
 
 (defun pilish--clear-sending-if-no-agent-start
-    (chat-buf generation &optional on-no-agent-start)
-  "Check whether CHAT-BUF prompt GENERATION produced no agent_start.
-Elapsed time alone is not authoritative: query Pi before releasing local prompt
-ownership or invoking ON-NO-AGENT-START."
+    (chat-buf wait &optional on-no-agent-start)
+  "Probe accepted WAIT in CHAT-BUF when no agent_start was observed.
+Elapsed time alone does not release ownership or invoke ON-NO-AGENT-START."
   (when (buffer-live-p chat-buf)
     (with-current-buffer chat-buf
-      (when (pilish--prompt-start-current-p generation)
+      (when (pilish--prompt-start-needed-p wait)
         (setq pilish--prompt-start-timer nil)
         (if (memq pilish--status '(streaming compacting))
-            (pilish--schedule-prompt-start-fallback
-             chat-buf generation on-no-agent-start)
-          (pilish--probe-prompt-start-state
-           chat-buf generation on-no-agent-start))))))
+            (pilish--schedule-prompt-start-fallback chat-buf wait on-no-agent-start)
+          (pilish--probe-prompt-start-state chat-buf wait on-no-agent-start))))))
 
 (defun pilish--schedule-prompt-start-fallback
-    (chat-buf generation &optional on-no-agent-start)
-  "Schedule idle fallback for CHAT-BUF after success with no agent_start.
-GENERATION ties the fallback to the prompt response that scheduled it.
-ON-NO-AGENT-START is called if the fallback actually fires."
+    (chat-buf wait &optional on-no-agent-start)
+  "Schedule a probe for CHAT-BUF's accepted WAIT with no observed agent_start.
+ON-NO-AGENT-START is called only if the probe confirms no turn."
   (when (buffer-live-p chat-buf)
     (with-current-buffer chat-buf
-      (when (pilish--prompt-start-current-p generation)
+      (when (pilish--prompt-start-needed-p wait)
         (pilish--cancel-prompt-start-timer)
         (setq pilish--prompt-start-timer
               (run-at-time pilish--prompt-start-timeout nil
                            #'pilish--clear-sending-if-no-agent-start
-                           chat-buf generation on-no-agent-start))))))
+                           chat-buf wait on-no-agent-start))))))
 
 (defun pilish--handle-prompt-send-failure
-    (chat-buf generation on-failure &optional error-text)
-  "Finish the current failed prompt send owned by GENERATION.
-Restore user input through ON-FAILURE, reset CHAT-BUF, and report ERROR-TEXT.
-Return non-nil only when GENERATION still owned the prompt-start wait."
+    (chat-buf wait on-failure &optional error-text)
+  "Finish the current failed prompt request owned by WAIT.
+Restore input through ON-FAILURE in CHAT-BUF and report ERROR-TEXT without
+idling independently observed work.  Return non-nil only for the current WAIT."
   (let ((current-failure
          (and (buffer-live-p chat-buf)
               (with-current-buffer chat-buf
-                (pilish--prompt-start-current-p generation)))))
+                (pilish--prompt-start-current-p wait)))))
     (when current-failure
       (pilish--abort-send chat-buf on-failure)
       (message "Pi: Send failed%s"
@@ -2918,14 +2932,12 @@ Return non-nil only when GENERATION still owned the prompt-start wait."
     (text &optional on-success on-failure on-no-agent-start prompt-image)
   "Send TEXT and optional PROMPT-IMAGE to the pi process.
 Slash commands are sent literally - pi handles expansion.
-Shows an error message if process is unavailable.
-ON-SUCCESS is called in the chat buffer after prompt preflight accepts TEXT.
-ON-FAILURE is called in the chat buffer if preflight rejects TEXT or scheduling
-fails synchronously.  ON-NO-AGENT-START is called if success is not followed
-by agent_start."
+ON-SUCCESS runs in the chat buffer upon acceptance, which may follow a run.
+ON-FAILURE restores a rejected request or synchronous scheduling failure.
+ON-NO-AGENT-START runs only for accepted requests confirmed to have no turn."
   (let ((proc (pilish--get-process))
         (chat-buf (pilish--get-chat-buffer))
-        (prompt-generation nil))
+        wait)
     (cond
      ((null proc)
       (pilish--abort-send chat-buf on-failure)
@@ -2936,7 +2948,7 @@ by agent_start."
      (t
       (when (buffer-live-p chat-buf)
         (with-current-buffer chat-buf
-          (setq prompt-generation (pilish--begin-prompt-start-wait))
+          (setq wait (pilish--begin-prompt-start-wait))
           (setq pilish--status 'sending)
           (pilish--set-activity-phase "thinking")))
       (condition-case err
@@ -2945,48 +2957,62 @@ by agent_start."
            (append (list :type "prompt" :message text)
                    (when prompt-image
                      (list :images
-                           (vector
-                            (pilish--prompt-image-content-block
-                             prompt-image)))))
+                           (vector (pilish--prompt-image-content-block prompt-image)))))
            (lambda (response)
              (if (eq (plist-get response :success) t)
                  (when (buffer-live-p chat-buf)
                    (with-current-buffer chat-buf
-                     (when (pilish--prompt-start-current-p
-                            prompt-generation)
-                       (when on-success
-                         (funcall on-success))
-                       (pilish--schedule-prompt-start-fallback
-                        chat-buf prompt-generation on-no-agent-start))))
+                     (when (pilish--prompt-start-current-p wait)
+                       (setf (pilish--prompt-wait-accepted wait) t)
+                       (unwind-protect
+                           (when on-success (funcall on-success))
+                         (when (pilish--prompt-start-current-p wait)
+                           (if (pilish--prompt-wait-started wait)
+                               (progn
+                                 (pilish--invalidate-prompt-start-wait)
+                                 (unless (pilish--session-busy-p)
+                                   (when pilish--aborted (pilish--clear-followup-queue))
+                                   (setq pilish--aborted nil))
+                                 (pilish--process-followup-queue))
+                             (pilish--schedule-prompt-start-fallback
+                              chat-buf wait on-no-agent-start)))))))
                (pilish--handle-prompt-send-failure
-                chat-buf prompt-generation on-failure
-                (plist-get response :error)))))
+                chat-buf wait on-failure (plist-get response :error)))))
         ((error quit)
          (if (eq (car err) 'quit)
              (unwind-protect
                  (pilish--handle-prompt-send-failure
-                  chat-buf prompt-generation on-failure
-                  (error-message-string err))
+                  chat-buf wait on-failure (error-message-string err))
                (signal (car err) (cdr err)))
            (pilish--handle-prompt-send-failure
-            chat-buf prompt-generation on-failure
-            (error-message-string err)))))))))
+            chat-buf wait on-failure (error-message-string err)))))))))
 
 (defun pilish--abort-send (chat-buf &optional on-failure)
-  "Clean up after a failed send attempt in CHAT-BUF.
-Call ON-FAILURE once after invalidating the prompt wait, then reset activity,
-local echo state, and status to idle even if restoration signals."
+  "Release a failed request in CHAT-BUF and restore input through ON-FAILURE.
+Only its unstarted sending window becomes idle; independently observed runs
+or compaction retain their activity and stop intent, even if restoration fails."
   (when (buffer-live-p chat-buf)
     (with-current-buffer chat-buf
-      (pilish--invalidate-prompt-start-wait)
-      (unwind-protect
-          (when on-failure
-            (funcall on-failure))
-        (setq pilish--local-user-message nil)
-        (pilish--clear-local-user-message-region)
-        (setq pilish--pre-compaction-status nil)
-        (setq pilish--status 'idle)
-        (pilish--set-activity-phase "idle")))))
+      (let ((started (and pilish--prompt-wait
+                          (pilish--prompt-wait-started pilish--prompt-wait))))
+        (pilish--invalidate-prompt-start-wait)
+        (unwind-protect
+            (progn
+              ;; Restore FIFO first so the direct owner can prepend its text.
+              (if pilish--aborted
+                  (pilish--clear-followup-queue)
+                (pilish--restore-followup-queue-to-input))
+              (when on-failure (funcall on-failure)))
+          (setq pilish--local-user-message nil)
+          (pilish--clear-local-user-message-region)
+          (unless started
+            (when (eq pilish--pre-compaction-status 'sending)
+              (setq pilish--pre-compaction-status 'idle))
+            (when (eq pilish--status 'sending)
+              (setq pilish--status 'idle)))
+          (when (eq pilish--status 'idle)
+            (setq pilish--pre-compaction-status nil pilish--aborted nil)
+            (pilish--set-activity-phase "idle")))))))
 
 
 (provide 'pilish-ui)

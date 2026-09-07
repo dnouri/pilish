@@ -1975,35 +1975,15 @@ block is closed."
 
 (ert-deftest pilish-test-send-displays-user-message ()
   "Accepted prompt preflight displays the user message in chat."
-  (let ((chat-buf (get-buffer-create "*pilish-test-chat*"))
-        (input-buf (get-buffer-create "*pilish-test-input*"))
-        (rpc-callback nil)
-        (fake-proc (start-process "test" nil "cat")))
-    (unwind-protect
-        (progn
-          (with-current-buffer chat-buf
-            (pilish-chat-mode)
-            (setq pilish--input-buffer input-buf))
-          (with-current-buffer input-buf
-            (pilish-input-mode)
-            (setq pilish--chat-buffer chat-buf)
-            (insert "Hello from test")
-            (cl-letf (((symbol-function 'pilish--get-process)
-                       (lambda () fake-proc))
-                      ((symbol-function 'pilish--get-chat-buffer)
-                       (lambda () chat-buf))
-                      ((symbol-function 'pilish--rpc-async)
-                       (lambda (_proc _msg cb) (setq rpc-callback cb))))
-              (pilish-send)))
-          (with-current-buffer chat-buf
-            (should-not (string-match-p "Hello from test" (buffer-string)))
-            (funcall rpc-callback '(:success t))
-            ;; Check chat buffer has the message with You setext heading and content.
-            (should (string-match-p "^You" (buffer-string)))
-            (should (string-match-p "Hello from test" (buffer-string)))))
-      (delete-process fake-proc)
-      (kill-buffer chat-buf)
-      (kill-buffer input-buf))))
+  (pilish-test-with-rpc-session (chat input proc commands)
+    (with-current-buffer input (insert "Hello from test") (pilish-send))
+    (with-current-buffer chat
+      (should-not (string-match-p "Hello from test" (buffer-string)))
+      (pilish--dispatch-response
+       proc (list :type "response" :id (plist-get (car commands) :id)
+                  :command "prompt" :success t))
+      (should (string-match-p "^You" (buffer-string)))
+      (should (string-match-p "Hello from test" (buffer-string))))))
 
 (ert-deftest pilish-test-send-slash-command-not-displayed-locally ()
   "Slash commands are NOT displayed locally - pi sends back expanded content.
@@ -13658,7 +13638,7 @@ Multiple deltas should replace the preview instead of appending forever."
       (should (= 2 (length (pilish-test--all-tool-overlays)))))))
 
 (ert-deftest pilish-test-metadata-less-toolcall-start-finalizes-at-end ()
-  "Tagged Pi 0.84.2 falls back cleanly when start metadata is unavailable."
+  "Incomplete start metadata is reconciled by the authoritative toolcall_end."
   (pilish-test--with-streaming-assistant
     (pilish-test--send-assistant-message-update
      '(:type "toolcall_start" :contentIndex 0))
@@ -14383,12 +14363,12 @@ Commands with embedded newlines should not have any lines deleted."
      '(:type "compaction_start" :reason "threshold"))
     (should (equal pilish--activity-phase "compact"))))
 
-(ert-deftest pilish-test-activity-phase-idle-on-agent-end ()
-  "Activity phase becomes idle on agent_end."
-  (with-temp-buffer
-    (pilish-chat-mode)
-    (setq pilish--activity-phase "thinking")
+(ert-deftest pilish-test-activity-phase-idle-only-on-agent-settled ()
+  "The activity phase remains busy between agent_end and agent_settled."
+  (pilish-test--with-streaming-assistant
     (pilish--handle-display-event '(:type "agent_end"))
+    (should (equal pilish--activity-phase "thinking"))
+    (pilish--handle-display-event '(:type "agent_settled"))
     (should (equal pilish--activity-phase "idle"))))
 
 (ert-deftest pilish-test-activity-phase-idle-on-compaction-end ()
@@ -14404,7 +14384,8 @@ Commands with embedded newlines should not have any lines deleted."
   "Activity phase stays busy while Pi's automatic retry is pending."
   (with-temp-buffer
     (pilish-chat-mode)
-    (setq pilish--activity-phase "compact")
+    (setq pilish--status 'sending)
+    (pilish--handle-display-event '(:type "compaction_start" :reason "overflow"))
     (pilish--handle-display-event
      '(:type "compaction_end"
        :reason "overflow"
@@ -14495,7 +14476,8 @@ Commands with embedded newlines should not have any lines deleted."
   (with-temp-buffer
     (pilish-chat-mode)
     (let ((sent-text nil))
-      (setq pilish--status 'compacting)
+      (setq pilish--status 'sending)
+      (pilish--handle-display-event '(:type "compaction_start" :reason "overflow"))
       (setq pilish--followup-queue '("queued behind retry"))
       (cl-letf (((symbol-function 'pilish--send-prompt)
                  (lambda (text &optional on-success &rest _)
@@ -14513,6 +14495,47 @@ Commands with embedded newlines should not have any lines deleted."
       (should (eq pilish--status 'sending))
       (should (equal pilish--followup-queue '("queued behind retry")))
       (should (null sent-text)))))
+
+(ert-deftest pilish-test-lifecycle-interturn-compaction-reopens-assistant-section ()
+  "Continued thinking, text and tools belong to Assistant, not Compaction."
+  (let ((pilish-thinking-display 'visible))
+    (pilish-test--with-streaming-assistant
+      (let (shown-message)
+        (cl-letf (((symbol-function 'message)
+                   (lambda (fmt &rest args)
+                     (setq shown-message (apply #'format fmt args)))))
+          (pilish-test--send-assistant-message-update
+           '(:type "text_delta" :contentIndex 0 :delta "Before compaction."))
+          (dolist (event '((:type "message_end" :message (:role "assistant"))
+                           (:type "turn_end")
+                           (:type "compaction_start" :reason "threshold")
+                           (:type "compaction_end" :aborted :false :willRetry :false
+                            :result (:tokensBefore 1000 :summary "Saved context."))
+                           (:type "turn_start")
+                           (:type "message_start" :message (:role "assistant"))))
+            (pilish--handle-display-event event))
+          (dolist (update '((:type "thinking_start" :contentIndex 0)
+                            (:type "thinking_delta" :contentIndex 0
+                             :delta "Continued reasoning.")
+                            (:type "thinking_end" :contentIndex 0
+                             :content "Continued reasoning.")
+                            (:type "text_delta" :contentIndex 1
+                             :delta "Continued answer.\n")
+                            (:type "toolcall_start" :contentIndex 2
+                             :id "continued-tool" :toolName "read")
+                            (:type "toolcall_delta" :contentIndex 2
+                             :delta "{\"path\":\"/tmp/continued.txt\"}")))
+            (pilish-test--send-assistant-message-update update))
+          (should (equal shown-message "Pi: Compacted from 1,000 tokens"))
+          (should (= 2 (pilish-test--count-matches
+                        "^Assistant\n=+" (buffer-string))))
+          (goto-char (point-min))
+          (dolist (text '("Before compaction." "Compaction\n" "Saved context."
+                          "Assistant\n" "> Continued reasoning."
+                          "Continued answer." "read /tmp/continued.txt"))
+            (should (search-forward text nil t)))
+          (should (= 1 (pilish-test--count-matches
+                        "Before compaction\\." (buffer-string)))))))))
 
 (ert-deftest pilish-test-display-handler-handles-compaction-end ()
   "Display handler processes compaction_end with current Pi result shape."

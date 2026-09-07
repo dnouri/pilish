@@ -610,6 +610,7 @@ def run_agent_end_cooling_scenario(
     write_json(
         {"type": "agent_end", "messages": messages, "willRetry": False}
     )
+    write_json({"type": "agent_settled"})
     log_line(
         log_file,
         {"event": "agent-end-cooling-complete", "emitted": emitted},
@@ -763,6 +764,7 @@ def run_scenario(config: JsonDict, log_file: Path | None) -> None:
     write_json(
         {"type": "agent_end", "messages": messages, "willRetry": False}
     )
+    write_json({"type": "agent_settled"})
     log_line(log_file, {"event": "storm-complete", "emitted": emitted})
 
 
@@ -826,7 +828,7 @@ def resolve_config(args: argparse.Namespace) -> JsonDict:
 def main(argv: list[str] | None = None) -> int:
     raw_argv = list(sys.argv[1:] if argv is None else argv)
     if raw_argv == ["--version"]:
-        print("0.84.2")
+        print("0.85.0")
         return 0
 
     args, log_file = parse_args([a for a in raw_argv if a != "--version"])
@@ -865,6 +867,8 @@ def main(argv: list[str] | None = None) -> int:
                 target=target, args=(config, log_file), daemon=True
             )
             storm_thread.start()
+        elif command_type == "clear_queue":
+            respond(command, data={"steering": [], "followUp": []})
         elif command_type in ("abort", "steer", "set_thinking_level"):
             respond(command)
         elif command_type == "new_session":

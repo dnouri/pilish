@@ -1126,8 +1126,12 @@ other family names there."
   (should (pilish--pi-version-outdated-p "0.79.0"))
   (should (pilish--pi-version-outdated-p "0.80.99"))
   (should (pilish--pi-version-outdated-p "0.84.1"))
-  (should-not (pilish--pi-version-outdated-p "0.84.2"))
-  (should-not (pilish--pi-version-outdated-p "0.84.3"))
+  (should (pilish--pi-version-outdated-p "0.84.2"))
+  (should (pilish--pi-version-outdated-p "0.84.4"))
+  (should (pilish--pi-version-outdated-p "0.84.99"))
+  (should-not (pilish--pi-version-outdated-p "0.85.0"))
+  (should-not (pilish--pi-version-outdated-p "0.85.1"))
+  (should-not (pilish--pi-version-outdated-p "0.86.0"))
   (should-not (pilish--pi-version-outdated-p "1.0.0")))
 
 (ert-deftest pilish-test-finish-pi-version-process-parses-stderr ()
@@ -1285,61 +1289,65 @@ other family names there."
         (delete-process proc)))))
 
 (ert-deftest pilish-test-probe-process-version-warns-when-pi-too-old ()
-  "Version probe warns clearly for unsupported pi versions."
-  (let ((callback nil)
-        (warning-text nil)
-        (noninteractive nil)
-        (proc (start-process "pilish-test-proc-old" nil "cat")))
-    (unwind-protect
-        (with-temp-buffer
-          (pilish-chat-mode)
-          (cl-letf (((symbol-function 'pilish--request-pi-version-async)
-                     (lambda (cb)
-                       (setq callback cb)
-                       nil))
-                    ((symbol-function 'message) #'ignore)
-                    ((symbol-function 'display-warning)
-                     (lambda (_type message &rest _)
-                       (setq warning-text message))))
-            (pilish--set-process proc)
-            (should callback)
-            (funcall callback "0.79.0")
-            (should (equal pilish--process-version "0.79.0"))
-            (should (string-match-p "0.79.0" warning-text))
-            (should (string-match-p "0.84.2" warning-text))
-            (should (string-match-p
-                     "npm install -g @earendil-works/pi-coding-agent"
-                     warning-text))
-            (should-not (string-match-p
-                         "npm install -g @earendil-works/pi-coding-agent@"
-                         warning-text))))
-      (when (process-live-p proc)
-        (delete-process proc)))))
+  "Version probe warns clearly for every tested below-minimum pi version."
+  (dolist (version '("0.84.4" "0.84.2" "0.84.99" "0.79.0"))
+    (ert-info ((format "Unsupported Pi %s" version))
+      (let ((callback nil)
+            (warnings nil)
+            (noninteractive nil)
+            (proc (start-process "pilish-test-proc-old" nil "cat")))
+        (unwind-protect
+            (with-temp-buffer
+              (pilish-chat-mode)
+              (cl-letf (((symbol-function 'pilish--request-pi-version-async)
+                         (lambda (cb)
+                           (setq callback cb)
+                           nil))
+                        ((symbol-function 'message) #'ignore)
+                        ((symbol-function 'display-warning)
+                         (lambda (&rest args)
+                           (push args warnings))))
+                (pilish--set-process proc)
+                (should callback)
+                (funcall callback version)
+                (should (equal pilish--process-version version))
+                (should
+                 (equal warnings
+                        (list
+                         (list 'pi
+                               (format
+                                "Pi CLI version %s is older than the supported minimum 0.85.0. Upgrade with: npm install -g @earendil-works/pi-coding-agent"
+                                version)
+                               :warning))))))
+          (when (process-live-p proc)
+            (delete-process proc)))))))
 
 (ert-deftest pilish-test-probe-process-version-does-not-warn-when-supported ()
-  "Version probe accepts the minimum supported pi version."
-  (let ((callback nil)
-        (warning-called nil)
-        (noninteractive nil)
-        (proc (start-process "pilish-test-proc-supported" nil "cat")))
-    (unwind-protect
-        (with-temp-buffer
-          (pilish-chat-mode)
-          (cl-letf (((symbol-function 'pilish--request-pi-version-async)
-                     (lambda (cb)
-                       (setq callback cb)
-                       nil))
-                    ((symbol-function 'message) #'ignore)
-                    ((symbol-function 'display-warning)
-                     (lambda (&rest _)
-                       (setq warning-called t))))
-            (pilish--set-process proc)
-            (should callback)
-            (funcall callback "0.84.2")
-            (should (equal pilish--process-version "0.84.2"))
-            (should-not warning-called)))
-      (when (process-live-p proc)
-        (delete-process proc)))))
+  "Version probe accepts Pi 0.85.0 exactly and newer versions without warning."
+  (dolist (version '("0.85.0" "0.85.1" "0.86.0" "1.0.0"))
+    (ert-info ((format "Supported Pi %s" version))
+      (let ((callback nil)
+            (warning-called nil)
+            (noninteractive nil)
+            (proc (start-process "pilish-test-proc-supported" nil "cat")))
+        (unwind-protect
+            (with-temp-buffer
+              (pilish-chat-mode)
+              (cl-letf (((symbol-function 'pilish--request-pi-version-async)
+                         (lambda (cb)
+                           (setq callback cb)
+                           nil))
+                        ((symbol-function 'message) #'ignore)
+                        ((symbol-function 'display-warning)
+                         (lambda (&rest _)
+                           (setq warning-called t))))
+                (pilish--set-process proc)
+                (should callback)
+                (funcall callback version)
+                (should (equal pilish--process-version version))
+                (should-not warning-called)))
+          (when (process-live-p proc)
+            (delete-process proc)))))))
 
 ;;; Copy Visible Text
 
@@ -2601,6 +2609,66 @@ Catches wiring bugs like requiring deleted modules."
                            "nul-session"))
             (should-not (plist-get pilish--state :session-file))))
       (kill-buffer chat-buf))))
+
+(ert-deftest pilish-test-rereview-snapshot-initializes-idle-ui ()
+  "Without an event-owned busy phase, UI initialization adopts remote status."
+  (dolist (snapshot '((:false :false idle) (t :false streaming)
+                      (:false t compacting) (t t streaming)))
+    (with-temp-buffer
+      (pilish-chat-mode)
+      (should (eq pilish--status 'idle))
+      (pilish--apply-state-response
+       (current-buffer)
+       (list :success t :data (list :isStreaming (car snapshot)
+                                   :isCompacting (cadr snapshot)
+                                   :thinkingLevel "high")))
+      (should (equal (plist-get pilish--state :thinking-level) "high"))
+      (should (eq pilish--status (nth 2 snapshot)))
+      (should (eq (plist-get pilish--state :status) (nth 2 snapshot))))))
+
+(ert-deftest pilish-test-rereview-snapshot-preserves-post-run-ownership ()
+  "Core/UI refreshes cannot invent agent_start during post-run work or compaction.
+Pi's isStreaming includes post-run processing, not just the low-level loop."
+  (dolist (path '(core ui))
+    (dolist (compaction '(nil t))
+      (ert-info ((format "%s refresh; post-run compaction %s" path compaction))
+        (pilish-test-with-rpc-session (chat _input proc commands)
+          (with-current-buffer chat
+            (cl-letf (((symbol-function 'message) #'ignore))
+              (pilish--handle-display-event '(:type "agent_start"))
+              (pilish--handle-display-event '(:type "agent_end" :messages []))
+              (when compaction
+                (pilish--handle-display-event
+                 '(:type "compaction_start" :reason "threshold")))
+              (setq pilish--followup-queue '("next"))
+              (if (eq path 'ui)
+                  (pilish--refresh-thinking-level-state proc chat)
+                (pilish--rpc-async
+                 proc '(:type "get_state")
+                 (lambda (response)
+                   (with-current-buffer chat
+                     (pilish--update-state-from-response response)))))
+              (pilish--dispatch-response
+               proc (list :type "response" :id (plist-get (car commands) :id)
+                          :command "get_state" :success t
+                          :data (list :isStreaming t
+                                      :isCompacting (if compaction t :false)
+                                      :thinkingLevel "high")))
+              (should (equal (plist-get pilish--state :thinking-level) "high"))
+              (should (eq pilish--status (if compaction 'compacting 'sending)))
+              (should (eq (plist-get pilish--state :status) pilish--status))
+              (when compaction
+                (should (eq pilish--pre-compaction-status 'sending))
+                (pilish--handle-display-event
+                 '(:type "compaction_end" :reason "threshold"
+                   :aborted :false :willRetry :false
+                   :result (:summary "Done" :tokensBefore 1000))))
+              (should (eq pilish--status 'sending))
+              (should (= 1 (length commands)))
+              (pilish--handle-display-event '(:type "agent_settled"))
+              (should (= 2 (length commands)))
+              (should (equal (plist-get (car commands) :type) "prompt"))
+              (should (equal (plist-get (car commands) :message) "next")))))))))
 
 (ert-deftest pilish-test-apply-state-response-keeps-local-prompt-start-busy ()
   "Stale idle get_state must not erase local prompt preflight state."

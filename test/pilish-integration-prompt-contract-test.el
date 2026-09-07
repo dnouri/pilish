@@ -18,7 +18,7 @@
                                                    pilish-test-rpc-timeout))
          (initial-count (plist-get (plist-get initial-state :data) :messageCount))
          (events nil)
-         (got-agent-end nil)
+         (got-agent-settled nil)
          (assistant-start nil)
          (assistant-end nil)
          (prompt-response nil))
@@ -31,8 +31,8 @@
               ("message_end"
                (when (equal (plist-get (plist-get event :message) :role) "assistant")
                  (setq assistant-end event)))
-              ("agent_end"
-               (setq got-agent-end t))))
+              ("agent_settled"
+               (setq got-agent-settled t))))
           pilish--event-handlers)
     (setq prompt-response
           (pilish--rpc-sync
@@ -45,7 +45,7 @@
     (should (equal (plist-get prompt-response :command) "prompt"))
     (with-timeout (pilish-test-integration-timeout
                    (ert-fail "Timeout waiting for prompt lifecycle to finish"))
-      (while (not got-agent-end)
+      (while (not got-agent-settled)
         (accept-process-output proc pilish-test-poll-interval)))
     (setq events (nreverse events))
     (ert-info ("agent_start should be emitted")
@@ -62,8 +62,10 @@
                         events)))
     (ert-info ("assistant message_end should be emitted")
       (should assistant-end))
-    (ert-info ("agent_end should be emitted")
-      (should (equal (plist-get (car (last events)) :type) "agent_end")))
+    (ert-info ("agent_end is followed by final agent_settled")
+      (should (seq-find (lambda (event) (equal (plist-get event :type) "agent_end"))
+                        events))
+      (should (equal (plist-get (car (last events)) :type) "agent_settled")))
     (let* ((final-state (pilish--rpc-sync proc '(:type "get_state")
                                                    pilish-test-rpc-timeout))
            (final-data (plist-get final-state :data))
@@ -77,14 +79,14 @@
     (prompt-contract-abort-stops-streaming)
   "Aborting a running prompt leaves the backend idle again."
   (let ((got-agent-start nil)
-        (got-agent-end nil)
+        (got-agent-settled nil)
         (prompt-response nil))
     (push (lambda (event)
             (pcase (plist-get event :type)
               ("agent_start"
                (setq got-agent-start t))
-              ("agent_end"
-               (setq got-agent-end t))))
+              ("agent_settled"
+               (setq got-agent-settled t))))
           pilish--event-handlers)
     (setq prompt-response
           (pilish--rpc-sync
@@ -103,8 +105,8 @@
       (should (eq (plist-get abort-response :success) t))
       (should (equal (plist-get abort-response :command) "abort")))
     (with-timeout (pilish-test-rpc-timeout
-                   (ert-fail "Timeout waiting for agent_end after abort"))
-      (while (not got-agent-end)
+                   (ert-fail "Timeout waiting for agent_settled after abort"))
+      (while (not got-agent-settled)
         (accept-process-output proc pilish-test-poll-interval)))
     (let* ((state (pilish--rpc-sync proc '(:type "get_state")
                                              pilish-test-rpc-timeout))

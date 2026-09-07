@@ -1058,6 +1058,7 @@ Each row is a plist with :type :count :totalMs :meanMs and :maxMs."
             (pilish-tu-bench--route-command-event event))
           (accept-process-output nil 0.005)
           (when (and (pilish-tu-bench--cooling-drained-p chat-buf)
+                     (eq (buffer-local-value 'pilish--status chat-buf) 'idle)
                      (null pilish-tu-bench--command-pending))
             (setq settled t)))
       (setq end (float-time))
@@ -1736,7 +1737,7 @@ Every entry must have a true :ok for the benchmark run to pass."
 (defun pilish-tu-bench--run-session ()
   "Run one fake-backed tool benchmark session and return a metrics plist.
 The cooling scenario waits for production one-shot timers to drain naturally;
-the storm scenarios retain their existing prompt-to-agent_end settle path."
+all scenarios await agent_settled before declaring the session complete."
   (let* ((session-dir (make-temp-file
                        (expand-file-name "session-"
                                          pilish-tu-bench-out-dir)
@@ -1831,12 +1832,13 @@ the storm scenarios retain their existing prompt-to-agent_end settle path."
                              (error
                               "Fake pi process exited before the storm settled"))
                            (and pilish-tu-bench--agent-end-time
+                                (eq (buffer-local-value 'pilish--status chat-buf) 'idle)
                                 (= 0
                                    (pilish-tu-bench--pending-requests-count
                                     proc)))))
                        pilish-tu-bench-timeout-seconds))
                 (unless ok
-                  (error "Timed out waiting for agent_end after %d seconds"
+                  (error "Timed out waiting for agent_settled after %d seconds"
                          pilish-tu-bench-timeout-seconds))))
           (error (setq error-text (error-message-string err))))
       (pilish-tu-bench--stop-command-route)

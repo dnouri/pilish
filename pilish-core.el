@@ -428,6 +428,14 @@ Maps request IDs to command type strings."
         (process-put process 'pilish-pending-command-types table)
         table)))
 
+(defun pilish--command-pending-p (process type)
+  "Return non-nil when PROCESS has a correlated request of command TYPE."
+  (when (processp process)
+    (let ((pending (process-get process 'pilish-pending-command-types)))
+      (and (hash-table-p pending)
+           (cl-loop for command being the hash-values of pending
+                    thereis (equal command type))))))
+
 (defconst pilish--remote-ready-marker
   "__PILISH_RPC_READY_V1__"
   "Exact stdout line that marks a remote Pi process ready for stdin.")
@@ -724,13 +732,13 @@ This is the single source of truth for session activity state.
 
 Runtime status transitions are driven by events from pi:
 - `idle' or `sending' -> `streaming' on agent_start
-- `streaming' -> `sending' on agent_end with willRetry
-- `streaming' -> `idle' on agent_end without retry
-- `idle' -> `compacting' on compaction_start
-- `compacting' -> `sending' on successful compaction_end with willRetry
-- `compacting' -> `sending' on successful compaction_end that resumes
-  prompt preflight
-- `compacting' -> `idle' on compaction_end without retry, failure, or abort
+- `streaming' -> `sending' on agent_end, awaiting session settlement
+- `sending' -> `idle' on agent_settled, unless newer streaming or compaction
+  has already been observed
+- any status -> `compacting' on compaction_start
+- `compacting' -> the surrounding `streaming' or `sending' work on
+  compaction_end, including failure and extension cancellation
+- standalone manual compaction -> `idle' on compaction_end
 
 Local commands may mark a session busy before the first event arrives,
 for example normal prompt submission and manual compaction during the
@@ -738,8 +746,8 @@ RPC pre-event window.")
 
 (defvar-local pilish--pre-compaction-status nil
   "Status that was active before a compaction event sequence.
-Used to restore local prompt submission state when Pi compacts during prompt
-preflight before the agent turn has started.")
+Restores the surrounding run or prompt preflight even when compaction fails
+or an extension cancels it.  Standalone manual compaction has no active run.")
 
 (defvar-local pilish--state nil
   "Current state of the pi session (buffer-local in chat buffer).
@@ -776,26 +784,10 @@ JSON null values, and other non-strings become nil."
                 (pilish--json-null-p result))
       result)))
 
-(defun pilish--compaction-end-success-p (event)
-  "Return non-nil when EVENT reports a completed, non-aborted compaction."
-  (and (not (pilish--normalize-boolean (plist-get event :aborted)))
-       (not (null (pilish--compaction-result-from-event event)))))
-
-(defun pilish--compaction-end-will-retry-p (event)
-  "Return non-nil when EVENT indicates Pi will retry after compaction.
-A retry is only considered pending for a successful compaction result;
-failed or aborted compactions must not leave the session busy."
-  (and (pilish--normalize-boolean (plist-get event :willRetry))
-       (pilish--compaction-end-success-p event)))
-
-(defun pilish--compaction-end-resumes-preflight-p (event)
-  "Return non-nil when EVENT can resume a pre-compaction prompt."
-  (and (eq pilish--pre-compaction-status 'sending)
-       (pilish--compaction-end-success-p event)))
-
 (defun pilish--update-state-from-event (event)
   "Update status and state based on EVENT.
-Handles agent lifecycle, message events, compaction, and error/retry events."
+Handles agent lifecycle, message events, compaction, and error/retry events.
+For agent_settled, return non-nil only when waiting work was released."
   (let ((type (plist-get event :type)))
     (pcase type
       ("agent_start"
@@ -803,12 +795,17 @@ Handles agent lifecycle, message events, compaction, and error/retry events."
        (plist-put pilish--state :is-retrying nil)
        (plist-put pilish--state :last-error nil))
       ("agent_end"
-       (setq pilish--status
-             (if (pilish--normalize-boolean (plist-get event :willRetry))
-                 'sending
-               'idle))
+       (setq pilish--status 'sending)
        (plist-put pilish--state :is-retrying nil)
        (plist-put pilish--state :messages (plist-get event :messages)))
+      ("agent_settled"
+       ;; Pi awaits extension hooks before emitting this event.  A hook can
+       ;; start B before A settles; do not release observably newer work.
+       ;; If B has ALSO ended, A_settled and B_settled are indistinguishable:
+       ;; the wire has no run identity, and get_state cannot resolve all such
+       ;; cases because Pi clears its run flag before awaiting those hooks.
+       (when (eq pilish--status 'sending)
+         (setq pilish--status 'idle)))
       ("message_start"
        (plist-put pilish--state :current-message (plist-get event :message)))
       ("message_end"
@@ -821,18 +818,19 @@ Handles agent lifecycle, message events, compaction, and error/retry events."
        (pilish--handle-tool-end event))
       ("compaction_start"
        (setq pilish--pre-compaction-status
-             (unless (eq pilish--status 'compacting)
-               pilish--status))
+             (if (equal (plist-get event :reason) "manual")
+                 'idle
+               (unless (eq pilish--status 'compacting)
+                 pilish--status)))
        (setq pilish--status 'compacting))
       ("compaction_end"
-       (setq pilish--status
-             (cond
-              ((pilish--compaction-end-will-retry-p event)
-               'sending)
-              ((pilish--compaction-end-resumes-preflight-p event)
-               'sending)
-              (t
-               'idle)))
+       ;; Exhausted overflow recovery emits an end without a start.  It does
+       ;; not release the surrounding sending owner (or newer streaming work).
+       (when (eq pilish--status 'compacting)
+         (setq pilish--status
+               (if (memq pilish--pre-compaction-status '(sending streaming))
+                   pilish--pre-compaction-status
+                 'idle)))
        (setq pilish--pre-compaction-status nil))
       ("auto_retry_start"
        (setq pilish--status 'sending)
@@ -842,8 +840,6 @@ Handles agent lifecycle, message events, compaction, and error/retry events."
       ("auto_retry_end"
        (plist-put pilish--state :is-retrying nil)
        (unless (eq (plist-get event :success) t)
-         (when (eq pilish--status 'sending)
-           (setq pilish--status 'idle))
          (plist-put pilish--state :last-error (plist-get event :finalError))))
       ("extension_error"
        (plist-put pilish--state :last-error (plist-get event :error))))))
@@ -878,6 +874,15 @@ Handles agent lifecycle, message events, compaction, and error/retry events."
     (when tools
       (remhash id tools))))
 
+(defun pilish--merge-state-response-status (remote-status)
+  "Merge REMOTE-STATUS without overwriting an owned busy phase.
+A snapshot may initialize an idle session, but isStreaming also includes
+post-run work and is not evidence of a newer agent_start.  Lifecycle
+events and the explicit no-turn prompt probe own busy-phase transitions."
+  (if (memq pilish--status '(sending streaming compacting))
+      pilish--status
+    remote-status))
+
 (defun pilish--update-state-from-response (response)
   "Update state from a command RESPONSE.
 Only processes successful responses for state-modifying commands."
@@ -896,8 +901,10 @@ Only processes successful responses for state-modifying commands."
            (plist-put pilish--state :thinking-level (plist-get data :level))))
         ("get_state"
          (let ((new-state (pilish--extract-state-from-response response)))
-           (setq pilish--status (plist-get new-state :status)
-                 pilish--state new-state)))))))
+           (setq pilish--status
+                 (pilish--merge-state-response-status
+                  (plist-get new-state :status)))
+           (setq pilish--state (plist-put new-state :status pilish--status))))))))
 
 (defun pilish--extract-state-from-response (response &optional anchor)
   "Extract state plist from a get_state RESPONSE.

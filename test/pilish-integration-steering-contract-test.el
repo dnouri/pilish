@@ -15,7 +15,7 @@
     (steering-contract-queues-and-delivers)
   "A steer command queued during streaming is delivered visibly later on."
   (let ((got-agent-start nil)
-        (got-agent-end nil)
+        (got-agent-settled nil)
         (queued-delivered nil)
         (user-message-events nil))
     (push (lambda (event)
@@ -28,8 +28,8 @@
                                     (pilish-integration--message-text
                                      (plist-get event :message)))
                 (setq queued-delivered t)))
-            (when (equal (plist-get event :type) "agent_end")
-              (setq got-agent-end t)))
+            (when (equal (plist-get event :type) "agent_settled")
+              (setq got-agent-settled t)))
           pilish--event-handlers)
     (let ((prompt-response (pilish--rpc-sync
                             proc
@@ -62,8 +62,8 @@
       (should (eq (plist-get abort-response :success) t))
       (should (equal (plist-get abort-response :command) "abort")))
     (with-timeout (pilish-test-rpc-timeout
-                   (ert-fail "Timeout waiting for agent_end after steering abort"))
-      (while (not got-agent-end)
+                   (ert-fail "Timeout waiting for agent_settled after steering abort"))
+      (while (not got-agent-settled)
         (accept-process-output proc pilish-test-poll-interval)))
     (setq user-message-events (nreverse user-message-events))
     (should (= (length user-message-events) 2))
