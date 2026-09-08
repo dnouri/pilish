@@ -280,9 +280,10 @@ Uses tool call ID \"call_1\" and contentIndex 0."
       (insert (base64-decode-string (pilish-test--prompt-image-base64 type)))))
   path)
 
-(defun pilish-test--input-header ()
-  "Return the current input header without properties."
-  (substring-no-properties (pilish--header-line-string)))
+(defun pilish-test--input-header (&optional input)
+  "Return INPUT's header without properties, defaulting to the current buffer."
+  (with-current-buffer (or input (current-buffer))
+    (substring-no-properties (pilish--header-line-string))))
 
 (defun pilish-test--attach-image (path)
   "Attach prompt image PATH through the public interactive command."
@@ -482,46 +483,44 @@ Returns the buffer with content ready for navigation tests."
           "You · 10:10\n===========\nThird question\n\n"
           "Assistant\n=========\nThird answer\n"))
 
-;;;; Controlled time and recorded production timers
+;;;; Inactivity observation fixtures
 
 (defvar pilish-session-inactivity-timeout)
 
-(cl-defmacro pilish-test-with-clock-and-timers
-    ((now timers cancelled) &rest body)
-  "Run BODY with clock NOW and inert production timers recorded in TIMERS.
-CANCELLED records actual cancellation requests.  Timer functions and arguments
-are those supplied by production, so tests can deliver even stale callbacks."
-  (declare (indent 1) (debug ((symbolp symbolp symbolp) body)))
-  `(let ((,now 1000.0) ,timers ,cancelled
-         (real-float-time (symbol-function 'float-time))
-         (real-cancel-timer (symbol-function 'cancel-timer)))
-     (cl-labels ((schedule (delay repeat function &rest args)
-                   (let ((timer (timer-create)))
-                     (timer-set-time timer (seconds-to-time ,now) repeat)
-                     (timer-set-function timer function args)
-                     (push timer ,timers)
-                     ;; DELAY is intentionally not used to advance the clock.
-                     (ignore delay)
-                     timer)))
-       (cl-letf (((symbol-function 'float-time)
-                  (lambda (&optional time)
-                    (if time (funcall real-float-time time) ,now)))
-                 ((symbol-function 'run-at-time) #'schedule)
-                 ((symbol-function 'run-with-timer) #'schedule)
-                 ((symbol-function 'cancel-timer)
-                  (lambda (timer)
-                    (push timer ,cancelled)
-                    (funcall real-cancel-timer timer))))
-         ,@body))))
+(defmacro pilish-test-with-clock (now &rest body)
+  "Run BODY with NOW initially 1000.0; explicit time conversions stay real.
+Timers use ordinary Emacs scheduling.  Do not wait with this frozen clock."
+  (declare (indent 1) (debug (symbolp body)))
+  `(let ((,now 1000.0) (real-float-time (symbol-function 'float-time)))
+     (cl-letf (((symbol-function 'float-time)
+                (lambda (&optional time)
+                  (if time (funcall real-float-time time) ,now))))
+       ,@body)))
+
+(defmacro pilish-test-with-repeating-timer-allocations (timers &rest body)
+  "Observe real repeating timer allocations in TIMERS while running BODY.
+Keep cancelled allocations too; count each timer once even when
+`run-with-timer' delegates to `run-at-time'.  On exit cancel only these
+new repeating timers.  BODY should contain synchronous test actions."
+  (declare (indent 1) (debug (symbolp body)))
+  `(let (,timers)
+     (cl-flet ((observe (timer)
+                 (when (timer--repeat-delay timer)
+                   (cl-pushnew timer ,timers :test #'eq))
+                 timer))
+       (unwind-protect
+           (progn
+             (advice-add 'run-at-time :filter-return #'observe)
+             (advice-add 'run-with-timer :filter-return #'observe)
+             ,@body)
+         (advice-remove 'run-at-time #'observe)
+         (advice-remove 'run-with-timer #'observe)
+         (mapc #'cancel-timer ,timers)))))
 
 (defun pilish-test--fire-timer (timer)
   "Deliver TIMER's production callback, even after cancellation."
   (should (timerp timer))
   (apply (timer--function timer) (timer--args timer)))
-
-(defun pilish-test--repeating-timers (timers)
-  "Return the repeating timers among recorded TIMERS."
-  (cl-remove-if-not #'timer--repeat-delay timers))
 
 (defun pilish-test--adopt-rpc-process (chat process)
   "Exercise genuine adoption of fixture PROCESS in CHAT."
@@ -529,6 +528,29 @@ are those supplied by production, so tests can deliver even stale callbacks."
     ;; The base RPC fixture deliberately assigns its process directly.
     (setq pilish--process nil)
     (pilish--set-process process)))
+
+(cl-defmacro pilish-test-with-inactivity-session
+    ((chat input proc commands now) &rest body)
+  "Run BODY in an adopted RPC session with clock NOW and real timers.
+The RPC fixture kills its buffers and cleans up their timers on exit."
+  (declare (indent 1) (debug ((symbolp symbolp symbolp symbolp symbolp) body)))
+  `(pilish-test-with-clock ,now
+     (pilish-test-with-rpc-session (,chat ,input ,proc ,commands)
+       (let ((pilish-session-inactivity-timeout 300))
+         (pilish-test--adopt-rpc-process ,chat ,proc)
+         ,@body))))
+
+(defun pilish-test--assert-inactivity (input expected)
+  "Assert INPUT has EXPECTED warning text and face, or no warning when nil."
+  (let ((header (with-current-buffer input (pilish--header-line-string))))
+    (ert-info ((format "input=%s expected=%S header=%S"
+                       (buffer-name input) expected header))
+      (if expected
+          (let ((start (string-match (regexp-quote expected) header)))
+            (should start)
+            (should (eq 'warning (get-text-property start 'face header))))
+        (should-not (string-match-p "no output" header))))
+    header))
 
 (defun pilish-test--stdout (process &rest events)
   "Deliver EVENTS together in one real stdout filter call for PROCESS.

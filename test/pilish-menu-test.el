@@ -3787,132 +3787,121 @@ The tree is built iteratively to avoid recursion in test setup."
 
 (ert-deftest pilish-test-inactivity-manual-compact-reservation-is-not-monitored ()
   "An idle compact RPC reservation is busy for submission, not for silence."
-  (pilish-test-with-clock-and-timers (now timers cancelled)
-    (pilish-test-with-rpc-session (chat input proc commands)
-      (let ((pilish-session-inactivity-timeout 300) notices)
-        (pilish-test--adopt-rpc-process chat proc)
-        (cl-letf (((symbol-function 'message)
-                   (lambda (fmt &rest args) (push (apply #'format fmt args) notices))))
-          (with-current-buffer input (pilish-compact)))
+  (pilish-test-with-inactivity-session (chat input proc commands now)
+    (let (notices)
+      (cl-letf (((symbol-function 'message)
+                 (lambda (fmt &rest args) (push (apply #'format fmt args) notices))))
+        (with-current-buffer input (pilish-compact))
         (should (equal notices '("Pi: Compacting...")))
         (should (equal "compact" (plist-get (car commands) :type)))
         (should (with-current-buffer chat (pilish--session-busy-p)))
         (should (eq 'idle (buffer-local-value 'pilish--status chat)))
         (setq now 2000.0)
-        (should-not (string-match-p "no output"
-                                    (with-current-buffer input (pilish-test--input-header))))
-        (should-not (pilish-test--repeating-timers timers))
+        (pilish-test--assert-inactivity input nil)
+        (should-not (buffer-local-value 'pilish--inactivity-timer chat))
         (should (= 1 (hash-table-count (pilish--get-pending-requests proc))))
-        (cl-letf (((symbol-function 'message)
-                   (lambda (fmt &rest args) (push (apply #'format fmt args) notices))))
-          (pilish-test--stdout proc '(:type "compaction_start" :reason "manual")
-                               '(:type "compaction_end" :reason "manual" :aborted t)))
-        (setq now 3000.0)
-        (should (eq 'idle (buffer-local-value 'pilish--status chat)))
-        (should (with-current-buffer chat (pilish--session-busy-p)))
-        (should (= 1 (hash-table-count (pilish--get-pending-requests proc))))
-        (should-not (string-match-p "no output"
-                                    (with-current-buffer input (pilish-test--input-header))))
-        (should (cl-every (lambda (timer) (memq timer cancelled))
-                          (pilish-test--repeating-timers timers)))))))
+        (pilish-test--stdout proc '(:type "compaction_start" :reason "manual")
+                             '(:type "compaction_end" :reason "manual" :aborted t)))
+      (should (equal notices '("Pi: Compaction cancelled"
+                               "Pi: Compacting..." "Pi: Compacting..."))))
+    (setq now 3000.0)
+    (should (eq 'idle (buffer-local-value 'pilish--status chat)))
+    (should (with-current-buffer chat (pilish--session-busy-p)))
+    (should (= 1 (hash-table-count (pilish--get-pending-requests proc))))
+    (pilish-test--assert-inactivity input nil)
+    (should-not (buffer-local-value 'pilish--inactivity-timer chat))))
 
 (ert-deftest pilish-test-inactivity-transition-cancellation-rearms-same-process ()
   "Transition guards cancel monitoring, and finishing preserves existing age."
-  (pilish-test-with-clock-and-timers (now timers cancelled)
-    (pilish-test-with-rpc-session (chat input proc commands)
-      (let ((pilish-session-inactivity-timeout 300))
-        (pilish-test--adopt-rpc-process chat proc)
-        (pilish-test--stdout proc '(:type "agent_start"))
-        (let* ((old (car (pilish-test--repeating-timers timers)))
-               (generation (with-current-buffer chat
-                             (pilish--begin-session-transition proc))))
-          (setq now 1400.0)
-          (should-not (string-match-p "no output"
-                                      (with-current-buffer input (pilish-test--input-header))))
-          (should (memq old cancelled))
-          (with-current-buffer chat (pilish--finish-session-transition generation))
-          (let ((current (car (pilish-test--repeating-timers timers))) refreshed)
-            (should-not (eq current old))
-            (should (string-match-p "no output 6m"
-                                    (with-current-buffer input (pilish-test--input-header))))
-            (cl-letf (((symbol-function 'force-mode-line-update)
-                       (lambda (&rest _) (push (current-buffer) refreshed))))
-              (pilish-test--fire-timer old))
-            (should-not refreshed)
-            (should-not (memq current cancelled))
-            (should (eq 'streaming (buffer-local-value 'pilish--status chat)))))))))
+  (pilish-test-with-inactivity-session (chat input proc commands now)
+    (pilish-test--stdout proc '(:type "agent_start"))
+    (with-current-buffer chat (setq pilish--followup-queue '("keep")))
+    (let* ((old (buffer-local-value 'pilish--inactivity-timer chat))
+           (generation (with-current-buffer chat
+                         (pilish--begin-session-transition proc))))
+      (setq now 1400.0)
+      (pilish-test--assert-inactivity input nil)
+      (should-not (memq old timer-list))
+      (with-current-buffer chat (pilish--finish-session-transition generation))
+      (let ((current (buffer-local-value 'pilish--inactivity-timer chat)) refreshed)
+        (should-not (eq current old))
+        (pilish-test--assert-inactivity input "thinking (no output 6m)")
+        (cl-letf (((symbol-function 'force-mode-line-update)
+                   (lambda (&rest _) (push (current-buffer) refreshed))))
+          (setq now 900.0 refreshed nil)
+          (pilish-test--fire-timer old)
+          (should-not refreshed)
+          (setq now 1400.0))
+        (should (memq current timer-list))
+        (should (eq current (buffer-local-value 'pilish--inactivity-timer chat)))
+        (should (equal 1000.0 (process-get proc 'pilish-last-output-time)))
+        (should (equal '("keep") (buffer-local-value 'pilish--followup-queue chat)))
+        (should (eq 'streaming (buffer-local-value 'pilish--status chat)))
+        (pilish-test--fire-timer current)
+        (pilish-test--assert-inactivity input "thinking (no output 6m)")))))
 
 (ert-deftest pilish-test-inactivity-session-reset-rebases-same-process ()
   "Explicit session reset invalidates the old observer even without replacement."
-  (pilish-test-with-clock-and-timers (now timers cancelled)
-    (pilish-test-with-rpc-session (chat input proc commands)
-      (let ((pilish-session-inactivity-timeout 300))
-        (pilish-test--adopt-rpc-process chat proc)
-        (pilish-test--stdout proc '(:type "agent_start"))
-        (let ((old (car (pilish-test--repeating-timers timers))))
-          (setq now 1400.0)
-          (with-current-buffer chat (pilish--reset-session-state))
-          (should-not (string-match-p "no output"
-                                      (with-current-buffer input (pilish-test--input-header))))
-          (should (memq old cancelled))
-          (should (eq proc (buffer-local-value 'pilish--process chat)))
-          ;; Reset's existing status semantics must not be changed by the UI.
-          (should (eq 'streaming (buffer-local-value 'pilish--status chat)))
-          (setq now 1700.0)
-          (should (string-match-p "no output 5m"
-                                  (with-current-buffer input (pilish-test--input-header)))))))))
+  (pilish-test-with-inactivity-session (chat input proc commands now)
+    (pilish-test--stdout proc '(:type "agent_start"))
+    (let ((old (buffer-local-value 'pilish--inactivity-timer chat)))
+      (should (memq old timer-list))
+      (setq now 1400.0)
+      (with-current-buffer chat (pilish--reset-session-state))
+      (pilish-test--assert-inactivity input nil)
+      (should-not (memq old timer-list))
+      (should (eq proc (buffer-local-value 'pilish--process chat)))
+      ;; Reset's existing status semantics must not be changed by the UI.
+      (should (eq 'streaming (buffer-local-value 'pilish--status chat)))
+      (setq now 1700.0)
+      (pilish-test--assert-inactivity input "idle (no output 5m)"))))
 
 (ert-deftest pilish-test-inactivity-resume-adopts-new-session-on-same-process ()
   "Successful same-process resume resets observation, not just history text."
   (let* ((dir (pilish-test--make-temp-directory "pilish-inactivity-resume-"))
          (path (expand-file-name "target.jsonl" dir)))
     (unwind-protect
-        (pilish-test-with-clock-and-timers (now timers cancelled)
-          (pilish-test-with-rpc-session (chat input proc commands)
-            (let ((pilish-session-inactivity-timeout 300) notices)
-              (pilish-test--write-session-file path "target" (directory-file-name dir))
-              (pilish-test--adopt-rpc-process chat proc)
-              (pilish-test--stdout proc '(:type "agent_start"))
-              (let ((old (car (pilish-test--repeating-timers timers))))
-                (pilish-test--stdout proc '(:type "agent_end" :messages [])
-                                     '(:type "agent_settled"))
-                (should (eq 'idle (buffer-local-value 'pilish--status chat)))
-                (setq now 1400.0)
-                ;; Like the existing resume choreography tests, deliver RPC
-                ;; callbacks synchronously.  No stdout clock update masks the
-                ;; separate requirement to reset on successful adoption.
-                (cl-letf (((symbol-function 'pilish--rpc-async)
-                           (lambda (_proc cmd cb)
-                             (pcase (plist-get cmd :type)
-                               ("switch_session"
-                                (funcall cb '(:success t :data (:cancelled :false))))
-                               ("get_state"
-                                (funcall cb `(:success t :data (:isStreaming t
-                                                  :isCompacting :false
-                                                  :sessionId "resumed"
-                                                  :sessionFile ,path))))
-                               ("get_messages"
-                                (funcall cb '(:success t :data (:messages []))))
-                               ("get_commands"
-                                (funcall cb '(:success t :data (:commands []))))
-                               (_ (ert-fail (format "Unexpected resume RPC: %S" cmd))))))
-                          ((symbol-function 'message)
-                           (lambda (fmt &rest args)
-                             (push (apply #'format fmt args) notices))))
-                  (pilish--resume-selected-session proc chat path))
-                ;; A resumed streaming owner intentionally prevents history
-                ;; rerender (and its success notice); preserve that behavior.
-                (should-not notices)
-                (should (equal "resumed"
-                               (plist-get (buffer-local-value 'pilish--state chat) :session-id)))
-                (should (eq proc (buffer-local-value 'pilish--process chat)))
-                (should (eq 'streaming (buffer-local-value 'pilish--status chat)))
-                (should-not (string-match-p "no output"
-                                            (with-current-buffer input (pilish-test--input-header))))
-                (should (memq old cancelled))
-                (setq now 1700.0)
-                (should (string-match-p "no output 5m"
-                                        (with-current-buffer input (pilish-test--input-header))))))))
+        (pilish-test-with-inactivity-session (chat input proc commands now)
+          (let (notices)
+            (pilish-test--write-session-file path "target" (directory-file-name dir))
+            (pilish-test--stdout proc '(:type "agent_start"))
+            (let ((old (buffer-local-value 'pilish--inactivity-timer chat)))
+              (should (memq old timer-list))
+              (pilish-test--stdout proc '(:type "agent_end" :messages [])
+                                   '(:type "agent_settled"))
+              (should (eq 'idle (buffer-local-value 'pilish--status chat)))
+              (setq now 1400.0)
+              ;; Deliver synchronous callbacks so stdout cannot mask adoption's
+              ;; separate responsibility to rebase the observation clock.
+              (cl-letf (((symbol-function 'pilish--rpc-async)
+                         (lambda (_proc cmd cb)
+                           (pcase (plist-get cmd :type)
+                             ("switch_session"
+                              (funcall cb '(:success t :data (:cancelled :false))))
+                             ("get_state"
+                              (funcall cb `(:success t :data
+                                            (:isStreaming t :isCompacting :false
+                                             :sessionId "resumed" :sessionFile ,path))))
+                             ("get_messages"
+                              (funcall cb '(:success t :data (:messages []))))
+                             ("get_commands"
+                              (funcall cb '(:success t :data (:commands []))))
+                             (_ (ert-fail (format "Unexpected resume RPC: %S" cmd))))))
+                        ((symbol-function 'message)
+                         (lambda (fmt &rest args)
+                           (push (apply #'format fmt args) notices))))
+                (pilish--resume-selected-session proc chat path))
+              ;; A resumed streaming owner intentionally prevents history
+              ;; rerender (and its success notice); preserve that behavior.
+              (should-not notices)
+              (should (equal "resumed"
+                             (plist-get (buffer-local-value 'pilish--state chat) :session-id)))
+              (should (eq proc (buffer-local-value 'pilish--process chat)))
+              (should (eq 'streaming (buffer-local-value 'pilish--status chat)))
+              (pilish-test--assert-inactivity input nil)
+              (should-not (memq old timer-list))
+              (setq now 1700.0)
+              (pilish-test--assert-inactivity input "idle (no output 5m)"))))
       (delete-directory dir t))))
 
 (provide 'pilish-menu-test)

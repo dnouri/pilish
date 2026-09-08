@@ -1387,28 +1387,29 @@ Arming never overwrites the stdout receipt that preceded a state event."
   (if (not (pilish--inactivity-eligible-p))
       (pilish--cancel-inactivity-timer)
     (unless pilish--inactivity-timer
-      (let ((chat (current-buffer))
-            (process pilish--process)
-            timer)
+      (let ((chat (current-buffer)) timer)
         (setq timer
               (run-at-time
                1 1
                (lambda ()
-                 (when (buffer-live-p chat)
+                 ;; Replacement cancels before assigning the process, so timer
+                 ;; identity covers process ownership.  Retire only our timer
+                 ;; if locals were reset, the chat died, or a new owner took over.
+                 (if (not (and (buffer-live-p chat)
+                               (eq timer (buffer-local-value
+                                          'pilish--inactivity-timer chat))))
+                     (cancel-timer timer)
                    (with-current-buffer chat
-                     ;; A cancelled callback must not touch a newer observer,
-                     ;; even when the process was reused for another session.
-                     (when (and (eq timer pilish--inactivity-timer)
-                                (eq process pilish--process))
-                       (if (not (pilish--inactivity-eligible-p))
-                           (pilish--cancel-inactivity-timer)
-                         (let ((now (float-time))
-                               (last (process-get process 'pilish-last-output-time)))
-                           (when (and last (< now last))
-                             (process-put process 'pilish-last-output-time now)))
-                         (when (buffer-live-p pilish--input-buffer)
-                           (with-current-buffer pilish--input-buffer
-                             (force-mode-line-update)))))))))
+                     (if (not (pilish--inactivity-eligible-p))
+                         (pilish--cancel-inactivity-timer)
+                       (let ((now (float-time))
+                             (last (process-get pilish--process
+                                                'pilish-last-output-time)))
+                         (when (and last (< now last))
+                           (process-put pilish--process 'pilish-last-output-time now)))
+                       (when (buffer-live-p pilish--input-buffer)
+                         (with-current-buffer pilish--input-buffer
+                           (force-mode-line-update))))))))
               pilish--inactivity-timer timer)))))
 
 (defun pilish--inactivity-status (phase)
