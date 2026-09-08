@@ -202,6 +202,32 @@ conveniently discover commands and shortcuts for model selection,
 thinking level, sessions, fork, compact, export, stats, skills and
 custom commands.
 
+** Quiet sessions
+
+While streaming or compacting, five minutes without stdout from Pi changes
+only the existing input activity status, for example to
+=thinking (no output 5m)=, using Emacs's =warning= face.  The phase stays
+visible.  Idle and sending sessions are not monitored; hiding the input
+also hides the warning.  It never aborts, polls Pi, or changes session state.
+Hover for help, or use =M-x pilish-abort= (normally =C-c C-k=) in that session
+if you choose to stop and discard queued continuations.
+
+=pilish-session-inactivity-timeout= defaults to =300= seconds.  Use a positive
+number to change the threshold, or =nil= to disable the warning:
+
+#+begin_src emacs-lisp
+(setopt pilish-session-inactivity-timeout nil)
+#+end_src
+
+Changes apply at the next header refresh; reenabling retains the existing
+output age.  Any nonempty parent stdout counts, including partial or malformed
+output, ordinary replies, and repeated tool progress; stderr does not.
+Silence is not proof of a hang: quiet tools and healthy subagents may produce
+no parent output, while one sibling's output keeps the shared clock fresh.
+Timing is approximate wall time, not an awake-time deadline: suspend, clock
+changes, or a blocked Emacs can advance or delay the warning.  Active sessions
+refresh the input header once a second when Emacs can service its timers.
+
 #+html: <a id="composing-prompts"></a>
 ** Composing prompts ✍️
 

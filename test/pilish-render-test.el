@@ -15261,5 +15261,120 @@ events where the header text hasn't changed."
       (goto-char (marker-position pilish--hot-tail-start))
       (should (looking-at "Assistant")))))
 
+;;; Stdout silence across real display/lifecycle dispatch
+
+(ert-deftest pilish-test-inactivity-raw-noise-clears-and-rewarns-without-dispatch ()
+  "Partial, malformed, response and unknown stdout clear a warning literally."
+  (pilish-test-with-clock-and-timers (now timers cancelled)
+    (pilish-test-with-rpc-session (chat input proc commands)
+      (let ((pilish-session-inactivity-timeout 300))
+        (pilish-test--adopt-rpc-process chat proc)
+        (pilish-test--stdout proc '(:type "agent_start"))
+        (let ((normal (with-current-buffer input (pilish-test--input-header)))
+              (text (with-current-buffer chat (buffer-string))))
+          (dolist (chunk '(" " "\ninvalid JSON\n" "{\"type\":\"response\""
+                           ",\"success\":true}\n" "{\"type\":\"unknown\"}\n"))
+            (setq now (+ now 300))
+            (should (string-match-p "no output 5m"
+                                    (with-current-buffer input (pilish-test--input-header))))
+            (pilish--process-filter proc chunk)
+            (should (equal normal (with-current-buffer input (pilish-test--input-header))))
+            (should (eq 'streaming (buffer-local-value 'pilish--status chat)))
+            (should (equal text (with-current-buffer chat (buffer-string)))))
+          (setq now (+ now 300))
+          (pilish--process-filter proc "")
+          (with-current-buffer input (insert "typing is not stdout"))
+          (let ((stderr (generate-new-buffer " *pilish-inactivity-stderr*")))
+            (unwind-protect
+                (progn
+                  (process-put proc 'pilish-stderr-buffer stderr)
+                  (with-current-buffer stderr (insert "still working on stderr\n"))
+                  (should (string-match-p "no output 5m"
+                                          (with-current-buffer input (pilish-test--input-header)))))
+              (kill-buffer stderr)))
+          (should-not commands)
+          (should (= 1 (length (pilish-test--repeating-timers timers)))))))))
+
+(ert-deftest pilish-test-inactivity-batched-end-start-keeps-chunk-receipt-time ()
+  "Timer rearming must not replace output already observed in the same chunk."
+  (pilish-test-with-clock-and-timers (now timers cancelled)
+    (pilish-test-with-rpc-session (chat input proc commands)
+      (let ((pilish-session-inactivity-timeout 300))
+        (pilish-test--adopt-rpc-process chat proc)
+        (pilish-test--stdout proc '(:type "agent_start"))
+        (setq now 1400.0)
+        (let ((original (symbol-function 'pilish--handle-display-event)))
+          (cl-letf (((symbol-function 'pilish--handle-display-event)
+                     (lambda (event)
+                       ;; Simulate expensive display work after chunk receipt.
+                       (setq now (+ now 10))
+                       (funcall original event))))
+            (pilish-test--stdout proc '(:type "agent_end" :messages [])
+                                 '(:type "agent_start"))))
+        (should (eq 'streaming (buffer-local-value 'pilish--status chat)))
+        (should-not (string-match-p "no output"
+                                    (with-current-buffer input (pilish-test--input-header))))
+        (setq now 1700.0)
+        (should (string-match-p "thinking (no output 5m)"
+                                (with-current-buffer input (pilish-test--input-header))))
+        (should (= 2 (length (pilish-test--repeating-timers timers))))))))
+
+(ert-deftest pilish-test-inactivity-unchanged-phase-deltas-do-not-churn-timer ()
+  "Rendered same-phase progress refreshes raw age without phase-hook reliance."
+  (pilish-test-with-clock-and-timers (now timers cancelled)
+    (pilish-test-with-rpc-session (chat input proc commands)
+      (let ((pilish-session-inactivity-timeout 300))
+        (pilish-test--adopt-rpc-process chat proc)
+        (pilish-test--stdout proc '(:type "agent_start"))
+        (dotimes (_ 4)
+          (setq now (+ now 250))
+          (pilish-test--stdout
+           proc '(:type "message_update"
+                        :assistantMessageEvent (:type "text_delta" :delta "more text ")))
+          (should (equal "replying" (buffer-local-value 'pilish--activity-phase chat)))
+          (should-not (string-match-p "no output"
+                                      (with-current-buffer input (pilish-test--input-header)))))
+        (should (string-match-p "more text more text more text more text"
+                                (with-current-buffer chat (buffer-string))))
+        (should (= 1 (length (pilish-test--repeating-timers timers))))
+        (should-not cancelled)
+        (setq now (+ now 300))
+        (should (string-match-p "replying (no output 5m)"
+                                (with-current-buffer input (pilish-test--input-header))))))))
+
+(ert-deftest pilish-test-inactivity-compaction-preserves-manual-and-auto-owners ()
+  "Warning changes neither compaction restoration nor pending reservations."
+  (dolist (case '(("manual" sending idle)
+                  ("threshold" streaming streaming)
+                  ("threshold" sending sending)))
+    (pilish-test-with-clock-and-timers (now timers cancelled)
+      (pilish-test-with-rpc-session (chat input proc commands)
+        (let ((pilish-session-inactivity-timeout 300) notices)
+          (pilish-test--adopt-rpc-process chat proc)
+          (with-current-buffer chat (setq pilish--status (cadr case)))
+          (cl-letf (((symbol-function 'message)
+                     (lambda (fmt &rest args) (push (apply #'format fmt args) notices))))
+            (pilish-test--stdout
+             proc `(:type "compaction_start" :reason ,(car case))))
+          (setq now 1300.0)
+          (should (string-match-p "compact (no output 5m)"
+                                  (with-current-buffer input (pilish-test--input-header))))
+          (should (eq 'compacting (buffer-local-value 'pilish--status chat)))
+          (let ((timer (car (pilish-test--repeating-timers timers))))
+            (cl-letf (((symbol-function 'message)
+                       (lambda (fmt &rest args) (push (apply #'format fmt args) notices))))
+              (pilish-test--stdout
+               proc `(:type "compaction_end" :reason ,(car case) :aborted t)))
+            (should (eq (caddr case) (buffer-local-value 'pilish--status chat)))
+            (should-not (string-match-p "no output"
+                                        (with-current-buffer input (pilish-test--input-header))))
+            (if (eq (caddr case) 'streaming)
+                (progn
+                  (should-not (memq timer cancelled))
+                  (setq now 1600.0)
+                  (should (string-match-p "no output 5m"
+                                          (with-current-buffer input (pilish-test--input-header)))))
+              (should (memq timer cancelled)))))))))
+
 (provide 'pilish-render-test)
 ;;; pilish-render-test.el ends here

@@ -346,6 +346,7 @@ Return the parsed metadata, or nil when SESSION-FILE was not a pi session."
 (defun pilish--reset-session-state ()
   "Reset all session-specific state for a new session.
 Call this when starting a new session to ensure no stale state persists."
+  (pilish--reset-inactivity-observation)
   (dolist (marker (list pilish--message-start-marker
                         pilish--streaming-marker
                         pilish--thinking-marker
@@ -663,6 +664,7 @@ buffer from session history."
                        (progn
                          (when (buffer-live-p chat-buf)
                            (with-current-buffer chat-buf
+                             (pilish--reset-inactivity-observation)
                              (pilish--retarget-session-buffers
                               target-dir)))
                          (pilish--refresh-transition-state-and-history

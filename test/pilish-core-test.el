@@ -11,6 +11,56 @@
 (require 'pilish-core)
 (require 'pilish-test-common)
 
+;;;; Raw stdout observation
+
+(ert-deftest pilish-test-inactivity-filter-counts-raw-chunks-before-dispatch ()
+  "Every nonempty chunk is observed before parsing or response callbacks."
+  (let ((proc (start-process "pilish-stdout-clock" nil "cat")))
+    (unwind-protect
+        (pilish-test-with-clock-and-timers (now timers cancelled)
+          (set-process-query-on-exit-flag proc nil)
+          (let ((frame (symbol-function 'pilish--accumulate-line-chunks)))
+            (cl-letf (((symbol-function 'pilish--accumulate-line-chunks)
+                       (lambda (partial output)
+                         (should (equal (process-get proc 'pilish-last-output-time) now))
+                         (funcall frame partial output))))
+              (dolist (chunk '(" \n" "not JSON\n" "{\"type\":\"response\""
+                               ",\"success\":true}\n" "{\"type\":\"future_event\"}\n"))
+                (setq now (+ now 17))
+                (pilish--process-filter proc chunk)
+                (should (equal (process-get proc 'pilish-last-output-time) now)))))
+          (let ((before (process-get proc 'pilish-last-output-time)))
+            (setq now (+ now 17))
+            (pilish--process-filter proc "")
+            (should (equal (process-get proc 'pilish-last-output-time) before)))
+          (let (seen)
+            (puthash "clock-response"
+                     (lambda (_response)
+                       (push (process-get proc 'pilish-last-output-time) seen))
+                     (pilish--get-pending-requests proc))
+            (setq now (+ now 17))
+            (pilish-test--stdout
+             proc '(:type "response" :id "clock-response" :success t))
+            (should (equal seen (list now))))
+          (should-not timers)
+          (should-not cancelled))
+      (delete-process proc))))
+
+(ert-deftest pilish-test-inactivity-filter-is-process-local-before-adoption ()
+  "Unadopted output records its own clock, never another process's clock."
+  (let ((a (start-process "pilish-clock-a" nil "cat"))
+        (b (start-process "pilish-clock-b" nil "cat")))
+    (unwind-protect
+        (pilish-test-with-clock-and-timers (now timers cancelled)
+          (pilish--process-filter a "partial")
+          (setq now 1100.0)
+          (pilish--process-filter b "\n")
+          (should (equal (process-get a 'pilish-last-output-time) 1000.0))
+          (should (equal (process-get b 'pilish-last-output-time) 1100.0))
+          (should-not timers))
+      (delete-process a)
+      (delete-process b))))
+
 ;;;; JSON Parsing Tests
 
 (ert-deftest pilish-test-parse-json-response ()

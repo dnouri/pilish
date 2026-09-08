@@ -482,5 +482,64 @@ Returns the buffer with content ready for navigation tests."
           "You · 10:10\n===========\nThird question\n\n"
           "Assistant\n=========\nThird answer\n"))
 
+;;;; Controlled time and recorded production timers
+
+(defvar pilish-session-inactivity-timeout)
+
+(cl-defmacro pilish-test-with-clock-and-timers
+    ((now timers cancelled) &rest body)
+  "Run BODY with clock NOW and inert production timers recorded in TIMERS.
+CANCELLED records actual cancellation requests.  Timer functions and arguments
+are those supplied by production, so tests can deliver even stale callbacks."
+  (declare (indent 1) (debug ((symbolp symbolp symbolp) body)))
+  `(let ((,now 1000.0) ,timers ,cancelled
+         (real-float-time (symbol-function 'float-time))
+         (real-cancel-timer (symbol-function 'cancel-timer)))
+     (cl-labels ((schedule (delay repeat function &rest args)
+                   (let ((timer (timer-create)))
+                     (timer-set-time timer (seconds-to-time ,now) repeat)
+                     (timer-set-function timer function args)
+                     (push timer ,timers)
+                     ;; DELAY is intentionally not used to advance the clock.
+                     (ignore delay)
+                     timer)))
+       (cl-letf (((symbol-function 'float-time)
+                  (lambda (&optional time)
+                    (if time (funcall real-float-time time) ,now)))
+                 ((symbol-function 'run-at-time) #'schedule)
+                 ((symbol-function 'run-with-timer) #'schedule)
+                 ((symbol-function 'cancel-timer)
+                  (lambda (timer)
+                    (push timer ,cancelled)
+                    (funcall real-cancel-timer timer))))
+         ,@body))))
+
+(defun pilish-test--fire-timer (timer)
+  "Deliver TIMER's production callback, even after cancellation."
+  (should (timerp timer))
+  (apply (timer--function timer) (timer--args timer)))
+
+(defun pilish-test--repeating-timers (timers)
+  "Return the repeating timers among recorded TIMERS."
+  (cl-remove-if-not #'timer--repeat-delay timers))
+
+(defun pilish-test--adopt-rpc-process (chat process)
+  "Exercise genuine adoption of fixture PROCESS in CHAT."
+  (with-current-buffer chat
+    ;; The base RPC fixture deliberately assigns its process directly.
+    (setq pilish--process nil)
+    (pilish--set-process process)))
+
+(defun pilish-test--stdout (process &rest events)
+  "Deliver EVENTS together in one real stdout filter call for PROCESS.
+Use parser-style JSON values: t, :false and :null.  The legacy :json-false
+sentinel is not accepted."
+  (pilish--process-filter
+   process (mapconcat (lambda (event)
+                        (concat (json-serialize event :false-object :false
+                                                :null-object :null)
+                                "\n"))
+                      events "")))
+
 (provide 'pilish-test-common)
 ;;; pilish-test-common.el ends here

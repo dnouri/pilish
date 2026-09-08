@@ -2830,5 +2830,328 @@ Binds `chat-win' and `input-win' for use in BODY."
     (should (memq #'pilish--maybe-rebalance-windows
                   window-size-change-functions))))
 
+;;; Active-session stdout silence, in the existing input status only
+
+(ert-deftest pilish-test-inactivity-header-threshold-phase-face-and-help ()
+  "At the exact threshold only the existing status slot changes."
+  (dolist (case '(((:type "agent_start") "thinking")
+                  ((:type "tool_execution_start" :toolName "bash"
+                          :toolCallId "quiet-tool" :args (:command "sleep 600"))
+                   "running")
+                  ((:type "compaction_start" :reason "manual") "compact")))
+    (pilish-test-with-clock-and-timers (now timers cancelled)
+      (pilish-test-with-rpc-session (chat input proc commands)
+        ;; Before the option exists, still reach the real header assertion in
+        ;; RED.  Once implemented, exercise its actual uncustomized default.
+        (let ((pilish-session-inactivity-timeout
+               (if (boundp 'pilish-session-inactivity-timeout)
+                   pilish-session-inactivity-timeout 300))
+              notices)
+          (pilish-test--adopt-rpc-process chat proc)
+          (cl-letf (((symbol-function 'message)
+                     (lambda (format-string &rest args)
+                       (push (apply #'format format-string args) notices))))
+            (pilish-test--stdout proc '(:type "agent_start") (car case)))
+          (with-current-buffer chat
+            (setq pilish--session-name "Kept session"
+                  pilish--followup-queue '("do not submit")
+                  pilish--extension-status '(("extension" . "kept status"))))
+          (let* ((phase (cadr case))
+                 (normal (with-current-buffer input (pilish--header-line-string)))
+                 (chat-text (with-current-buffer chat (buffer-string)))
+                 (input-text (with-current-buffer input (buffer-string)))
+                 (status (buffer-local-value 'pilish--status chat))
+                 (state (copy-tree (buffer-local-value 'pilish--state chat)))
+                 (window (selected-window)))
+            (should (eq 'pilish-activity-phase
+                        (get-text-property (string-match phase normal) 'face normal)))
+            (setq notices nil commands nil now 1299.999)
+            (should (equal-including-properties
+                     normal (with-current-buffer input (pilish--header-line-string))))
+            (setq now 1300.0)
+            (cl-letf (((symbol-function 'message)
+                       (lambda (&rest args) (push args notices)))
+                      ((symbol-function 'display-warning)
+                       (lambda (&rest args) (push args notices))))
+              (let* ((header (with-current-buffer input (pilish--header-line-string)))
+                     (warning-text (concat phase " (no output 5m)"))
+                     (start (string-match (regexp-quote warning-text) header)))
+                (should start)
+                (should (equal (substring-no-properties header)
+                               (string-replace (format "%-8s" phase) warning-text
+                                               (substring-no-properties normal))))
+                (should (eq (get-text-property start 'face header) 'warning))
+                (let ((help (get-text-property start 'help-echo header)))
+                  (should (string-match-p "Pi may still be working" help))
+                  (should (string-match-p "M-x pilish-abort" help))
+                  (should (string-match-p "normally C-c C-k" help))
+                  (should (string-match-p "discard queued continuations" help)))
+                ;; Redisplay must be pure, not start another observer.
+                (let ((scheduled (length timers)))
+                  (dotimes (_ 3)
+                    (with-current-buffer input (pilish--header-line-string)))
+                  (should (= scheduled (length timers))))))
+            (should-not notices)
+            (should-not commands)
+            (should (eq status (buffer-local-value 'pilish--status chat)))
+            (should (equal state (buffer-local-value 'pilish--state chat)))
+            (should (equal phase (buffer-local-value 'pilish--activity-phase chat)))
+            (should (equal '("do not submit")
+                           (buffer-local-value 'pilish--followup-queue chat)))
+            (should-not (buffer-local-value 'pilish--aborted chat))
+            (should-not (buffer-local-value 'header-line-format chat))
+            (should (equal chat-text (with-current-buffer chat (buffer-string))))
+            (should (equal input-text (with-current-buffer input (buffer-string))))
+            (should (eq window (selected-window)))))))))
+
+(ert-deftest pilish-test-inactivity-live-timeout-policy-retains-output-age ()
+  "Disable, reenable and threshold edits use the same factual output age."
+  (pilish-test-with-clock-and-timers (now timers cancelled)
+    (pilish-test-with-rpc-session (chat input proc commands)
+      (let ((pilish-session-inactivity-timeout 20))
+        (pilish-test--adopt-rpc-process chat proc)
+        (pilish-test--stdout proc '(:type "agent_start"))
+        (let ((normal (with-current-buffer input (pilish-test--input-header))))
+          (setq now 1020.0)
+          (should (string-match-p "thinking (no output 20s)"
+                                  (with-current-buffer input (pilish-test--input-header))))
+          (setq pilish-session-inactivity-timeout nil)
+          (should (equal normal (with-current-buffer input (pilish-test--input-header))))
+          (let ((timer (car (pilish-test--repeating-timers timers))))
+            (pilish-test--fire-timer timer)
+            (should-not (memq timer cancelled)))
+          (setq now 1070.0 pilish-session-inactivity-timeout 20)
+          (should (string-match-p "no output 1m"
+                                  (with-current-buffer input (pilish-test--input-header))))
+          (setq pilish-session-inactivity-timeout 100)
+          (should (equal normal (with-current-buffer input (pilish-test--input-header))))
+          (setq pilish-session-inactivity-timeout 60)
+          (should (string-match-p "no output 1m"
+                                  (with-current-buffer input (pilish-test--input-header))))
+          (should (= 1 (length (pilish-test--repeating-timers timers)))))))))
+
+(ert-deftest pilish-test-inactivity-refresh-is-active-only-and-not-a-stats-poll ()
+  "The production timer refreshes linked input without RPC or lifecycle work."
+  (pilish-test-with-clock-and-timers (now timers cancelled)
+    (pilish-test-with-rpc-session (chat input proc commands)
+      (let ((pilish-session-inactivity-timeout 300) refreshed notices)
+        (pilish-test--adopt-rpc-process chat proc)
+        (should-not (pilish-test--repeating-timers timers))
+        (pilish-test--stdout proc '(:type "agent_start"))
+        (should (= 1 (length (pilish-test--repeating-timers timers))))
+        (let ((timer (car (pilish-test--repeating-timers timers))))
+          (setq now 4000.0 commands nil)
+          (with-current-buffer chat (setq pilish--followup-queue '("wait")))
+          (cl-letf (((symbol-function 'force-mode-line-update)
+                     (lambda (&optional all)
+                       (push (list (current-buffer) all) refreshed)))
+                    ((symbol-function 'pilish--refresh-header)
+                     (lambda () (ert-fail "Watchdog attempted stats refresh")))
+                    ((symbol-function 'message)
+                     (lambda (&rest args) (push args notices))))
+            ;; Callback must use its owner, not whichever buffer is selected.
+            (with-temp-buffer (pilish-test--fire-timer timer)))
+          (should (member (list input nil) refreshed))
+          (should-not (cl-some #'cadr refreshed))
+          (should-not notices)
+          (should-not commands)
+          (should (eq 'streaming (buffer-local-value 'pilish--status chat)))
+          (should (equal '("wait") (buffer-local-value 'pilish--followup-queue chat)))
+          (should (string-match-p "no output 50m"
+                                  (with-current-buffer input (pilish-test--input-header))))
+          (pilish-test--stdout proc '(:type "agent_end" :messages []))
+          (should (memq timer cancelled))
+          (should (eq 'sending (buffer-local-value 'pilish--status chat)))
+          (should-not (string-match-p "no output"
+                                      (with-current-buffer input (pilish-test--input-header))))
+          ;; Do not drain the deliberately held followup in fixture teardown.
+          (with-current-buffer chat (setq pilish--followup-queue nil))
+          (pilish-test--stdout proc '(:type "agent_settled"))
+          (should (eq 'idle (buffer-local-value 'pilish--status chat)))
+          (should (= 1 (length (pilish-test--repeating-timers timers)))))))))
+
+(ert-deftest pilish-test-inactivity-startup-state-response-arms-without-agent-event ()
+  "An accepted get_state can initialize busy observation, not settle it."
+  (pilish-test-with-clock-and-timers (now timers cancelled)
+    (pilish-test-with-rpc-session (chat input proc commands)
+      (let ((pilish-session-inactivity-timeout 300))
+        (pilish-test--adopt-rpc-process chat proc)
+        (pilish--rpc-async proc '(:type "get_state")
+                           (lambda (response)
+                             (pilish--apply-state-response chat response)))
+        (setq now 2000.0)
+        (pilish-test--stdout
+         proc `(:type "response" :id ,(plist-get (car commands) :id)
+                      :success t :data (:isStreaming t :isCompacting :false)))
+        (should (eq 'streaming (buffer-local-value 'pilish--status chat)))
+        (setq now 2300.0)
+        (should (string-match-p "no output 5m"
+                                (with-current-buffer input (pilish-test--input-header))))
+        (should (= 1 (length (pilish-test--repeating-timers timers))))
+        (pilish--apply-state-response
+         chat '(:success t :data (:isStreaming :false :isCompacting :false)))
+        (should (eq 'streaming (buffer-local-value 'pilish--status chat)))
+        (should-not cancelled)))))
+
+(ert-deftest pilish-test-inactivity-compacting-state-response-preserves-json-literals ()
+  "Framed false/null literals initialize compaction, not a phantom stream."
+  (pilish-test-with-clock-and-timers (now timers cancelled)
+    (pilish-test-with-rpc-session (chat input proc commands)
+      (let ((pilish-session-inactivity-timeout 300)
+            (phase (buffer-local-value 'pilish--activity-phase chat)))
+        (pilish-test--adopt-rpc-process chat proc)
+        (should-not (pilish-test--repeating-timers timers))
+        (pilish--rpc-async proc '(:type "get_state")
+                           (lambda (response)
+                             (pilish--apply-state-response chat response)))
+        (setq now 2000.0)
+        (pilish-test--stdout
+         proc `(:type "response" :id ,(plist-get (car commands) :id)
+                      :success t :data (:isStreaming :false :isCompacting t
+                                       :sessionFile :null)))
+        (should (eq 'compacting (buffer-local-value 'pilish--status chat)))
+        (should-not (plist-get (buffer-local-value 'pilish--state chat) :session-file))
+        (should (= 0 (hash-table-count (pilish--get-pending-requests proc))))
+        ;; State snapshots preserve the existing phase, even when it is idle.
+        (should (equal phase (buffer-local-value 'pilish--activity-phase chat)))
+        (should-not (string-match-p "no output"
+                                    (with-current-buffer input (pilish-test--input-header))))
+        (should (= 1 (length (pilish-test--repeating-timers timers))))
+        (setq now 2300.0)
+        (pilish-test--fire-timer (car (pilish-test--repeating-timers timers)))
+        (let* ((header (with-current-buffer input (pilish--header-line-string)))
+               (start (string-match (regexp-quote (concat phase " (no output 5m)"))
+                                    header)))
+          (should start)
+          (should (eq 'warning (get-text-property start 'face header))))
+        (should (eq 'compacting (buffer-local-value 'pilish--status chat)))
+        (should (= 1 (length commands)))
+        (should-not cancelled)))))
+
+(ert-deftest pilish-test-inactivity-two-sessions-and-candidate-output-isolation ()
+  "Traffic and candidate display routing cannot borrow another owner's timer."
+  (pilish-test-with-clock-and-timers (now timers cancelled)
+    (pilish-test-with-rpc-session (a ai ap ac)
+      (pilish-test-with-rpc-session (b bi bp bc)
+        (let ((pilish-session-inactivity-timeout 300))
+          (pilish-test--adopt-rpc-process a ap)
+          (pilish-test--adopt-rpc-process b bp)
+          (pilish-test--stdout ap '(:type "agent_start"))
+          (pilish-test--stdout bp '(:type "agent_start"))
+          (setq now 1300.0)
+          (pilish--process-filter bp " \n")
+          (should (string-match-p "no output"
+                                  (with-current-buffer ai (pilish-test--input-header))))
+          (should-not (string-match-p "no output"
+                                      (with-current-buffer bi (pilish-test--input-header))))
+          (should (= 2 (length (pilish-test--repeating-timers timers))))
+          ;; Match the baseline reload candidate route.  Ordinary events still
+          ;; render there; the NEW observer must independently guard its source.
+          (pilish-test--stdout ap '(:type "agent_end" :messages []))
+          (let ((count (length timers)))
+            (process-put bp 'pilish-chat-buffer a)
+            (pilish-test--stdout bp '(:type "agent_start"))
+            (should (= count (length timers))))
+          (process-put bp 'pilish-chat-buffer b))))))
+
+(ert-deftest pilish-test-inactivity-replacement-and-stale-callback-ownership ()
+  "Replacement seeds a fresh clock; old callbacks cannot refresh/cancel it."
+  (pilish-test-with-clock-and-timers (now timers cancelled)
+    (pilish-test-with-rpc-session (chat input proc commands)
+      (let ((next (start-process "pilish-replacement" nil "cat"))
+            (pilish-session-inactivity-timeout 300))
+        (unwind-protect
+            (progn
+              (pilish-test--adopt-rpc-process chat proc)
+              (pilish-test--stdout proc '(:type "agent_start"))
+              (let ((old (car (pilish-test--repeating-timers timers))) refreshed)
+                (should (timerp old))
+                (pilish--process-filter next "candidate output before adoption\n")
+                (setq now 1400.0)
+                (with-current-buffer chat (pilish--set-process next))
+                (process-put next 'pilish-chat-buffer chat)
+                (pilish--register-display-handler next)
+                (should (memq old cancelled))
+                (should-not (string-match-p "no output"
+                                            (with-current-buffer input (pilish-test--input-header))))
+                (let ((current (car (pilish-test--repeating-timers timers))))
+                  (should-not (eq current old))
+                  (cl-letf (((symbol-function 'force-mode-line-update)
+                             (lambda (&rest _) (push (current-buffer) refreshed))))
+                    (pilish-test--fire-timer old))
+                  (should-not refreshed)
+                  (should-not (memq current cancelled))
+                  (setq now 1700.0)
+                  (pilish--process-filter proc "late old stdout\n")
+                  (should (string-match-p "no output 5m"
+                                          (with-current-buffer input (pilish-test--input-header))))
+                  ;; Idempotent same-process assignment is not adoption.
+                  (with-current-buffer chat (pilish--set-process next))
+                  (should (string-match-p "no output 5m"
+                                          (with-current-buffer input (pilish-test--input-header))))
+                  (should (= 2 (length (pilish-test--repeating-timers timers)))))))
+          (when (process-live-p next) (delete-process next)))))))
+
+(ert-deftest pilish-test-inactivity-exit-and-buffer-kill-cancel-owned-timer ()
+  "Exit, chat kill and input kill cancel rather than just orphan callbacks."
+  (dolist (how '(exit chat input))
+    (pilish-test-with-clock-and-timers (now timers cancelled)
+      (pilish-test-with-rpc-session (chat input proc commands)
+        (pilish-test--adopt-rpc-process chat proc)
+        (pilish-test--stdout proc '(:type "agent_start"))
+        (let ((timer (car (pilish-test--repeating-timers timers))) refreshed)
+          (should (timerp timer))
+          (pcase how
+            ('exit
+             (delete-process proc)
+             (pilish--process-sentinel proc "finished\n")
+             (should-not (buffer-local-value 'pilish--process chat))
+             (should (eq 'idle (buffer-local-value 'pilish--status chat))))
+            ('chat (pilish-test--kill-live-buffers chat))
+            ('input (pilish-test--kill-live-buffers input)))
+          (should (memq timer cancelled))
+          (cl-letf (((symbol-function 'force-mode-line-update)
+                     (lambda (&rest _) (push (current-buffer) refreshed))))
+            (pilish-test--fire-timer timer))
+          (should-not refreshed))))))
+
+(ert-deftest pilish-test-inactivity-cancelled-kill-keeps-monitoring ()
+  "A rejected kill decision must not cancel live observation."
+  (pilish-test-with-clock-and-timers (now timers cancelled)
+    (pilish-test-with-rpc-session (chat input proc commands)
+      (let ((pilish-session-inactivity-timeout 300))
+        (pilish-test--adopt-rpc-process chat proc)
+        (pilish-test--stdout proc '(:type "agent_start"))
+        (let ((timer (car (pilish-test--repeating-timers timers))))
+          (with-current-buffer chat
+            (let ((kill-buffer-query-functions (list (lambda () nil))))
+              (should-not (kill-buffer chat))))
+          (should (buffer-live-p chat))
+          (should-not (memq timer cancelled))
+          (setq now 1300.0)
+          (pilish-test--fire-timer timer)
+          (should (string-match-p "no output 5m"
+                                  (with-current-buffer input (pilish-test--input-header)))))))))
+
+(ert-deftest pilish-test-inactivity-backward-clock-is-pure-until-owner-tick ()
+  "Backward time hides warning; the owner tick rebases without settlement."
+  (pilish-test-with-clock-and-timers (now timers cancelled)
+    (pilish-test-with-rpc-session (chat input proc commands)
+      (let ((pilish-session-inactivity-timeout 300))
+        (pilish-test--adopt-rpc-process chat proc)
+        (pilish-test--stdout proc '(:type "agent_start"))
+        (let ((timer (car (pilish-test--repeating-timers timers)))
+              (normal (with-current-buffer input (pilish-test--input-header))))
+          (setq now 900.0)
+          (should (equal normal (with-current-buffer input (pilish-test--input-header))))
+          ;; A pure header read must not itself rewrite the observation clock.
+          (should (equal (process-get proc 'pilish-last-output-time) 1000.0))
+          (pilish-test--fire-timer timer)
+          (setq now 1200.0)
+          (should (string-match-p "no output 5m"
+                                  (with-current-buffer input (pilish-test--input-header))))
+          (should (eq 'streaming (buffer-local-value 'pilish--status chat)))
+          (should-not cancelled))))))
+
 (provide 'pilish-ui-test)
 ;;; pilish-ui-test.el ends here
