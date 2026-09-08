@@ -1103,6 +1103,7 @@ Note: This runs from `kill-buffer-hook', which executes AFTER the kill
 decision is made.  For proper cancellation support, use `pilish-quit'
 which asks upfront before any buffers are touched."
   (when (derived-mode-p 'pilish-chat-mode)
+    (pilish--cancel-inactivity-timer)
     (pilish--cancel-tool-update-flush)
     (pilish--cancel-tool-cooling)
     (pilish--invalidate-prompt-start-wait)
@@ -1154,10 +1155,13 @@ which asks upfront before any buffers are touched."
     (when-let* ((chat-buf (process-get process 'pilish-chat-buffer)))
       (when (buffer-live-p chat-buf)
         (with-current-buffer chat-buf
-          (if (equal (plist-get event :type) "queue_update")
-              (when (eq process pilish--process)
-                (force-mode-line-update t))
-            (pilish--handle-display-event event)))))))
+          (unwind-protect
+              (if (equal (plist-get event :type) "queue_update")
+                  (when (eq process pilish--process)
+                    (force-mode-line-update t))
+                (pilish--handle-display-event event))
+            (when (eq process pilish--process)
+              (pilish--reconcile-inactivity-timer))))))))
 
 (defun pilish--make-process-exit-handler (process)
   "Create a frontend cleanup handler for PROCESS exit."

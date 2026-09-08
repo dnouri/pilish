@@ -280,9 +280,10 @@ Uses tool call ID \"call_1\" and contentIndex 0."
       (insert (base64-decode-string (pilish-test--prompt-image-base64 type)))))
   path)
 
-(defun pilish-test--input-header ()
-  "Return the current input header without properties."
-  (substring-no-properties (pilish--header-line-string)))
+(defun pilish-test--input-header (&optional input)
+  "Return INPUT's header without properties, defaulting to the current buffer."
+  (with-current-buffer (or input (current-buffer))
+    (substring-no-properties (pilish--header-line-string))))
 
 (defun pilish-test--attach-image (path)
   "Attach prompt image PATH through the public interactive command."
@@ -481,6 +482,86 @@ Returns the buffer with content ready for navigation tests."
           "Assistant\n=========\nSecond answer\n\n"
           "You · 10:10\n===========\nThird question\n\n"
           "Assistant\n=========\nThird answer\n"))
+
+;;;; Inactivity observation fixtures
+
+(defvar pilish-session-inactivity-timeout)
+
+(defmacro pilish-test-with-clock (now &rest body)
+  "Run BODY with NOW initially 1000.0; explicit time conversions stay real.
+Timers use ordinary Emacs scheduling.  Do not wait with this frozen clock."
+  (declare (indent 1) (debug (symbolp body)))
+  `(let ((,now 1000.0) (real-float-time (symbol-function 'float-time)))
+     (cl-letf (((symbol-function 'float-time)
+                (lambda (&optional time)
+                  (if time (funcall real-float-time time) ,now))))
+       ,@body)))
+
+(defmacro pilish-test-with-repeating-timer-allocations (timers &rest body)
+  "Observe real repeating timer allocations in TIMERS while running BODY.
+Keep cancelled allocations too; count each timer once even when
+`run-with-timer' delegates to `run-at-time'.  On exit cancel only these
+new repeating timers.  BODY should contain synchronous test actions."
+  (declare (indent 1) (debug (symbolp body)))
+  `(let (,timers)
+     (cl-flet ((observe (timer)
+                 (when (timer--repeat-delay timer)
+                   (cl-pushnew timer ,timers :test #'eq))
+                 timer))
+       (unwind-protect
+           (progn
+             (advice-add 'run-at-time :filter-return #'observe)
+             (advice-add 'run-with-timer :filter-return #'observe)
+             ,@body)
+         (advice-remove 'run-at-time #'observe)
+         (advice-remove 'run-with-timer #'observe)
+         (mapc #'cancel-timer ,timers)))))
+
+(defun pilish-test--fire-timer (timer)
+  "Deliver TIMER's production callback, even after cancellation."
+  (should (timerp timer))
+  (apply (timer--function timer) (timer--args timer)))
+
+(defun pilish-test--adopt-rpc-process (chat process)
+  "Exercise genuine adoption of fixture PROCESS in CHAT."
+  (with-current-buffer chat
+    ;; The base RPC fixture deliberately assigns its process directly.
+    (setq pilish--process nil)
+    (pilish--set-process process)))
+
+(cl-defmacro pilish-test-with-inactivity-session
+    ((chat input proc commands now) &rest body)
+  "Run BODY in an adopted RPC session with clock NOW and real timers.
+The RPC fixture kills its buffers and cleans up their timers on exit."
+  (declare (indent 1) (debug ((symbolp symbolp symbolp symbolp symbolp) body)))
+  `(pilish-test-with-clock ,now
+     (pilish-test-with-rpc-session (,chat ,input ,proc ,commands)
+       (let ((pilish-session-inactivity-timeout 300))
+         (pilish-test--adopt-rpc-process ,chat ,proc)
+         ,@body))))
+
+(defun pilish-test--assert-inactivity (input expected)
+  "Assert INPUT has EXPECTED warning text and face, or no warning when nil."
+  (let ((header (with-current-buffer input (pilish--header-line-string))))
+    (ert-info ((format "input=%s expected=%S header=%S"
+                       (buffer-name input) expected header))
+      (if expected
+          (let ((start (string-match (regexp-quote expected) header)))
+            (should start)
+            (should (eq 'warning (get-text-property start 'face header))))
+        (should-not (string-match-p "no output" header))))
+    header))
+
+(defun pilish-test--stdout (process &rest events)
+  "Deliver EVENTS together in one real stdout filter call for PROCESS.
+Use parser-style JSON values: t, :false and :null.  The legacy :json-false
+sentinel is not accepted."
+  (pilish--process-filter
+   process (mapconcat (lambda (event)
+                        (concat (json-serialize event :false-object :false
+                                                :null-object :null)
+                                "\n"))
+                      events "")))
 
 (provide 'pilish-test-common)
 ;;; pilish-test-common.el ends here

@@ -15261,5 +15261,145 @@ events where the header text hasn't changed."
       (goto-char (marker-position pilish--hot-tail-start))
       (should (looking-at "Assistant")))))
 
+;;; Stdout silence across real display/lifecycle dispatch
+
+(ert-deftest pilish-test-inactivity-raw-noise-clears-and-rewarns-without-dispatch ()
+  "Partial, malformed, response and unknown stdout clear a warning literally."
+  (pilish-test-with-inactivity-session (chat input proc commands now)
+    (pilish-test--stdout proc '(:type "agent_start"))
+    (let ((normal (pilish-test--input-header input))
+          (text (with-current-buffer chat (buffer-string))))
+      (dolist (chunk '(" " "\ninvalid JSON\n" "{\"type\":\"response\""
+                       ",\"success\":true}\n" "{\"type\":\"unknown\"}\n"))
+        (ert-info ((format "raw chunk=%S" chunk))
+          (setq now (+ now 300))
+          (pilish-test--assert-inactivity input "thinking (no output 5m)")
+          (pilish--process-filter proc chunk)
+          (should (equal normal (pilish-test--input-header input)))
+          (should (eq 'streaming (buffer-local-value 'pilish--status chat)))
+          (should (equal text (with-current-buffer chat (buffer-string))))))
+      (setq now (+ now 300))
+      (pilish--process-filter proc "")
+      (with-current-buffer input (insert "typing is not stdout"))
+      (pilish-test--assert-inactivity input "thinking (no output 5m)")
+      (should-not commands))))
+
+(ert-deftest pilish-test-inactivity-batched-end-start-keeps-chunk-receipt-time ()
+  "Timer rearming must not replace output already observed in the same chunk."
+  (pilish-test-with-inactivity-session (chat input proc commands now)
+    (pilish-test--stdout proc '(:type "agent_start"))
+    (setq now 1400.0)
+    (let ((original (symbol-function 'pilish--handle-display-event)))
+      (cl-letf (((symbol-function 'pilish--handle-display-event)
+                 (lambda (event)
+                   ;; Simulate expensive display work after chunk receipt.
+                   (setq now (+ now 10))
+                   (funcall original event))))
+        (pilish-test--stdout proc '(:type "agent_end" :messages [])
+                             '(:type "agent_start"))))
+    (should (eq 'streaming (buffer-local-value 'pilish--status chat)))
+    (pilish-test--assert-inactivity input nil)
+    (setq now 1700.0)
+    (pilish-test--assert-inactivity input "thinking (no output 5m)")))
+
+(ert-deftest pilish-test-inactivity-unchanged-phase-deltas-do-not-churn-timer ()
+  "Identical text or generic tool progress keeps one observer and a fresh age."
+  (dolist (phase '("replying" "running"))
+    (ert-info ((format "progress phase=%s" phase))
+      (pilish-test-with-inactivity-session (chat input proc commands now)
+        (pilish-test-with-repeating-timer-allocations allocated
+          (let ((before (copy-sequence timer-list)))
+            (pilish-test--stdout proc '(:type "agent_start"))
+            (let ((observer (buffer-local-value 'pilish--inactivity-timer chat))
+                  (scheduled (cl-remove-if-not #'timer--repeat-delay timer-list)))
+              (should (timerp observer))
+              (should (equal (cl-set-difference timer-list before) (list observer)))
+              (when (equal phase "running")
+                (pilish-test--stdout
+                 proc '(:type "tool_execution_start" :toolName "generic" :toolCallId "tool"
+                              :args (:task "work"))))
+              (dotimes (_ 4)
+                (setq now (+ now 250))
+                (pilish-test--stdout
+                 proc (if (equal phase "replying")
+                          '(:type "message_update"
+                                  :assistantMessageEvent (:type "text_delta" :delta "more text "))
+                        '(:type "tool_execution_update" :toolCallId "tool" :toolName "generic"
+                                :partialResult (:content [(:type "text" :text "still working")]))))
+                (should (equal phase (buffer-local-value 'pilish--activity-phase chat)))
+                (pilish-test--assert-inactivity input nil)
+                (should (eq observer (buffer-local-value 'pilish--inactivity-timer chat)))
+                ;; Also reject timers allocated and cancelled within the update.
+                (should (equal allocated (list observer)))
+                ;; Ignore the renderer's one-shot flush, not extra repeating observers.
+                (should (equal scheduled
+                               (cl-remove-if-not #'timer--repeat-delay timer-list))))))
+          (if (equal phase "replying")
+              (should (string-match-p "more text more text more text more text"
+                                      (with-current-buffer chat (buffer-string))))
+            (should (equal '(:content [(:type "text" :text "still working")])
+                           (plist-get
+                            (gethash "tool" (plist-get (buffer-local-value 'pilish--state chat)
+                                                       :active-tools))
+                            :partial-result))))
+          (setq now (+ now 300))
+          (pilish-test--assert-inactivity input (concat phase " (no output 5m)")))))))
+
+(ert-deftest pilish-test-inactivity-compaction-preserves-manual-and-auto-owners ()
+  "Warning changes neither compaction restoration nor pending reservations."
+  (dolist (case '(("manual" sending idle)
+                  ("threshold" streaming streaming)
+                  ("threshold" sending sending)))
+    (ert-info ((format "compaction owner=%S" case))
+      (pilish-test-with-inactivity-session (chat input proc commands now)
+        (let (notices)
+          (cl-letf (((symbol-function 'message)
+                     (lambda (fmt &rest args) (push (apply #'format fmt args) notices))))
+            (with-current-buffer chat (setq pilish--status (cadr case)))
+            (pilish-test--stdout proc `(:type "compaction_start" :reason ,(car case)))
+            (setq now 1300.0)
+            (pilish-test--assert-inactivity input "compact (no output 5m)")
+            (should (eq 'compacting (buffer-local-value 'pilish--status chat)))
+            (let ((timer (buffer-local-value 'pilish--inactivity-timer chat)))
+              (should (memq timer timer-list))
+              (pilish-test--stdout
+               proc `(:type "compaction_end" :reason ,(car case) :aborted t))
+              (should (eq (caddr case) (buffer-local-value 'pilish--status chat)))
+              (pilish-test--assert-inactivity input nil)
+              (if (eq (caddr case) 'streaming)
+                  (progn
+                    (should (memq timer timer-list))
+                    (setq now 1600.0)
+                    (pilish-test--assert-inactivity input "no output 5m"))
+                (should-not (memq timer timer-list)))))
+          (should (equal notices '("Pi: Compaction cancelled" "Pi: Compacting..."))))))))
+
+(ert-deftest pilish-test-inactivity-display-errors-preserve-observation-and-cleanup ()
+  "State changes still establish and cancel observation when rendering fails."
+  (pilish-test-with-inactivity-session (chat input proc commands now)
+    (let (notices)
+      (cl-letf (((symbol-function 'message)
+                 (lambda (fmt &rest args) (push (apply #'format fmt args) notices))))
+        (cl-letf (((symbol-function 'pilish--display-agent-start)
+                   (lambda () (error "start renderer failed"))))
+          (pilish-test--stdout proc '(:type "agent_start")))
+        (should (eq 'streaming (buffer-local-value 'pilish--status chat)))
+        (let ((timer (buffer-local-value 'pilish--inactivity-timer chat)))
+          (setq now 1300.0)
+          (pilish-test--fire-timer timer)
+          ;; The failed leaf did not set thinking; retain the real phase.
+          (pilish-test--assert-inactivity input "idle (no output 5m)")
+          (cl-letf (((symbol-function 'pilish--display-agent-end)
+                     (lambda (&rest _) (error "end renderer failed"))))
+            (pilish-test--stdout proc '(:type "agent_end" :messages [])))
+          (should (eq 'sending (buffer-local-value 'pilish--status chat)))
+          (pilish-test--assert-inactivity input nil)
+          (should-not (memq timer timer-list))
+          (should-not (buffer-local-value 'pilish--inactivity-timer chat))))
+      (should (equal notices
+                     '("pilish: error dispatching process response: end renderer failed"
+                       "pilish: error dispatching process response: start renderer failed")))
+      (should-not commands))))
+
 (provide 'pilish-render-test)
 ;;; pilish-render-test.el ends here

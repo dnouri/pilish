@@ -129,6 +129,16 @@ Some operations like model loading may need more time."
   :type 'natnum
   :group 'pilish)
 
+(defcustom pilish-session-inactivity-timeout 300
+  "Seconds without Pi stdout before warning in the input activity status.
+Use a positive number, or nil to disable.  Only streaming and compacting
+sessions are monitored.  Any nonempty stdout counts, even partial output
+or RPC responses; silence does not prove Pi has stopped working.
+Changes take effect at the next header refresh, retaining the output age.
+Timing uses approximate wall time, including suspend and Emacs delays."
+  :type '(choice (const :tag "Disabled" nil) number)
+  :group 'pilish)
+
 (defcustom pilish-input-window-height 10
   "Height of the input window.
 An integer specifies an absolute number of lines.
@@ -1160,11 +1170,15 @@ CHAT-BUFFER defaults to the current buffer."
 Resets cached process version and starts a delayed version probe for
 new live processes in interactive sessions."
   (unless (eq process pilish--process)
+    (pilish--cancel-inactivity-timer)
+    (when (processp process)
+      (process-put process 'pilish-last-output-time (float-time)))
     (pilish--invalidate-model-change)
     (pilish--invalidate-prompt-start-wait)
     (force-mode-line-update t))
   (setq pilish--process process
         pilish--process-version nil)
+  (pilish--reconcile-inactivity-timer)
   (when (and (processp process)
              (process-live-p process)
              (not noninteractive))
@@ -1259,6 +1273,7 @@ cannot apply older session identity or header state over a newer session view.")
 (defun pilish--begin-session-transition (&optional proc)
   "Invalidate pending session-transition callbacks and return the new generation.
 Optional PROC may complete the transition before it becomes the current process."
+  (pilish--cancel-inactivity-timer)
   (let ((next (1+ (or pilish--session-transition-generation 0))))
     (pilish--set-session-transition-generation next)
     (setq pilish--session-transition-active t
@@ -1269,7 +1284,8 @@ Optional PROC may complete the transition before it becomes the current process.
   "Mark session transition GENERATION finished when it is still current."
   (when (= generation pilish--session-transition-generation)
     (setq pilish--session-transition-active nil
-          pilish--session-transition-process nil)))
+          pilish--session-transition-process nil)
+    (pilish--reconcile-inactivity-timer)))
 
 (defun pilish--session-transition-active-p (&optional chat-buf)
   "Return non-nil when CHAT-BUF is switching sessions or forking."
@@ -1338,7 +1354,82 @@ Starts as `line-start' because content begins after separator newline.")
   "Fine-grained activity phase for header-line display.
 One of \"thinking\", \"replying\", \"running\",
 \"compact\", or \"idle\".
-Always populated and rendered in a fixed-width slot.")
+Always populated; normally rendered in a fixed-width slot.")
+
+(defvar-local pilish--inactivity-timer nil
+  "Active-session timer invalidating only the linked input header.
+Keep refreshing even when the warning option is nil, so reenabling it
+while Pi is silent needs neither a setter nor an RPC.")
+
+(defun pilish--inactivity-eligible-p ()
+  "Return whether this chat owns a live streaming or compacting process."
+  (and (processp pilish--process)
+       (process-live-p pilish--process)
+       (memq pilish--status '(streaming compacting))
+       (not pilish--session-transition-active)))
+
+(defun pilish--cancel-inactivity-timer ()
+  "Cancel this chat's header observer without changing its output clock."
+  (when pilish--inactivity-timer
+    (cancel-timer pilish--inactivity-timer)
+    (setq pilish--inactivity-timer nil)))
+
+(defun pilish--reset-inactivity-observation ()
+  "Reset observation for an adopted session on this chat's current process.
+Cancel the old timer identity; the next state reconciliation may rearm it."
+  (pilish--cancel-inactivity-timer)
+  (when (processp pilish--process)
+    (process-put pilish--process 'pilish-last-output-time (float-time))))
+
+(defun pilish--reconcile-inactivity-timer ()
+  "Keep one header refresh timer only while this chat is eligible.
+Arming never overwrites the stdout receipt that preceded a state event."
+  (if (not (pilish--inactivity-eligible-p))
+      (pilish--cancel-inactivity-timer)
+    (unless pilish--inactivity-timer
+      (let ((chat (current-buffer)) timer)
+        (setq timer
+              (run-at-time
+               1 1
+               (lambda ()
+                 ;; Replacement cancels before assigning the process, so timer
+                 ;; identity covers process ownership.  Retire only our timer
+                 ;; if locals were reset, the chat died, or a new owner took over.
+                 (if (not (and (buffer-live-p chat)
+                               (eq timer (buffer-local-value
+                                          'pilish--inactivity-timer chat))))
+                     (cancel-timer timer)
+                   (with-current-buffer chat
+                     (if (not (pilish--inactivity-eligible-p))
+                         (pilish--cancel-inactivity-timer)
+                       (let ((now (float-time))
+                             (last (process-get pilish--process
+                                                'pilish-last-output-time)))
+                         (when (and last (< now last))
+                           (process-put pilish--process 'pilish-last-output-time now)))
+                       (when (buffer-live-p pilish--input-buffer)
+                         (with-current-buffer pilish--input-buffer
+                           (force-mode-line-update))))))))
+              pilish--inactivity-timer timer)))))
+
+(defun pilish--inactivity-status (phase)
+  "Format PHASE for this chat's input header, without changing any state."
+  (let* ((last (and (pilish--inactivity-eligible-p)
+                    (process-get pilish--process 'pilish-last-output-time)))
+         (age (and last (max 0 (- (float-time) last)))))
+    (when (and age pilish-session-inactivity-timeout
+               (>= age pilish-session-inactivity-timeout))
+      (propertize
+       (format "%s (no output %s)" phase
+               (if (< age 60) (format "%ds" (floor age))
+                 (format "%dm" (floor (/ age 60)))))
+       'face 'warning
+       'help-echo
+       (format (concat "No stdout received from Pi for %d seconds. "
+                       "Pi may still be working. Use M-x pilish-abort "
+                       "(normally C-c C-k) in this session to stop and "
+                       "discard queued continuations.")
+               (floor age))))))
 
 (defun pilish--run-activity-phase-functions
     (chat-buf input-buf old-phase new-phase reason)
@@ -2805,8 +2896,11 @@ Accesses state from the linked chat buffer."
                                   (buffer-local-value 'pilish--activity-phase chat-buf))
                              "idle"))
          (activity-phase-str
-          (propertize (format "%-8s" activity-phase)
-                      'face 'pilish-activity-phase)))
+          (or (and chat-buf
+                   (with-current-buffer chat-buf
+                     (pilish--inactivity-status activity-phase)))
+              (propertize (format "%-8s" activity-phase)
+                          'face 'pilish-activity-phase))))
     (concat
      (pilish--header-format-identity model-short thinking activity-phase-str)
      (pilish--header-format-stats stats)
@@ -2861,6 +2955,7 @@ Safely handles dead buffers by checking liveness first."
           (plist-put new-state :status new-status)
           (setq pilish--status new-status
                 pilish--state new-state)))
+      (pilish--reconcile-inactivity-timer)
       (force-mode-line-update t))))
 
 ;;;; Sending Infrastructure

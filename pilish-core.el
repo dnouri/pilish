@@ -520,7 +520,12 @@ Returns nil on timeout."
 
 (defun pilish--process-filter (proc output)
   "Handle OUTPUT from pi PROC.
-Accumulates output and dispatches complete JSON lines."
+Accumulates output and dispatches complete JSON lines.
+Record each nonempty stdout receipt in the process property
+`pilish-last-output-time' before framing or dispatch.  UI session adoption
+may also reset this wall-clock observation baseline."
+  (unless (string-empty-p output)
+    (process-put proc 'pilish-last-output-time (float-time)))
   (let* ((inhibit-redisplay t)
          (partial (process-get proc 'pilish-partial-output-chunks))
          (result (pilish--accumulate-line-chunks partial output))

@@ -996,6 +996,33 @@ not claim to distinguish those otherwise identical sending-state traces."
 
 ;;; Abort Command
 
+(ert-deftest pilish-test-inactivity-abort-acknowledgment-is-output-not-settlement ()
+  "Only actual stdout clears silence; Stop and its replies never force idle."
+  (pilish-test-with-inactivity-session (chat input proc commands now)
+    (pilish-test--stdout proc '(:type "agent_start"))
+    (with-current-buffer chat (setq pilish--followup-queue '("discard me")))
+    (setq now 1300.0)
+    (pilish-test--assert-inactivity input "thinking (no output 5m)")
+    (should-not commands)
+    (let (notices)
+      (cl-letf (((symbol-function 'message)
+                 (lambda (fmt &rest args) (push (apply #'format fmt args) notices))))
+        (with-current-buffer input (pilish-abort)))
+      (should (equal notices '("Pi: Aborting..."))))
+    (should (equal (mapcar (lambda (cmd) (plist-get cmd :type)) (reverse commands))
+                   '("clear_queue" "abort")))
+    (should-not (buffer-local-value 'pilish--followup-queue chat))
+    (should (buffer-local-value 'pilish--aborted chat))
+    (pilish-test--assert-inactivity input "thinking (no output 5m)")
+    (dolist (command (reverse commands))
+      (pilish-test--stdout
+       proc `(:type "response" :id ,(plist-get command :id) :success t)))
+    (pilish-test--assert-inactivity input nil)
+    (should (eq 'streaming (buffer-local-value 'pilish--status chat)))
+    (should (buffer-local-value 'pilish--aborted chat))
+    (setq now 1600.0)
+    (pilish-test--assert-inactivity input "thinking (no output 5m)")))
+
 (ert-deftest pilish-test-lifecycle-abort-clears-backend-before-stopping ()
   "Stop clears backend steering and local FIFO in every busy phase."
   (dolist (status '(streaming sending compacting))
