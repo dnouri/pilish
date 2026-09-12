@@ -11331,6 +11331,7 @@ Edit diffs include unchanged context rows with a leading space marker."
                                           :assistantMessageEvent
                                           (:type "text_delta" :delta 42)))))
               (error (setq caught err)))
+            (pilish--flush-stream-deltas)
             (should-not caught)
             (should (string-match-p "42" (buffer-string))))
         (pilish--unregister-display-handler proc)
@@ -11364,6 +11365,7 @@ Edit diffs include unchanged context rows with a leading space marker."
                                           :assistantMessageEvent
                                           (:type "thinking_delta" :delta 42)))))
               (error (setq caught err)))
+            (pilish--flush-stream-deltas)
             (should-not caught)
             (should (string-match-p "^> 42" (buffer-string))))
         (pilish--unregister-display-handler proc)
@@ -12565,6 +12567,230 @@ hooks, including `kill-buffer-hook'."
           (should-not (memq timer timer-list)))
       (when (buffer-live-p buf)
         (kill-buffer buf)))))
+
+;; ── Coalesced streaming text/thinking deltas ───────────────────────
+
+(defun pilish-test--send-text-delta (text)
+  "Send a text_delta message_update event carrying TEXT."
+  (pilish--handle-display-event
+   `(:type "message_update"
+     :assistantMessageEvent (:type "text_delta" :delta ,text))))
+
+(defun pilish-test--send-thinking-delta (text)
+  "Send a thinking_delta message_update event carrying TEXT."
+  (pilish--handle-display-event
+   `(:type "message_update"
+     :assistantMessageEvent (:type "thinking_delta" :delta ,text))))
+
+(ert-deftest pilish-test-stream-text-delta-coalesces-until-flush ()
+  "Streamed text deltas queue without rendering until the flush."
+  (with-temp-buffer
+    (pilish-chat-mode)
+    (pilish--handle-display-event '(:type "agent_start"))
+    (pilish--handle-display-event
+     '(:type "message_start" :message (:role "assistant")))
+    (pilish-test--send-text-delta "alpha ")
+    (pilish-test--send-text-delta "bravo")
+    (should-not (string-match-p "alpha" (buffer-string)))
+    (should (equal pilish--pending-stream-deltas
+                   '((text . "bravo") (text . "alpha "))))
+    (should (timerp pilish--stream-delta-flush-timer))
+    (pilish--flush-stream-deltas)
+    (should (string-match-p "alpha bravo" (buffer-string)))
+    (should-not pilish--pending-stream-deltas)
+    (should-not pilish--stream-delta-flush-timer)))
+
+(ert-deftest pilish-test-stream-text-delta-timer-renders ()
+  "The coalescing timer paints queued deltas without an explicit flush."
+  (with-temp-buffer
+    (pilish-chat-mode)
+    (let ((pilish--stream-delta-render-interval 0.001))
+      (pilish--handle-display-event '(:type "agent_start"))
+      (pilish--handle-display-event
+       '(:type "message_start" :message (:role "assistant")))
+      (pilish-test--send-text-delta "timered")
+      (should-not (string-match-p "timered" (buffer-string)))
+      (sit-for 0.05)
+      (should (string-match-p "timered" (buffer-string)))
+      (should-not pilish--stream-delta-flush-timer))))
+
+(ert-deftest pilish-test-stream-delta-flush-preserves-kind-order ()
+  "Interleaved text and thinking deltas render in arrival order."
+  (with-temp-buffer
+    (pilish-chat-mode)
+    (pilish--handle-display-event '(:type "agent_start"))
+    (pilish--handle-display-event
+     '(:type "message_start" :message (:role "assistant")))
+    (pilish--handle-display-event
+     '(:type "message_update" :assistantMessageEvent (:type "thinking_start")))
+    (pilish-test--send-thinking-delta "ponder ")
+    (pilish-test--send-thinking-delta "deeply")
+    (pilish-test--send-text-delta "answer")
+    (pilish--flush-stream-deltas)
+    (let ((content (buffer-string)))
+      (should (string-match-p "ponder deeply" content))
+      (should (string-match-p "answer" content))
+      (should (< (string-match-p "ponder deeply" content)
+                 (string-match-p "answer" content))))))
+
+(ert-deftest pilish-test-stream-delta-flushes-before-non-delta-event ()
+  "A non-delta event paints pending text before inserting its own content."
+  (with-temp-buffer
+    (pilish-chat-mode)
+    (pilish--handle-display-event '(:type "agent_start"))
+    (pilish--handle-display-event
+     '(:type "message_start" :message (:role "assistant")))
+    (pilish-test--send-text-delta "streamed first")
+    (pilish--handle-display-event
+     '(:type "tool_execution_start"
+       :toolName "bash" :toolCallId "call_1" :args (:command "echo hi")))
+    (let ((content (buffer-string)))
+      (should (string-match-p "streamed first" content))
+      (should (string-match-p "\\$ echo hi" content))
+      (should (< (string-match-p "streamed first" content)
+                 (string-match-p "\\$ echo hi" content))))
+    (should-not pilish--pending-stream-deltas)
+    (should-not pilish--stream-delta-flush-timer)))
+
+(ert-deftest pilish-test-stream-delta-flush-suspends-expensive-md-ts-hooks ()
+  "The coalesced flush keeps md-ts's cheap dirty-tick bookkeeping installed.
+Suspending `md-ts--font-lock-record-dirty-side-effect-bounds' too would make
+every flush look like an untracked full-buffer rewrite and accumulate dirty
+ranges; see `pilish--md-ts-expensive-change-hooks'."
+  (with-temp-buffer
+    (pilish-chat-mode)
+    (pilish--handle-display-event '(:type "agent_start"))
+    (pilish--handle-display-event
+     '(:type "message_start" :message (:role "assistant")))
+    (pilish-test--send-text-delta "streamed")
+    (let ((seen-before nil)
+          (seen-after nil)
+          (orig (symbol-function 'pilish--display-message-delta)))
+      (cl-letf (((symbol-function 'pilish--display-message-delta)
+                 (lambda (delta)
+                   (setq seen-before before-change-functions
+                         seen-after after-change-functions)
+                   (funcall orig delta))))
+        (pilish--flush-stream-deltas))
+      ;; Expensive tracking is suspended during the insert ...
+      (should-not (seq-find #'pilish--md-ts-expensive-change-hook-p
+                            seen-before))
+      (should-not (seq-find #'pilish--md-ts-expensive-change-hook-p
+                            seen-after))
+      ;; ... but the dirty-tick hook stays, so md-ts never sees an untracked
+      ;; full-buffer edit and the dirty-range list does not grow per flush.
+      (should (memq 'md-ts--font-lock-record-dirty-side-effect-bounds
+                    seen-before))
+      (should (memq 'md-ts--font-lock-record-dirty-side-effect-bounds
+                    seen-after))
+      ;; Hooks are restored after the flush.
+      (should (seq-find #'pilish--md-ts-change-hook-p
+                        before-change-functions))
+      (should (seq-find #'pilish--md-ts-change-hook-p
+                        after-change-functions))
+      (should (string-match-p "streamed" (buffer-string))))))
+
+(ert-deftest pilish-test-clear-render-artifacts-discards-pending-stream-deltas ()
+  "Session reset/history rebuild drops queued deltas and the flush timer."
+  (with-temp-buffer
+    (pilish-chat-mode)
+    (pilish--handle-display-event '(:type "agent_start"))
+    (pilish--handle-display-event
+     '(:type "message_start" :message (:role "assistant")))
+    (pilish-test--send-text-delta "queued")
+    (should (timerp pilish--stream-delta-flush-timer))
+    (pilish--clear-render-artifacts)
+    (should-not pilish--pending-stream-deltas)
+    (should-not pilish--stream-delta-flush-timer)))
+
+(ert-deftest pilish-test-stream-delta-timer-cancelled-on-kill ()
+  "Killing the chat buffer cancels a pending stream flush timer."
+  (let ((buf (generate-new-buffer "*pilish-test-stream-kill*"))
+        (pilish-quit-without-confirmation t)
+        timer)
+    (unwind-protect
+        (with-current-buffer buf
+          (pilish-chat-mode)
+          (pilish--handle-display-event '(:type "agent_start"))
+          (pilish--handle-display-event
+           '(:type "message_start" :message (:role "assistant")))
+          (pilish-test--send-text-delta "queued")
+          (setq timer pilish--stream-delta-flush-timer)
+          (should (timerp timer))
+          (kill-buffer buf)
+          (should-not (memq timer timer-list)))
+      (when (buffer-live-p buf)
+        (kill-buffer buf)))))
+
+(ert-deftest pilish-test-md-ts-change-hooks-suspended-removes-and-restores ()
+  "Full suspension removes every md-ts per-change hook and restores them.
+Bulk history replay uses this single-epoch form."
+  (with-temp-buffer
+    (pilish-chat-mode)
+    (let ((before-hooks before-change-functions)
+          (after-hooks after-change-functions)
+          (inside-before nil)
+          (inside-after nil))
+      (pilish--with-md-ts-change-hooks-suspended
+          #'pilish--md-ts-change-hook-p
+        (setq inside-before before-change-functions
+              inside-after after-change-functions))
+      (should-not (seq-find #'pilish--md-ts-change-hook-p inside-before))
+      (should-not (seq-find #'pilish--md-ts-change-hook-p inside-after))
+      (should (equal before-hooks before-change-functions))
+      (should (equal after-hooks after-change-functions)))))
+
+(ert-deftest pilish-test-md-ts-expensive-hooks-suspended-keeps-dirty-tick ()
+  "Expensive-hook suspension keeps md-ts's dirty-tick hook installed."
+  (with-temp-buffer
+    (pilish-chat-mode)
+    (let ((inside-before nil)
+          (inside-after nil))
+      (pilish--with-md-ts-change-hooks-suspended
+          #'pilish--md-ts-expensive-change-hook-p
+        (setq inside-before before-change-functions
+              inside-after after-change-functions))
+      (should-not (seq-find #'pilish--md-ts-expensive-change-hook-p
+                            inside-before))
+      (should-not (seq-find #'pilish--md-ts-expensive-change-hook-p
+                            inside-after))
+      (should (memq 'md-ts--font-lock-record-dirty-side-effect-bounds
+                    inside-before))
+      (should (memq 'md-ts--font-lock-record-dirty-side-effect-bounds
+                    inside-after)))))
+
+(defun pilish-test--stream-dirty-ranges (n suspend-all)
+  "Return md-ts dirty-range count after N coalesced flushes.
+When SUSPEND-ALL is non-nil, suspend every md-ts hook (the pre-fix
+behavior) instead of only the expensive ones.  Each flush is followed by
+a fontification of the visible tail, as redisplay would do."
+  (with-temp-buffer
+    (pilish-chat-mode)
+    (pilish--handle-display-event '(:type "agent_start"))
+    (pilish--handle-display-event
+     '(:type "message_start" :message (:role "assistant")))
+    (cl-letf (((symbol-function 'pilish--md-ts-expensive-change-hook-p)
+               (if suspend-all
+                   (symbol-function 'pilish--md-ts-change-hook-p)
+                 (symbol-function 'pilish--md-ts-expensive-change-hook-p))))
+      (dotimes (i n)
+        (pilish--queue-stream-delta
+         'text (format "token%d streamed words\n" i))
+        (pilish--flush-stream-deltas)
+        (font-lock-ensure (max (point-min) (- (point-max) 2000))
+                          (point-max))))
+    (length (md-ts--font-lock-dirty-side-effect-bounds))))
+
+(ert-deftest pilish-test-stream-flush-keeps-md-ts-dirty-ranges-bounded ()
+  "Hybrid suspension must not accumulate full-buffer dirty ranges.
+Suspending every md-ts hook makes each flush look like an untracked
+full-buffer rewrite, so md-ts pushes a full-buffer dirty range on the
+next fontification and retains its non-fontified prefix.  Keeping the
+cheap dirty-tick hook bounds the list instead."
+  (let ((hybrid (pilish-test--stream-dirty-ranges 200 nil))
+        (full (pilish-test--stream-dirty-ranges 200 t)))
+    (should (<= hybrid 5))
+    (should (> full hybrid))))
 
 ;; ── Toolcall streaming (during LLM generation) ─────────────────────
 
@@ -13886,6 +14112,27 @@ Multiple deltas should replace the preview instead of appending forever."
       (when (process-live-p process)
         (delete-process process)))))
 
+(ert-deftest pilish-test-process-exit-flushes-streamed-text-before-error ()
+  "Residual coalesced stream text renders before the process-exit banner.
+The text was produced before the exit, so it must not be painted after the
+banner just because it was still queued when the process died."
+  (let ((process (start-process "pilish-render-exit-flush-test" nil "cat")))
+    (unwind-protect
+        (pilish-test--with-streaming-assistant
+          (setq pilish--process process)
+          (pilish-test--send-assistant-message-update
+           '(:type "text_delta" :delta "residual text"))
+          (should-not (string-match-p "residual text" (buffer-string)))
+          (pilish--mark-process-exited
+           process '(:error "Process exited" :exitCode 1))
+          (let ((content (buffer-string)))
+            (should (string-match-p "residual text" content))
+            (should (string-match-p "pi process exited" content))
+            (should (< (string-match-p "residual text" content)
+                       (string-match-p "pi process exited" content)))))
+      (when (process-live-p process)
+        (delete-process process)))))
+
 (ert-deftest pilish-test-abort-finalizes-empty-id-generation-blocks ()
   "Abort finalizes every content-index-owned block before clearing streams."
   (pilish-test--with-streaming-assistant
@@ -14296,6 +14543,7 @@ Commands with embedded newlines should not have any lines deleted."
     (pilish--handle-display-event
      '(:type "message_update"
        :assistantMessageEvent (:type "thinking_delta" :delta "Analyzing...")))
+    (pilish--flush-stream-deltas)
     (should (string-match-p "Analyzing..." (buffer-string)))))
 
 (ert-deftest pilish-test-activity-phase-thinking-on-agent-start ()
