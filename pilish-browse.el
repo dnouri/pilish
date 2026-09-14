@@ -649,6 +649,11 @@ browser's state on the real rendering path."
   "Face for time-group headers (Today, Yesterday, etc.)."
   :group 'pilish)
 
+(defface pilish-session-live
+  '((t :inherit success :weight bold))
+  "Face for live-session markers in the session browser."
+  :group 'pilish)
+
 ;;;; Major Modes
 
 (define-derived-mode pilish-browse-mode magit-section-mode
@@ -703,7 +708,11 @@ Inherits section navigation from `magit-section-mode'."
                (if pilish--session-browser-named-only
                    (pilish--session-filter-named items)
                  items)
-               pilish--session-browser-search-tokens))))
+               pilish--session-browser-search-tokens)))
+           ;; Batch the live-process lookup once per render instead of a
+           ;; per-item scan whose file-equal-p fallback would stat per
+           ;; non-matching pair (a remote roundtrip under TRAMP).
+           (live-paths (pilish--browse-live-session-paths)))
       (magit-insert-section (root)
         (cond
          (pilish--session-browser-loading
@@ -720,29 +729,31 @@ Inherits section navigation from `magit-section-mode'."
          ((null filtered)
           (insert "No matching sessions.\n"))
          ((equal pilish--session-browser-sort "threaded")
-          (pilish--session-browser-render-threaded filtered))
+          (pilish--session-browser-render-threaded filtered live-paths))
          ((equal pilish--session-browser-sort "recent")
-          (pilish--session-browser-render-recent filtered))
+          (pilish--session-browser-render-recent filtered live-paths))
          (t
           (let ((sorted (pilish--session-sort-items
                          filtered pilish--session-browser-sort)))
-            (pilish--session-browser-render-flat sorted))))))))
+            (pilish--session-browser-render-flat sorted live-paths))))))))
 
-(defun pilish--session-browser-render-flat (items)
-  "Render ITEMS as a flat list."
+(defun pilish--session-browser-render-flat (items live-paths)
+  "Render ITEMS as a flat list, marking sessions in LIVE-PATHS."
   (dolist (item items)
-    (pilish--session-browser-insert-session item 0 nil)))
+    (pilish--session-browser-insert-session item 0 nil live-paths)))
 
-(defun pilish--session-browser-render-threaded (items)
-  "Render ITEMS in threaded view with connectors."
+(defun pilish--session-browser-render-threaded (items live-paths)
+  "Render ITEMS in threaded view with connectors.
+Sessions in LIVE-PATHS get the live-session marker."
   (let ((threaded (pilish--session-thread-items items)))
     (dolist (entry threaded)
       (let ((item (car entry))
             (depth (cdr entry)))
-        (pilish--session-browser-insert-session item depth t)))))
+        (pilish--session-browser-insert-session item depth t live-paths)))))
 
-(defun pilish--session-browser-render-recent (items)
-  "Render ITEMS sorted by recency with time-group headers."
+(defun pilish--session-browser-render-recent (items live-paths)
+  "Render ITEMS sorted by recency with time-group headers.
+Sessions in LIVE-PATHS get the live-session marker."
   (let ((sorted (pilish--session-sort-items items "recent"))
         (last-group nil))
     (dolist (item sorted)
@@ -754,18 +765,21 @@ Inherits section navigation from `magit-section-mode'."
               (pilish--propertize-face
                group 'pilish-session-group-header)))
           (setq last-group group)))
-      (pilish--session-browser-insert-session item 0 nil))))
+      (pilish--session-browser-insert-session item 0 nil live-paths))))
 
-(defun pilish--session-browser-insert-session (session depth threaded)
+(defun pilish--session-browser-insert-session (session depth threaded live-paths)
   "Insert SESSION as a `magit-section' section at DEPTH.
 When THREADED is non-nil, prepend threading connector at DEPTH.
-In non-threaded modes, forked sessions get a \"fork:\" prefix.
+In non-threaded modes, forked sessions get a \"fork:\" prefix.  When
+SESSION's path is a key of LIVE-PATHS (see
+`pilish--browse-live-session-paths'), prepend a live-session marker.
 Message count and age are rendered as a right-margin overlay."
   (let* ((path (plist-get session :path))
          (name (pilish--session-display-name session))
          (count (or (plist-get session :messageCount) 0))
          (modified (plist-get session :modified))
          (is-fork (plist-get session :parentSessionPath))
+         (live-p (gethash (expand-file-name path) live-paths))
          (prefix (cond
                   ((and threaded (> depth 0))
                    (concat (make-string (* 2 (1- depth)) ?\s)
@@ -776,6 +790,9 @@ Message count and age are rendered as a right-margin overlay."
                     "fork: " 'pilish-session-thread-connector))
                   (t "")))
          (heading (concat prefix
+                          (when live-p
+                            (pilish--propertize-face
+                             "● " 'pilish-session-live))
                           (pilish--propertize-face
                            name 'pilish-session-name)))
          (margin-str (concat
@@ -876,6 +893,28 @@ The legacy first-message fallback can still match text from any role."
   (if-let* ((path (pilish--session-browser-path-at-point)))
       (pilish--browse-switch-session path)
     (message "Pi: No session at point")))
+
+(defun pilish--browse-live-session-paths ()
+  "Return a hash table of session file paths open in live Pilish processes.
+Keys are `expand-file-name' spellings of each live process's current
+session file, anchored at its chat buffer exactly as
+`pilish--browse-session-file-matches-p' anchors spellings.  The table
+reflects only the frontend's own process state — sessions opened in
+other Emacs instances or outside Pilish are not marked — and is empty
+with no live process, so disk browsing stays fully usable offline.
+Symlink-unified spellings that only `file-equal-p' detects do not
+become keys; the interactive guards keep their stricter per-path
+check (see `pilish--browse-live-session-chat-buffer')."
+  (let ((paths (make-hash-table :test 'equal)))
+    (dolist (proc (process-list))
+      (when (pilish--session-live-process-p proc)
+        (let ((chat-buf (process-get proc 'pilish-chat-buffer)))
+          (when (buffer-live-p chat-buf)
+            (with-current-buffer chat-buf
+              (let ((current (plist-get pilish--state :session-file)))
+                (when (stringp current)
+                  (puthash (expand-file-name current) t paths))))))))
+    paths))
 
 (defun pilish--browse-live-session-chat-buffer (path)
   "Return the chat buffer of a live Pilish process using PATH, or nil."

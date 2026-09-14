@@ -850,6 +850,26 @@ without an input window."
     (dolist (key '("&" "E" "o"))
       (should-not (lookup-key pilish-chat-mode-map (kbd key))))))
 
+(ert-deftest pilish-test-chat-mode-map-copy-file-reference ()
+  "The chat `w' key copies an @path:line reference at point."
+  (with-temp-buffer
+    (pilish-chat-mode)
+    (pilish--set-chat-session-identity "/tmp/project/")
+    (let ((inhibit-read-only t))
+      (insert "src/report.el:7"))
+    (goto-char (+ (point-min) 2))
+    (let ((kill-ring nil)
+          (kill-ring-yank-pointer nil)
+          (messages nil))
+      (cl-letf (((symbol-function 'message)
+                 (lambda (fmt &rest args)
+                   (push (apply #'format fmt args) messages))))
+        (let ((binding (key-binding (kbd "w"))))
+          (should (eq binding #'pilish-copy-file-reference))
+          (call-interactively binding)))
+      (should (equal (car kill-ring) "@src/report.el:7"))
+      (should (member "Pi: Copied @src/report.el:7" messages)))))
+
 ;;; Startup Header
 
 (ert-deftest pilish-test-startup-header-shows-keybindings ()

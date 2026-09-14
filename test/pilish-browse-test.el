@@ -756,6 +756,63 @@ empty assistants are a universal pre-filter, not mode-specific."
       ;; Full name should appear, not truncated
       (should (string-match-p long-name (buffer-string))))))
 
+(ert-deftest pilish-test-session-browser-live-marker ()
+  "Sessions open in a live Pilish process get the live marker; others do not.
+Killing the process and rerendering drops the marker."
+  (let* ((path "/test/live-session.jsonl")
+         (chat-buf (generate-new-buffer "*pilish-test-live-marker-chat*"))
+         (proc (start-process "pilish-live-marker-test" nil "sleep" "30")))
+    (set-process-query-on-exit-flag proc nil)
+    (process-put proc 'pilish-chat-buffer chat-buf)
+    (with-current-buffer chat-buf
+      (setq pilish--process proc
+            pilish--state (list :session-file path)))
+    (unwind-protect
+        (with-temp-buffer
+          (pilish-session-browser-mode)
+          (setq pilish--session-browser-items
+                (list (list :path path :name "Live session"
+                            :messageCount 1 :modified "2026-02-24T10:00:00Z")
+                      (list :path "/test/cold-session.jsonl" :name "Cold session"
+                            :messageCount 1 :modified "2026-02-24T10:00:00Z")))
+          (setq pilish--session-browser-sort "relevance")
+          (pilish--session-browser-rerender)
+          (should (string-match-p "● Live session" (buffer-string)))
+          (should-not (string-match-p "● Cold session" (buffer-string)))
+          (delete-process proc)
+          (pilish--session-browser-rerender)
+          (should-not (string-match-p "● Live session" (buffer-string))))
+      (when (process-live-p proc)
+        (delete-process proc))
+      (kill-buffer chat-buf))))
+
+(ert-deftest pilish-test-session-browser-live-marker-threaded ()
+  "The live marker follows the threading connector in threaded sort."
+  (let* ((path "/test/live-child.jsonl")
+         (chat-buf (generate-new-buffer "*pilish-test-live-marker-chat*"))
+         (proc (start-process "pilish-live-marker-test" nil "sleep" "30")))
+    (set-process-query-on-exit-flag proc nil)
+    (process-put proc 'pilish-chat-buffer chat-buf)
+    (with-current-buffer chat-buf
+      (setq pilish--process proc
+            pilish--state (list :session-file path)))
+    (unwind-protect
+        (with-temp-buffer
+          (pilish-session-browser-mode)
+          (setq pilish--session-browser-items
+                (list (list :path "/test/parent.jsonl" :name "Parent session"
+                            :messageCount 10 :modified "2026-02-24T10:00:00Z")
+                      (list :path path :name "Child session"
+                            :parentSessionPath "/test/parent.jsonl"
+                            :messageCount 2 :modified "2026-02-24T11:00:00Z")))
+          (setq pilish--session-browser-sort "threaded")
+          (pilish--session-browser-rerender)
+          (should (string-match-p "└─ ● Child session" (buffer-string)))
+          (should-not (string-match-p "● Parent session" (buffer-string))))
+      (when (process-live-p proc)
+        (delete-process proc))
+      (kill-buffer chat-buf))))
+
 (ert-deftest pilish-test-session-browser-render-loading ()
   "Render loading indicator."
   (with-temp-buffer
