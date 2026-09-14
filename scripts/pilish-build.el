@@ -51,17 +51,30 @@
                           (insert-file-contents pilish-build-main-file)
                           (pilish-build--read-package-requires)))))
 
+(defconst pilish-build-test-requirements
+  '((evil . (1 14)) (evil-snipe . (0)))
+  "Development-only packages exercised by the test suite.
+These are installed by `pilish-build-install-deps' alongside the
+package requirements but never appear in `Package-Requires': Evil is
+an optional integration that must keep building and loading without
+it, and `test/pilish-evil-test.el' skips its cases when it is
+absent.  evil-snipe covers the minor-mode keymap precedence the
+browser bindings must overcome.  Explicit REQUIREMENTS arguments to
+`pilish-build-install-deps' override this list.")
+
 (defun pilish-build--package-missing-p (package min-version)
   "Return non-nil when PACKAGE does not satisfy MIN-VERSION."
   (not (package-installed-p package min-version)))
 
 (defun pilish-build-install-deps (&optional requirements)
   "Install package REQUIREMENTS for local development.
-REQUIREMENTS defaults to `pilish-build-package-requirements'.
+REQUIREMENTS defaults to `pilish-build-package-requirements' plus
+`pilish-build-test-requirements'.
 Signals an error if any dependency still does not satisfy its minimum
 version after installation finishes."
   (let ((requirements (or requirements
-                           (pilish-build-package-requirements)))
+                           (append (pilish-build-package-requirements)
+                                   pilish-build-test-requirements)))
         (missing nil))
     (setq package-install-upgrade-built-in t)
     (add-to-list 'package-archives '("melpa" . "https://melpa.org/packages/") t)

@@ -15,14 +15,40 @@
 (require 'ert)
 (require 'pilish)
 (when (require 'evil nil t)
-  (require 'pilish-evil))
+  (require 'pilish-evil)
+  ;; Requiring `pilish-evil' runs `pilish-evil-setup' at load time,
+  ;; which installs global mode hooks.  The suite's default-behavior
+  ;; tests (for example kill-ring stripping) must observe the
+  ;; non-Evil defaults, so undo the copy-raw-markdown hook; every
+  ;; test below re-runs `pilish-evil-setup' inside
+  ;; `pilish-evil-test--with-evil', which snapshots the hooks.
+  (remove-hook 'pilish-chat-mode-hook
+               #'pilish-evil--copy-raw-markdown-in-chat))
+
+;; Mark evil-snipe's hook variables special before any test code runs.
+;; `add-hook' in `pilish-evil-setup' gives them global values without
+;; declaring them special, so under this file's lexical binding the
+;; `let' snapshot in `pilish-evil-test--with-evil' would bind them
+;; lexically instead — and loading evil-snipe.elc inside that scope
+;; then errors with "Defining as dynamic an already lexical var"
+;; when its first real `defvar' executes.  `defvar' on already-bound
+;; variables only marks them special, so this is safe either way.
+(defvar evil-snipe-local-mode-hook nil)
+(defvar evil-snipe-override-local-mode-hook nil)
 
 (defmacro pilish-evil-test--with-evil (&rest body)
-  "Skip the test when Evil is unavailable, else run BODY."
+  "Skip the test when Evil is unavailable, else run BODY.
+`pilish-evil-setup' installs global mode hooks (copy-raw-markdown,
+snipe disabling); snapshot them so one test cannot pollute the rest
+of the suite."
   (declare (indent 0) (debug t))
   `(if (not (featurep 'evil))
        (ert-skip "Evil not installed")
-     ,@body))
+     (let ((pilish-chat-mode-hook pilish-chat-mode-hook)
+           (evil-snipe-local-mode-hook evil-snipe-local-mode-hook)
+           (evil-snipe-override-local-mode-hook
+            evil-snipe-override-local-mode-hook))
+       ,@body)))
 
 (ert-deftest pilish-evil-test-initial-states ()
   "Chat buffers start in motion state, input buffers in insert state."
@@ -43,6 +69,7 @@
      (should (eq (lookup-key map "n") #'pilish-next-message))
      (should (eq (lookup-key map "p") #'pilish-previous-message))
      (should (eq (lookup-key map "f") #'pilish-fork-at-point))
+     (should (eq (lookup-key map "w") #'pilish-copy-file-reference))
      (should (eq (lookup-key map "?") #'pilish-menu))
      (should (eq (lookup-key map "q") #'pilish-quit))
      (should (eq (lookup-key map "i") #'pilish-evil-insert-input))
@@ -52,6 +79,66 @@
                  #'pilish-toggle-tool-section))
      (should (eq (lookup-key map [tab])
                  #'pilish-toggle-tool-section)))))
+
+(ert-deftest pilish-evil-test-browse-initial-states ()
+  "Browser buffers start in the configured browse state."
+  (pilish-evil-test--with-evil
+   (pilish-evil-setup)
+   (dolist (mode '(pilish-browse-mode
+                   pilish-session-browser-mode
+                   pilish-tree-browser-mode))
+     (should (eq (evil-initial-state mode)
+                 pilish-evil-browse-state)))))
+
+(ert-deftest pilish-evil-test-session-browser-motion-bindings ()
+  "Motion state reclaims the documented session browser keys."
+  (pilish-evil-test--with-evil
+   (pilish-evil-setup)
+   (let ((map (evil-get-auxiliary-keymap pilish-session-browser-mode-map
+                                         'motion)))
+     (should map)
+     (should (eq (lookup-key map "s")
+                 #'pilish-session-browser-cycle-sort))
+     (should (eq (lookup-key map "f")
+                 #'pilish-session-browser-toggle-named))
+     (should (eq (lookup-key map "t")
+                 #'pilish-session-browser-toggle-scope))
+     (should (eq (lookup-key map "/")
+                 #'pilish-session-browser-search))
+     (should (eq (lookup-key map "r")
+                 #'pilish-session-browser-rename))
+     (should (eq (lookup-key map "d")
+                 #'pilish-session-browser-delete))
+     (should (eq (lookup-key map "?")
+                 #'pilish-session-browser-dispatch))
+     (should (eq (lookup-key map "h")
+                 #'pilish-session-browser-dispatch))
+     (should (eq (lookup-key map "g") #'pilish-browse-refresh))
+     (should (eq (lookup-key map "q") #'quit-window))
+     (should (eq (lookup-key map (kbd "RET"))
+                 #'pilish-session-browser-switch)))))
+
+(ert-deftest pilish-evil-test-tree-browser-motion-bindings ()
+  "Motion state reclaims the documented tree browser keys."
+  (pilish-evil-test--with-evil
+   (pilish-evil-setup)
+   (let ((map (evil-get-auxiliary-keymap pilish-tree-browser-mode-map
+                                         'motion)))
+     (should map)
+     (should (eq (lookup-key map "f")
+                 #'pilish-tree-browser-cycle-filter))
+     (should (eq (lookup-key map "l")
+                 #'pilish-tree-browser-set-label))
+     (should (eq (lookup-key map "/")
+                 #'pilish-tree-browser-search))
+     (should (eq (lookup-key map "?")
+                 #'pilish-tree-browser-dispatch))
+     (should (eq (lookup-key map "h")
+                 #'pilish-tree-browser-dispatch))
+     (should (eq (lookup-key map "g") #'pilish-browse-refresh))
+     (should (eq (lookup-key map "q") #'quit-window))
+     (should (eq (lookup-key map (kbd "RET"))
+                 #'pilish-tree-browser-navigate)))))
 
 (ert-deftest pilish-evil-test-input-normal-bindings ()
   "Normal state bindings in the input buffer."
@@ -113,6 +200,19 @@
      (pilish-evil--maybe-disable-snipe)
      (should evil-snipe-local-mode)
      (should evil-snipe-override-local-mode))))
+
+(ert-deftest pilish-evil-test-snipe-hook-disables-in-browse-buffers ()
+  "The snipe hook turns snipe off in both browser modes."
+  (pilish-evil-test--with-evil
+   (skip-unless (require 'evil-snipe nil t))
+   (dolist (mode '(pilish-session-browser-mode pilish-tree-browser-mode))
+     (with-temp-buffer
+       (evil-snipe-local-mode 1)
+       (evil-snipe-override-local-mode 1)
+       (setq major-mode mode)
+       (pilish-evil--maybe-disable-snipe)
+       (should-not evil-snipe-local-mode)
+       (should-not evil-snipe-override-local-mode)))))
 
 (ert-deftest pilish-evil-test-copy-raw-markdown-opt-out ()
   "Setup does not add the chat mode hook when opted out."

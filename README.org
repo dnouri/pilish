@@ -667,6 +667,7 @@ Chat buffer (motion state):
 |-------+-----------------------------------------|
 | n / p | next / previous message                 |
 | f     | fork session at point                   |
+| w     | copy @path:line reference at point      |
 | TAB   | toggle tool/thinking section            |
 | RET   | visit file at point                     |
 | i / a | focus input (=a= goes to end of input)  |
@@ -681,6 +682,14 @@ Input buffer (normal state):
 | q   | close input window |
 | ?   | transient menu     |
 
+Session and tree browser buffers start in motion state as well.
+Magit's own =j=/=k= section navigation works unmodified, and every
+documented browser key — sort, filters, search, scope, rename, delete,
+refresh, dispatch, =RET= — is rebound in motion state so the Evil and
+evil-collection keymap stack never swallows them (evil's motion state
+owns =/=, =?= and the =g= prefix; evil-snipe's =f=/=t= are disabled in
+these buffers, mirroring the chat buffer's =f= fork binding).
+
 Setup also sets =pilish-copy-raw-markdown= buffer-locally in
 chat buffers, so that yanking preserves code fences and markup without
 changing the global default.  Each part can be tuned independently
@@ -693,6 +702,9 @@ before loading:
 ;; Open and focus the input window in normal state instead of insert
 ;; (press i to start composing, RET sends, q closes the window):
 (setq pilish-evil-input-state 'normal)
+
+;; Run the browsers in emacs state instead of motion:
+(setq pilish-evil-browse-state 'emacs)
 
 ;; Keep copying only visible text instead of raw Markdown:
 (setq pilish-evil-copy-raw-markdown nil)

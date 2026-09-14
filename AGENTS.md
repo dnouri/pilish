@@ -86,6 +86,7 @@ latch on delayed agent/compaction starts.
 | `test/pilish-jsonl-test.el` | JSONL reading, canonical session metadata, raw tree/projection and golden fixtures, tool-call formatting, session discovery, navigation targets, and byte-preserving line reordering across branches/malformed input |
 | `test/pilish-fake-pi-test.el` | Black-box fake subprocess contract: strict framing/events, valid v3 persistence, entry/tree/message RPC projections, transactional switching, and full resume/history choreography |
 | `test/pilish-build-test.el` | Batch helper scripts for dependency and grammar installation |
+| `test/pilish-evil-test.el` | Optional Evil integration: initial states, motion-state keymap registrations for chat and browser modes, snipe disabling, and the copy-raw-markdown default (all skip when Evil is absent) |
 | `test/pilish-test.el` | Entry point / cross-module integration |
 | `test/pilish-test-common.el` | Shared fixtures: mock-session macro, toolcall helpers, fake-pi launch helpers |
 | `test/pilish-integration-test-common.el` | Shared integration backend helpers and contract macros |

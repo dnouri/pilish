@@ -128,6 +128,7 @@ test: .deps-stamp
 		-l pilish-browse-test \
 		-l pilish-jsonl-test \
 		-l pilish-build-test \
+		-l pilish-evil-test \
 		-l pilish-fake-pi-test \
 		-l pilish-gui-test-utils-test \
 		-l pilish-integration-test-common-test \
@@ -343,7 +344,7 @@ ollama-status:
 
 check-parens:
 	@echo "=== Check Parens ==="
-	@OUTPUT=$$($(BATCH) --eval '(condition-case err (dolist (f (list "scripts/pilish-build.el" "scripts/install-deps.el" "scripts/install-ts-grammars.el" "pilish-core.el" "pilish-jsonl.el" "pilish-grammars.el" "pilish-ui.el" "pilish-table.el" "pilish-render.el" "pilish-input.el" "pilish-menu.el" "pilish-browse.el" "pilish.el")) (with-current-buffer (find-file-noselect f) (check-parens) (message "%s OK" f))) (user-error (message "FAIL: %s" (error-message-string err)) (kill-emacs 1)))' 2>&1); \
+	@OUTPUT=$$($(BATCH) --eval '(condition-case err (dolist (f (list "scripts/pilish-build.el" "scripts/install-deps.el" "scripts/install-ts-grammars.el" "pilish-core.el" "pilish-jsonl.el" "pilish-grammars.el" "pilish-ui.el" "pilish-table.el" "pilish-render.el" "pilish-input.el" "pilish-menu.el" "pilish-browse.el" "pilish-evil.el" "pilish.el")) (with-current-buffer (find-file-noselect f) (check-parens) (message "%s OK" f))) (user-error (message "FAIL: %s" (error-message-string err)) (kill-emacs 1)))' 2>&1); \
 	echo "$$OUTPUT" | grep -E "OK$$|FAIL:"; \
 	echo "$$OUTPUT" | grep -q "FAIL:" && exit 1 || true
 
@@ -355,7 +356,7 @@ compile: .deps-stamp
 		--eval "(package-initialize)" \
 		$(LOCAL_LOAD_PATH) \
 		--eval "(setq byte-compile-error-on-warn t)" \
-		-f batch-byte-compile scripts/pilish-build.el scripts/install-deps.el scripts/install-ts-grammars.el pilish-core.el pilish-jsonl.el pilish-grammars.el pilish-ui.el pilish-table.el pilish-render.el pilish-input.el pilish-menu.el pilish-browse.el pilish.el
+		-f batch-byte-compile scripts/pilish-build.el scripts/install-deps.el scripts/install-ts-grammars.el pilish-core.el pilish-jsonl.el pilish-grammars.el pilish-ui.el pilish-table.el pilish-render.el pilish-input.el pilish-menu.el pilish-browse.el pilish-evil.el pilish.el
 
 lint: lint-checkdoc lint-package
 
@@ -376,6 +377,7 @@ lint-checkdoc:
 		--eval "(checkdoc-file \"pilish-input.el\")" \
 		--eval "(checkdoc-file \"pilish-menu.el\")" \
 		--eval "(checkdoc-file \"pilish-browse.el\")" \
+		--eval "(checkdoc-file \"pilish-evil.el\")" \
 		--eval "(checkdoc-file \"pilish.el\")" 2>&1); \
 	WARNINGS=$$(echo "$$OUTPUT" | grep -A1 "^Warning" | grep -v "^Warning\|^--$$"); \
 	if [ -n "$$WARNINGS" ]; then echo "$$WARNINGS"; exit 1; else echo "OK"; fi
