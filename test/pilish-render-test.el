@@ -12666,23 +12666,53 @@ hooks, including `kill-buffer-hook'."
       (should-not pilish--stream-delta-flush-timer))))
 
 (ert-deftest pilish-test-stream-delta-flush-preserves-kind-order ()
-  "Interleaved text and thinking deltas render in arrival order."
-  (with-temp-buffer
-    (pilish-chat-mode)
-    (pilish--handle-display-event '(:type "agent_start"))
-    (pilish--handle-display-event
-     '(:type "message_start" :message (:role "assistant")))
-    (pilish--handle-display-event
-     '(:type "message_update" :assistantMessageEvent (:type "thinking_start")))
-    (pilish-test--send-thinking-delta "ponder ")
-    (pilish-test--send-thinking-delta "deeply")
-    (pilish-test--send-text-delta "answer")
-    (pilish--flush-stream-deltas)
-    (let ((content (buffer-string)))
-      (should (string-match-p "ponder deeply" content))
-      (should (string-match-p "answer" content))
-      (should (< (string-match-p "ponder deeply" content)
-                 (string-match-p "answer" content))))))
+  "Large same-kind runs concatenate exactly once in arrival order."
+  (pilish-test--with-streaming-assistant
+    (let* ((first-text-chunks
+            (mapcar (lambda (i) (format "T%04d;" i))
+                    (number-sequence 0 999)))
+           (thinking-chunks
+            (mapcar (lambda (i) (format "H%04d;" i))
+                    (number-sequence 0 399)))
+           (last-text-chunks
+            (mapcar (lambda (i) (format "Z%04d;" i))
+                    (number-sequence 0 299)))
+           (first-text (mapconcat #'identity first-text-chunks ""))
+           (thinking (mapconcat #'identity thinking-chunks ""))
+           (last-text (mapconcat #'identity last-text-chunks ""))
+           (original-text (symbol-function 'pilish--display-message-delta))
+           (original-thinking (symbol-function 'pilish--display-thinking-delta))
+           calls)
+      (dolist (chunk first-text-chunks)
+        (pilish--queue-stream-delta 'text chunk))
+      (dolist (chunk thinking-chunks)
+        (pilish--queue-stream-delta 'thinking chunk))
+      (dolist (chunk last-text-chunks)
+        (pilish--queue-stream-delta 'text chunk))
+      (cl-letf (((symbol-function 'pilish--display-message-delta)
+                 (lambda (text)
+                   (push (cons 'text text) calls)
+                   (funcall original-text text)))
+                ((symbol-function 'pilish--display-thinking-delta)
+                 (lambda (text)
+                   (push (cons 'thinking text) calls)
+                   (funcall original-thinking text))))
+        (pilish--flush-stream-deltas))
+      (setq calls (nreverse calls))
+      (should (equal calls
+                     (list (cons 'text first-text)
+                           (cons 'thinking thinking)
+                           (cons 'text last-text))))
+      (let* ((content (buffer-string))
+             (first-position (string-search first-text content))
+             (thinking-position (string-search thinking content))
+             (last-position (string-search last-text content)))
+        (should (numberp first-position))
+        (should (numberp thinking-position))
+        (should (numberp last-position))
+        (should (< first-position thinking-position last-position)))
+      (should-not pilish--pending-stream-deltas)
+      (should-not pilish--stream-delta-flush-timer))))
 
 (ert-deftest pilish-test-stream-delta-flushes-before-non-delta-event ()
   "A non-delta event advances state, then paints text before its own output."

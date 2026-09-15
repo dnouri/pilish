@@ -811,15 +811,16 @@ canonical history or reload is the recovery path."
                     #'pilish--md-ts-expensive-change-hook-p
                   (while pending
                     (let ((kind (car (car pending)))
-                          (text (cdr (car pending))))
+                          (chunks (list (cdr (car pending)))))
                       (setq pending (cdr pending))
                       (while (and pending (eq (car (car pending)) kind))
-                        (setq text (concat text (cdr (car pending)))
-                              pending (cdr pending)))
-                      (pcase kind
-                        ('text (pilish--display-message-delta text))
-                        ('thinking
-                         (pilish--display-thinking-delta text))))))
+                        (push (cdr (car pending)) chunks)
+                        (setq pending (cdr pending)))
+                      (let ((text (mapconcat #'identity (nreverse chunks) "")))
+                        (pcase kind
+                          ('text (pilish--display-message-delta text))
+                          ('thinking
+                           (pilish--display-thinking-delta text)))))))
               (error
                (message "pilish: stream delta flush failed: %s"
                         (error-message-string err))
