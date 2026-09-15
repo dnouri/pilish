@@ -17,7 +17,7 @@
   "Read dependency versions from the package header, excluding Emacs itself."
   (should (equal '((transient . (0 9 0))
                    (magit-section . (4 0 0))
-                   (md-ts-mode . (0 3 0))
+                   (md-ts-mode . (0 4 0))
                    (markdown-table-wrap . (0 2 0)))
                  (pilish-build-package-requirements))))
 
@@ -56,7 +56,7 @@
                  (setf (alist-get package installed-state) t))))
       (pilish-build-install-deps
        '((transient . (0 9 0))
-         (md-ts-mode . (0 3 0))))
+         (md-ts-mode . (0 4 0))))
       (should package-install-upgrade-built-in)
       (should refreshed)
       (should (equal '(transient) (nreverse installed)))
@@ -80,7 +80,7 @@
                 (progn
                   (pilish-build-install-deps
                    '((transient . (0 9 0))
-                     (md-ts-mode . (0 3 0))))
+                     (md-ts-mode . (0 4 0))))
                   nil)
               (error (error-message-string err))))
       (should (string-match-p "md-ts-mode" message-text)))))

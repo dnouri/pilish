@@ -10780,10 +10780,8 @@ fixture; a test may dynamically override it inside FUNCTION."
       (when (buffer-live-p chat)
         (kill-buffer chat)))))
 
-(ert-deftest pilish-test-local-md-ts-04-button-compatibility ()
-  "Real md-ts link buttons route local RET and reject URI RET.
-Skip when the loaded md-ts-mode does not provide link buttons, as in the
-supported installed 0.3 dependency lane."
+(ert-deftest pilish-test-md-ts-04-link-button-compatibility ()
+  "`md-ts-mode' 0.4 link buttons route local RET and reject URI RET."
   (let ((overriding-terminal-local-map nil)
         (overriding-local-map nil)
         (pre-command-hook nil)
@@ -10797,7 +10795,7 @@ supported installed 0.3 dependency lane."
       (goto-char (point-min))
       (search-forward "Displayed label")
       (goto-char (match-beginning 0))
-      (skip-unless (button-at (point)))
+      (should (button-at (point)))
       (should (equal "Displayed label" (button-label (button-at (point)))))
       (let ((buffer (current-buffer))
             (label-start (point))
@@ -11010,48 +11008,6 @@ supported installed 0.3 dependency lane."
                                (error-message-string err)))))))
       (when (buffer-live-p chat)
         (kill-buffer chat)))))
-
-(ert-deftest pilish-test-installed-md-ts-03-keeps-link-label-unbuttonized ()
-  "Installed md-ts-mode 0.3 leaves Markdown link Return dispatch to chat mode."
-  (with-temp-buffer
-    (pilish-chat-mode)
-    (pilish--set-chat-session-identity "/tmp/")
-    (let ((inhibit-read-only t))
-      (insert "[Report](docs/report.md)"))
-    (font-lock-ensure)
-    (goto-char (point-min))
-    (search-forward "Report")
-    (goto-char (match-beginning 0))
-    ;; A local newer implementation can be loaded while package metadata still
-    ;; names the installed 0.3 release; the separate compatibility test owns
-    ;; the buttonized behavior in that lane.
-    (skip-unless (not (button-at (point))))
-    (should (package-installed-p 'md-ts-mode '(0 3 0)))
-    (should (eq #'pilish-visit-file (key-binding (kbd "RET"))))
-    (should (eq #'pilish-visit-file
-                (key-binding (kbd "<return>"))))
-    (let ((buffer (current-buffer))
-          (overriding-terminal-local-map nil)
-          (overriding-local-map nil)
-          (pre-command-hook nil)
-          (post-command-hook nil)
-          calls)
-      (save-window-excursion
-        (switch-to-buffer buffer)
-        (cl-letf (((symbol-function 'find-file)
-                   (lambda (path)
-                     (push path calls)))
-                  ((symbol-function 'find-file-other-window)
-                   (lambda (&rest _)
-                     (ert-fail "Installed md-ts changed opener intent"))))
-          (let ((pilish-visit-file-other-window nil))
-            (execute-kbd-macro (kbd "RET"))
-            (goto-char (point-min))
-            (search-forward "Report")
-            (goto-char (match-beginning 0))
-            (execute-kbd-macro (kbd "<return>")))))
-      (should (equal '("/tmp/docs/report.md" "/tmp/docs/report.md")
-                     calls)))))
 
 (ert-deftest pilish-test-diff-line-at-point-added ()
   "Should parse line number from added diff line."
@@ -12654,6 +12610,15 @@ hooks, including `kill-buffer-hook'."
 
 ;; ── Coalesced streaming text/thinking deltas ───────────────────────
 
+(defun pilish-test--assert-md-ts-04-change-hook-capabilities ()
+  "Assert required `md-ts-mode' 0.4 change-hook functions are available."
+  (dolist (function
+           (append pilish--md-ts-expensive-change-hooks
+                   '(md-ts--font-lock-record-dirty-side-effect-bounds
+                     md-ts--font-lock-dirty-side-effect-bounds)))
+    (ert-info ((format "md-ts-mode 0.4.0 must define %S" function))
+      (should (fboundp function)))))
+
 (defun pilish-test--send-text-delta (text)
   "Send a text_delta message_update event carrying TEXT."
   (pilish--handle-display-event
@@ -12741,6 +12706,7 @@ hooks, including `kill-buffer-hook'."
 Suspending `md-ts--font-lock-record-dirty-side-effect-bounds' too would make
 every flush look like an untracked full-buffer rewrite and accumulate dirty
 ranges; see `pilish--md-ts-expensive-change-hooks'."
+  (pilish-test--assert-md-ts-04-change-hook-capabilities)
   (with-temp-buffer
     (pilish-chat-mode)
     (pilish--handle-display-event '(:type "agent_start"))
@@ -12809,6 +12775,7 @@ ranges; see `pilish--md-ts-expensive-change-hooks'."
 (ert-deftest pilish-test-md-ts-change-hooks-suspended-removes-and-restores ()
   "Full suspension removes every md-ts per-change hook and restores them.
 Bulk history replay uses this single-epoch form."
+  (pilish-test--assert-md-ts-04-change-hook-capabilities)
   (with-temp-buffer
     (pilish-chat-mode)
     (let ((before-hooks before-change-functions)
@@ -12826,6 +12793,7 @@ Bulk history replay uses this single-epoch form."
 
 (ert-deftest pilish-test-md-ts-expensive-hooks-suspended-keeps-dirty-tick ()
   "Expensive-hook suspension keeps md-ts's dirty-tick hook installed."
+  (pilish-test--assert-md-ts-04-change-hook-capabilities)
   (with-temp-buffer
     (pilish-chat-mode)
     (let ((inside-before nil)
@@ -12871,6 +12839,7 @@ Suspending every md-ts hook makes each flush look like an untracked
 full-buffer rewrite, so md-ts pushes a full-buffer dirty range on the
 next fontification and retains its non-fontified prefix.  Keeping the
 cheap dirty-tick hook bounds the list instead."
+  (pilish-test--assert-md-ts-04-change-hook-capabilities)
   (let ((hybrid (pilish-test--stream-dirty-ranges 200 nil))
         (full (pilish-test--stream-dirty-ranges 200 t)))
     (should (<= hybrid 5))

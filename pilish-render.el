@@ -5731,10 +5731,9 @@ single semantic owner at point before projecting only that owner's label.  This
 keeps deeply nested/recovery trees linear and fails ambiguity closed before
 expensive projection.  All node types, bounds, labels, and destinations are
 copied to a plist before deleting the parser; no caller observes a tree node
-after its parser lifetime.  Installed `md-ts-mode' 0.3 creates its own local
-inline parsers lazily during fontification and exposes no public link resolver.
-This parser never changes text, overlays, font-lock properties, visibility, or
-the mode's parser set."
+after its parser lifetime.  `md-ts-mode' exposes no public resolver with the
+detached semantic metadata contract Pilish needs.  This parser never changes
+text, overlays, font-lock properties, visibility, or the mode's parser set."
   (let ((parser (treesit-parser-create 'markdown-inline nil t)))
     (when pilish--semantic-link-resolver-parsers
       (push parser pilish--semantic-link-resolver-parsers))
