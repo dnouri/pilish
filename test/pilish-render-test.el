@@ -15667,8 +15667,10 @@ events where the header text hasn't changed."
                 (should (equal scheduled
                                (cl-remove-if-not #'timer--repeat-delay timer-list))))))
           (if (equal phase "replying")
-              (should (string-match-p "more text more text more text more text"
-                                      (with-current-buffer chat (buffer-string))))
+              (with-current-buffer chat
+                (pilish--flush-stream-deltas)
+                (should (string-match-p "more text more text more text more text"
+                                        (buffer-string))))
             (should (equal '(:content [(:type "text" :text "still working")])
                            (plist-get
                             (gethash "tool" (plist-get (buffer-local-value 'pilish--state chat)
