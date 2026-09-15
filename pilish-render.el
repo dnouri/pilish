@@ -359,8 +359,12 @@ case of no headings is O(n) with no allocations."
   "Display streaming message DELTA at the streaming marker.
 Transforms ATX headings (outside code blocks) by adding one # level
 to keep our setext H1 separators as the top-level document structure.
-Modification hooks fire normally so jit-lock marks inserted text for
-fontification; tree-sitter re-parses at the C level on each insert."
+During a coalesced flush, Pilish suspends the sole hook in
+`pilish--md-ts-expensive-change-hooks',
+`md-ts--font-lock-record-stale-side-effect-bounds'.  `jit-lock-after-change',
+`md-ts--font-lock-record-dirty-side-effect-bounds', and md-ts's paired
+reference-definition hooks remain installed.  Tree-sitter still re-parses at
+the C level on each insertion."
   (when (and delta pilish--streaming-marker)
     (let* ((inhibit-read-only t)
            (delta (pilish--render-safe-string delta))
@@ -778,9 +782,9 @@ Single source of truth for the delta kinds the coalescer understands."
 (defun pilish--queue-stream-delta (kind delta)
   "Queue streaming DELTA of KIND (`text' or `thinking') for rendering.
 DELTA may be a non-string value; it is normalized with
-`pilish--render-safe-string' so queued entries always concatenate.
-Consecutive deltas are concatenated at flush time so the renderer performs one
-markdown-changing insertion per cadence instead of one per token."
+`pilish--render-safe-string' so every queued entry is a string.
+Consecutive same-kind deltas are joined once at flush time so the renderer
+performs one markdown-changing insertion per kind run instead of one per token."
   (when delta
     (let ((delta (if (stringp delta) delta
                    (pilish--render-safe-string delta))))
@@ -790,7 +794,7 @@ markdown-changing insertion per cadence instead of one per token."
           (pilish--schedule-stream-delta-flush))))))
 
 (defun pilish--flush-stream-deltas (&optional buffer)
-  "Render the pending streaming delta batch in BUFFER, then clear flush state.
+  "Stage BUFFER's pending delta batch, clear flush state, then render it.
 Timer callback for `pilish--stream-delta-flush-timer'.  Also called
 synchronously before any non-delta event so text, thinking, and tool blocks
 keep their authoritative order.  If rendering signals, log once and discard
@@ -810,11 +814,10 @@ canonical history or reload is the recovery path."
           (setq pilish--stream-delta-flush-timer nil)
           (let ((pending (nreverse pilish--pending-stream-deltas)))
             (setq pilish--pending-stream-deltas nil)
-            ;; Coalesced deltas still insert into a growing transcript.
-            ;; Suspend only md-ts's expensive per-change tracking; keeping its
-            ;; cheap dirty-tick bookkeeping means repeated suspended flushes do
-            ;; not accumulate full-buffer dirty ranges.  jit-lock refontifies
-            ;; the visible region at redisplay.
+            ;; Coalesced deltas still insert into a growing transcript.  Suspend
+            ;; only the explicitly allowlisted stale-side-effect hook; jit-lock
+            ;; plus md-ts's dirty-tick and reference-definition hooks remain for
+            ;; fontification bookkeeping and distant-link correctness.
             (condition-case err
                 (pilish--with-md-ts-change-hooks-suspended
                     #'pilish--md-ts-expensive-change-hook-p
@@ -837,9 +840,11 @@ canonical history or reload is the recovery path."
 
 (defun pilish--cancel-stream-delta-flush ()
   "Cancel any armed streaming delta flush timer and drop pending deltas.
-Idempotent.  Runs wherever live streaming state is torn down -- buffer kill,
-session reset, history rebuild, process exit -- so no stale timer or delta
-survives a session transition."
+Idempotent.  Used for buffer kill, defensive cleanup after `agent_end', and
+render-artifact teardown during session or history reset.  Process exit does
+not call this discard helper: it first attempts `pilish--flush-stream-deltas',
+which leaves timer and queue state clear and, on failure, logs and discards the
+staged batch."
   (when (timerp pilish--stream-delta-flush-timer)
     (cancel-timer pilish--stream-delta-flush-timer))
   (setq pilish--stream-delta-flush-timer nil
