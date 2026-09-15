@@ -768,10 +768,6 @@ Single source of truth for the delta kinds the coalescer understands."
       ("text_delta" 'text)
       ("thinking_delta" 'thinking))))
 
-(defun pilish--stream-delta-event-p (event)
-  "Return non-nil when EVENT is a renderable streaming delta."
-  (and (pilish--stream-delta-kind event) t))
-
 (defun pilish--schedule-stream-delta-flush ()
   "Arm the one-shot streaming delta flush timer for the current buffer."
   (setq pilish--stream-delta-flush-timer
@@ -840,9 +836,9 @@ canonical history or reload is the recovery path."
 
 (defun pilish--cancel-stream-delta-flush ()
   "Cancel any armed streaming delta flush timer and drop pending deltas.
-Idempotent.  Used for buffer kill, defensive cleanup after `agent_end', and
-render-artifact teardown during session or history reset.  Process exit does
-not call this discard helper: it first attempts `pilish--flush-stream-deltas',
+Idempotent.  Used for buffer kill and render-artifact teardown during session
+or history reset.  Process exit does not call this discard helper: it first
+attempts `pilish--flush-stream-deltas',
 which leaves timer and queue state clear and, on failure, logs and discards the
 staged batch."
   (when (timerp pilish--stream-delta-flush-timer)
@@ -1413,13 +1409,14 @@ Updates buffer-local state and renders display updates."
   ;; Protocol state is authoritative and must advance before fallible display
   ;; work.  Settlement's return value says whether this event released waiting
   ;; work; preserve it from the single state update to gate completion effects.
-  (let ((settlement-released (pilish--update-state-from-event event)))
+  (let* ((settlement-released (pilish--update-state-from-event event))
+         (delta-kind (pilish--stream-delta-kind event)))
     ;; Coalesced stream deltas must be painted before any handled event that can
     ;; insert chat text or start a block, so ordering between text, thinking,
     ;; and tool blocks stays authoritative.  Delta events keep accumulating
     ;; until the flush cadence.  (`queue_update' bypasses this handler and only
     ;; refreshes the mode line, so it needs no flush.)
-    (unless (pilish--stream-delta-event-p event)
+    (unless delta-kind
       (pilish--flush-stream-deltas))
     (when (and settlement-released
                (equal (plist-get event :type) "agent_settled"))
@@ -1427,7 +1424,13 @@ Updates buffer-local state and renders display updates."
         (pilish--clear-followup-queue))
       (pilish--set-aborted nil)
       (pilish--set-activity-phase "idle")
-      (pilish--process-followup-queue)))
+      (pilish--process-followup-queue))
+    (when delta-kind
+      (when (eq delta-kind 'text)
+        (pilish--set-activity-phase "replying"))
+      (pilish--queue-stream-delta
+       delta-kind
+       (plist-get (plist-get event :assistantMessageEvent) :delta))))
   ;; Then handle display
   (pcase (plist-get event :type)
     ("agent_start"
@@ -1480,33 +1483,25 @@ Updates buffer-local state and renders display updates."
     ("message_update"
      (when-let* ((msg-event (plist-get event :assistantMessageEvent))
                  (event-type (plist-get msg-event :type)))
-       ;; `pilish--stream-delta-kind' is the single source of truth for which
-       ;; assistant events are coalesced stream deltas.  A nil kind is not an
-       ;; error: block events (`text_end', `thinking_*', `toolcall_*', `error')
-       ;; have none and are dispatched by the `pcase' below.
-       (if-let* ((delta-kind (pilish--stream-delta-kind event)))
-           (progn
-             (when (eq delta-kind 'text)
-               (pilish--set-activity-phase "replying"))
-             (pilish--queue-stream-delta delta-kind
-                                         (plist-get msg-event :delta)))
-         (pcase event-type
-           ("text_start") ; No-op: text block started, nothing to render
-           ("text_end"
-            ;; Text block ended — finalize any active table that may have
-            ;; a trailing row without newline (backstop for streaming).
-            (pilish--maybe-decorate-streaming-table)
-            (setq pilish--streaming-table-candidate nil))
-           ("thinking_start"
-            (pilish--display-thinking-start))
-           ("thinking_end"
-            (pilish--display-thinking-end (plist-get msg-event :content)))
-           ((or "toolcall_start" "toolcall_delta" "toolcall_end")
-            (pilish--set-activity-phase "running")
-            (pilish--handle-toolcall-message-event msg-event))
-           ("error"
-            ;; Error during streaming (e.g., API error)
-            (pilish--display-error (plist-get msg-event :reason)))))))
+       ;; Stream deltas were queued from the single classification above.
+       ;; Dispatch the remaining block events here.
+       (pcase event-type
+         ("text_start") ; No-op: text block started, nothing to render
+         ("text_end"
+          ;; Text block ended — finalize any active table that may have
+          ;; a trailing row without newline (backstop for streaming).
+          (pilish--maybe-decorate-streaming-table)
+          (setq pilish--streaming-table-candidate nil))
+         ("thinking_start"
+          (pilish--display-thinking-start))
+         ("thinking_end"
+          (pilish--display-thinking-end (plist-get msg-event :content)))
+         ((or "toolcall_start" "toolcall_delta" "toolcall_end")
+          (pilish--set-activity-phase "running")
+          (pilish--handle-toolcall-message-event msg-event))
+         ("error"
+          ;; Error during streaming (e.g., API error)
+          (pilish--display-error (plist-get msg-event :reason))))))
     ("message_end"
      (let* ((message (plist-get event :message))
             (assistant-p (equal (plist-get message :role) "assistant")))
@@ -1581,10 +1576,9 @@ Updates buffer-local state and renders display updates."
     ("compaction_end"
      (pilish--handle-compaction-end-event event))
     ("agent_end"
-     ;; Defensively drop pending previews and cancel the flush timers; any
+     ;; Defensively drop pending tool previews and cancel their flush timer; any
      ;; tool still running here is aborted and its block is finalized below.
      (pilish--cancel-tool-update-flush)
-     (pilish--cancel-stream-delta-flush)
      (pilish--set-canonical-messages
       (plist-get pilish--state :messages))
      (pilish--display-agent-end)
