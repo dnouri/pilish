@@ -781,10 +781,12 @@ markdown-changing insertion per cadence instead of one per token."
           (pilish--schedule-stream-delta-flush))))))
 
 (defun pilish--flush-stream-deltas (&optional buffer)
-  "Render pending streaming deltas in BUFFER, then clear flush state.
+  "Render the pending streaming delta batch in BUFFER, then clear flush state.
 Timer callback for `pilish--stream-delta-flush-timer'.  Also called
 synchronously before any non-delta event so text, thinking, and tool blocks
-keep their authoritative order."
+keep their authoritative order.  If rendering signals, log once and discard
+the rest of the staged batch rather than risk duplicating partial output;
+canonical history or reload is the recovery path."
   (let ((buffer (or buffer (current-buffer))))
     ;; Cheap pre-check without switching buffers: high-frequency non-delta
     ;; events call this on every token.
@@ -804,19 +806,24 @@ keep their authoritative order."
             ;; cheap dirty-tick bookkeeping means repeated suspended flushes do
             ;; not accumulate full-buffer dirty ranges.  jit-lock refontifies
             ;; the visible region at redisplay.
-            (pilish--with-md-ts-change-hooks-suspended
-                #'pilish--md-ts-expensive-change-hook-p
-              (while pending
-                (let ((kind (car (car pending)))
-                      (text (cdr (car pending))))
-                  (setq pending (cdr pending))
-                  (while (and pending (eq (car (car pending)) kind))
-                    (setq text (concat text (cdr (car pending)))
-                          pending (cdr pending)))
-                  (pcase kind
-                    ('text (pilish--display-message-delta text))
-                    ('thinking
-                     (pilish--display-thinking-delta text))))))))))))
+            (condition-case err
+                (pilish--with-md-ts-change-hooks-suspended
+                    #'pilish--md-ts-expensive-change-hook-p
+                  (while pending
+                    (let ((kind (car (car pending)))
+                          (text (cdr (car pending))))
+                      (setq pending (cdr pending))
+                      (while (and pending (eq (car (car pending)) kind))
+                        (setq text (concat text (cdr (car pending)))
+                              pending (cdr pending)))
+                      (pcase kind
+                        ('text (pilish--display-message-delta text))
+                        ('thinking
+                         (pilish--display-thinking-delta text))))))
+              (error
+               (message "pilish: stream delta flush failed: %s"
+                        (error-message-string err))
+               nil))))))))
 
 (defun pilish--cancel-stream-delta-flush ()
   "Cancel any armed streaming delta flush timer and drop pending deltas.
@@ -1388,17 +1395,24 @@ which asks upfront before any buffers are touched."
 (defun pilish--handle-display-event (event)
   "Handle EVENT for display purposes.
 Updates buffer-local state and renders display updates."
-  ;; Coalesced stream deltas must be painted before any handled event that can
-  ;; insert chat text or start a block, so ordering between text, thinking,
-  ;; and tool blocks stays authoritative.  Delta events keep accumulating until
-  ;; the flush cadence.  (`queue_update' bypasses this handler and only
-  ;; refreshes the mode line, so it needs no flush.)
-  (unless (pilish--stream-delta-event-p event)
-    (pilish--flush-stream-deltas))
-  ;; Most events update state first.  Settlement's return value gates its
-  ;; completion effects below, since it may belong to an older run.
-  (unless (equal (plist-get event :type) "agent_settled")
-    (pilish--update-state-from-event event))
+  ;; Protocol state is authoritative and must advance before fallible display
+  ;; work.  Settlement's return value says whether this event released waiting
+  ;; work; preserve it from the single state update to gate completion effects.
+  (let ((settlement-released (pilish--update-state-from-event event)))
+    ;; Coalesced stream deltas must be painted before any handled event that can
+    ;; insert chat text or start a block, so ordering between text, thinking,
+    ;; and tool blocks stays authoritative.  Delta events keep accumulating
+    ;; until the flush cadence.  (`queue_update' bypasses this handler and only
+    ;; refreshes the mode line, so it needs no flush.)
+    (unless (pilish--stream-delta-event-p event)
+      (pilish--flush-stream-deltas))
+    (when (and settlement-released
+               (equal (plist-get event :type) "agent_settled"))
+      (when pilish--aborted
+        (pilish--clear-followup-queue))
+      (pilish--set-aborted nil)
+      (pilish--set-activity-phase "idle")
+      (pilish--process-followup-queue)))
   ;; Then handle display
   (pcase (plist-get event :type)
     ("agent_start"
@@ -1561,13 +1575,7 @@ Updates buffer-local state and renders display updates."
      (pilish--display-agent-end)
      (pilish--update-hot-tail-boundary)
      (pilish--queue-tool-cooling-outside-hot-tail))
-    ("agent_settled"
-     (when (pilish--update-state-from-event event)
-       (when pilish--aborted
-         (pilish--clear-followup-queue))
-       (pilish--set-aborted nil)
-       (pilish--set-activity-phase "idle")
-       (pilish--process-followup-queue)))
+    ("agent_settled" nil)
     ("auto_retry_start"
      (pilish--display-retry-start event))
     ("auto_retry_end"

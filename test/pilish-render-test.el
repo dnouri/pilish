@@ -12685,16 +12685,35 @@ hooks, including `kill-buffer-hook'."
                  (string-match-p "answer" content))))))
 
 (ert-deftest pilish-test-stream-delta-flushes-before-non-delta-event ()
-  "A non-delta event paints pending text before inserting its own content."
+  "A non-delta event advances state, then paints text before its own output."
   (with-temp-buffer
     (pilish-chat-mode)
     (pilish--handle-display-event '(:type "agent_start"))
     (pilish--handle-display-event
      '(:type "message_start" :message (:role "assistant")))
     (pilish-test--send-text-delta "streamed first")
-    (pilish--handle-display-event
-     '(:type "tool_execution_start"
-       :toolName "bash" :toolCallId "call_1" :args (:command "echo hi")))
+    (let ((original-update (symbol-function 'pilish--update-state-from-event))
+          (original-delta (symbol-function 'pilish--display-message-delta))
+          (original-tool (symbol-function 'pilish--display-tool-start))
+          order)
+      (cl-letf (((symbol-function 'pilish--update-state-from-event)
+                 (lambda (event)
+                   (push 'state-update order)
+                   (funcall original-update event)))
+                ((symbol-function 'pilish--display-message-delta)
+                 (lambda (delta)
+                   (push 'stream-text order)
+                   (funcall original-delta delta)))
+                ((symbol-function 'pilish--display-tool-start)
+                 (lambda (&rest args)
+                   (push 'tool-output order)
+                   (apply original-tool args))))
+        (pilish--handle-display-event
+         '(:type "tool_execution_start"
+           :toolName "bash" :toolCallId "call_1"
+           :args (:command "echo hi"))))
+      (should (equal (nreverse order)
+                     '(state-update stream-text tool-output))))
     (let ((content (buffer-string)))
       (should (string-match-p "streamed first" content))
       (should (string-match-p "\\$ echo hi" content))
@@ -12702,6 +12721,78 @@ hooks, including `kill-buffer-hook'."
                  (string-match-p "\\$ echo hi" content))))
     (should-not pilish--pending-stream-deltas)
     (should-not pilish--stream-delta-flush-timer)))
+
+(ert-deftest pilish-test-stream-flush-error-before-insert-does-not-wedge-settlement ()
+  "A failed preflush cannot skip agent cleanup or follow-up settlement."
+  (pilish-test--with-streaming-assistant
+    (let ((original-update (symbol-function 'pilish--update-state-from-event))
+          (original-agent-end (symbol-function 'pilish--display-agent-end))
+          diagnostics updates sent
+          (terminal-cleanups 0))
+      (setq pilish--followup-queue '("queued follow-up"))
+      (pilish-test--send-text-delta "lost before insertion")
+      (should (timerp pilish--stream-delta-flush-timer))
+      (cl-letf (((symbol-function 'pilish--display-message-delta)
+                 (lambda (_delta) (error "before insertion")))
+                ((symbol-function 'pilish--update-state-from-event)
+                 (lambda (event)
+                   (push (plist-get event :type) updates)
+                   (funcall original-update event)))
+                ((symbol-function 'pilish--display-agent-end)
+                 (lambda ()
+                   (cl-incf terminal-cleanups)
+                   (funcall original-agent-end)))
+                ((symbol-function 'pilish--send-prompt)
+                 (lambda (text &optional on-success &rest _)
+                   (setq sent text)
+                   (when on-success (funcall on-success))))
+                ((symbol-function 'message)
+                 (lambda (format-string &rest args)
+                   (push (apply #'format format-string args) diagnostics))))
+        (pilish--handle-display-event '(:type "agent_end" :messages []))
+        (should-not pilish--pending-stream-deltas)
+        (should-not pilish--stream-delta-flush-timer)
+        (should (eq pilish--status 'sending))
+        (should (= terminal-cleanups 1))
+        (pilish--handle-display-event '(:type "agent_settled")))
+      (should (equal (nreverse updates) '("agent_end" "agent_settled")))
+      (should (equal diagnostics
+                     '("pilish: stream delta flush failed: before insertion")))
+      (should (= terminal-cleanups 1))
+      (should (eq pilish--status 'idle))
+      (should (equal sent "queued follow-up"))
+      (should-not pilish--followup-queue))))
+
+(ert-deftest pilish-test-stream-flush-error-after-insert-discards-batch ()
+  "A partially rendered failed batch is neither retried nor reordered."
+  (pilish-test--with-streaming-assistant
+    (pilish-test--send-text-delta "inserted exactly once")
+    (pilish-test--send-thinking-delta "later thinking")
+    (pilish-test--send-text-delta "later text")
+    (let ((original-delta (symbol-function 'pilish--display-message-delta))
+          diagnostics
+          (render-calls 0))
+      (cl-letf (((symbol-function 'pilish--display-message-delta)
+                 (lambda (delta)
+                   (cl-incf render-calls)
+                   (funcall original-delta delta)
+                   (error "after insertion")))
+                ((symbol-function 'message)
+                 (lambda (format-string &rest args)
+                   (push (apply #'format format-string args) diagnostics))))
+        (pilish--handle-display-event '(:type "agent_end" :messages []))
+        (pilish--handle-display-event '(:type "agent_settled")))
+      (let ((content (buffer-string)))
+        (should (= 1 render-calls))
+        (should (= 1 (pilish-test--count-matches
+                      "inserted exactly once" content)))
+        (should-not (string-match-p "later thinking" content))
+        (should-not (string-match-p "later text" content)))
+      (should (equal diagnostics
+                     '("pilish: stream delta flush failed: after insertion")))
+      (should-not pilish--pending-stream-deltas)
+      (should-not pilish--stream-delta-flush-timer)
+      (should (eq pilish--status 'idle)))))
 
 (ert-deftest pilish-test-stream-delta-flush-suspends-expensive-md-ts-hooks ()
   "A coalesced flush suppresses stale tracking but keeps required md-ts hooks.
@@ -14192,6 +14283,36 @@ banner just because it was still queued when the process died."
             (should (string-match-p "pi process exited" content))
             (should (< (string-match-p "residual text" content)
                        (string-match-p "pi process exited" content)))))
+      (when (process-live-p process)
+        (delete-process process)))))
+
+(ert-deftest pilish-test-process-exit-survives-stream-flush-error ()
+  "A failed pending-text flush cannot skip the exit banner or cleanup."
+  (let ((process (start-process "pilish-render-exit-error-test" nil "cat")))
+    (unwind-protect
+        (pilish-test--with-streaming-assistant
+          (setq pilish--process process)
+          (pilish-test--send-text-delta "unrenderable residual")
+          (let (diagnostics)
+            (cl-letf (((symbol-function 'pilish--display-message-delta)
+                       (lambda (_delta) (error "exit flush")))
+                      ((symbol-function 'message)
+                       (lambda (format-string &rest args)
+                         (push (apply #'format format-string args)
+                               diagnostics))))
+              (pilish--mark-process-exited
+               process '(:error "transport failed" :exitCode 9)))
+            (should (equal diagnostics
+                           '("pilish: stream delta flush failed: exit flush"))))
+          (should (string-match-p "pi process exited" (buffer-string)))
+          (should (process-get process 'pilish-exit-error-rendered))
+          (should-not pilish--pending-stream-deltas)
+          (should-not pilish--stream-delta-flush-timer)
+          (should-not pilish--process)
+          (should (eq pilish--status 'idle))
+          (should (equal pilish--activity-phase "idle"))
+          (should (equal (plist-get pilish--state :last-error)
+                         "transport failed")))
       (when (process-live-p process)
         (delete-process process)))))
 
