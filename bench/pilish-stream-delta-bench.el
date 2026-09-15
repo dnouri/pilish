@@ -483,19 +483,62 @@
     '("SD-BOUNDARY-TOOL"))
    "\n"))
 
+(defun pilish-sd-bench--projection-line-specs ()
+  "Return ordered line specifications for the complete visible stream span."
+  (append
+   '((omit . "Assistant")
+     ;; `pilish--visible-text' has already omitted the display-empty underline.
+     (omit . ""))
+   (cl-loop for index below pilish-sd-bench-timer-text-deltas
+            collect (cons 'payload (pilish-sd-bench--text-line index)))
+   '((omit . ""))
+   (cl-loop for index below pilish-sd-bench-thinking-deltas
+            collect (cons 'thinking (pilish-sd-bench--thinking-line index)))
+   '((omit . ""))
+   (cl-loop for index below pilish-sd-bench-backlog-deltas
+            collect (cons 'payload (pilish-sd-bench--backlog-line index)))
+   '((omit . "")
+     (tool . "SD-BOUNDARY-TOOL")
+     (omit . ""))))
+
 (defun pilish-sd-bench--actual-projection (chat-buf)
-  "Return CHAT-BUF's exact visible benchmark-payload projection.
-For each visible line containing an SD marker, renderer chrome before the
-marker is omitted; payload text from the marker through end-of-line is exact."
+  "Return CHAT-BUF's exact normalized visible stream-span projection.
+The span starts at the post-history assistant header and extends to buffer end.
+Only exact renderer chrome at its expected line is omitted or stripped; every
+other visible line is retained so unexpected text fails projection equality."
   (with-current-buffer chat-buf
-    (let ((visible
-           (substring-no-properties
-            (pilish--visible-text (point-min) (point-max))))
-          rows)
-      (dolist (line (split-string visible "\n"))
-        (when (string-match "SD-" line)
-          (push (substring line (match-beginning 0)) rows)))
-      (string-join (nreverse rows) "\n"))))
+    (let* ((visible
+            (substring-no-properties
+             (pilish--visible-text (point-min) (point-max))))
+           (anchor "run the deterministic stream-delta benchmark\n\n")
+           (anchor-start (string-match (regexp-quote anchor) visible)))
+      (unless anchor-start
+        (error "Stream-span anchor not found in rendered benchmark buffer"))
+      (when (string-match-p "SD-" (substring visible 0 anchor-start))
+        (error "Synthetic replay prefix contains reserved SD- marker"))
+      (let ((lines (split-string
+                    (substring visible (+ anchor-start (length anchor)))
+                    "\n" nil))
+            (specs (pilish-sd-bench--projection-line-specs))
+            normalized)
+        (dolist (line lines)
+          (let ((spec (pop specs)))
+            (pcase (car-safe spec)
+              ('omit
+               (unless (equal line (cdr spec))
+                 (push line normalized)))
+              ('thinking
+               (push (if (equal line (concat "> " (cdr spec)))
+                         (cdr spec)
+                       line)
+                     normalized))
+              ('tool
+               (push (if (equal line (concat "$ echo " (cdr spec)))
+                         (cdr spec)
+                       line)
+                     normalized))
+              (_ (push line normalized)))))
+        (string-join (nreverse normalized) "\n")))))
 
 (defun pilish-sd-bench--dirty-ranges ()
   "Return guarded md-ts dirty-range diagnostics in the current buffer."
