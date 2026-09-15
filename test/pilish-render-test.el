@@ -12613,11 +12613,8 @@ hooks, including `kill-buffer-hook'."
 (defun pilish-test--assert-md-ts-04-change-hook-capabilities ()
   "Assert required `md-ts-mode' 0.4 change-hook functions are available."
   (dolist (function
-           (append pilish--md-ts-expensive-change-hooks
-                   '(md-ts--before-change-check-link-reference-definition
-                     md-ts--after-change-flush-link-reference-links
-                     md-ts--font-lock-record-dirty-side-effect-bounds
-                     md-ts--font-lock-dirty-side-effect-bounds)))
+           (cons 'md-ts--font-lock-dirty-side-effect-bounds
+                 pilish--md-ts-known-change-hooks))
     (ert-info ((format "md-ts-mode 0.4.0 must define %S" function))
       (should (fboundp function)))))
 
@@ -12903,7 +12900,7 @@ installed so dirty ranges remain bounded and distant links stay up to date."
         (kill-buffer buf)))))
 
 (ert-deftest pilish-test-md-ts-change-hooks-suspended-removes-and-restores ()
-  "Full suspension removes every md-ts per-change hook and restores them.
+  "Full suspension removes every known md-ts 0.4 hook and restores them.
 Bulk history replay uses this single-epoch form."
   (pilish-test--assert-md-ts-04-change-hook-capabilities)
   (with-temp-buffer
@@ -12920,6 +12917,81 @@ Bulk history replay uses this single-epoch form."
       (should-not (seq-find #'pilish--md-ts-change-hook-p inside-after))
       (should (equal before-hooks before-change-functions))
       (should (equal after-hooks after-change-functions)))))
+
+(ert-deftest pilish-test-md-ts-future-hook-survives-full-suspension ()
+  "Full suspension removes known hooks but preserves an unknown md-ts hook.
+Exact hook values and local/inherited status survive normal and error exits."
+  (pilish-test--assert-md-ts-04-change-hook-capabilities)
+  (let ((known-hooks pilish--md-ts-known-change-hooks)
+        (future-hook 'md-ts--future-expensive-thing))
+    (cl-labels
+        ((exercise
+          (nonlocal)
+          (let ((before-hooks (copy-sequence before-change-functions))
+                (after-hooks (copy-sequence after-change-functions))
+                (before-local (local-variable-p 'before-change-functions))
+                (after-local (local-variable-p 'after-change-functions))
+                inside-before inside-after)
+            (dolist (hook known-hooks)
+              (should (or (memq hook before-hooks)
+                          (memq hook after-hooks))))
+            (let ((body
+                   (lambda ()
+                     (setq inside-before before-change-functions
+                           inside-after after-change-functions)
+                     (when nonlocal
+                       (error "synthetic nonlocal exit")))))
+              (if nonlocal
+                  (should-error
+                   (pilish--with-md-ts-change-hooks-suspended
+                       #'pilish--md-ts-change-hook-p
+                     (funcall body))
+                   :type 'error)
+                (pilish--with-md-ts-change-hooks-suspended
+                    #'pilish--md-ts-change-hook-p
+                  (funcall body))))
+            (should (memq future-hook inside-before))
+            (should (memq future-hook inside-after))
+            (dolist (hook known-hooks)
+              (should-not (memq hook inside-before))
+              (should-not (memq hook inside-after)))
+            (should (equal before-hooks before-change-functions))
+            (should (equal after-hooks after-change-functions))
+            (should (eq before-local
+                        (local-variable-p 'before-change-functions)))
+            (should (eq after-local
+                        (local-variable-p 'after-change-functions))))))
+      (cl-letf (((symbol-function 'md-ts--future-expensive-thing) #'ignore))
+        (dolist (local-hooks '(t nil))
+          (dolist (nonlocal '(nil t))
+            (ert-info ((format "%s hooks, %s exit"
+                               (if local-hooks "local" "inherited")
+                               (if nonlocal "nonlocal" "normal")))
+              (with-temp-buffer
+                (pilish-chat-mode)
+                (let ((mode-before (copy-sequence before-change-functions))
+                      (mode-after (copy-sequence after-change-functions)))
+                  (if local-hooks
+                      (progn
+                        (add-hook 'before-change-functions future-hook nil t)
+                        (add-hook 'after-change-functions future-hook nil t)
+                        (exercise nonlocal))
+                    (let ((default-before
+                           (default-value 'before-change-functions))
+                          (default-after
+                           (default-value 'after-change-functions)))
+                      (unwind-protect
+                          (progn
+                            (set-default 'before-change-functions
+                                         (cons future-hook mode-before))
+                            (set-default 'after-change-functions
+                                         (cons future-hook mode-after))
+                            (kill-local-variable 'before-change-functions)
+                            (kill-local-variable 'after-change-functions)
+                            (exercise nonlocal))
+                        (set-default 'before-change-functions default-before)
+                        (set-default 'after-change-functions
+                                     default-after)))))))))))))
 
 (ert-deftest pilish-test-md-ts-expensive-hooks-suspended-keeps-dirty-tick ()
   "Expensive-hook suspension keeps md-ts's dirty-tick hook installed."

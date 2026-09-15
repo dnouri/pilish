@@ -111,9 +111,18 @@ concatenated at flush time.")
 (defvar-local pilish--stream-delta-flush-timer nil
   "The one pending one-shot streaming delta flush timer, or nil.")
 
+(defconst pilish--md-ts-known-change-hooks
+  '(md-ts--font-lock-record-dirty-side-effect-bounds
+    md-ts--font-lock-record-stale-side-effect-bounds
+    md-ts--before-change-check-link-reference-definition
+    md-ts--after-change-flush-link-reference-links)
+  "Complete set of md-ts 0.4 per-change hooks known to Pilish.
+Full history replay may suspend exactly these hooks; unknown hooks remain
+installed because Pilish has no cost or correctness contract for them.")
+
 (defconst pilish--md-ts-expensive-change-hooks
   '(md-ts--font-lock-record-stale-side-effect-bounds)
-  "Expensive md-ts per-change hooks that must not run on every streamed flush.
+  "Expensive subset of `pilish--md-ts-known-change-hooks' for stream flushes.
 The stale-side-effect recorder queries tree-sitter over regions that grow with
 the buffer.  Coupled to md-ts internals: if md-ts renames it, streaming
 suspension silently degrades to running it (correct, only slower).
@@ -129,16 +138,16 @@ untracked full-buffer rewrite, so md-ts pushes a full-buffer dirty range on
 the next fontification and the dirty-range list grows by one per flush.")
 
 (defun pilish--md-ts-change-hook-p (hook)
-  "Return non-nil when HOOK is any md-ts per-change tracking function.
+  "Return non-nil when HOOK is a known md-ts 0.4 per-change hook.
 md-ts-mode installs buffer-local before/after-change hooks that query
 tree-sitter on every buffer modification.  Their cost grows with buffer size,
-so bulk replay and coalesced streaming inserts would otherwise pay it
-quadratically.  jit-lock's own after-change hook is deliberately kept.
+so bulk replay would otherwise pay it quadratically.  jit-lock's own
+`jit-lock-after-change' hook is deliberately kept.
 
-Matches by name prefix, which couples this to md-ts internals: a rename makes
-suspension silently stop matching (correct, only slower)."
-  (and (symbolp hook)
-       (string-prefix-p "md-ts--" (symbol-name hook))))
+Only explicit members of `pilish--md-ts-known-change-hooks' are suspended.
+Renamed or future md-ts hooks remain installed (correct, potentially slower)
+rather than being suppressed without a known correctness contract."
+  (memq hook pilish--md-ts-known-change-hooks))
 
 (defun pilish--md-ts-expensive-change-hook-p (hook)
   "Return non-nil when HOOK is an expensive md-ts per-change hook.
@@ -7247,9 +7256,9 @@ Note: When called from async callbacks, pass CHAT-BUF explicitly."
              (max gc-cons-threshold
                   pilish--history-replay-gc-threshold)))
         ;; Replaying and cooling a large transcript performs hundreds of small
-        ;; rewrites.  Suspend every md-ts per-change hook for the whole rebuild:
-        ;; this is one untracked epoch, so md-ts records a single dirty range
-        ;; and jit-lock fontifies visible text at the next redisplay.
+        ;; rewrites.  Suspend every known md-ts 0.4 per-change hook for the
+        ;; whole rebuild.  This is one untracked epoch, so md-ts records one
+        ;; dirty range and jit-lock fontifies visible text at the next redisplay.
         (pilish--with-md-ts-change-hooks-suspended
             #'pilish--md-ts-change-hook-p
           (pilish--clear-render-artifacts)
