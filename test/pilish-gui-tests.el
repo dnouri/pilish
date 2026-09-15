@@ -607,6 +607,54 @@ chat-mode buffer to isolate the toggle logic from RPC timing."
 
 ;;;; Streaming Fontification Tests
 
+(ert-deftest pilish-gui-test-streamed-reference-definition-refreshes-distant-link ()
+  "A streamed definition refontifies an offscreen reference link."
+  (pilish-gui-test-with-fresh-session
+    (:backend fake :fake-scenario "prompt-lifecycle")
+    (let* ((chat (plist-get pilish-gui-test--session :chat-buffer))
+           (window (pilish-gui-test-chat-window))
+           doc-position)
+      (with-current-buffer chat
+        (let ((inhibit-read-only t))
+          (erase-buffer)
+          (insert "See [Doc][id].\n\n")
+          (dotimes (i (+ 20 (* 2 (window-body-height window))))
+            (insert (format "Filler line %03d.\n" i)))
+          (insert "\n"))
+        (goto-char (point-min))
+        (search-forward "Doc")
+        (setq doc-position (match-beginning 0))
+        (setq pilish--assistant-header-shown nil)
+        (pilish--handle-display-event '(:type "agent_start"))
+        (pilish--handle-display-event
+         '(:type "message_start" :message (:role "assistant"))))
+      (with-selected-window window
+        (goto-char (point-min))
+        (set-window-start window (point-min))
+        (redisplay t)
+        (should-not (pos-visible-in-window-p (point-max) window))
+        (should (eq t (get-text-property doc-position 'fontified)))
+        (should-not (button-at doc-position)))
+      (with-selected-window window
+        (goto-char (point-max))
+        (recenter -1)
+        (redisplay t)
+        (should-not (pos-visible-in-window-p doc-position window)))
+      (with-current-buffer chat
+        (pilish--handle-display-event
+         '(:type "message_update"
+           :assistantMessageEvent
+           (:type "text_delta" :delta "[id]: https://added.example\n")))
+        (pilish--flush-stream-deltas))
+      (with-selected-window window
+        (goto-char doc-position)
+        (set-window-start window (point-min))
+        (redisplay t)
+        (let ((button (button-at doc-position)))
+          (should button)
+          (should (equal "https://added.example"
+                         (button-get button 'help-echo))))))))
+
 (ert-deftest pilish-gui-test-streaming-no-fences ()
   "Streaming write content shows no fence markers to the user.
 Fences exist in the buffer for tree-sitter parsing, but

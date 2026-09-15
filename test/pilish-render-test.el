@@ -12614,7 +12614,9 @@ hooks, including `kill-buffer-hook'."
   "Assert required `md-ts-mode' 0.4 change-hook functions are available."
   (dolist (function
            (append pilish--md-ts-expensive-change-hooks
-                   '(md-ts--font-lock-record-dirty-side-effect-bounds
+                   '(md-ts--before-change-check-link-reference-definition
+                     md-ts--after-change-flush-link-reference-links
+                     md-ts--font-lock-record-dirty-side-effect-bounds
                      md-ts--font-lock-dirty-side-effect-bounds)))
     (ert-info ((format "md-ts-mode 0.4.0 must define %S" function))
       (should (fboundp function)))))
@@ -12702,10 +12704,9 @@ hooks, including `kill-buffer-hook'."
     (should-not pilish--stream-delta-flush-timer)))
 
 (ert-deftest pilish-test-stream-delta-flush-suspends-expensive-md-ts-hooks ()
-  "The coalesced flush keeps md-ts's cheap dirty-tick bookkeeping installed.
-Suspending `md-ts--font-lock-record-dirty-side-effect-bounds' too would make
-every flush look like an untracked full-buffer rewrite and accumulate dirty
-ranges; see `pilish--md-ts-expensive-change-hooks'."
+  "A coalesced flush suppresses stale tracking but keeps required md-ts hooks.
+The cheap dirty-tick hook and reference-definition before/after pair must stay
+installed so dirty ranges remain bounded and distant links stay up to date."
   (pilish-test--assert-md-ts-04-change-hook-capabilities)
   (with-temp-buffer
     (pilish-chat-mode)
@@ -12722,17 +12723,25 @@ ranges; see `pilish--md-ts-expensive-change-hooks'."
                          seen-after after-change-functions)
                    (funcall orig delta))))
         (pilish--flush-stream-deltas))
-      ;; Expensive tracking is suspended during the insert ...
+      ;; Only stale side-effect tracking is suspended during the insert.
+      (should-not
+       (memq 'md-ts--font-lock-record-stale-side-effect-bounds seen-before))
       (should-not (seq-find #'pilish--md-ts-expensive-change-hook-p
                             seen-before))
       (should-not (seq-find #'pilish--md-ts-expensive-change-hook-p
                             seen-after))
-      ;; ... but the dirty-tick hook stays, so md-ts never sees an untracked
-      ;; full-buffer edit and the dirty-range list does not grow per flush.
+      ;; The dirty-tick hook stays, so md-ts never sees an untracked full-buffer
+      ;; edit and the dirty-range list does not grow per flush.
       (should (memq 'md-ts--font-lock-record-dirty-side-effect-bounds
                     seen-before))
       (should (memq 'md-ts--font-lock-record-dirty-side-effect-bounds
                     seen-after))
+      ;; The paired link hooks keep offscreen reference buttons current.
+      (should
+       (memq 'md-ts--before-change-check-link-reference-definition
+             seen-before))
+      (should
+       (memq 'md-ts--after-change-flush-link-reference-links seen-after))
       ;; Hooks are restored after the flush.
       (should (seq-find #'pilish--md-ts-change-hook-p
                         before-change-functions))

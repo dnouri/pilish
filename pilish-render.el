@@ -112,15 +112,15 @@ concatenated at flush time.")
   "The one pending one-shot streaming delta flush timer, or nil.")
 
 (defconst pilish--md-ts-expensive-change-hooks
-  '(md-ts--font-lock-record-stale-side-effect-bounds
-    md-ts--before-change-check-link-reference-definition
-    md-ts--after-change-flush-link-reference-links)
+  '(md-ts--font-lock-record-stale-side-effect-bounds)
   "Expensive md-ts per-change hooks that must not run on every streamed flush.
-Each queries tree-sitter over regions that grow with the buffer: the first
-records stale multi-line side-effect nodes, the other two scan the
-blank-line-delimited block for link-reference and fence structure.  Coupled
-to md-ts internals: if md-ts renames them, streaming suspension silently
-degrades to running them (correct, only slower).
+The stale-side-effect recorder queries tree-sitter over regions that grow with
+the buffer.  Coupled to md-ts internals: if md-ts renames it, streaming
+suspension silently degrades to running it (correct, only slower).
+
+The paired link-reference before/after hooks are deliberately NOT in this list.
+md-ts cheaply prefilters irrelevant edits, while real definition changes must
+invalidate distant fontified link buttons.
 
 `md-ts--font-lock-record-dirty-side-effect-bounds' is deliberately NOT in
 this list.  It is cheap and keeps md-ts's modified tick and bounded dirty
