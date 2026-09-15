@@ -34,6 +34,7 @@ VERBOSE ?=
 .PHONY: test-integration test-integration-fake test-integration-real test-integration-ci test-integration-ci-real test-gui test-gui-ci test-all
 .PHONY: bench bench-batch bench-reload-resume bench-reload-resume-batch bench-reload-resume-smoke
 .PHONY: bench-tool-update bench-tool-update-batch bench-tool-update-smoke
+.PHONY: bench-stream-delta bench-stream-delta-batch bench-stream-delta-smoke
 .PHONY: bench-agent-end-cooling bench-agent-end-cooling-batch bench-agent-end-cooling-smoke
 .PHONY: check check-parens compile lint lint-checkdoc lint-package clean clean-cache help
 .PHONY: ollama-start ollama-stop ollama-status setup-pi install-hooks
@@ -63,6 +64,9 @@ help:
 	@echo "  make bench-tool-update             Tool-update storm benchmarks (GUI via xvfb)"
 	@echo "  make bench-tool-update-batch       Tool-update storm benchmarks (batch, secondary lane)"
 	@echo "  make bench-tool-update-smoke       Tool-update storm smoke benchmark (batch, no timing thresholds)"
+	@echo "  make bench-stream-delta            Stream-delta benchmark (GUI via xvfb)"
+	@echo "  make bench-stream-delta-batch      Stream-delta benchmark (batch, secondary lane)"
+	@echo "  make bench-stream-delta-smoke      Stream-delta smoke benchmark (batch, no timing thresholds)"
 	@echo "  make bench-agent-end-cooling       Deferred agent_end cooling benchmark (GUI via xvfb)"
 	@echo "  make bench-agent-end-cooling-batch Deferred agent_end cooling benchmark (batch, secondary lane)"
 	@echo "  make bench-agent-end-cooling-smoke Cheap deferred cooling smoke (batch, no timing thresholds)"
@@ -310,6 +314,18 @@ bench-tool-update-batch: .deps-stamp
 # Cheap correctness/regression smoke; no timing thresholds are enforced.
 bench-tool-update-smoke: .deps-stamp
 	@./bench/run-tool-update-bench.sh --batch --scenario smoke -c 1
+
+# Primary lane: GUI via xvfb for representative coalesced stream rendering.
+bench-stream-delta: .deps-stamp
+	@./bench/run-stream-delta-bench.sh
+
+# Secondary lane: batch mode; useful for CI artifacts and quick comparisons.
+bench-stream-delta-batch: .deps-stamp
+	@./bench/run-stream-delta-bench.sh --batch
+
+# Cheap correctness/regression smoke; no timing thresholds are enforced.
+bench-stream-delta-smoke: .deps-stamp
+	@./bench/run-stream-delta-bench.sh --batch --scenario smoke -c 1
 
 # Deferred agent_end regression: a 90-overlay cohort drains through the real
 # process filter and production one-shot cooling timers.  Timing is diagnostic.

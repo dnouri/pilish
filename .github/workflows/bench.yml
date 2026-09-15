@@ -34,6 +34,10 @@ jobs:
         run: |
           set -o pipefail
           ./bench/run-tool-update-bench.sh --batch --scenario smoke -c 1 --out-dir tmp/tool-update-bench-ci | tee tool-update-bench-output.txt
+      - name: Run stream-delta benchmarks (batch smoke)
+        run: |
+          set -o pipefail
+          ./bench/run-stream-delta-bench.sh --batch --scenario smoke -c 1 --out-dir tmp/stream-delta-bench-ci | tee stream-delta-bench-output.txt
       - name: Upload results
         if: always()
         uses: actions/upload-artifact@v4
@@ -43,6 +47,7 @@ jobs:
             bench-output.txt
             reload-resume-bench-output.txt
             tool-update-bench-output.txt
+            stream-delta-bench-output.txt
             tmp/reload-resume-bench-ci/summary.csv
             tmp/reload-resume-bench-ci/summary.md
             tmp/reload-resume-bench-ci/**/report.md
@@ -57,3 +62,12 @@ jobs:
             tmp/tool-update-bench-ci/**/times.tsv
             tmp/tool-update-bench-ci/**/stdout.log
             tmp/tool-update-bench-ci/**/stderr.log
+            tmp/stream-delta-bench-ci/summary.csv
+            tmp/stream-delta-bench-ci/summary.md
+            tmp/stream-delta-bench-ci/**/report.md
+            tmp/stream-delta-bench-ci/**/result.json
+            tmp/stream-delta-bench-ci/**/times.tsv
+            tmp/stream-delta-bench-ci/**/fake-pi.jsonl
+            tmp/stream-delta-bench-ci/**/env
+            tmp/stream-delta-bench-ci/**/stdout.log
+            tmp/stream-delta-bench-ci/**/stderr.log

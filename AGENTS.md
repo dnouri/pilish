@@ -112,6 +112,9 @@ latch on delayed agent/compaction starts.
 | `bench/pilish-tool-update-bench.el` | Synthetic tool-update storm and deferred agent_end cooling benchmark harness |
 | `bench/fake-pi-tool-update-storm.py` | Fake JSON-over-stdio pi backend emitting tool-update storm and cooling scenarios |
 | `bench/run-tool-update-bench.sh` | Tool-update/cooling benchmark runner; GUI uses `xvfb-run`, `--batch` for headless lane |
+| `bench/pilish-stream-delta-bench.el` | Synthetic history plus coalesced text/thinking stream benchmark harness |
+| `bench/fake-pi-stream-delta.py` | Fake JSON-over-stdio backend for deterministic stream bursts and backlog |
+| `bench/run-stream-delta-bench.sh` | Stream-delta benchmark runner; GUI uses `xvfb-run`, `--batch` for headless lane |
 | `bench/fixtures/tables.md` | Sample pipe tables used by the table benchmark |
 | `test/support/fake_pi.py` | Deterministic JSONL RPC subprocess double with scenario-driven events, valid v3 persistence, inspection RPCs, and transactional session switching |
 | `test/support/fake-pi-contract.md` | Maintainer-facing wire, scenario/event/tool, v3 record, projection, and switch contract for `fake_pi.py` |
@@ -181,6 +184,9 @@ make bench-reload-resume-smoke     # cheap synthetic correctness smoke
 make bench-tool-update             # tool-update storm GUI lane via xvfb (primary)
 make bench-tool-update-batch       # tool-update storm batch lane (secondary)
 make bench-tool-update-smoke       # cheap synthetic correctness smoke
+make bench-stream-delta            # stream-delta GUI lane via xvfb (primary)
+make bench-stream-delta-batch      # stream-delta batch lane (secondary)
+make bench-stream-delta-smoke      # cheap stream-delta correctness smoke
 make bench-agent-end-cooling       # deferred agent_end cooling GUI lane (primary)
 make bench-agent-end-cooling-batch # deferred cooling batch lane (secondary)
 make bench-agent-end-cooling-smoke # cheap deferred cooling correctness smoke
@@ -191,20 +197,22 @@ checks and CI artifact generators.  Reload/resume benchmarks use synthetic
 JSONL fixtures only and fail on correctness errors, not timing thresholds.
 Tool-update storm benchmarks replay a deterministic synthetic
 `tool_execution_update` storm against a fake pi and likewise fail only on
-correctness errors.  The deferred agent_end scenario reuses that harness and
-fake backend to cross a 90-overlay cohort at the final real process-filter
-event, then observes production one-shot cooling timers and routed scroll
+correctness errors.  Stream-delta benchmarks replay synthetic history before
+measuring coalesced text/thinking bursts and a single-filter backlog.  The
+deferred agent_end scenario reuses the tool-update harness and fake backend to
+cross a 90-overlay cohort at the final real process-filter event, then observes
+production one-shot cooling timers and routed scroll
 heartbeats without enforcing timing thresholds.  Its runner deliberately uses
 `-Q`: slice/root timings are structural diagnostics, zero root calls is valid,
 and these results must not be cited as evidence that md-ts root cost was
 reduced.
 Table fixtures live in `bench/fixtures/tables.md`.  Reload/resume artifacts are
 written under `tmp/reload-resume-bench/`, tool-update artifacts under
-`tmp/tool-update-bench/`, and agent-end-cooling artifacts under
-`tmp/agent-end-cooling-bench/{gui,batch}/` by default (the runner picks that
-directory per scenario and lane when no `--out-dir` is given; the dedicated
-smoke target writes `smoke/`), so those public lanes do not overwrite one
-another.
+`tmp/tool-update-bench/`, stream-delta artifacts under
+`tmp/stream-delta-bench/{gui,batch,smoke}/`, and agent-end-cooling artifacts
+under `tmp/agent-end-cooling-bench/{gui,batch,smoke}/` by default.  Runners
+select lane directories when no `--out-dir` is given; dedicated smoke targets write
+under `smoke/`, so public lanes do not overwrite one another.
 
 ## Linting
 
