@@ -503,8 +503,9 @@ cancels, the session remains intact."
     (when (buffer-live-p input-buf)
       (kill-buffer input-buf))
     (dolist (win input-windows)
-      (when (window-live-p win)
-        (ignore-errors (delete-window win))))))
+      (when (and (window-live-p win)
+                 (window-deletable-p win))
+        (delete-window win)))))
 
 ;;;; Slash Command Completion
 
