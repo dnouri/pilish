@@ -2476,7 +2476,7 @@ Stores the result in CHAT-BUF and emits a minibuffer notice when available."
    "assets/pilish-logo.svg"
    (file-name-directory
     (or load-file-name
-        (ignore-errors (symbol-file 'pilish--make-separator 'defun))
+        (symbol-file 'pilish--make-separator 'defun)
         (locate-library "pilish-ui")
         "pilish-ui.el")))
   "Absolute path of the canonical Hornbridge logo SVG shipped with Pilish.
