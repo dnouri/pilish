@@ -242,13 +242,17 @@ markup visibility, mode identity, and keybindings.  Set
 `pilish-input-markdown-highlighting' to nil for plain text."
   :group 'pilish
   (when pilish-input-markdown-highlighting
-    (md-ts-mode)
-    (setq major-mode 'pilish-input-mode)
-    (setq mode-name "Pi-Input")
-    (use-local-map pilish-input-mode-map)
-    ;; Users see exactly what they type — never hide markup in input.
-    (setq-local md-ts-hide-markup nil)
-    (md-ts--set-hide-markup nil))
+    (let ((derived-name mode-name))
+      ;; `md-ts-mode' is a full major mode: it clobbers the identity
+      ;; `define-derived-mode' installed before running this body, so
+      ;; capture and restore it rather than duplicating "Pi-Input".
+      (md-ts-mode)
+      (setq major-mode 'pilish-input-mode
+            mode-name derived-name)
+      (use-local-map pilish-input-mode-map)
+      ;; Users see exactly what they type — never hide markup in input.
+      (setq-local md-ts-hide-markup nil)
+      (md-ts--set-hide-markup nil)))
   (setq-local header-line-format '(:eval (pilish--header-line-string)))
   ;; Reset inherited completions (text-mode adds ispell, etc.) — our
   ;; input buffer should only offer slash commands, file refs, and paths.
