@@ -257,22 +257,36 @@
   (gethash type pilish-sd-bench--event-counts 0))
 
 (defun pilish-sd-bench--around-process-filter (orig proc output)
-  "Call real filter ORIG for PROC and OUTPUT and record its cost."
+  "Call real filter ORIG for PROC and OUTPUT and record its cost.
+When OUTPUT couples the backlog-ready line with trailing backlog bytes,
+dispatch only through the ready line and route the remainder into the
+backlog collector that the ready handler installs."
   (let* ((id (cl-incf pilish-sd-bench--filter-sequence))
          (start (float-time))
          (gc-before gcs-done)
          (gc-time-before gc-elapsed)
+         (split (and (not pilish-sd-bench--collector-active)
+                     (string-match "benchmark_backlog_ready[^\n]*\n" output)
+                     (let ((end (match-end 0)))
+                       (and (< end (length output)) end))))
+         (head (if split (substring output 0 split) output))
+         (tail (and split (substring output split)))
          (backlog (string-match-p
                    (regexp-quote pilish-sd-bench--backlog-marker)
-                   output))
+                   head))
          (pilish-sd-bench--current-filter-id id)
          value)
     (unwind-protect
-        (setq value (funcall orig proc output))
+        (progn
+          (setq value (funcall orig proc head))
+          (when tail
+            (if pilish-sd-bench--collector-active
+                (pilish-sd-bench--collecting-process-filter proc tail)
+              (setq value (funcall orig proc tail)))))
       (push (list :id id
                   :phase pilish-sd-bench--phase
-                  :bytes (string-bytes output)
-                  :lines (cl-count ?\n output)
+                  :bytes (string-bytes head)
+                  :lines (cl-count ?\n head)
                   :wallMs (* 1000.0 (- (float-time) start))
                   :gcs (- gcs-done gc-before)
                   :gcMs (* 1000.0 (- gc-elapsed gc-time-before))
@@ -343,9 +357,12 @@
     (setq value (funcall orig event))
     (pcase type
       ("benchmark_backlog_ready"
-       (pilish-sd-bench--start-backlog-collector
-        (or (and (boundp 'pilish--process) pilish--process)
-            (error "Backlog control event has no process"))))
+       (let ((proc (or (and (boundp 'pilish--process) pilish--process)
+                       (error "Backlog control event has no process"))))
+         (pilish-sd-bench--start-backlog-collector proc)
+         (pilish--send-string
+          proc
+          "{\"type\":\"benchmark_backlog_begin\",\"id\":\"sd-bench-backlog-begin\"}\n")))
       ("agent_end"
        (setq pilish-sd-bench--agent-end-time (float-time)))
       ("agent_settled"

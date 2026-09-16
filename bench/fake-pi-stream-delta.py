@@ -42,7 +42,6 @@ def config_from_env() -> Json:
         "thinking_burst": env_int("PI_SD_BENCH_THINKING_BURST", 20),
         "backlog_deltas": env_int("PI_SD_BENCH_BACKLOG_DELTAS", 300),
         "burst_pause_ms": env_int("PI_SD_BENCH_BURST_PAUSE_MS", 80),
-        "backlog_ready_ms": env_int("PI_SD_BENCH_BACKLOG_READY_MS", 120),
         "seed": env_int("PI_SD_BENCH_SEED", 20240817),
     }
 
@@ -215,7 +214,11 @@ def emit_bursts(
         time.sleep(pause_ms / 1000.0)
 
 
-def run_stream(config: Json, log_file: Path | None) -> None:
+def run_stream(
+    config: Json,
+    log_file: Path | None,
+    backlog_begin: threading.Event,
+) -> None:
     seed = int(config["seed"])
     timer_count = int(config["timer_text_deltas"])
     thinking_count = int(config["thinking_deltas"])
@@ -331,7 +334,9 @@ def run_stream(config: Json, log_file: Path | None) -> None:
             "benchmarkPhase": "backlog-control",
         }
     )
-    time.sleep(int(config["backlog_ready_ms"]) / 1000.0)
+    # Emit the backlog only after the harness acknowledges that its
+    # backlog collector is installed.
+    backlog_begin.wait()
 
     backlog_payloads = [
         message_update(
@@ -437,6 +442,7 @@ def main(argv: list[str] | None = None) -> int:
     config = config_from_env()
     log_file = Path(args.log_file) if args.log_file else None
     history = history_messages(config)
+    backlog_begin = threading.Event()
     log_line(log_file, {"event": "fake-pi-start", "config": config})
 
     worker: threading.Thread | None = None
@@ -468,9 +474,14 @@ def main(argv: list[str] | None = None) -> int:
         elif command_type == "prompt":
             respond(command)
             worker = threading.Thread(
-                target=run_stream, args=(config, log_file), daemon=True
+                target=run_stream,
+                args=(config, log_file, backlog_begin),
+                daemon=True,
             )
             worker.start()
+        elif command_type == "benchmark_backlog_begin":
+            backlog_begin.set()
+            respond(command)
         elif command_type == "clear_queue":
             respond(command, {"steering": [], "followUp": []})
         elif command_type in (
