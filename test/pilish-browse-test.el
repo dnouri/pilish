@@ -575,6 +575,22 @@ empty assistants are a universal pre-filter, not mode-specific."
       (should (equal (plist-get (nth 1 sorted) :id) "mid"))
       (should (equal (plist-get (nth 2 sorted) :id) "old")))))
 
+(ert-deftest pilish-test-session-sort-recent-nil-and-ties ()
+  "Recent ordering survives missing mtimes and breaks ties by identity.
+A nil `:modified' is the oldest known value, like the subtree
+activity fallback, and equal mtimes order by canonical path
+ascending instead of scan order."
+  (let* ((items (list '(:modified "2026-02-22T10:00:00Z"
+                        :path "/sess/z.jsonl" :id "tie-z")
+                     '(:path "/sess/nil.jsonl" :id "nil-mod")
+                     '(:modified "2026-02-24T10:00:00Z"
+                      :path "/sess/new.jsonl" :id "new")
+                     '(:modified "2026-02-22T10:00:00Z"
+                      :path "/sess/a.jsonl" :id "tie-a")))
+         (sorted (pilish--session-sort-items items "recent")))
+    (should (equal (mapcar (lambda (item) (plist-get item :id)) sorted)
+                   '("new" "tie-a" "tie-z" "nil-mod")))))
+
 (ert-deftest pilish-test-session-sort-relevance ()
   "Sort by relevance puts highest message count first."
   (let ((items (list '(:messageCount 10 :id "small")
@@ -585,23 +601,861 @@ empty assistants are a universal pre-filter, not mode-specific."
       (should (equal (plist-get (nth 1 sorted) :id) "med"))
       (should (equal (plist-get (nth 2 sorted) :id) "small")))))
 
+(ert-deftest pilish-test-session-sort-relevance-ties ()
+  "Equal message counts order by identity ascending, like Recent."
+  (let ((items (list '(:messageCount 5 :path "/sess/z.jsonl" :id "z")
+                     '(:messageCount 9 :path "/sess/big.jsonl" :id "big")
+                     '(:messageCount 5 :path "/sess/a.jsonl" :id "a"))))
+    (should (equal (mapcar (lambda (item) (plist-get item :id))
+                           (pilish--session-sort-items items "relevance"))
+                   '("big" "a" "z")))))
+
 ;;;; Session Threading
 
 (ert-deftest pilish-test-session-threading ()
   "Thread items into parent-child structure."
   (let* ((items (pilish-test--fixture-sessions))
          (threaded (pilish--session-thread-items items)))
-    ;; Should have entries with depth
     (should (> (length threaded) 0))
-    ;; Root items have depth 0
-    (let ((roots (cl-remove-if-not (lambda (e) (= (cdr e) 0)) threaded)))
+    ;; Root rows carry no connector.
+    (let ((roots (cl-remove-if-not (lambda (e) (equal (nth 1 e) ""))
+                                   threaded)))
       (should (>= (length roots) 3)))
-    ;; Session ccc-333 is a child of bbb-222, should have depth 1
+    ;; Session ccc-333 is a child of bbb-222 and connects to it.
     (let ((child (cl-find-if (lambda (e)
-                               (equal (plist-get (car e) :id) "ccc-333"))
+                               (equal (plist-get (nth 0 e) :id) "ccc-333"))
                              threaded)))
       (should child)
-      (should (= (cdr child) 1)))))
+      (should (equal (nth 1 child) "\u2514\u2500 ")))))
+
+(ert-deftest pilish-test-session-thread-subtree-activity-order ()
+  "Families order by the latest activity anywhere in each subtree.
+Discovery order (lexical, usually oldest first) must not leak
+through: an old parent promoted by a newly active child outranks a
+younger but colder root, and the parent renders before the child."
+  (let* ((items (list
+                 ;; Discovery order disagrees with activity order:
+                 ;; the younger root is listed before the old parent,
+                 ;; and the newest activity is a fork, not a root.
+                 '(:path "/sess/mid-root.jsonl" :id "mid-root"
+                   :modified "2026-01-02T00:00:00Z")
+                 '(:path "/sess/old-parent.jsonl" :id "old-parent"
+                   :modified "2026-01-01T00:00:00Z")
+                 '(:path "/sess/new-child.jsonl" :id "new-child"
+                   :parentSessionPath "/sess/old-parent.jsonl"
+                   :modified "2026-01-03T00:00:00Z")))
+         (threaded (pilish--session-thread-items items)))
+    (should (equal (mapcar (lambda (e) (plist-get (nth 0 e) :id)) threaded)
+                   '("old-parent" "new-child" "mid-root")))
+    (should (equal (mapcar (lambda (e) (nth 1 e)) threaded)
+                   '("" "\u2514\u2500 " "")))))
+
+(ert-deftest pilish-test-session-thread-sibling-order-and-connectors ()
+  "Siblings sort by subtree activity and only the last gets the
+final connector."
+  (let* ((items (list
+                 ;; Discovery order disagrees with sibling activity.
+                 '(:path "/sess/p.jsonl" :id "p"
+                   :modified "2026-01-01T00:00:00Z")
+                 '(:path "/sess/k1.jsonl" :id "k1"
+                   :parentSessionPath "/sess/p.jsonl"
+                   :modified "2026-01-02T00:00:00Z")
+                 '(:path "/sess/k2.jsonl" :id "k2"
+                   :parentSessionPath "/sess/p.jsonl"
+                   :modified "2026-01-04T00:00:00Z")
+                 '(:path "/sess/k3.jsonl" :id "k3"
+                   :parentSessionPath "/sess/p.jsonl"
+                   :modified "2026-01-03T00:00:00Z")))
+         (threaded (pilish--session-thread-items items)))
+    (should (equal (mapcar (lambda (e) (plist-get (nth 0 e) :id)) threaded)
+                   '("p" "k2" "k3" "k1")))
+    ;; Every earlier sibling branches; only the last one terminates.
+    (should (equal (mapcar (lambda (e) (nth 1 e)) threaded)
+                   '("" "├─ " "├─ " "└─ ")))))
+
+(ert-deftest pilish-test-session-thread-nested-connectors ()
+  "Nested forks get a continuing-ancestor gutter under their parent's
+branch."
+  (let* ((items (list
+                 ;; Discovery order lists the older child first.
+                 '(:path "/sess/p.jsonl" :id "p"
+                   :modified "2026-01-01T00:00:00Z")
+                 '(:path "/sess/a.jsonl" :id "a"
+                   :parentSessionPath "/sess/p.jsonl"
+                   :modified "2026-01-02T00:00:00Z")
+                 '(:path "/sess/b.jsonl" :id "b"
+                   :parentSessionPath "/sess/p.jsonl"
+                   :modified "2026-01-05T00:00:00Z")
+                 '(:path "/sess/g1.jsonl" :id "g1"
+                   :parentSessionPath "/sess/b.jsonl"
+                   :modified "2026-01-03T00:00:00Z")
+                 '(:path "/sess/g2.jsonl" :id "g2"
+                   :parentSessionPath "/sess/b.jsonl"
+                   :modified "2026-01-04T00:00:00Z")))
+         (threaded (pilish--session-thread-items items)))
+    ;; p's family: b (newest child) first with grandchildren nested,
+    ;; then a; b is not last, so its descendants keep a gutter bar.
+    (should (equal (mapcar (lambda (e)
+                             (list (plist-get (nth 0 e) :id)
+                                   (nth 1 e)))
+                           threaded)
+                   '(("p" "")
+                     ("b" "├─ ")
+                     ("g2" "│ ├─ ")
+                     ("g1" "│ └─ ")
+                     ("a" "└─ "))))))
+
+(ert-deftest pilish-test-session-thread-activity-ties-break-by-path ()
+  "Equal subtree activity falls back to canonical path ascending, so
+ordering never depends on scan order."
+  (let* ((items (list
+                 '(:path "/sess/z-root.jsonl" :id "z-root"
+                   :modified "2026-01-02T00:00:00Z")
+                 '(:path "/sess/a-root.jsonl" :id "a-root"
+                   :modified "2026-01-02T00:00:00Z")
+                 '(:path "/sess/p.jsonl" :id "p"
+                   :modified "2026-01-01T00:00:00Z")
+                 '(:path "/sess/k-z.jsonl" :id "k-z"
+                   :parentSessionPath "/sess/p.jsonl"
+                   :modified "2026-01-01T12:00:00Z")
+                 '(:path "/sess/k-a.jsonl" :id "k-a"
+                   :parentSessionPath "/sess/p.jsonl"
+                   :modified "2026-01-01T12:00:00Z")))
+         (threaded (pilish--session-thread-items items)))
+    (should (equal (mapcar (lambda (e) (plist-get (nth 0 e) :id)) threaded)
+                   '("a-root" "z-root" "p" "k-a" "k-z")))))
+
+(ert-deftest pilish-test-session-thread-missing-parent-is-root ()
+  "A fork whose parent is absent from the item set is an ordinary
+root: no connector, no nesting, no implied ancestor."
+  (let* ((items (list
+                 '(:path "/sess/gone-parent.jsonl" :id "gone"
+                   :modified "2026-01-05T00:00:00Z")
+                 '(:path "/sess/orphan.jsonl" :id "orphan"
+                   :parentSessionPath "/sess/no-such-parent.jsonl"
+                   :modified "2026-01-01T00:00:00Z")))
+         (threaded (pilish--session-thread-items items)))
+    (should (equal (mapcar (lambda (e)
+                             (list (plist-get (nth 0 e) :id)
+                                   (nth 1 e)))
+                           threaded)
+                   '(("gone" "")
+                     ("orphan" ""))))))
+
+(ert-deftest pilish-test-session-thread-equivalent-path-spellings ()
+  "Equivalent local path spellings are one family identity.
+A parent discovered through one symlink alias threads a child whose
+recorded parent path uses a different alias of the same directory."
+  (let* ((base (pilish-test--make-temp-directory "pi-thread-alias-"))
+         (real (expand-file-name "real/sessions/" base))
+         (alias-a (expand-file-name "alias-a/" base))
+         (alias-b (expand-file-name "alias-b/" base)))
+    (unwind-protect
+        (progn
+          (make-directory real t)
+          (make-directory alias-a t)
+          (make-directory alias-b t)
+          (make-symbolic-link (directory-file-name real)
+                              (expand-file-name "sessions" alias-a))
+          (make-symbolic-link (directory-file-name real)
+                              (expand-file-name "sessions" alias-b))
+          (let* ((items (list
+                         '(:path "/sess/other.jsonl" :id "other"
+                           :modified "2026-01-01T00:00:00Z")
+                         (list :path (expand-file-name "parent.jsonl"
+                                                       (concat alias-a "sessions/"))
+                               :id "parent"
+                               :modified "2026-01-02T00:00:00Z")
+                         (list :path (expand-file-name "child.jsonl"
+                                                       (concat alias-a "sessions/"))
+                               :id "child"
+                               :parentSessionPath
+                               (expand-file-name "parent.jsonl"
+                                                 (concat alias-b "sessions/"))
+                               :modified "2026-01-03T00:00:00Z")))
+                 (threaded (pilish--session-thread-items items)))
+            ;; The parent's family (activity Jan 3, via the child)
+            ;; outranks the older root; the alias-spelled parent link
+            ;; still threads the child under the parent.
+            (should (equal (mapcar (lambda (e)
+                                     (list (plist-get (nth 0 e) :id)
+                                           (nth 1 e)))
+                                   threaded)
+                           '(("parent" "")
+                             ("child" "└─ ")
+                             ("other" ""))))))
+      (when (file-directory-p base)
+        (delete-directory base t)))))
+
+(ert-deftest pilish-test-session-thread-remote-parent-by-localname ()
+  "A pi-local parent path threads under its TRAMP-prefixed discovery
+spelling.  Family identity compares remote local names as pure
+strings, so no remote host is ever contacted."
+  (let* ((items (list
+                 '(:path "/ssh:pi-host:/home/u/.pi/sessions/--d--/p.jsonl"
+                   :id "p" :modified "2026-01-05T00:00:00Z")
+                 '(:path "/ssh:pi-host:/home/u/.pi/sessions/--d--/c.jsonl"
+                   :id "c"
+                   :parentSessionPath "/home/u/.pi/sessions/--d--/p.jsonl"
+                   :modified "2026-01-01T00:00:00Z")))
+         (threaded (pilish--session-thread-items items)))
+    (should (equal (mapcar (lambda (e)
+                             (list (plist-get (nth 0 e) :id)
+                                   (nth 1 e)))
+                           threaded)
+                   '(("p" "")
+                     ("c" "└─ "))))))
+
+(ert-deftest pilish-test-session-thread-remote-parent-not-local-canonicalized ()
+  "A remote family never consults this machine's filesystem.
+The discovered parent path is TRAMP-prefixed while the child's fork
+header records the identical pi-local spelling; a local symlink
+shadowing that spelling must not split the exact pair."
+  (let* ((base (pilish-test--make-temp-directory "pi-thread-remote-"))
+         (real (expand-file-name "real-home/sessions" base))
+         (link-home (file-name-as-directory (expand-file-name "link-home" base))))
+    (unwind-protect
+        (progn
+          (make-directory real t)
+          ;; A LOCAL symlink that would rewrite the shared spelling
+          ;; under `file-truename' on this machine.
+          (make-symbolic-link (directory-file-name
+                               (file-name-as-directory real))
+                              (directory-file-name link-home))
+          (let* ((shared (expand-file-name "p.jsonl"
+                                           (concat link-home "sessions/")))
+                 (items (list
+                         (list :path (concat "/ssh:pi-host:" shared)
+                               :id "P" :modified "2026-01-02T00:00:00Z")
+                         (list :path (concat "/ssh:pi-host:"
+                                             (expand-file-name
+                                              "c.jsonl"
+                                              (concat link-home "sessions/")))
+                               :id "C"
+                               :parentSessionPath shared
+                               :modified "2026-01-01T00:00:00Z")))
+                 (threaded (pilish--session-thread-items items)))
+            (should (equal (mapcar (lambda (e)
+                                     (list (plist-get (nth 0 e) :id)
+                                           (nth 1 e)))
+                                   threaded)
+                           '(("P" "") ("C" "\u2514\u2500 "))))))
+      (when (file-directory-p base)
+        (delete-directory base t)))))
+
+(ert-deftest pilish-test-session-thread-remote-routes-stay-distinct ()
+  "Distinct TRAMP routes sharing a local name stay distinct families.
+A route-exact parent link threads under its own route's item only,
+and no row renders twice."
+  (let* ((items (list
+                 '(:path "/ssh:a-host:/s/p.jsonl" :id "PA"
+                   :modified "2026-01-03T00:00:00Z")
+                 '(:path "/ssh:b-host:/s/p.jsonl" :id "PB"
+                   :modified "2026-01-02T00:00:00Z")
+                 '(:path "/ssh:a-host:/s/c.jsonl" :id "C"
+                   :parentSessionPath "/ssh:a-host:/s/p.jsonl"
+                   :modified "2026-01-01T00:00:00Z")))
+         (ids (mapcar (lambda (e) (plist-get (nth 0 e) :id))
+                      (pilish--session-thread-items items))))
+    ;; Every row renders exactly once.
+    (should (equal (cl-sort (copy-sequence ids) #'string<)
+                   '("C" "PA" "PB")))
+    ;; The route-exact link threads C under PA's family only.
+    (should (equal ids '("PA" "C" "PB")))))
+
+(ert-deftest pilish-test-session-thread-remote-route-anchors-parent ()
+  "A prefix-free fork header anchors to the child's own TRAMP route.
+With two routes sharing a local name, the child joins its own
+route's family regardless of input order, never the other route's."
+  (let* ((pa '(:path "/ssh:a-host:/s/p.jsonl" :id "PA"
+               :modified "2026-01-03T00:00:00Z"))
+         (pb '(:path "/ssh:b-host:/s/p.jsonl" :id "PB"
+               :modified "2026-01-02T00:00:00Z"))
+         (c '(:path "/ssh:a-host:/s/c.jsonl" :id "C"
+              :parentSessionPath "/s/p.jsonl"
+              :modified "2026-01-01T00:00:00Z")))
+    (dolist (items (list (list pa pb c) (list pb pa c)))
+      (should (equal (mapcar (lambda (e)
+                               (list (plist-get (nth 0 e) :id)
+                                     (nth 1 e)))
+                             (pilish--session-thread-items items))
+                     '(("PA" "") ("C" "\u2514\u2500 ") ("PB" "")))))))
+
+(ert-deftest pilish-test-session-thread-all-remote-skips-local-canonicalization ()
+  "An all-remote family never consults this machine's filesystem.
+`file-truename' must not run at all while threading remote items."
+  (let* ((items (list
+                 '(:path "/ssh:a-host:/s/p.jsonl" :id "P"
+                   :modified "2026-01-02T00:00:00Z")
+                 '(:path "/ssh:a-host:/s/c.jsonl" :id "C"
+                   :parentSessionPath "/s/p.jsonl"
+                   :modified "2026-01-01T00:00:00Z")))
+         (calls 0))
+    (cl-letf (((symbol-function 'file-truename)
+               (lambda (&rest _)
+                 (cl-incf calls)
+                 (error "local canonicalization of a remote family"))))
+      (should (equal (mapcar (lambda (e)
+                               (list (plist-get (nth 0 e) :id)
+                                     (nth 1 e)))
+                             (pilish--session-thread-items items))
+                     '(("P" "") ("C" "\u2514\u2500 ")))))
+    (should (zerop calls))))
+
+(ert-deftest pilish-test-session-canonicalize-items-dedupes-and-keys ()
+  "Ingestion computes one keyed item per session identity.
+Equally canonical spellings of one file collapse to the first
+spelling, every retained item carries its `:canonicalPath', and the
+child's stored key matches its parent's, so family and live-marker
+lookups reuse stored identities without per-render filesystem work."
+  (let* ((base (pilish-test--make-temp-directory "pi-thread-dupes-"))
+         (elsewhere (expand-file-name "elsewhere" base)))
+    (unwind-protect
+        (progn
+          (make-directory elsewhere t)
+          (let* ((target (expand-file-name "parent.jsonl" elsewhere))
+                 (alias1 (expand-file-name "alias1" base))
+                 (alias2 (expand-file-name "alias2" base))
+                 (p1-path (expand-file-name "parent.jsonl" alias1))
+                 (c-path (expand-file-name "child.jsonl" alias1)))
+            (write-region "" nil target)
+            (make-directory alias1 t)
+            (make-directory alias2 t)
+            (make-symbolic-link target (expand-file-name "parent.jsonl" alias1))
+            (make-symbolic-link target (expand-file-name "parent.jsonl" alias2))
+            (let* ((raw (list
+                         (list :path p1-path :id "P1"
+                               :modified "2026-01-02T00:00:00Z")
+                         (list :path (expand-file-name "parent.jsonl" alias2)
+                               :id "P2" :modified "2026-01-02T00:00:00Z")
+                         (list :path c-path :id "C"
+                               :parentSessionPath target
+                               :modified "2026-01-01T00:00:00Z")))
+                   (items (pilish--session-canonicalize-items raw)))
+              ;; One item per identity; the first spelling survives.
+              (should (equal (mapcar (lambda (item) (plist-get item :id))
+                                     items)
+                             '("P1" "C")))
+              ;; Stored keys are canonical and consistent (canonicalized
+              ;; expectations: portable under a symlinked temp root).
+              (should (equal (plist-get (nth 0 items) :canonicalPath)
+                             (pilish--canonical-session-path target)))
+              (should (equal (plist-get (nth 1 items) :canonicalPath)
+                             (pilish--canonical-session-path c-path)))
+              ;; Input plists are not mutated.
+              (should-not (plist-get (nth 1 raw) :canonicalPath))
+              ;; Families thread through the stored identities.
+              (should (equal (mapcar (lambda (e)
+                                       (list (plist-get (nth 0 e) :id)
+                                             (nth 1 e)))
+                                     (pilish--session-thread-items items))
+                             '(("P1" "") ("C" "\u2514\u2500 ")))))))
+      (when (file-directory-p base)
+        (delete-directory base t)))))
+
+(ert-deftest pilish-test-session-browser-views-single-alias-row ()
+  "Ingested aliases render one row in every view and across query
+transitions, and point survives those transitions on the retained
+row."
+  (let* ((base (pilish-test--make-temp-directory "pi-views-dupes-"))
+         (elsewhere (expand-file-name "elsewhere" base)))
+    (unwind-protect
+        (progn
+          (make-directory elsewhere t)
+          (let* ((target (expand-file-name "parent.jsonl" elsewhere))
+                 (alias1 (expand-file-name "alias1" base))
+                 (alias2 (expand-file-name "alias2" base))
+                 (p1-path (expand-file-name "parent.jsonl" alias1)))
+            (write-region "" nil target)
+            (make-directory alias1 t)
+            (make-directory alias2 t)
+            (make-symbolic-link target (expand-file-name "parent.jsonl" alias1))
+            (make-symbolic-link target (expand-file-name "parent.jsonl" alias2))
+            (with-temp-buffer
+              (pilish-session-browser-mode)
+              ;; The production scan path stores items through
+              ;; `pilish--session-browser-apply-scan'.
+              (pilish--session-browser-apply-scan
+               (current-buffer)
+               (list (list :path p1-path :name "Alias Parent"
+                           :messageCount 3 :modified "2026-01-02T00:00:00Z")
+                     (list :path (expand-file-name "parent.jsonl" alias2)
+                           :name "Alias Parent"
+                           :messageCount 3 :modified "2026-01-02T00:00:00Z")
+                     (list :path (expand-file-name "child.jsonl" alias1)
+                           :name "Alias Child"
+                           :parentSessionPath target
+                           :messageCount 1 :modified "2026-01-01T00:00:00Z"))
+               nil nil)
+              (should (= 2 (length pilish--session-browser-items)))
+              ;; Unqueried Threaded: one family.
+              (should (string-match-p "└─ Alias Child" (buffer-string)))
+              (goto-char (point-min))
+              (search-forward "Alias Parent")
+              ;; Sections carry canonical identities (canonicalized
+              ;; expectation: portable under a symlinked temp root);
+              ;; actions see the retained raw spelling.
+              (should (equal (oref (magit-current-section) value)
+                             (pilish--canonical-session-path target)))
+              (should (equal (pilish--session-browser-path-at-point)
+                             p1-path))
+              ;; A matching query still renders each session once.
+              (setq pilish--session-browser-search-query "Alias"
+                    pilish--session-browser-search-tokens '("Alias"))
+              (pilish--session-browser-rerender)
+              (should (equal (count-matches "Alias Parent"
+                                            (point-min) (point-max))
+                             1))
+              ;; Clearing the query restores the family and keeps
+              ;; point on the retained parent row.
+              (setq pilish--session-browser-search-query nil
+                    pilish--session-browser-search-tokens nil)
+              (pilish--session-browser-rerender)
+              (should (string-match-p "└─ Alias Child" (buffer-string)))
+              (should (equal (oref (magit-current-section) value)
+                             (pilish--canonical-session-path target)))
+              ;; Cycling to the Recent view keeps point anchored to
+              ;; the same session row.
+              (setq pilish--session-browser-sort "recent")
+              (pilish--session-browser-rerender)
+              (should (equal (oref (magit-current-section) value)
+                             (pilish--canonical-session-path target)))
+              (setq pilish--session-browser-sort "threaded"))))
+      (when (file-directory-p base)
+        (delete-directory base t)))))
+
+(ert-deftest pilish-test-session-browser-refresh-keeps-point-across-alias-change ()
+  "Point survives a refresh that retains a different alias spelling.
+Sections carry canonical identities, so the same session keeps its
+point anchor while actions see the newly retained raw spelling."
+  (let* ((base (pilish-test--make-temp-directory "pi-repr-alias-"))
+         (elsewhere (expand-file-name "elsewhere" base)))
+    (unwind-protect
+        (progn
+          (make-directory elsewhere t)
+          (let* ((target (expand-file-name "p.jsonl" elsewhere))
+                 (alias-a (expand-file-name "alias-a" base))
+                 (alias-b (expand-file-name "alias-b" base))
+                 (a-path (expand-file-name "p.jsonl" alias-a))
+                 (b-path (expand-file-name "p.jsonl" alias-b)))
+            (write-region "" nil target)
+            (make-directory alias-a t)
+            (make-directory alias-b t)
+            (make-symbolic-link target a-path)
+            (make-symbolic-link target b-path)
+            (with-temp-buffer
+              (pilish-session-browser-mode)
+              (pilish--session-browser-apply-scan
+               (current-buffer)
+               (list (list :path a-path :name "Same session"
+                           :messageCount 3 :modified "2026-01-02T00:00:00Z")
+                     '(:path "/repr/other.jsonl" :name "Zeta other"
+                       :messageCount 9 :modified "2026-01-03T00:00:00Z"))
+               nil nil)
+              (goto-char (point-min))
+              (search-forward "Same session")
+              (beginning-of-line)
+              ;; The next scan no longer finds alias A but finds the
+              ;; equivalent alias B: same canonical session.
+              (pilish--session-browser-apply-scan
+               (current-buffer)
+               (list '(:path "/repr/other.jsonl" :name "Zeta other"
+                       :messageCount 9 :modified "2026-01-03T00:00:00Z")
+                     (list :path b-path :name "Same session"
+                           :messageCount 3 :modified "2026-01-02T00:00:00Z"))
+               nil nil)
+              ;; Still the same session under point, not the top row.
+              (should (string-match-p "Same session"
+                                      (thing-at-point 'line)))
+              ;; The section identity is the canonical file —
+              ;; canonicalized here so a symlinked
+              ;; `temporary-file-directory' (e.g. macOS /var) keeps
+              ;; the test portable — and actions see the retained
+              ;; raw spelling.
+              (should (equal (oref (magit-current-section) value)
+                             (pilish--canonical-session-path target)))
+              (should (equal (pilish--session-browser-path-at-point)
+                             b-path)))))
+      (when (file-directory-p base)
+        (delete-directory base t)))))
+
+(ert-deftest pilish-test-session-browser-scan-quit-leaves-coherent-state ()
+  "A quit during canonicalization reports an interrupted scan.
+The loading and error state stay coherent instead of stranding a
+Loading render under cleared flags."
+  (let* ((root (pilish-test--make-temp-directory "pi-scan-quit-"))
+         (sessions (expand-file-name "sessions" root))
+         (dir (expand-file-name "--home-fake-a--" sessions))
+         (path (expand-file-name "s.jsonl" dir)))
+    (unwind-protect
+        (progn
+          (make-directory dir t)
+          (pilish-test--write-session-lines
+           path (list (pilish-test--make-session-header "sid-quit")))
+          (with-temp-buffer
+            (pilish-session-browser-mode)
+            (let ((process-environment
+                   (cons (format "PI_CODING_AGENT_DIR=%s"
+                                (directory-file-name root))
+                         process-environment)))
+              (cl-letf (((symbol-function 'pilish--session-list-directory)
+                         (lambda (&optional _chat-buf) dir))
+                        ((symbol-function 'run-at-time)
+                         (lambda (_secs _repeat fn &rest args)
+                           (apply fn args)))
+                        ((symbol-function 'file-truename)
+                         (lambda (&rest _)
+                           (signal 'quit nil))))
+                (pilish--session-browser-fetch-and-render))
+              (should-not pilish--session-browser-loading)
+              (should (equal pilish--session-browser-error
+                             "Session scan was interrupted"))
+              (should (string-match-p "interrupted" (buffer-string)))
+              (should-not (string-match-p "Loading sessions"
+                                          (buffer-string))))))
+      (when (file-directory-p root)
+        (delete-directory root t)))))
+
+(ert-deftest pilish-test-session-browser-rerender-without-filesystem-io ()
+  "Rerenders do no per-row, per-family, or remote canonicalization.
+Family identity, including fork parent links, is resolved once
+during the scan; toggling views and queries never calls
+`file-truename' (only live-process paths may canonicalize locally,
+and none are live here)."
+  (let* ((root (pilish-test--make-temp-directory "pi-scan-pure-"))
+         (sessions (expand-file-name "sessions" root))
+         (dir (expand-file-name "--home-fake-a--" sessions))
+         (parent-path (expand-file-name "parent.jsonl" dir))
+         (child-path (expand-file-name "child.jsonl" dir))
+         (calls 0))
+    (unwind-protect
+        (progn
+          (make-directory dir t)
+          (pilish-test--write-session-lines
+           parent-path
+           (list (pilish-test--make-session-header "sid-parent")))
+          (pilish-test--write-session-lines
+           child-path
+           (list (pilish-test--make-session-header
+                  "sid-child" :parentSession parent-path)))
+          (with-temp-buffer
+            (pilish-session-browser-mode)
+            (let ((process-environment
+                   (cons (format "PI_CODING_AGENT_DIR=%s"
+                                (directory-file-name root))
+                         process-environment)))
+              (cl-letf (((symbol-function 'pilish--session-list-directory)
+                         (lambda (&optional _chat-buf) dir))
+                        ((symbol-function 'run-at-time)
+                         (lambda (_secs _repeat fn &rest args)
+                           (apply fn args))))
+                (pilish--session-browser-fetch-and-render))
+              (should (= 2 (length pilish--session-browser-items)))
+              (should (string-match-p "└─" (buffer-string)))
+              ;; View and query rerenders with the filesystem cut off.
+              (cl-letf (((symbol-function 'file-truename)
+                         (lambda (&rest _)
+                           (cl-incf calls)
+                           (error "rerender touched the filesystem"))))
+                (setq pilish--session-browser-sort "recent")
+                (pilish--session-browser-rerender)
+                (setq pilish--session-browser-sort "threaded")
+                (pilish--session-browser-rerender)
+                (setq pilish--session-browser-search-query "fix"
+                      pilish--session-browser-search-tokens '("fix"))
+                (pilish--session-browser-rerender)
+                (setq pilish--session-browser-search-query nil
+                      pilish--session-browser-search-tokens nil)
+                (pilish--session-browser-rerender)
+                (should (string-match-p "└─" (buffer-string))))
+              (should (zerop calls)))))
+      (when (file-directory-p root)
+        (delete-directory root t)))))
+
+(ert-deftest pilish-test-session-file-matches-multi-hop-routes-distinct ()
+  "Live/current identity keeps complete TRAMP routes distinct.
+A final-hop-only spelling is not the multi-hop session's file."
+  (let ((chat-buf (generate-new-buffer "*pilish-test-match-route*")))
+    (unwind-protect
+        (progn
+          (with-current-buffer chat-buf
+            (setq pilish--state
+                  (list :session-file
+                        "/ssh:bastion|ssh:pi-host:/s/p.jsonl")))
+          (should-not (pilish--browse-session-file-matches-p
+                       chat-buf "/ssh:pi-host:/s/p.jsonl"))
+          (should (pilish--browse-session-file-matches-p
+                   chat-buf "/ssh:bastion|ssh:pi-host:/s/p.jsonl")))
+      (kill-buffer chat-buf))))
+
+(ert-deftest pilish-test-session-file-matches-local-alias ()
+  "Live/current identity unifies local symlink aliases."
+  (let* ((base (pilish-test--make-temp-directory "pi-match-alias-"))
+         (elsewhere (expand-file-name "elsewhere" base))
+         (chat-buf (generate-new-buffer "*pilish-test-match-alias*")))
+    (unwind-protect
+        (progn
+          (make-directory elsewhere t)
+          (let ((target (expand-file-name "live.jsonl" elsewhere))
+                (alias-dir (expand-file-name "alias" base)))
+            (make-directory alias-dir t)
+            (write-region "" nil target)
+            (make-symbolic-link target
+                                (expand-file-name "live.jsonl" alias-dir))
+            (with-current-buffer chat-buf
+              (setq pilish--state (list :session-file target)))
+            (should (pilish--browse-session-file-matches-p
+                     chat-buf
+                     (expand-file-name "live.jsonl" alias-dir)))))
+      (kill-buffer chat-buf)
+      (when (file-directory-p base)
+        (delete-directory base t)))))
+
+(ert-deftest pilish-test-session-browser-scan-malformed-parent-isolated ()
+  "A malformed fork header degrades to an orphan, not a failed scan.
+A NUL byte in one file's parentSessionPath must not abort the scan
+or discard the healthy files around it."
+  (let* ((root (pilish-test--make-temp-directory "pi-scan-nul-"))
+         (sessions (expand-file-name "sessions" root))
+         (dir (expand-file-name "--home-fake-a--" sessions))
+         (parent-path (expand-file-name "parent.jsonl" dir))
+         (bad-path (expand-file-name "bad.jsonl" dir))
+         (child-path (expand-file-name "child.jsonl" dir)))
+    (unwind-protect
+        (progn
+          (make-directory dir t)
+          (pilish-test--write-session-lines
+           parent-path
+           (list (pilish-test--make-session-header "sid-parent")))
+          (pilish-test--write-session-lines
+           bad-path
+           (list (pilish-test--make-session-header
+                  "sid-bad" :parentSession "/bad\0parent.jsonl")))
+          (pilish-test--write-session-lines
+           child-path
+           (list (pilish-test--make-session-header
+                  "sid-child" :parentSession parent-path)))
+          (with-temp-buffer
+            (pilish-session-browser-mode)
+            (let ((process-environment
+                   (cons (format "PI_CODING_AGENT_DIR=%s"
+                                (directory-file-name root))
+                         process-environment)))
+              (cl-letf (((symbol-function 'pilish--session-list-directory)
+                         (lambda (&optional _chat-buf) dir))
+                        ((symbol-function 'run-at-time)
+                         (lambda (_secs _repeat fn &rest args)
+                           (apply fn args))))
+                (pilish--session-browser-fetch-and-render))
+              (should-not pilish--session-browser-error)
+              (should (= 3 (length pilish--session-browser-items)))
+              ;; The malformed fork degrades to a plain root row; the
+              ;; healthy family still threads.
+              (let ((rows (pilish--session-thread-items
+                           pilish--session-browser-items)))
+                (should (= 3 (length rows)))
+                (dolist (row rows)
+                  (let ((id (plist-get (nth 0 row) :id)))
+                    (cond
+                     ((equal id "sid-bad")
+                      (should (equal (nth 1 row) "")))
+                     ((equal id "sid-child")
+                      (should (equal (nth 1 row) "\u2514\u2500 "))))))))))
+      (when (file-directory-p root)
+        (delete-directory root t)))))
+
+(ert-deftest pilish-test-session-parent-anchor-is-recorded-cwd ()
+  "Relative fork headers resolve against the child's recorded cwd.
+Pi resolves relative paths against its process working directory —
+the session header's `cwd' — so threading is independent of the
+ambient buffer's `default-directory', locally and over TRAMP."
+  (let* ((items (list
+                 '(:path "/anchor/parent.jsonl" :id "P"
+                   :modified "2026-01-02T00:00:00Z")
+                 '(:path "/sess-other/child.jsonl" :id "C"
+                   :cwd "/anchor"
+                   :parentSessionPath "parent.jsonl"
+                   :modified "2026-01-01T00:00:00Z")))
+         (child-row
+          (lambda (rows)
+            (cl-find "C" rows :test #'equal
+                     :key (lambda (e) (plist-get (nth 0 e) :id))))))
+    (dolist (ambient '("/anchor/" "/somewhere/else/"))
+      (let ((default-directory ambient))
+        (should (equal (nth 1 (funcall child-row
+                                       (pilish--session-thread-items items)))
+                       "\u2514\u2500 "))))
+    ;; Remote child: the recorded cwd is pi-local, and the resolved
+    ;; identity rides the child's own TRAMP route.
+    (let* ((remote-items
+            (list '(:path "/ssh:pi-host:/home/u/co/parent.jsonl" :id "P"
+                   :modified "2026-01-02T00:00:00Z")
+                  '(:path "/ssh:pi-host:/home/u/.pi/s/c.jsonl" :id "C"
+                    :cwd "/home/u/co"
+                    :parentSessionPath "parent.jsonl"
+                    :modified "2026-01-01T00:00:00Z"))))
+      (dolist (ambient '("/local/ambient/" "/ssh:other:/ambient/"))
+        (let ((default-directory ambient))
+          (should (equal (nth 1 (funcall child-row
+                                         (pilish--session-thread-items
+                                          remote-items)))
+                         "\u2514\u2500 ")))))))
+
+(ert-deftest pilish-test-session-file-matches-local-hardlink ()
+  "Live/current identity still detects local hardlinks.
+Canonical spellings differ for two names of one inode; the local
+same-file fallback catches what `file-truename' cannot."
+  (let* ((base (pilish-test--make-temp-directory "pi-match-hardlink-"))
+         (elsewhere (expand-file-name "elsewhere" base))
+         (chat-buf (generate-new-buffer "*pilish-test-match-hardlink*")))
+    (unwind-protect
+        (progn
+          (make-directory elsewhere t)
+          (let* ((target (expand-file-name "live.jsonl" elsewhere))
+                 (linked (expand-file-name "linked.jsonl" base)))
+            (write-region "" nil target)
+            (add-name-to-file target linked)
+            (with-current-buffer chat-buf
+              (setq pilish--state (list :session-file target)))
+            (should (pilish--browse-session-file-matches-p chat-buf linked))))
+      (kill-buffer chat-buf)
+      (when (file-directory-p base)
+        (delete-directory base t)))))
+
+(ert-deftest pilish-test-session-file-matches-remote-never-stats ()
+  "Remote identity never falls back to `file-equal-p'.
+Distinct routes stay distinct without contacting any host."
+  (let ((chat-buf (generate-new-buffer "*pilish-test-match-remote2*")))
+    (unwind-protect
+        (progn
+          (with-current-buffer chat-buf
+            (setq pilish--state
+                  (list :session-file
+                        "/ssh:bastion|ssh:pi-host:/s/p.jsonl")))
+          (cl-letf (((symbol-function 'file-equal-p)
+                     (lambda (&rest _)
+                       (error "remote identity must not stat"))))
+            (should-not (pilish--browse-session-file-matches-p
+                         chat-buf "/ssh:pi-host:/s/p.jsonl"))
+            (should (pilish--browse-session-file-matches-p
+                     chat-buf
+                     "/ssh:bastion|ssh:pi-host:/s/p.jsonl"))))
+      (kill-buffer chat-buf))))
+
+(ert-deftest pilish-test-session-parent-anchor-multi-hop-cwd-less ()
+  "A cwd-less multi-hop child anchors relatives to its own route.
+The child session file's directory keeps the complete TRAMP route,
+so a relative fork header resolves to the full-route parent
+identity."
+  (let* ((items (list
+                 '(:path "/ssh:bastion|ssh:pi-host:/s/parent.jsonl" :id "P"
+                   :modified "2026-01-02T00:00:00Z")
+                 '(:path "/ssh:bastion|ssh:pi-host:/s/child.jsonl" :id "C"
+                   :parentSessionPath "parent.jsonl"
+                   :modified "2026-01-01T00:00:00Z")))
+         (child (pilish--session-enrich-item (nth 1 items))))
+    ;; Enrichment stores the full-route parent identity.
+    (should (equal (plist-get child :canonicalParentSession)
+                   "/ssh:bastion|ssh:pi-host:/s/parent.jsonl"))
+    ;; And the family threads through it.
+    (should (equal (mapcar (lambda (e)
+                             (list (plist-get (nth 0 e) :id)
+                                   (nth 1 e)))
+                           (pilish--session-thread-items items))
+                   '(("P" "") ("C" "└─ "))))))
+
+(ert-deftest pilish-test-session-parent-anchor-relative-cwd-invalid ()
+  "A relative recorded cwd never anchors fork resolution.
+It would expand against the ambient buffer; the child session file's
+own directory anchors instead, independent of `default-directory'."
+  (let* ((items (list
+                 '(:path "/proj-sessions/parent.jsonl" :id "P"
+                   :modified "2026-01-02T00:00:00Z")
+                 '(:path "/proj-sessions/child.jsonl" :id "C"
+                   :cwd "rel-proj"
+                   :parentSessionPath "parent.jsonl"
+                   :modified "2026-01-01T00:00:00Z"))))
+    (dolist (ambient '("/ambient/one/" "/proj-sessions/"))
+      (let ((default-directory ambient))
+        (should (equal (nth 1 (cl-find "C"
+                                       (pilish--session-thread-items items)
+                                       :key (lambda (e)
+                                              (plist-get (nth 0 e) :id))
+                                       :test #'equal))
+                       "└─ "))))))
+
+(ert-deftest pilish-test-session-thread-cyclic-symlinks-degrade-not-abort ()
+  "Cyclic symlink spellings degrade to lexical identities, not render
+aborts.  A parent link through a cycle becomes an orphan root; a
+cyclic item path still renders."
+  (let* ((base (pilish-test--make-temp-directory "pi-thread-cycle-"))
+         (cyc (expand-file-name "cycle" base)))
+    (unwind-protect
+        (progn
+          (make-directory cyc t)
+          (make-symbolic-link "b.jsonl" (expand-file-name "a.jsonl" cyc))
+          (make-symbolic-link "a.jsonl" (expand-file-name "b.jsonl" cyc))
+          ;; Canonicalization falls back to the lexical spelling.
+          (should (equal (pilish--canonical-session-path
+                          (expand-file-name "a.jsonl" cyc))
+                         (expand-file-name "a.jsonl" cyc)))
+          (let* ((items (list
+                         (list :path (expand-file-name "a.jsonl" cyc)
+                               :id "CYC" :modified "2026-01-05T00:00:00Z")
+                         (list :path (expand-file-name "ok.jsonl" base)
+                               :id "OK" :modified "2026-01-02T00:00:00Z")
+                         (list :path (expand-file-name "c.jsonl" base)
+                               :id "C"
+                               :parentSessionPath (expand-file-name "ok.jsonl" base)
+                               :modified "2026-01-01T00:00:00Z")
+                         (list :path (expand-file-name "d.jsonl" base)
+                               :id "D"
+                               :parentSessionPath (expand-file-name "b.jsonl" cyc)
+                               :modified "2026-01-04T00:00:00Z")))
+                 (rows (mapcar (lambda (e)
+                                 (list (plist-get (nth 0 e) :id)
+                                       (nth 1 e)))
+                               (pilish--session-thread-items items))))
+            ;; D's parent link names a cyclic spelling no item has, so
+            ;; it degrades to an orphan root; the healthy family still
+            ;; threads; the cyclic item still renders; nothing aborts.
+            (should (equal rows
+                           '(("CYC" "") ("D" "") ("OK" "")
+                             ("C" "\u2514\u2500 "))))))
+      (when (file-directory-p base)
+        (delete-directory base t)))))
+
+(ert-deftest pilish-test-session-thread-symlinked-session-file ()
+  "A symlinked session file matches a parent header naming the real
+target, like pi's realpath identity."
+  (let* ((base (pilish-test--make-temp-directory "pi-thread-filelink-"))
+         (sessions (expand-file-name "sessions" base))
+         (elsewhere (expand-file-name "elsewhere" base)))
+    (unwind-protect
+        (progn
+          (make-directory sessions t)
+          (make-directory elsewhere t)
+          (let ((real-target (expand-file-name "real-parent.jsonl" elsewhere)))
+            (write-region "" nil real-target)
+            (make-symbolic-link
+             real-target (expand-file-name "parent.jsonl" sessions))
+            (let* ((items (list
+                           (list :path (expand-file-name "parent.jsonl"
+                                                         sessions)
+                                 :id "P" :modified "2026-01-02T00:00:00Z")
+                           (list :path (expand-file-name "child.jsonl"
+                                                         sessions)
+                                 :id "C"
+                                 :parentSessionPath real-target
+                                 :modified "2026-01-01T00:00:00Z")))
+                   (threaded (pilish--session-thread-items items)))
+              (should (equal (mapcar (lambda (e)
+                                       (list (plist-get (nth 0 e) :id)
+                                             (nth 1 e)))
+                                     threaded)
+                             '(("P" "") ("C" "\u2514\u2500 ")))))))
+      (when (file-directory-p base)
+        (delete-directory base t)))))
 
 ;;;; Session Filter
 
@@ -812,6 +1666,142 @@ Killing the process and rerendering drops the marker."
       (when (process-live-p proc)
         (delete-process proc))
       (kill-buffer chat-buf))))
+
+(ert-deftest pilish-test-session-browser-live-marker-alias-spelling ()
+  "The live marker matches a session through symlink alias spellings.
+The process holds the real target while the browser row retained an
+alias spelling of the same file; both canonicalize to one identity."
+  (let* ((base (pilish-test--make-temp-directory "pi-live-alias-"))
+         (elsewhere (expand-file-name "elsewhere" base))
+         (chat-buf (generate-new-buffer "*pilish-test-live-alias-chat*"))
+         (proc (start-process "pilish-live-alias-test" nil "sleep" "30")))
+    (set-process-query-on-exit-flag proc nil)
+    (process-put proc 'pilish-chat-buffer chat-buf)
+    (unwind-protect
+        (progn
+          (make-directory elsewhere t)
+          (let ((target (expand-file-name "live.jsonl" elsewhere))
+                (alias-dir (expand-file-name "alias" base)))
+            (write-region "" nil target)
+            (make-directory alias-dir t)
+            (make-symbolic-link target
+                                (expand-file-name "live.jsonl" alias-dir))
+            (with-current-buffer chat-buf
+              (setq pilish--process proc
+                    pilish--state (list :session-file target)))
+            (with-temp-buffer
+              (pilish-session-browser-mode)
+              (setq pilish--session-browser-items
+                    (list (list :path (expand-file-name "live.jsonl"
+                                                       alias-dir)
+                                :name "Alias session"
+                                :messageCount 3
+                                :modified "2026-02-24T10:00:00Z")))
+              (setq pilish--session-browser-sort "relevance")
+              (pilish--session-browser-rerender)
+              (should (string-match-p "● Alias session" (buffer-string))))))
+      (when (process-live-p proc)
+        (delete-process proc))
+      (kill-buffer chat-buf)
+      (when (file-directory-p base)
+        (delete-directory base t)))))
+
+(ert-deftest pilish-test-session-browser-live-marker-multi-hop-routes ()
+  "The live marker respects complete TRAMP routes.
+A session file on a multi-hop route is live; the same local name
+reached without the bastion hop is a different route's file and must
+not be cross-marked."
+  (let* ((chat-buf (generate-new-buffer "*pilish-test-live-route-chat*"))
+         (proc (start-process "pilish-live-route-test" nil "sleep" "30")))
+    (set-process-query-on-exit-flag proc nil)
+    (process-put proc 'pilish-chat-buffer chat-buf)
+    (unwind-protect
+        (progn
+          (with-current-buffer chat-buf
+            (setq pilish--process proc
+                  pilish--state
+                  (list :session-file
+                        "/ssh:bastion|ssh:pi-host:/s/live.jsonl")))
+          (with-temp-buffer
+            (pilish-session-browser-mode)
+            (setq pilish--session-browser-items
+                  (list '(:path "/ssh:pi-host:/s/live.jsonl"
+                         :name "Final hop session"
+                         :messageCount 3 :modified "2026-02-24T10:00:00Z")
+                        '(:path "/ssh:bastion|ssh:pi-host:/s/live.jsonl"
+                         :name "Routed session"
+                         :messageCount 3 :modified "2026-02-24T11:00:00Z")))
+            (setq pilish--session-browser-sort "relevance")
+            (pilish--session-browser-rerender)
+            ;; Only the same-route row is live.
+            (should (string-match-p "● Routed session" (buffer-string)))
+            (should-not (string-match-p "● Final hop session"
+                                        (buffer-string)))))
+      (when (process-live-p proc)
+        (delete-process proc))
+      (kill-buffer chat-buf))))
+
+(ert-deftest pilish-test-session-browser-render-threaded-activity-order ()
+  "Threaded render orders families by subtree activity.
+Mirrors the upstream Pi selector case: an old parent promoted by a new
+child renders above a newer root, before its own descendant."
+  (with-temp-buffer
+    (pilish-session-browser-mode)
+    (setq pilish--session-browser-items
+          ;; Discovery order lists the younger root first.
+          (list '(:path "/sess/mid-root.jsonl" :name "Mid Root"
+                  :messageCount 10 :modified "2026-01-02T00:00:00Z")
+                '(:path "/sess/old-parent.jsonl" :name "Old Parent"
+                  :messageCount 10 :modified "2026-01-01T00:00:00Z")
+                '(:path "/sess/new-child.jsonl" :name "New Child"
+                  :parentSessionPath "/sess/old-parent.jsonl"
+                  :messageCount 10 :modified "2026-01-03T00:00:00Z")))
+    (setq pilish--session-browser-sort "threaded")
+    (pilish--session-browser-rerender)
+    (let ((text (buffer-string)))
+      (let ((pos-p (string-match "Old Parent" text))
+            (pos-c (string-match "New Child" text))
+            (pos-r (string-match "Mid Root" text)))
+        (should (and pos-p pos-c pos-r))
+        (should (< pos-p pos-c pos-r)))
+      (should (string-match-p "└─ New Child" text)))))
+
+(ert-deftest pilish-test-session-browser-threaded-query-flattens ()
+  "A query in Threaded view shows flat newest-first rows.
+A partial match set must not draw family connectors or nest fork
+children; ordering follows activity instead of archive order."
+  (with-temp-buffer
+    (pilish-session-browser-mode)
+    (setq pilish--session-browser-items
+          (list '(:path "/sess/r.jsonl" :name "Query Root"
+                  :messageCount 10 :modified "2026-01-01T00:00:00Z")
+                '(:path "/sess/p.jsonl" :name "Query Parent"
+                  :messageCount 10 :modified "2026-01-03T00:00:00Z")
+                '(:path "/sess/c.jsonl" :name "Query Child"
+                  :parentSessionPath "/sess/p.jsonl"
+                  :messageCount 10 :modified "2026-01-02T00:00:00Z")
+                '(:path "/sess/x.jsonl" :name "Unrelated Session"
+                  :messageCount 10 :modified "2026-01-04T00:00:00Z")))
+    (setq pilish--session-browser-sort "threaded")
+    (setq pilish--session-browser-search-query "Query"
+          pilish--session-browser-search-tokens '("Query"))
+    (unwind-protect
+        (progn
+          (pilish--session-browser-rerender)
+          (let ((text (buffer-string)))
+            ;; Flat newest-first over the matching set.
+            (let ((pos-p (string-match "Query Parent" text))
+                  (pos-c (string-match "Query Child" text))
+                  (pos-r (string-match "Query Root" text)))
+              (should (and pos-p pos-c pos-r))
+              (should (< pos-p pos-c pos-r)))
+            ;; No ancestry implied between partial matches.
+            (should-not (string-match-p "├─" text))
+            (should-not (string-match-p "└─" text))
+            ;; The non-matching session is filtered out entirely.
+            (should-not (string-match-p "Unrelated" text))))
+      (setq pilish--session-browser-search-query nil
+            pilish--session-browser-search-tokens nil))))
 
 (ert-deftest pilish-test-session-browser-render-loading ()
   "Render loading indicator."
@@ -2452,6 +3442,29 @@ The controlled clock forces line-level yielding without elapsed-time assertions.
       (should (pilish--session-filter-search (caar calls) '("finál")))
       (should-not (get-buffer-window browser t))
       (should-not (cl-some #'buffer-live-p scan-buffers)))))
+
+(ert-deftest pilish-test-session-search-whitespace-only-query ()
+  "A whitespace-only query is semantically empty.
+The state, the header, and the render must agree: no active query,
+and Threaded keeps its fork-family hierarchy."
+  (with-temp-buffer
+    (pilish-session-browser-mode)
+    (setq pilish--session-browser-items
+          (list '(:path "/sess/parent.jsonl" :name "Whitespace Parent"
+                  :messageCount 3 :modified "2026-01-02T00:00:00Z")
+                '(:path "/sess/child.jsonl" :name "Whitespace Child"
+                  :parentSessionPath "/sess/parent.jsonl"
+                  :messageCount 1 :modified "2026-01-01T00:00:00Z")))
+    (setq pilish--session-browser-sort "threaded")
+    (cl-letf (((symbol-function 'read-string) (lambda (&rest _) "   ")))
+      (call-interactively #'pilish-session-browser-search))
+    ;; State: the query is cleared, not recorded as active.
+    (should-not pilish--session-browser-search-query)
+    (should-not pilish--session-browser-search-tokens)
+    ;; Render: the family hierarchy is intact and the header carries
+    ;; no query segment.
+    (should (string-match-p "└─" (buffer-string)))
+    (should-not (string-match-p "/" (pilish--session-browser-header-line)))))
 
 (ert-deftest pilish-test-session-search-invalid-and-cleared-query ()
   "Invalid regexps preserve the previous query; clearing restores all rows."

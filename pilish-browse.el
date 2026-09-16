@@ -426,54 +426,289 @@ All tokens must match for the entry to be included."
   "Sort session ITEMS by SORT-MODE.
 \"recent\" sorts by modified time descending.
 \"relevance\" sorts by message count descending.
-\"threaded\" returns items as-is (threading is handled during rendering)."
+\"threaded\" returns items as-is; fork-family ordering, including the
+query-time flattening to newest-first rows, is handled during
+rendering (see `pilish--session-thread-items')."
   (pcase sort-mode
     ("recent"
      (sort (copy-sequence items)
            (lambda (a b)
-             (string> (plist-get a :modified) (plist-get b :modified)))))
+             ;; Missing mtimes are the oldest known value, matching
+             ;; the subtree activity fallback; equal mtimes fall back
+             ;; to canonical identity so scan order never leaks.
+             (let ((ma (or (plist-get a :modified) ""))
+                   (mb (or (plist-get b :modified) "")))
+               (if (not (equal ma mb))
+                   (string> ma mb)
+                 (string< (or (plist-get a :canonicalPath)
+                              (plist-get a :path) "")
+                          (or (plist-get b :canonicalPath)
+                              (plist-get b :path) "")))))))
     ("relevance"
      (sort (copy-sequence items)
            (lambda (a b)
-             (> (or (plist-get a :messageCount) 0)
-                (or (plist-get b :messageCount) 0)))))
+             ;; Equal message counts fall back to canonical identity
+             ;; so scan order never leaks, matching Recent.
+             (let ((ca (or (plist-get a :messageCount) 0))
+                   (cb (or (plist-get b :messageCount) 0)))
+               (if (/= ca cb)
+                   (> ca cb)
+                 (string< (or (plist-get a :canonicalPath)
+                              (plist-get a :path) "")
+                          (or (plist-get b :canonicalPath)
+                              (plist-get b :path) "")))))))
     (_ items)))
 
+(defun pilish--canonical-session-path (path &optional memo anchor)
+  "Return PATH's canonical spelling for session family identity.
+Remote spellings keep their full TRAMP route as the identity — never
+resolved, so no remote filesystem is contacted and distinct routes
+stay distinct identities.  Local spellings resolve symlinks along
+the whole path through `file-truename', so alias spellings of one
+file — a symlinked sessions directory or a symlinked session file
+itself — denote one family.  A spelling `file-truename' cannot
+resolve, such as a symlink cycle, keeps its lexical form instead of
+signaling — like pi's realpath fallback.  MEMO, when non-nil, is a
+hash table caching canonical spellings across calls; ANCHOR, when
+non-nil, anchors relative spellings as
+`pilish--route-preserving-expand-file-name' does."
+  (when (stringp path)
+    (let ((expanded (pilish--route-preserving-expand-file-name path anchor)))
+      (if (pilish--remote-prefix-for-path expanded)
+          expanded
+        (let ((memo (or memo (make-hash-table :test 'equal))))
+          (or (gethash expanded memo)
+              (puthash expanded
+                       (condition-case nil
+                           (file-truename expanded)
+                         (error expanded))
+                       memo)))))))
+
+(defun pilish--session-item-key (item &optional memo)
+  "Return ITEM's canonical identity key.
+A stored `:canonicalPath' (see `pilish--session-enrich-item') wins;
+otherwise the key is computed from `:path' with MEMO, as direct
+callers rendering hand-built items still do."
+  (or (plist-get item :canonicalPath)
+      (pilish--canonical-session-path (plist-get item :path) memo)))
+
+(defconst pilish--unresolved-parent-session 'unresolved
+  "Sentinel `:canonicalParentSession' for unresolvable fork headers.
+Truthiness stops the render-time fallback from recomputing a path
+that already failed during the scan; it matches no item identity, so
+the fork renders as an ordinary root.")
+
+(defun pilish--session-parent-anchor (item)
+  "Return the anchor for ITEM's relative fork-header spellings.
+Pi resolves relative paths against its process working directory —
+recorded as the session header's `cwd', which pi's own fork code
+writes (`cwd: this.cwd') and `resolvePath' defaults to — so that
+recorded directory is the deterministic anchor, but only when it is
+absolute: pi records an absolute working directory, and a relative
+value would otherwise expand against the ambient buffer.  When the
+header lacks a usable `cwd', the child session file's own directory
+anchors instead — route-preserving, so a multi-hop TRAMP child
+keeps its complete route — and pi's fork flow creates the fork next
+to its parent.  Nil when neither yields a stable anchor."
+  (let ((cwd (plist-get item :cwd)))
+    (if (and (stringp cwd) (file-name-absolute-p cwd))
+        cwd
+      (pilish--route-preserving-file-name-directory
+       (plist-get item :path)))))
+
+(defun pilish--session-enrich-item (item)
+  "Return ITEM with its canonical identities resolved for rendering.
+Computes `:canonicalPath' and, for forks, `:canonicalParentSession'
+\(see `pilish--thread-parent-identity'), so family building and
+live-marker lookups on ingested items need no archive-sized or
+remote canonicalization at render time — only the few live-process
+session paths are canonicalized per render.  Runs inside scan slices
+under the scan's cancellation and quit handling; an ordinary
+resolution failure degrades just that relationship — an unresolvable
+fork header keeps `pilish--unresolved-parent-session' and renders as
+an orphan, an unresolvable own path keeps its raw spelling — instead
+of discarding the file or aborting the scan."
+  (let* ((key (condition-case nil
+                 (pilish--canonical-session-path (plist-get item :path))
+               (error (plist-get item :path))))
+         (parent-path (plist-get item :parentSessionPath)))
+    (append item
+            (list :canonicalPath key)
+            (when parent-path
+              (list :canonicalParentSession
+                    (or (condition-case nil
+                            (pilish--thread-parent-identity
+                             parent-path key nil
+                             (pilish--session-parent-anchor item))
+                          (error pilish--unresolved-parent-session))
+                        ;; No stable anchor is as unresolvable as an
+                        ;; error: keep the sentinel so renders never
+                        ;; recompute against the ambient buffer.
+                        pilish--unresolved-parent-session))))))
+
+(defun pilish--session-canonicalize-items (items)
+  "Return ITEMS deduplicated by canonical identity, one per session.
+Items carrying stored keys (see `pilish--session-enrich-item') dedupe
+by pure hash lookups; hand-built items without keys get
+`:canonicalPath' computed here.  Items with equivalent identities —
+two discovered spellings of one file, such as symlink aliases —
+collapse to the first spelling, so all views render one row per
+session.  Input plists are never mutated."
+  (let ((memo (make-hash-table :test 'equal))
+        (seen (make-hash-table :test 'equal))
+        (result nil))
+    (dolist (item items)
+      (let* ((stored (plist-get item :canonicalPath))
+             (key (or stored
+                      (pilish--canonical-session-path
+                       (plist-get item :path) memo)))
+             (entry (if stored item
+                      (append item (list :canonicalPath key)))))
+        (unless (gethash key seen)
+          (puthash key t seen)
+          (push entry result))))
+    (nreverse result)))
+
+(defun pilish--thread-parent-identity (parent-path child-key &optional memo anchor)
+  "Return PARENT-PATH's canonical identity resolved against CHILD-KEY.
+A spelling with its own TRAMP route is its own identity; a prefix-free
+spelling — what pi records in a fork header — is anchored to the
+child's own route first, so a shared local name can never attach to
+another route's item and an all-remote family never touches the local
+filesystem.  Relative spellings expand against ANCHOR — the child's
+recorded working directory (see `pilish--session-parent-anchor'), as
+pi resolves them — never the ambient buffer; a relative spelling
+with no absolute anchor has no stable identity and resolves to nil.
+MEMO caches local canonicalization."
+  (when (stringp parent-path)
+    (if (and (not (file-name-absolute-p parent-path))
+             (not (and (stringp anchor)
+                       (file-name-absolute-p anchor))))
+        nil
+      (let* ((expanded (pilish--route-preserving-expand-file-name
+                        parent-path anchor))
+             (child-prefix (pilish--remote-prefix-for-path child-key)))
+        (cond
+         ((pilish--remote-prefix-for-path expanded) expanded)
+         (child-prefix (concat child-prefix expanded))
+         (t (pilish--canonical-session-path parent-path memo anchor)))))))
+
 (defun pilish--session-thread-items (items)
-  "Arrange ITEMS into a flat list with threading depth.
-Returns a list of (session . depth) cons cells.
-Top-level items have depth 0, children have depth 1+."
-  (let ((by-path (make-hash-table :test 'equal))
-        (children-of (make-hash-table :test 'equal))
-        (root-items nil))
-    ;; Index by path
-    (dolist (item items)
-      (puthash (plist-get item :path) item by-path))
-    ;; Group children under parents
-    (dolist (item items)
-      (let ((parent-path (plist-get item :parentSessionPath)))
-        (if (and parent-path (gethash parent-path by-path))
-            (puthash parent-path
-                     (append (gethash parent-path children-of) (list item))
+  "Arrange ITEMS into fork-family rows for the Threaded view.
+Return a list of (ITEM PREFIX) pairs.  ITEMS are assumed to
+carry one row per canonical identity, as
+`pilish--session-canonicalize-items' ensures for browser state.
+Families are built from `:parentSessionPath' links, and only when
+the parent is part of ITEMS: a fork whose parent is missing,
+filtered out, or out of scope renders as an ordinary root.  Each
+root and sibling subtree is ordered by the latest activity anywhere
+in that subtree — newest first, ties broken by canonical path
+ascending — and each parent renders before its descendants.  PREFIX
+is the row's connector: the empty string for a family root; for
+descendants `├─' with later siblings or `└─' last, preceded by a `│'
+gutter for every ancestor level that continues — its length encodes
+the nesting depth."
+  (let* ((memo (make-hash-table :test 'equal))
+         (nodes (mapcar (lambda (item)
+                          (list :item item
+                                :key (pilish--session-item-key item memo)))
+                        items))
+         (by-key (make-hash-table :test 'equal))
+         (children-of (make-hash-table :test 'equal))
+         (roots nil))
+    (dolist (node nodes)
+      (puthash (plist-get node :key) node by-key))
+    (dolist (node nodes)
+      (let* ((item (plist-get node :item))
+             (parent-key
+              (or (plist-get item :canonicalParentSession)
+                  (pilish--thread-parent-identity
+                   (plist-get item :parentSessionPath)
+                   (plist-get node :key) memo
+                   (pilish--session-parent-anchor item))))
+             (parent (and parent-key (gethash parent-key by-key))))
+        (if (and parent
+                 ;; A self-referential fork header would otherwise
+                 ;; recurse forever; render it as the root it claims.
+                 (not (equal (plist-get parent :key)
+                             (plist-get node :key))))
+            (puthash (plist-get parent :key)
+                     (cons node (gethash (plist-get parent :key) children-of))
                      children-of)
-          (push item root-items))))
-    ;; Build threaded list with depth (DFS)
+          (push node roots))))
+    (dolist (root roots)
+      (pilish--thread-node-activity root children-of))
     (let ((result nil))
-      (dolist (root (nreverse root-items))
-        (setq result (pilish--collect-threaded
-                      root children-of 0 result)))
+      (dolist (root (pilish--thread-sorted-nodes roots))
+        (push (list (plist-get root :item) "") result)
+        (setq result (pilish--thread-collect-children
+                      root children-of nil result)))
       (nreverse result))))
 
-(defun pilish--collect-threaded (item children-of depth result)
-  "Collect ITEM and its children into RESULT at DEPTH.
-CHILDREN-OF maps parent path to child items.
-Returns the updated RESULT list."
-  (push (cons item depth) result)
-  (let ((kids (gethash (plist-get item :path) children-of)))
+(defun pilish--thread-node-activity (node children-of)
+  "Return and cache in NODE the latest `:modified' in NODE's subtree.
+CHILDREN-OF maps a canonical parent key to its child nodes.  Activity
+is the newest modification anywhere under the family, not the
+parent's own mtime, so a recently used fork promotes its whole
+family.  Fork parents always predate their children, so subtrees are
+finite."
+  (or (plist-get node :activity)
+      (let ((latest (or (plist-get (plist-get node :item) :modified) "")))
+        (dolist (child (gethash (plist-get node :key) children-of))
+          (let ((child-latest (pilish--thread-node-activity child children-of)))
+            (when (string> child-latest latest)
+              (setq latest child-latest))))
+        (plist-put node :activity latest)
+        latest)))
+
+(defun pilish--thread-sorted-nodes (nodes)
+  "Return NODES ordered by subtree activity descending.
+Equal activity falls back to canonical path ascending, so the row
+order never depends on scan order."
+  (sort (copy-sequence nodes)
+        (lambda (a b)
+          (let ((ma (or (plist-get a :activity) ""))
+                (mb (or (plist-get b :activity) "")))
+            (if (not (equal ma mb))
+                (string> ma mb)
+              (string< (or (plist-get a :key) "")
+                       (or (plist-get b :key) "")))))))
+
+(defun pilish--thread-collect-children (node children-of ancestors result)
+  "Collect NODE's sorted children and their descendants onto RESULT.
+CHILDREN-OF maps a canonical parent key to its child nodes.
+ANCESTORS lists, oldest level first, whether each ancestor level
+above the children continues below them.  Children sort by
+`pilish--thread-sorted-nodes' and render after their parent with
+connectors from `pilish--thread-prefix'."
+  (let* ((kids (pilish--thread-sorted-nodes
+                (gethash (plist-get node :key) children-of)))
+         (count (length kids))
+         (index 0))
     (dolist (kid kids)
-      (setq result (pilish--collect-threaded
-                    kid children-of (1+ depth) result))))
-  result)
+      (cl-incf index)
+      (let* ((last-p (= index count))
+             (prefix (pilish--thread-prefix ancestors last-p)))
+        (push (list (plist-get kid :item) prefix) result)
+        (setq result
+              (pilish--thread-collect-children
+               kid children-of
+               ;; KID's descendants grow one more gutter slot: a bar
+               ;; while KID's own subtree is not the last of its
+               ;; siblings, blank once it is.
+               (append ancestors (list (not last-p)))
+               result))))
+    result))
+
+(defun pilish--thread-prefix (ancestors last-p)
+  "Return the Threaded-view connector for a row below the top level.
+LAST-P non-nil means the row is its parent's last child and gets the
+terminating `└─' branch; earlier siblings get `├─'.  Each true element
+of ANCESTORS contributes a `│' gutter for an ancestor level whose
+subtree continues past this row."
+  (concat (mapconcat (lambda (continues) (if continues "│ " "  "))
+                     ancestors "")
+          (if last-p "└─ " "├─ ")))
 
 (defun pilish--session-filter-named (items)
   "Filter ITEMS to only those with a name."
@@ -728,28 +963,33 @@ Inherits section navigation from `magit-section-mode'."
           (insert "No sessions found.\n"))
          ((null filtered)
           (insert "No matching sessions.\n"))
-         ((equal pilish--session-browser-sort "threaded")
+         ((and (equal pilish--session-browser-sort "threaded")
+               (null pilish--session-browser-search-tokens))
           (pilish--session-browser-render-threaded filtered live-paths))
          ((equal pilish--session-browser-sort "recent")
           (pilish--session-browser-render-recent filtered live-paths))
          (t
-          (let ((sorted (pilish--session-sort-items
-                         filtered pilish--session-browser-sort)))
-            (pilish--session-browser-render-flat sorted live-paths))))))))
+          (pilish--session-browser-render-flat
+           (pilish--session-sort-items
+            filtered
+            ;; A query flattens Threaded to newest-first rows; a
+            ;; partial match set must not draw family connectors.
+            (if (equal pilish--session-browser-sort "threaded")
+                "recent"
+              pilish--session-browser-sort))
+           live-paths)))))))
 
 (defun pilish--session-browser-render-flat (items live-paths)
   "Render ITEMS as a flat list, marking sessions in LIVE-PATHS."
   (dolist (item items)
-    (pilish--session-browser-insert-session item 0 nil live-paths)))
+    (pilish--session-browser-insert-session item nil live-paths)))
 
 (defun pilish--session-browser-render-threaded (items live-paths)
-  "Render ITEMS in threaded view with connectors.
+  "Render ITEMS in fork-family order with connectors.
 Sessions in LIVE-PATHS get the live-session marker."
-  (let ((threaded (pilish--session-thread-items items)))
-    (dolist (entry threaded)
-      (let ((item (car entry))
-            (depth (cdr entry)))
-        (pilish--session-browser-insert-session item depth t live-paths)))))
+  (dolist (entry (pilish--session-thread-items items))
+    (pilish--session-browser-insert-session
+     (nth 0 entry) (nth 1 entry) live-paths)))
 
 (defun pilish--session-browser-render-recent (items live-paths)
   "Render ITEMS sorted by recency with time-group headers.
@@ -765,31 +1005,36 @@ Sessions in LIVE-PATHS get the live-session marker."
               (pilish--propertize-face
                group 'pilish-session-group-header)))
           (setq last-group group)))
-      (pilish--session-browser-insert-session item 0 nil live-paths))))
+      (pilish--session-browser-insert-session item nil live-paths))))
 
-(defun pilish--session-browser-insert-session (session depth threaded live-paths)
-  "Insert SESSION as a `magit-section' section at DEPTH.
-When THREADED is non-nil, prepend threading connector at DEPTH.
-In non-threaded modes, forked sessions get a \"fork:\" prefix.  When
-SESSION's path is a key of LIVE-PATHS (see
+(defun pilish--session-browser-insert-session (session prefix live-paths)
+  "Insert SESSION as a `magit-section' section, PREFIXED by PREFIX.
+The section's identity is the session's canonical key (see
+`pilish--session-item-key'), so point restoration survives a refresh
+that retains a different alias spelling; actions resolve the raw
+retained spelling through `pilish--session-browser-path-at-point'.
+PREFIX is the Threaded-view connector — the empty string for a family
+root, gutters and a branch for descendants.  A nil PREFIX renders a
+flat row, where a forked session gets a \"fork:\" prefix instead.
+When SESSION's key is a key of LIVE-PATHS (see
 `pilish--browse-live-session-paths'), prepend a live-session marker.
 Message count and age are rendered as a right-margin overlay."
-  (let* ((path (plist-get session :path))
+  (let* ((key (pilish--session-item-key session))
          (name (pilish--session-display-name session))
          (count (or (plist-get session :messageCount) 0))
          (modified (plist-get session :modified))
          (is-fork (plist-get session :parentSessionPath))
-         (live-p (gethash (expand-file-name path) live-paths))
-         (prefix (cond
-                  ((and threaded (> depth 0))
-                   (concat (make-string (* 2 (1- depth)) ?\s)
-                           (pilish--propertize-face
-                            "└─ " 'pilish-session-thread-connector)))
-                  ((and is-fork (not threaded))
-                   (pilish--propertize-face
-                    "fork: " 'pilish-session-thread-connector))
-                  (t "")))
-         (heading (concat prefix
+         (live-p (gethash key live-paths))
+         (display-prefix
+          (cond
+           (prefix
+            (pilish--propertize-face
+             prefix 'pilish-session-thread-connector))
+           (is-fork
+            (pilish--propertize-face
+             "fork: " 'pilish-session-thread-connector))
+           (t "")))
+         (heading (concat display-prefix
                           (when live-p
                             (pilish--propertize-face
                              "● " 'pilish-session-live))
@@ -805,7 +1050,7 @@ Message count and age are rendered as a right-margin overlay."
                                            (+ 3 pilish--margin-age-unit-width))
                                    "?"))
                        'pilish-session-age))))
-    (magit-insert-section (session path)
+    (magit-insert-section (session key)
       (magit-insert-heading heading)
       (pilish--make-margin-overlay margin-str))))
 
@@ -860,10 +1105,12 @@ Message count and age are rendered as a right-margin overlay."
   "Search names, first messages and all user/assistant text on disk.
 Whitespace-separated regexp tokens must all match.  Text on inactive
 branches is included; thinking, tools, images and summaries are not added.
-The legacy first-message fallback can still match text from any role."
+The legacy first-message fallback can still match text from any role.
+A blank or whitespace-only query clears the filter."
   (interactive)
-  (let ((query (read-string "Filter (regexp tokens): "
-                            pilish--session-browser-search-query))
+  (let ((query (string-trim
+                (read-string "Filter (regexp tokens): "
+                             pilish--session-browser-search-query)))
         (need-rerender t))
     (if (string-empty-p query)
         (setq pilish--session-browser-search-query nil
@@ -882,10 +1129,18 @@ The legacy first-message fallback can still match text from any role."
       (pilish--session-browser-rerender))))
 
 (defun pilish--session-browser-path-at-point ()
-  "Return the file path of the session at point, or nil."
+  "Return the file path of the session at point, or nil.
+Sections carry canonical identities; the displayed row's raw retained
+spelling is returned so actions (switch, rename, delete) act on the
+path the user sees."
   (when-let* ((section (magit-current-section))
               ((object-of-class-p section 'pilish-session-section)))
-    (oref section value)))
+    (let ((key (oref section value)))
+      (or (plist-get
+           (cl-find key pilish--session-browser-items
+                    :key #'pilish--session-item-key :test #'equal)
+           :path)
+          key))))
 
 (defun pilish-session-browser-switch ()
   "Switch to the session at point."
@@ -895,16 +1150,17 @@ The legacy first-message fallback can still match text from any role."
     (message "Pi: No session at point")))
 
 (defun pilish--browse-live-session-paths ()
-  "Return a hash table of session file paths open in live Pilish processes.
-Keys are `expand-file-name' spellings of each live process's current
-session file, anchored at its chat buffer exactly as
-`pilish--browse-session-file-matches-p' anchors spellings.  The table
+  "Return a hash table of session identities open in live Pilish processes.
+Keys are canonical identities (`pilish--canonical-session-path'):
+symlink alias spellings of one file unify, and remote spellings keep
+their complete TRAMP route, so a final-hop-only spelling of a
+multi-hop session is not cross-marked.  Rows compare their stored
+`:canonicalPath' through `pilish--session-item-key'.  The table
 reflects only the frontend's own process state — sessions opened in
-other Emacs instances or outside Pilish are not marked — and is empty
-with no live process, so disk browsing stays fully usable offline.
-Symlink-unified spellings that only `file-equal-p' detects do not
-become keys; the interactive guards keep their stricter per-path
-check (see `pilish--browse-live-session-chat-buffer')."
+other Emacs instances or outside Pilish are not marked — and is
+empty with no live process, so disk browsing stays fully usable
+offline.  The interactive guards keep their stricter per-path checks
+in `pilish--browse-live-session-chat-buffer'."
   (let ((paths (make-hash-table :test 'equal)))
     (dolist (proc (process-list))
       (when (pilish--session-live-process-p proc)
@@ -913,7 +1169,8 @@ check (see `pilish--browse-live-session-chat-buffer')."
             (with-current-buffer chat-buf
               (let ((current (plist-get pilish--state :session-file)))
                 (when (stringp current)
-                  (puthash (expand-file-name current) t paths))))))))
+                  (puthash (pilish--canonical-session-path current)
+                           t paths))))))))
     paths))
 
 (defun pilish--browse-live-session-chat-buffer (path)
@@ -1200,14 +1457,21 @@ cycle's anchor (see `pilish--session-browser-fetch-anchor')."
      pilish--session-browser-scope
      (lambda (items error)
        (when (buffer-live-p buf)
-         ;; The scan calls back from a timer in whatever buffer is
-         ;; current; render in the browser buffer, not that one.
-         (with-current-buffer buf
-           (setq pilish--session-browser-loading nil
-                 pilish--session-browser-fetch-anchor nil
-                 pilish--session-browser-error error
-                 pilish--session-browser-items items)
-           (pilish--session-browser-rerender anchor)))))))
+         (pilish--session-browser-apply-scan buf items error anchor))))))
+
+(defun pilish--session-browser-apply-scan (buf items error anchor)
+  "Store a completed scan's ITEMS and ERROR in BUF, then rerender.
+ITEMS pass through `pilish--session-canonicalize-items' — one keyed
+row per session identity — so every view and query transition
+renders each session once.  ANCHOR is the pre-fetch point anchor
+handed to `pilish--session-browser-rerender'."
+  (with-current-buffer buf
+    (setq pilish--session-browser-loading nil
+          pilish--session-browser-fetch-anchor nil
+          pilish--session-browser-error error
+          pilish--session-browser-items
+          (pilish--session-canonicalize-items items))
+    (pilish--session-browser-rerender anchor)))
 
 (defun pilish--session-browser-rerender (&optional fallback)
   "Re-render the session browser from local state, preserving point.
@@ -1855,7 +2119,12 @@ runs, without a callback.  Hiding the browser with q does not cancel it."
                       (error (setq result '(done))))
                     (if (or (null state) result)
                         (progn
-                          (when (cdr result) (push (cdr result) items))
+                          ;; Enrich inside the slice: identity
+                          ;; resolution shares the scan's budget,
+                          ;; cancellation token, and quit handling.
+                          (when (cdr result)
+                            (push (pilish--session-enrich-item (cdr result))
+                                  items))
                           (pilish-jsonl-close-session-info state)
                           (setq state nil files (cdr files)))
                       (setq yield t))))
@@ -1882,7 +2151,11 @@ runs, without a callback.  Hiding the browser with q does not cancel it."
 ITEMS is a list of session plists in the browse session dialect:
 \(:path :id :cwd :name? :parentSessionPath? :created :modified
 :messageCount :firstMessage :searchText) — the optional search-corpus
-output of `pilish-jsonl-read-session-info'.  ERROR is an error
+output of `pilish-jsonl-read-session-info' — each enriched during the
+scan with `:canonicalPath' and, for forks, `:canonicalParentSession'
+\(see `pilish--session-enrich-item'), so downstream renders need no
+archive-sized or remote canonicalization — only the few live-process
+session paths canonicalize locally per render.  ERROR is an error
 string or nil.  SCOPE is \"current\" (one project directory) or \"all\" (every
 munged directory under the sessions root).  The scan is
 chunked (see `pilish--browse-scan-session-files'), shows a
@@ -2004,16 +2277,25 @@ never run and the browser would sit on its loading state forever."
 
 (defun pilish--browse-session-file-matches-p (chat-buf path)
   "Return non-nil when CHAT-BUF's current session file is PATH.
-Compares `expand-file-name' spellings (anchored at CHAT-BUF so relative
-session files resolve like the chat does) with `file-equal-p' as the
-symlink-aware fallback."
+Compares canonical identities (`pilish--canonical-session-path',
+anchored at CHAT-BUF so relative session files resolve like the chat
+does): symlink alias spellings of one file match, and remote
+spellings keep their complete TRAMP route, so a final-hop-only
+spelling of a multi-hop session is a different file.  For LOCAL
+spellings only, `file-equal-p' adds the same-inode fallback that
+hardlinked names need; remote spellings are never queried with
+`file-equal-p'."
   (and (buffer-live-p chat-buf)
        (with-current-buffer chat-buf
          (let ((current (plist-get pilish--state :session-file)))
            (and (stringp current)
-                (or (equal (expand-file-name current)
-                           (expand-file-name path))
-                    (file-equal-p current path)))))))
+                (let ((a (pilish--canonical-session-path
+                          current nil default-directory))
+                      (b (pilish--canonical-session-path path)))
+                  (or (equal a b)
+                      (and (not (pilish--remote-prefix-for-path current))
+                           (not (pilish--remote-prefix-for-path path))
+                           (file-equal-p current path)))))))))
 
 (defun pilish--browse-transition-refused-p (chat-buf action)
   "Return non-nil when CHAT-BUF must refuse to start ACTION now.
