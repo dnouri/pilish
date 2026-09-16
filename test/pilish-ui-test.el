@@ -850,8 +850,8 @@ without an input window."
     (dolist (key '("&" "E" "o"))
       (should-not (lookup-key pilish-chat-mode-map (kbd key))))))
 
-(ert-deftest pilish-test-chat-mode-map-copy-file-reference ()
-  "The chat `w' key copies an @path:line reference at point."
+(ert-deftest pilish-test-chat-mode-map-copy-file-path ()
+  "The chat `w' key copies the same shell-local path used by `!'."
   (with-temp-buffer
     (pilish-chat-mode)
     (pilish--set-chat-session-identity "/tmp/project/")
@@ -865,10 +865,10 @@ without an input window."
                  (lambda (fmt &rest args)
                    (push (apply #'format fmt args) messages))))
         (let ((binding (key-binding (kbd "w"))))
-          (should (eq binding #'pilish-copy-file-reference))
+          (should (eq binding #'pilish-copy-file-path))
           (call-interactively binding)))
-      (should (equal (car kill-ring) "@src/report.el:7"))
-      (should (member "Pi: Copied @src/report.el:7" messages)))))
+      (should (equal (car kill-ring) "/tmp/project/src/report.el"))
+      (should (member "Pi: Copied /tmp/project/src/report.el" messages)))))
 
 ;;; Startup Header
 

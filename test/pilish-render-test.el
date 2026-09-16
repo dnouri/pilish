@@ -5624,8 +5624,8 @@ INPUT is returned by `read-shell-command', or signals `quit' when it is
       (should-not prompted)
       (should-not executed))))
 
-(ert-deftest pilish-test-copy-file-reference-project-relative ()
-  "A project file with a line copies a relative @path:line reference."
+(ert-deftest pilish-test-copy-file-path-project-absolute ()
+  "A project file copies the same absolute shell-local path used by `!'."
   (with-temp-buffer
     (pilish-chat-mode)
     (pilish--set-chat-session-identity "/tmp/project/")
@@ -5637,13 +5637,13 @@ INPUT is returned by `read-shell-command', or signals `quit' when it is
       (cl-letf (((symbol-function 'message)
                  (lambda (fmt &rest args)
                    (push (apply #'format fmt args) messages))))
-        (pilish-copy-file-reference))
-      (should (equal (car kill-ring) "@src/app.el:12"))
+        (pilish-copy-file-path))
+      (should (equal (car kill-ring) "/tmp/project/src/app.el"))
       (should (equal kill-ring-yank-pointer kill-ring))
-      (should (member "Pi: Copied @src/app.el:12" messages)))))
+      (should (member "Pi: Copied /tmp/project/src/app.el" messages)))))
 
-(ert-deftest pilish-test-copy-file-reference-no-line ()
-  "A target without a location copies the path alone."
+(ert-deftest pilish-test-copy-file-path-no-location ()
+  "A target without a location copies its absolute shell-local path."
   (with-temp-buffer
     (pilish-chat-mode)
     (pilish--set-chat-session-identity "/tmp/project/")
@@ -5652,23 +5652,25 @@ INPUT is returned by `read-shell-command', or signals `quit' when it is
     (let ((kill-ring nil)
           (kill-ring-yank-pointer nil))
       (cl-letf (((symbol-function 'message) (lambda (&rest _))))
-        (pilish-copy-file-reference))
-      (should (equal (car kill-ring) "@src/app.el")))))
+        (pilish-copy-file-path))
+      (should (equal (car kill-ring) "/tmp/project/src/app.el")))))
 
-(ert-deftest pilish-test-copy-file-reference-range-uses-first-line ()
-  "A line range copies its first line only."
-  (with-temp-buffer
-    (pilish-chat-mode)
-    (pilish--set-chat-session-identity "/tmp/project/")
-    (let ((inhibit-read-only t)) (insert "src/app.el#L12-L20"))
-    (goto-char (+ (point-min) 2))
-    (let ((kill-ring nil)
-          (kill-ring-yank-pointer nil))
-      (cl-letf (((symbol-function 'message) (lambda (&rest _))))
-        (pilish-copy-file-reference))
-      (should (equal (car kill-ring) "@src/app.el:12")))))
+(ert-deftest pilish-test-copy-file-path-excludes-locations ()
+  "Line, column, and range metadata never enter the copied path."
+  (dolist (source '("src/app.el:12" "src/app.el:12:3"
+                    "src/app.el#L12-L20"))
+    (with-temp-buffer
+      (pilish-chat-mode)
+      (pilish--set-chat-session-identity "/tmp/project/")
+      (let ((inhibit-read-only t)) (insert source))
+      (goto-char (+ (point-min) 2))
+      (let ((kill-ring nil)
+            (kill-ring-yank-pointer nil))
+        (cl-letf (((symbol-function 'message) (lambda (&rest _))))
+          (pilish-copy-file-path))
+        (should (equal (car kill-ring) "/tmp/project/src/app.el"))))))
 
-(ert-deftest pilish-test-copy-file-reference-outside-project-absolute ()
+(ert-deftest pilish-test-copy-file-path-outside-project-absolute ()
   "A file outside the session directory copies its absolute path."
   (with-temp-buffer
     (pilish-chat-mode)
@@ -5678,11 +5680,11 @@ INPUT is returned by `read-shell-command', or signals `quit' when it is
     (let ((kill-ring nil)
           (kill-ring-yank-pointer nil))
       (cl-letf (((symbol-function 'message) (lambda (&rest _))))
-        (pilish-copy-file-reference))
-      (should (equal (car kill-ring) "@/tmp/pi-outside/notes.txt")))))
+        (pilish-copy-file-path))
+      (should (equal (car kill-ring) "/tmp/pi-outside/notes.txt")))))
 
-(ert-deftest pilish-test-copy-file-reference-spaces-quoted ()
-  "A path containing spaces uses the quoted @-reference spelling."
+(ert-deftest pilish-test-copy-file-path-spaces-remain-path-text ()
+  "A copied path contains its literal spaces, not shell or @ quoting."
   (with-temp-buffer
     (pilish-chat-mode)
     (pilish--set-chat-session-identity "/tmp/project/")
@@ -5692,10 +5694,44 @@ INPUT is returned by `read-shell-command', or signals `quit' when it is
     (let ((kill-ring nil)
           (kill-ring-yank-pointer nil))
       (cl-letf (((symbol-function 'message) (lambda (&rest _))))
-        (pilish-copy-file-reference))
-      (should (equal (car kill-ring) "@\"src/my file.el\":3")))))
+        (pilish-copy-file-path))
+      (should (equal (car kill-ring) "/tmp/project/src/my file.el")))))
 
-(ert-deftest pilish-test-copy-file-reference-no-target ()
+(ert-deftest pilish-test-copy-file-path-uses-remote-shell-namespace ()
+  "A remote target copies the path used by `!', without its TRAMP prefix."
+  (with-temp-buffer
+    (pilish-chat-mode)
+    (pilish--set-chat-session-identity
+     "/ssh:bastion|sudo:root@host:/srv/project/")
+    (pilish--display-tool-start "read" '(:path "src/app.el"))
+    (goto-char (overlay-start pilish--pending-tool-overlay))
+    (let ((kill-ring nil)
+          (kill-ring-yank-pointer nil))
+      (cl-letf (((symbol-function 'message) (lambda (&rest _))))
+        (pilish-copy-file-path))
+      (should (equal (car kill-ring) "/srv/project/src/app.el")))))
+
+(ert-deftest pilish-test-copy-file-path-preserves-shell-conversion-errors ()
+  "Copying shares `!'s controlled shell-path error instead of falling back."
+  (with-temp-buffer
+    (pilish-chat-mode)
+    (pilish--set-chat-session-identity "/ssh:host:/srv/project/")
+    (pilish--display-tool-start
+     "read" '(:path "/ssh:host:~root;printf PWNED/app.el"))
+    (goto-char (overlay-start pilish--pending-tool-overlay))
+    (let ((kill-ring nil)
+          (kill-ring-yank-pointer nil)
+          copied)
+      (cl-letf (((symbol-function 'kill-new)
+                 (lambda (&rest _) (setq copied t))))
+        (let ((err (should-error (pilish-copy-file-path)
+                                 :type 'user-error)))
+          (should (string-match-p "Unsafe shell home prefix"
+                                  (error-message-string err)))))
+      (should-not copied)
+      (should-not kill-ring))))
+
+(ert-deftest pilish-test-copy-file-path-no-target ()
   "No target rejects with the public command's exact controlled error."
   (with-temp-buffer
     (pilish-chat-mode)
@@ -5703,7 +5739,7 @@ INPUT is returned by `read-shell-command', or signals `quit' when it is
       (insert "ordinary prose")
       (cl-letf (((symbol-function 'kill-new)
                  (lambda (&rest _) (setq copied t))))
-        (let ((err (should-error (pilish-copy-file-reference)
+        (let ((err (should-error (pilish-copy-file-path)
                                  :type 'user-error)))
           (should (equal "No file at point" (error-message-string err)))))
       (should-not copied))))

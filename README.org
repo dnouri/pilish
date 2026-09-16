@@ -326,13 +326,12 @@ multiple lines, must use a textual isolated =*= bounded by a space, tab, or
 string edge.  A final whitespace-delimited = &= uses the usual asynchronous
 shell output.
 
-Press =w= on one strict file target at point to copy an =@path:line=
-reference for Pi prompts.  The path is spelled exactly as =@= completion
-would insert it: project-relative inside the session directory, otherwise
-absolute, with paths containing spaces taking a quoted =@"…"= form.  A known
-physical line — a line range uses its first line — appends =:LINE=; targets
-without a location copy the path alone.  Paste the reference into a prompt
-to point Pi at that file and line.
+Press =w= on one strict file target at point to copy the same shell-local
+path that =!= operates on.  Local paths are absolute; paths in remote sessions
+use the remote shell's namespace without an Emacs TRAMP prefix.  Line, column,
+range, and link-fragment metadata are excluded.  The kill-ring value is the
+literal, unquoted pathname, so spaces remain spaces and no =@= prompt marker is
+added.
 
 Press =TAB= on a turn header (=You= or =Assistant=) to fold or unfold
 that turn.  Use =n= and =p= in the chat buffer to jump between user
@@ -415,7 +414,7 @@ configured warning and error thresholds.
 | =M+<prior/next>= | input   | 🛗 Scroll linked chat window                  |
 | =TAB=            | chat    | 🪗 Toggle summary line, thinking, tool, or turn |
 | =!=              | chat    | 🐚 Run a Dired-inspired command on a file    |
-| =w=              | chat    | 📋 Copy =@path:line= file reference          |
+| =w=              | chat    | 📋 Copy the shell-local file path           |
 | =RET=            | chat    | 🎯 Visit strict file target at point          |
 | =n= / =p=        | chat    | 🐾 Navigate user messages                     |
 | =f=              | chat    | 🌿 Fork from the turn at point                |
@@ -693,7 +692,7 @@ Chat buffer (motion state):
 |-------+-----------------------------------------|
 | n / p | next / previous message                 |
 | f     | fork session at point                   |
-| w     | copy @path:line reference at point      |
+| w     | copy shell-local file path at point     |
 | TAB   | toggle tool/thinking section            |
 | RET   | visit file at point                     |
 | i / a | focus input (=a= goes to end of input)  |

@@ -45,7 +45,7 @@
 ;;
 ;;   n / p   next / previous message (like Magit's section motion)
 ;;   f       fork session at point
-;;   w       copy an @path:line reference at point
+;;   w       copy the shell-local file path at point
 ;;   TAB     toggle tool/thinking section
 ;;   RET     visit file at point
 ;;   i / a   focus input window (append moves to end of input)
@@ -100,7 +100,7 @@
 ;; Browser and chat command declarations follow the menu/ui pattern:
 ;; declare the entry points without requiring their modules, keeping
 ;; this file's dependencies (ui, input, menu) acyclic with them.
-(declare-function pilish-copy-file-reference "pilish-render")
+(declare-function pilish-copy-file-path "pilish-render")
 (declare-function pilish-visit-file "pilish-render")
 (declare-function pilish-toggle-tool-section "pilish-render")
 (declare-function pilish-browse-refresh "pilish-browse")
@@ -280,7 +280,7 @@ options `pilish-evil-chat-state',
     "n" #'pilish-next-message
     "p" #'pilish-previous-message
     "f" #'pilish-fork-at-point
-    "w" #'pilish-copy-file-reference
+    "w" #'pilish-copy-file-path
     "?" #'pilish-menu
     "q" #'pilish-quit
     "i" #'pilish-evil-insert-input

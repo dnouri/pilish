@@ -72,7 +72,7 @@
 ;;     TAB            Toggle completed thinking/tool section or fold turn
 ;;     !              Run a Dired-inspired shell command on a strict file target
 ;;                    (command + dash-options appends it; otherwise use *)
-;;     w              Copy an @path:line reference for prompts to the kill ring
+;;     w              Copy the shell-local file path to the kill ring
 ;;     RET            Visit strict file target at point (tool content,
 ;;                    plain path, or local Markdown label)
 ;;     C-c C-k        Abort current operation

@@ -6454,44 +6454,20 @@ placement.  With prefix argument TOGGLE, invert the opener request."
                     (user-error "No file at point"))))
     (pilish--visit-file-target target toggle)))
 
-(defun pilish--file-reference-path (target)
-  "Return TARGET's path spelled for a Pi @-file prompt reference.
-A file under the session directory uses its project-relative spelling,
-matching what `@' completion inserts in the input buffer.  Any other
-file uses the target's unquoted shell-namespace path — the remote-native
-spelling on TRAMP, matching the process Pi runs — falling back to the
-normalized `:emacs-path' when no safe shell spelling exists."
-  (let* ((anchor (pilish--chat-session-directory))
-         (emacs-path (plist-get target :emacs-path))
-         (relative (and anchor (file-relative-name emacs-path anchor))))
-    (if (and relative
-             (not (file-name-absolute-p relative))
-             (not (string-prefix-p ".." relative)))
-        relative
-      (or (plist-get target :shell-path) emacs-path))))
-
-(defun pilish-copy-file-reference ()
-  "Copy an @path:line reference for the strict file target at point.
-The path is spelled exactly as `@' completion would insert it:
-project-relative inside the session directory, otherwise absolute in the
-target's shell namespace, and a path containing whitespace takes the
-quoted @-reference form.  A known physical line appends a colon and the
-line number — a line range uses its first line — and targets without a
-location copy the path alone.  The reference is plain prompt text: paste
-it into a Pi prompt to point the agent at that file and line."
+(defun pilish-copy-file-path ()
+  "Copy the shell-local path for the strict file target at point.
+Path resolution matches `pilish-shell-command-at-point': local paths are
+absolute, while paths in remote sessions use the remote shell's namespace
+without a TRAMP prefix.  Line, column, range, and link-fragment metadata are
+not part of the path.  The `kill-ring' value is unquoted pathname text, not
+shell syntax."
   (interactive)
   (let* ((target (or (pilish--file-target-at-point)
                      (user-error "No file at point")))
-         (path (pilish--file-reference-path target))
-         (line (plist-get target :line))
-         (at-path (if (string-match-p "[ \t]" path)
-                      (concat "@\"" path "\"")
-                    (concat "@" path)))
-         (reference (if (pilish--positive-location-p line)
-                        (format "%s:%d" at-path line)
-                      at-path)))
-    (kill-new reference)
-    (message "Pi: Copied %s" reference)))
+         (path (pilish--file-target-shell-path target)))
+    (kill-new path)
+    (message "Pi: Copied %s"
+             (pilish--escape-control-chars-for-display path))))
 
 ;;;; Diff Overlay Highlighting
 

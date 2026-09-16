@@ -69,7 +69,7 @@ of the suite."
      (should (eq (lookup-key map "n") #'pilish-next-message))
      (should (eq (lookup-key map "p") #'pilish-previous-message))
      (should (eq (lookup-key map "f") #'pilish-fork-at-point))
-     (should (eq (lookup-key map "w") #'pilish-copy-file-reference))
+     (should (eq (lookup-key map "w") #'pilish-copy-file-path))
      (should (eq (lookup-key map "?") #'pilish-menu))
      (should (eq (lookup-key map "q") #'pilish-quit))
      (should (eq (lookup-key map "i") #'pilish-evil-insert-input))
