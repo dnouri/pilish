@@ -257,36 +257,22 @@
   (gethash type pilish-sd-bench--event-counts 0))
 
 (defun pilish-sd-bench--around-process-filter (orig proc output)
-  "Call real filter ORIG for PROC and OUTPUT and record its cost.
-When OUTPUT couples the backlog-ready line with trailing backlog bytes,
-dispatch only through the ready line and route the remainder into the
-backlog collector that the ready handler installs."
+  "Call real filter ORIG for PROC and OUTPUT and record its cost."
   (let* ((id (cl-incf pilish-sd-bench--filter-sequence))
          (start (float-time))
          (gc-before gcs-done)
          (gc-time-before gc-elapsed)
-         (split (and (not pilish-sd-bench--collector-active)
-                     (string-match "benchmark_backlog_ready[^\n]*\n" output)
-                     (let ((end (match-end 0)))
-                       (and (< end (length output)) end))))
-         (head (if split (substring output 0 split) output))
-         (tail (and split (substring output split)))
          (backlog (string-match-p
                    (regexp-quote pilish-sd-bench--backlog-marker)
-                   head))
+                   output))
          (pilish-sd-bench--current-filter-id id)
          value)
     (unwind-protect
-        (progn
-          (setq value (funcall orig proc head))
-          (when tail
-            (if pilish-sd-bench--collector-active
-                (pilish-sd-bench--collecting-process-filter proc tail)
-              (setq value (funcall orig proc tail)))))
+        (setq value (funcall orig proc output))
       (push (list :id id
                   :phase pilish-sd-bench--phase
-                  :bytes (string-bytes head)
-                  :lines (cl-count ?\n head)
+                  :bytes (string-bytes output)
+                  :lines (cl-count ?\n output)
                   :wallMs (* 1000.0 (- (float-time) start))
                   :gcs (- gcs-done gc-before)
                   :gcMs (* 1000.0 (- gc-elapsed gc-time-before))
