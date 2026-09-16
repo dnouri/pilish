@@ -91,9 +91,9 @@
 ;; Evil was present at compile time.
 (require 'evil nil t)
 
-(declare-function evil-change-state "evil")
-(declare-function evil-define-key* "evil")
-(declare-function evil-set-initial-state "evil")
+(declare-function evil-change-state "evil-core")
+(declare-function evil-define-key* "evil-core")
+(declare-function evil-set-initial-state "evil-core")
 (declare-function evil-snipe-local-mode "evil-snipe")
 (declare-function evil-snipe-override-local-mode "evil-snipe")
 
@@ -111,12 +111,12 @@
 (declare-function pilish-session-browser-rename "pilish-browse")
 (declare-function pilish-session-browser-delete "pilish-browse")
 (declare-function pilish-session-browser-switch "pilish-browse")
-(declare-function pilish-session-browser-dispatch "pilish-browse")
+(declare-function pilish-session-browser-dispatch "pilish-browse" nil t)
 (declare-function pilish-tree-browser-cycle-filter "pilish-browse")
 (declare-function pilish-tree-browser-set-label "pilish-browse")
 (declare-function pilish-tree-browser-search "pilish-browse")
 (declare-function pilish-tree-browser-navigate "pilish-browse")
-(declare-function pilish-tree-browser-dispatch "pilish-browse")
+(declare-function pilish-tree-browser-dispatch "pilish-browse" nil t)
 
 ;; Keymaps defined by `define-derived-mode' in `pilish-browse', which
 ;; this file does not require (see the comment above).  `defvar' does

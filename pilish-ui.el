@@ -78,7 +78,7 @@
 (declare-function pilish-session-browser "pilish-browse")
 
 ;; pilish-menu.el (menu and session commands)
-(declare-function pilish-menu "pilish-menu")
+(declare-function pilish-menu "pilish-menu" nil t)
 (declare-function pilish-new-session "pilish-menu")
 (declare-function pilish-export-html "pilish-menu")
 (declare-function pilish-compact "pilish-menu")
