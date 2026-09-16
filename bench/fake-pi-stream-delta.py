@@ -184,23 +184,13 @@ def backlog_line(index: int, seed: int) -> str:
     return f"SD-BACKLOG-{index:04d} value-{value:05d}\n"
 
 
-def message_update(
-    event: Json,
-    *,
-    phase: str,
-    sequence: int | None = None,
-    burst: int | None = None,
-) -> Json:
+def message_update(event: Json, *, phase: str) -> Json:
     payload: Json = {
         "type": "message_update",
         "usage": zero_usage(),
         "assistantMessageEvent": event,
         "benchmarkPhase": phase,
     }
-    if sequence is not None:
-        payload["benchmarkSequence"] = sequence
-    if burst is not None:
-        payload["benchmarkBurst"] = burst
     return payload
 
 
@@ -276,9 +266,7 @@ def run_stream(
                 "contentIndex": 0,
                 "delta": text_line(index, seed),
             },
-            phase="timer-text",
-            sequence=index,
-            burst=index // int(config["text_burst"]),
+            phase="timer-text"
         )
         for index in range(timer_count)
     ]
@@ -303,9 +291,7 @@ def run_stream(
                 "contentIndex": 1,
                 "delta": thinking_line(index, seed),
             },
-            phase="timer-thinking",
-            sequence=index,
-            burst=index // int(config["thinking_burst"]),
+            phase="timer-thinking"
         )
         for index in range(thinking_count)
     ]
@@ -345,9 +331,7 @@ def run_stream(
                 "contentIndex": 2,
                 "delta": backlog_line(index, seed),
             },
-            phase="backlog",
-            sequence=index,
-            burst=0,
+            phase="backlog"
         )
         for index in range(backlog_count)
     ]

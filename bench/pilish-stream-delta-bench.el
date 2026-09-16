@@ -490,14 +490,8 @@ backlog collector that the ready handler installs."
 (defun pilish-sd-bench--expected-projection ()
   "Return exact deterministic visible marker projection."
   (string-join
-   (append
-    (cl-loop for index below pilish-sd-bench-timer-text-deltas
-             collect (pilish-sd-bench--text-line index))
-    (cl-loop for index below pilish-sd-bench-thinking-deltas
-             collect (pilish-sd-bench--thinking-line index))
-    (cl-loop for index below pilish-sd-bench-backlog-deltas
-             collect (pilish-sd-bench--backlog-line index))
-    '("SD-BOUNDARY-TOOL"))
+   (cl-loop for (kind . line) in (pilish-sd-bench--projection-line-specs)
+            unless (eq kind 'omit) collect line)
    "\n"))
 
 (defun pilish-sd-bench--projection-line-specs ()
@@ -1000,10 +994,6 @@ the settled rendered buffer."
              (insert (format "probe\t%d\tstream\tlateness\t1\t\t\t%.3f\t\t\t\t\t\n"
                              index sample)))))
 
-(defun pilish-sd-bench--checks-json (entries)
-  "Encode correctness ENTRIES as a JSON vector."
-  (vconcat entries))
-
 (defun pilish-sd-bench--write-result-json (metrics run-ok)
   "Write METRICS and RUN-OK verdict to the JSON artifact."
   (let* ((filters (pilish-sd-bench--rows-in-order
@@ -1100,8 +1090,7 @@ the settled rendered buffer."
                                   0 (length (split-string projection "\n")))
                  :expectedSha256 (secure-hash 'sha256 expected)
                  :actualSha256 (secure-hash 'sha256 projection))
-           :checks (pilish-sd-bench--checks-json
-                    (plist-get metrics :checks)))))
+           :checks (vconcat (plist-get metrics :checks)))))
     (with-temp-file pilish-sd-bench-result-file
       (insert (json-encode object) "\n"))))
 
