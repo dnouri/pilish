@@ -514,7 +514,7 @@ cancels, the session remains intact."
 Returns completion data when point is after / at start of buffer.
 Includes both built-in commands and commands from pi's `get_commands' RPC."
   (when (and (eq (char-after (point-min)) ?/)
-             (> (point) (point-min)))
+             (not (bobp)))
     (let* ((start (1+ (point-min)))
            (end (point))
            (builtin-names (mapcar #'car pilish--builtin-commands))
