@@ -311,7 +311,7 @@ displayed), `--browse-apply-margins' must not touch `selected-window'."
          (tree (pilish-test--make-deep-tree n))
          (leaf-id (format "node-%d" n))
          (flat (pilish--flatten-tree-for-display
-                tree leaf-id "default")))
+                tree leaf-id 'default)))
     (should (= (length flat) n))))
 
 (ert-deftest pilish-test-subtree-contains-active-deep ()
@@ -332,7 +332,7 @@ displayed), `--browse-apply-margins' must not touch `selected-window'."
          (flat (pilish--flatten-tree-for-display
                 (plist-get tree-data :tree)
                 (plist-get tree-data :leafId)
-                "default")))
+                'default)))
     ;; Should return a list of (node indent prefix) lists
     (should (listp flat))
     (should (> (length flat) 0))
@@ -352,7 +352,7 @@ displayed), `--browse-apply-margins' must not touch `selected-window'."
          (flat (pilish--flatten-tree-for-display
                 (plist-get tree-data :tree)
                 (plist-get tree-data :leafId)
-                "default"))
+                'default))
          ;; Build alist of (id . prefix) for easy lookup
          (prefix-alist (mapcar (lambda (entry)
                                  (cons (plist-get (nth 0 entry) :id)
@@ -382,7 +382,7 @@ displayed), `--browse-apply-margins' must not touch `selected-window'."
          (flat (pilish--flatten-tree-for-display
                 (plist-get tree-data :tree)
                 (plist-get tree-data :leafId)
-                "no-tools"))
+                'no-tools))
          (prefix-alist (mapcar (lambda (entry)
                                  (cons (plist-get (nth 0 entry) :id)
                                        (nth 2 entry)))
@@ -403,7 +403,7 @@ displayed), `--browse-apply-margins' must not touch `selected-window'."
   (let* ((tree (list '(:id "r1" :type "message" :role "user"
                        :children [(:id "c1" :type "message" :role "assistant"
                                   :preview "hi" :children [])])))
-         (flat (pilish--flatten-tree-for-display tree "c1" "default"))
+         (flat (pilish--flatten-tree-for-display tree "c1" 'default))
          (prefixes (mapcar (lambda (e) (nth 2 e)) flat)))
     ;; Both nodes at root level, single-child chain — no connectors
     (should (equal prefixes '("" "")))))
@@ -422,7 +422,7 @@ displayed), `--browse-apply-margins' must not touch `selected-window'."
                    (:id "a2" :type "message" :role "assistant" :preview "a2"
                     :children [])])))
          ;; leaf is u2 so a1 branch is active
-         (flat (pilish--flatten-tree-for-display tree "u2" "default"))
+         (flat (pilish--flatten-tree-for-display tree "u2" 'default))
          (prefix-alist (mapcar (lambda (entry)
                                  (cons (plist-get (nth 0 entry) :id)
                                        (nth 2 entry)))
@@ -448,7 +448,7 @@ displayed), `--browse-apply-margins' must not touch `selected-window'."
                     :preview "second" :children [])
                    (:id "c3" :type "message" :role "assistant"
                     :preview "third" :children [])])))
-         (flat (pilish--flatten-tree-for-display tree "c1" "default"))
+         (flat (pilish--flatten-tree-for-display tree "c1" 'default))
          (prefix-alist (mapcar (lambda (entry)
                                  (cons (plist-get (nth 0 entry) :id)
                                        (nth 2 entry)))
@@ -464,63 +464,63 @@ displayed), `--browse-apply-margins' must not touch `selected-window'."
 (ert-deftest pilish-test-filter-default ()
   "Default filter shows messages, tool results, compaction, branch summary."
   (should (pilish--browse-node-visible-p
-           '(:type "message" :role "user") "default"))
+           '(:type "message" :role "user") 'default))
   (should (pilish--browse-node-visible-p
-           '(:type "message" :role "assistant" :preview "hello") "default"))
+           '(:type "message" :role "assistant" :preview "hello") 'default))
   (should (pilish--browse-node-visible-p
-           '(:type "tool_result") "default"))
+           '(:type "tool_result") 'default))
   (should (pilish--browse-node-visible-p
-           '(:type "compaction") "default"))
+           '(:type "compaction") 'default))
   (should (pilish--browse-node-visible-p
-           '(:type "branch_summary") "default"))
+           '(:type "branch_summary") 'default))
   ;; Model change hidden in default
   (should-not (pilish--browse-node-visible-p
-               '(:type "model_change") "default"))
+               '(:type "model_change") 'default))
   ;; Thinking level change hidden in default
   (should-not (pilish--browse-node-visible-p
-               '(:type "thinking_level_change") "default")))
+               '(:type "thinking_level_change") 'default)))
 
 (ert-deftest pilish-test-filter-no-tools ()
   "No-tools filter hides tool_result entries."
   (should (pilish--browse-node-visible-p
-           '(:type "message" :role "user") "no-tools"))
+           '(:type "message" :role "user") 'no-tools))
   (should-not (pilish--browse-node-visible-p
-               '(:type "tool_result") "no-tools")))
+               '(:type "tool_result") 'no-tools)))
 
 (ert-deftest pilish-test-filter-user-only ()
   "User-only filter shows only user messages."
   (should (pilish--browse-node-visible-p
-           '(:type "message" :role "user") "user-only"))
+           '(:type "message" :role "user") 'user-only))
   (should-not (pilish--browse-node-visible-p
-               '(:type "message" :role "assistant" :preview "hello") "user-only"))
+               '(:type "message" :role "assistant" :preview "hello") 'user-only))
   (should-not (pilish--browse-node-visible-p
-               '(:type "tool_result") "user-only")))
+               '(:type "tool_result") 'user-only)))
 
 (ert-deftest pilish-test-filter-labeled-only ()
   "Labeled-only filter shows only entries with labels."
   (should (pilish--browse-node-visible-p
-           '(:type "message" :role "user" :label "checkpoint") "labeled-only"))
+           '(:type "message" :role "user" :label "checkpoint") 'labeled-only))
   (should-not (pilish--browse-node-visible-p
-               '(:type "message" :role "user") "labeled-only")))
+               '(:type "message" :role "user") 'labeled-only)))
 
 (ert-deftest pilish-test-filter-all ()
   "All filter shows settings entries that other modes hide."
   (should (pilish--browse-node-visible-p
-           '(:type "model_change") "all"))
+           '(:type "model_change") 'all))
   (should (pilish--browse-node-visible-p
-           '(:type "thinking_level_change") "all")))
+           '(:type "thinking_level_change") 'all)))
 
 (ert-deftest pilish-test-filter-empty-assistant ()
   "Empty assistant messages are hidden (unless they are the leaf)."
   ;; Empty assistant with no useful content
   (should-not (pilish--browse-node-visible-p
-               '(:type "message" :role "assistant" :preview "") "default"))
+               '(:type "message" :role "assistant" :preview "") 'default))
   ;; Aborted assistant is shown
   (should (pilish--browse-node-visible-p
-           '(:type "message" :role "assistant" :preview "" :stopReason "aborted") "default"))
+           '(:type "message" :role "assistant" :preview "" :stopReason "aborted") 'default))
   ;; Assistant with error is shown
   (should (pilish--browse-node-visible-p
-           '(:type "message" :role "assistant" :preview "" :errorMessage "rate limit") "default")))
+           '(:type "message" :role "assistant" :preview "" :errorMessage "rate limit") 'default)))
 
 (ert-deftest pilish-test-empty-assistant-hidden-in-all-modes ()
   "Empty assistant messages are hidden in ALL filter modes.
@@ -528,7 +528,7 @@ Per TUI tree-selector.ts:282-293 and PLAN-BROWSING.md line 560:
 empty assistants are a universal pre-filter, not mode-specific."
   (let ((empty-ast '(:type "message" :role "assistant" :preview "(no content)"))
         (empty-ast-blank '(:type "message" :role "assistant" :preview "")))
-    (dolist (mode '("default" "no-tools" "all"))
+    (dolist (mode '(default no-tools all))
       (should-not (pilish--browse-node-visible-p empty-ast mode))
       (should-not (pilish--browse-node-visible-p empty-ast-blank mode)))))
 
@@ -538,7 +538,7 @@ empty assistants are a universal pre-filter, not mode-specific."
                           :stopReason "aborted"))
         (errored '(:type "message" :role "assistant" :preview ""
                           :errorMessage "rate limit")))
-    (dolist (mode '("default" "no-tools" "all"))
+    (dolist (mode '(default no-tools all))
       (should (pilish--browse-node-visible-p aborted mode))
       (should (pilish--browse-node-visible-p errored mode)))))
 
@@ -557,20 +557,177 @@ empty assistants are a universal pre-filter, not mode-specific."
   ;; Empty tokens list matches everything
   (should (pilish--matches-filter-p "anything" nil)))
 
-;;;; Session Sorting
+;;;; Session Views
 
-(ert-deftest pilish-test-session-sort-cycle ()
-  "Sort mode cycles through threaded → recent → relevance."
-  (should (equal (pilish--session-sort-next "threaded") "recent"))
-  (should (equal (pilish--session-sort-next "recent") "relevance"))
-  (should (equal (pilish--session-sort-next "relevance") "threaded")))
+(ert-deftest pilish-test-session-view-cycle ()
+  "View cycles threaded → recent → messages → threaded."
+  (should (eq (pilish--session-view-next 'threaded) 'recent))
+  (should (eq (pilish--session-view-next 'recent) 'messages))
+  (should (eq (pilish--session-view-next 'messages) 'threaded)))
+
+(ert-deftest pilish-test-session-view-labels ()
+  "Views carry honest user-facing labels.
+The message-count view is Most messages — never relevance or Fuzzy,
+which would promise a ranking the browser does not compute."
+  (should (equal (pilish--session-view-label 'threaded)
+                 "Threaded (fork families)"))
+  (should (equal (pilish--session-view-label 'recent)
+                 "Recent activity"))
+  (should (equal (pilish--session-view-label 'messages)
+                 "Most messages")))
+
+(ert-deftest pilish-test-session-scope-labels ()
+  "Scopes carry user-facing labels."
+  (should (equal (pilish--session-scope-label 'current)
+                 "This project"))
+  (should (equal (pilish--session-scope-label 'all)
+                 "All projects")))
+
+;;;; Browser Default Options
+
+(ert-deftest pilish-test-browser-default-options-shipped-values ()
+  "Shipped defaults: this project, Threaded, all names, tree no-tools."
+  (should (eq pilish-session-browser-default-scope 'current))
+  (should (eq pilish-session-browser-default-view 'threaded))
+  (should (null pilish-session-browser-default-named-only))
+  (should (eq pilish-tree-browser-default-filter 'no-tools)))
+
+(ert-deftest pilish-test-session-browser-new-buffer-uses-default-options ()
+  "A newly created session browser starts from the default options."
+  (let* ((dir (pilish-test--make-temp-directory "pi-browse-defs-"))
+         (buf (let ((pilish-session-browser-default-scope 'all)
+                    (pilish-session-browser-default-view 'messages)
+                    (pilish-session-browser-default-named-only t))
+                (pilish--get-or-create-session-browser dir))))
+    (unwind-protect
+        (with-current-buffer buf
+          (should (eq pilish--session-browser-scope 'all))
+          (should (eq pilish--session-browser-view 'messages))
+          (should pilish--session-browser-named-only))
+      (kill-buffer buf)
+      (delete-directory dir t))))
+
+(ert-deftest pilish-test-session-browser-existing-buffer-keeps-local-state ()
+  "Reopening an existing session browser keeps its local state.
+`q' hides the browser without killing it, so the next open must not
+reset scope, view, named-only, or the active query."
+  (let* ((dir (pilish-test--make-temp-directory "pi-browse-keep-"))
+         (buf (pilish--get-or-create-session-browser dir)))
+    (unwind-protect
+        (progn
+          (with-current-buffer buf
+            (setq pilish--session-browser-scope 'all
+                  pilish--session-browser-view 'recent
+                  pilish--session-browser-named-only t
+                  pilish--session-browser-search-query "alias"
+                  pilish--session-browser-search-tokens '("alias")))
+          ;; The same live buffer is reused, not recreated.
+          (should (eq (pilish--get-or-create-session-browser dir) buf))
+          (with-current-buffer buf
+            (should (eq pilish--session-browser-scope 'all))
+            (should (eq pilish--session-browser-view 'recent))
+            (should pilish--session-browser-named-only)
+            (should (equal pilish--session-browser-search-tokens
+                           '("alias")))))
+      (kill-buffer buf)
+      (delete-directory dir t))))
+
+(ert-deftest pilish-test-session-browser-mode-applies-defaults-before-hooks ()
+  "Mode initialization applies the default options before hooks run.
+Direct mode activation starts from the public defaults (not only the
+entry-point buffers), mode hooks observe the configured values, and
+a hook's overrides survive the initialization."
+  (let ((observed nil)
+        (named-in-hook-buffer nil)
+        (pilish-session-browser-default-scope 'all)
+        (pilish-session-browser-default-view 'messages))
+    (let ((hook (lambda ()
+                 (push (list pilish--session-browser-scope
+                             pilish--session-browser-view)
+                       observed)
+                 ;; A hook override must not be clobbered.
+                 (setq pilish--session-browser-named-only t))))
+      ;; A global hook, the way users add them: `kill-all-local-variables'
+      ;; at mode start would wipe a buffer-local hook binding first.
+      (add-hook 'pilish-session-browser-mode-hook hook)
+      (unwind-protect
+          (with-temp-buffer
+            (pilish-session-browser-mode)
+            ;; Buffer-locals are only readable inside their buffer.
+            (setq named-in-hook-buffer
+                  pilish--session-browser-named-only))
+        (remove-hook 'pilish-session-browser-mode-hook hook)))
+    (should (equal observed '((all messages))))
+    (should named-in-hook-buffer)))
+
+(ert-deftest pilish-test-tree-browser-mode-applies-defaults-before-hooks ()
+  "Tree mode initialization applies the default filter before hooks run."
+  (let ((observed nil)
+        (filter-in-hook-buffer nil)
+        (pilish-tree-browser-default-filter 'user-only))
+    (let ((hook (lambda ()
+                 (push pilish--tree-browser-filter observed)
+                 (setq pilish--tree-browser-filter 'labeled-only))))
+      (add-hook 'pilish-tree-browser-mode-hook hook)
+      (unwind-protect
+          (with-temp-buffer
+            (pilish-tree-browser-mode)
+            (setq filter-in-hook-buffer
+                  pilish--tree-browser-filter))
+          (remove-hook 'pilish-tree-browser-mode-hook hook)))
+    (should (equal observed '(user-only)))
+    (should (eq filter-in-hook-buffer 'labeled-only))))
+
+(ert-deftest pilish-test-session-browser-cycle-sort-obsolete-alias ()
+  "The old public cycle command still resolves and still cycles views.
+`pilish-session-browser-cycle-sort' was public API; it stays as an
+obsolete alias so existing bindings and calls keep working."
+  (should (eq (symbol-function 'pilish-session-browser-cycle-sort)
+              'pilish-session-browser-cycle-view))
+  (should (commandp 'pilish-session-browser-cycle-sort))
+  (with-temp-buffer
+    (pilish-session-browser-mode)
+    (setq pilish--session-browser-items nil)
+    (let ((messages nil))
+      (cl-letf (((symbol-function 'message)
+                 (lambda (format &rest args)
+                   (push (apply #'format format args) messages))))
+        (call-interactively #'pilish-session-browser-cycle-sort))
+      ;; The aliased command reports views, never sorts.
+      (should (equal messages '("Pi: View: Recent activity"))))
+    (should (eq pilish--session-browser-view 'recent))))
+
+(ert-deftest pilish-test-tree-browser-new-buffer-uses-default-filter ()
+  "A newly created tree browser starts from the default filter."
+  (let* ((dir (pilish-test--make-temp-directory "pi-tree-defs-"))
+         (buf (let ((pilish-tree-browser-default-filter 'labeled-only))
+                (pilish--get-or-create-tree-browser dir))))
+    (unwind-protect
+        (with-current-buffer buf
+          (should (eq pilish--tree-browser-filter 'labeled-only)))
+      (kill-buffer buf)
+      (delete-directory dir t))))
+
+(ert-deftest pilish-test-tree-browser-existing-buffer-keeps-local-filter ()
+  "Reopening an existing tree browser keeps its locally chosen filter."
+  (let* ((dir (pilish-test--make-temp-directory "pi-tree-keep-"))
+         (buf (pilish--get-or-create-tree-browser dir)))
+    (unwind-protect
+        (progn
+          (with-current-buffer buf
+            (setq pilish--tree-browser-filter 'all))
+          (should (eq (pilish--get-or-create-tree-browser dir) buf))
+          (with-current-buffer buf
+            (should (eq pilish--tree-browser-filter 'all))))
+      (kill-buffer buf)
+      (delete-directory dir t))))
 
 (ert-deftest pilish-test-session-sort-recent ()
   "Sort by recent puts newest modified first."
   (let ((items (list '(:modified "2026-02-20T10:00:00Z" :id "old")
                      '(:modified "2026-02-24T10:00:00Z" :id "new")
                      '(:modified "2026-02-22T10:00:00Z" :id "mid"))))
-    (let ((sorted (pilish--session-sort-items items "recent")))
+    (let ((sorted (pilish--session-sort-items items 'recent)))
       (should (equal (plist-get (nth 0 sorted) :id) "new"))
       (should (equal (plist-get (nth 1 sorted) :id) "mid"))
       (should (equal (plist-get (nth 2 sorted) :id) "old")))))
@@ -587,27 +744,27 @@ ascending instead of scan order."
                       :path "/sess/new.jsonl" :id "new")
                      '(:modified "2026-02-22T10:00:00Z"
                       :path "/sess/a.jsonl" :id "tie-a")))
-         (sorted (pilish--session-sort-items items "recent")))
+         (sorted (pilish--session-sort-items items 'recent)))
     (should (equal (mapcar (lambda (item) (plist-get item :id)) sorted)
                    '("new" "tie-a" "tie-z" "nil-mod")))))
 
-(ert-deftest pilish-test-session-sort-relevance ()
-  "Sort by relevance puts highest message count first."
+(ert-deftest pilish-test-session-sort-messages ()
+  "Most messages view puts highest message count first."
   (let ((items (list '(:messageCount 10 :id "small")
                      '(:messageCount 500 :id "big")
                      '(:messageCount 100 :id "med"))))
-    (let ((sorted (pilish--session-sort-items items "relevance")))
+    (let ((sorted (pilish--session-sort-items items 'messages)))
       (should (equal (plist-get (nth 0 sorted) :id) "big"))
       (should (equal (plist-get (nth 1 sorted) :id) "med"))
       (should (equal (plist-get (nth 2 sorted) :id) "small")))))
 
-(ert-deftest pilish-test-session-sort-relevance-ties ()
+(ert-deftest pilish-test-session-sort-messages-ties ()
   "Equal message counts order by identity ascending, like Recent."
   (let ((items (list '(:messageCount 5 :path "/sess/z.jsonl" :id "z")
                      '(:messageCount 9 :path "/sess/big.jsonl" :id "big")
                      '(:messageCount 5 :path "/sess/a.jsonl" :id "a"))))
     (should (equal (mapcar (lambda (item) (plist-get item :id))
-                           (pilish--session-sort-items items "relevance"))
+                           (pilish--session-sort-items items 'messages))
                    '("big" "a" "z")))))
 
 ;;;; Session Threading
@@ -1016,11 +1173,11 @@ row."
                              (pilish--canonical-session-path target)))
               ;; Cycling to the Recent view keeps point anchored to
               ;; the same session row.
-              (setq pilish--session-browser-sort "recent")
+              (setq pilish--session-browser-view 'recent)
               (pilish--session-browser-rerender)
               (should (equal (oref (magit-current-section) value)
                              (pilish--canonical-session-path target)))
-              (setq pilish--session-browser-sort "threaded"))))
+              (setq pilish--session-browser-view 'threaded))))
       (when (file-directory-p base)
         (delete-directory base t)))))
 
@@ -1157,9 +1314,9 @@ and none are live here)."
                          (lambda (&rest _)
                            (cl-incf calls)
                            (error "rerender touched the filesystem"))))
-                (setq pilish--session-browser-sort "recent")
+                (setq pilish--session-browser-view 'recent)
                 (pilish--session-browser-rerender)
-                (setq pilish--session-browser-sort "threaded")
+                (setq pilish--session-browser-view 'threaded)
                 (pilish--session-browser-rerender)
                 (setq pilish--session-browser-search-query "fix"
                       pilish--session-browser-search-tokens '("fix"))
@@ -1505,12 +1662,12 @@ target, like pi's realpath identity."
                   :messageCount 42 :modified "2026-02-24T10:00:00Z")
                 '(:path "/test/b.jsonl" :firstMessage "Fix the bug"
                   :messageCount 10 :modified "2026-02-23T10:00:00Z")))
-    (setq pilish--session-browser-sort "relevance")
+    (setq pilish--session-browser-view 'messages)
     (pilish--session-browser-rerender)
     ;; Buffer should contain session names
     (should (string-match-p "Session A" (buffer-string)))
     (should (string-match-p "Fix the bug" (buffer-string)))
-    ;; Session A has more messages, should come first in relevance sort
+    ;; Session A has more messages, so it comes first under Most messages
     (let ((pos-a (string-match "Session A" (buffer-string)))
           (pos-b (string-match "Fix the bug" (buffer-string))))
       (should (< pos-a pos-b)))
@@ -1528,7 +1685,7 @@ target, like pi's realpath identity."
                 '(:path "/test/child.jsonl" :firstMessage "Child branch"
                   :parentSessionPath "/test/parent.jsonl"
                   :messageCount 20 :modified "2026-02-24T11:00:00Z")))
-    (setq pilish--session-browser-sort "threaded")
+    (setq pilish--session-browser-view 'threaded)
     (pilish--session-browser-rerender)
     ;; Should contain threading connector
     (should (string-match-p "└─" (buffer-string)))
@@ -1547,7 +1704,7 @@ target, like pi's realpath identity."
                 '(:path "/test/child.jsonl" :firstMessage "Child branch"
                   :parentSessionPath "/test/parent.jsonl"
                   :messageCount 20 :modified "2026-02-24T11:00:00Z")))
-    (setq pilish--session-browser-sort "relevance")
+    (setq pilish--session-browser-view 'messages)
     (pilish--session-browser-rerender)
     ;; Fork prefix should appear before child session
     (should (string-match-p "fork:" (buffer-string)))
@@ -1565,7 +1722,7 @@ target, like pi's realpath identity."
                 '(:path "/test/child.jsonl" :firstMessage "Child branch"
                   :parentSessionPath "/test/parent.jsonl"
                   :messageCount 20 :modified "2026-02-24T11:00:00Z")))
-    (setq pilish--session-browser-sort "threaded")
+    (setq pilish--session-browser-view 'threaded)
     (pilish--session-browser-rerender)
     ;; Threading connector should appear, but NOT fork: prefix
     (should (string-match-p "└─" (buffer-string)))
@@ -1578,7 +1735,7 @@ target, like pi's realpath identity."
     (setq pilish--session-browser-items
           (list '(:path "/test/a.jsonl" :name "Session A"
                   :messageCount 42 :modified "2026-02-24T10:00:00Z")))
-    (setq pilish--session-browser-sort "relevance")
+    (setq pilish--session-browser-view 'messages)
     (pilish--session-browser-rerender)
     ;; Should have at least one overlay
     (let ((ovs (overlays-in (point-min) (point-max))))
@@ -1605,7 +1762,7 @@ target, like pi's realpath identity."
       (setq pilish--session-browser-items
             (list (list :path "/test/a.jsonl" :name long-name
                         :messageCount 1 :modified "2026-02-24T10:00:00Z")))
-      (setq pilish--session-browser-sort "relevance")
+      (setq pilish--session-browser-view 'messages)
       (pilish--session-browser-rerender)
       ;; Full name should appear, not truncated
       (should (string-match-p long-name (buffer-string))))))
@@ -1629,7 +1786,7 @@ Killing the process and rerendering drops the marker."
                             :messageCount 1 :modified "2026-02-24T10:00:00Z")
                       (list :path "/test/cold-session.jsonl" :name "Cold session"
                             :messageCount 1 :modified "2026-02-24T10:00:00Z")))
-          (setq pilish--session-browser-sort "relevance")
+          (setq pilish--session-browser-view 'messages)
           (pilish--session-browser-rerender)
           (should (string-match-p "● Live session" (buffer-string)))
           (should-not (string-match-p "● Cold session" (buffer-string)))
@@ -1641,7 +1798,7 @@ Killing the process and rerendering drops the marker."
       (kill-buffer chat-buf))))
 
 (ert-deftest pilish-test-session-browser-live-marker-threaded ()
-  "The live marker follows the threading connector in threaded sort."
+  "The live marker follows the threading connector in the Threaded view."
   (let* ((path "/test/live-child.jsonl")
          (chat-buf (generate-new-buffer "*pilish-test-live-marker-chat*"))
          (proc (start-process "pilish-live-marker-test" nil "sleep" "30")))
@@ -1659,7 +1816,7 @@ Killing the process and rerendering drops the marker."
                       (list :path path :name "Child session"
                             :parentSessionPath "/test/parent.jsonl"
                             :messageCount 2 :modified "2026-02-24T11:00:00Z")))
-          (setq pilish--session-browser-sort "threaded")
+          (setq pilish--session-browser-view 'threaded)
           (pilish--session-browser-rerender)
           (should (string-match-p "└─ ● Child session" (buffer-string)))
           (should-not (string-match-p "● Parent session" (buffer-string))))
@@ -1697,7 +1854,7 @@ alias spelling of the same file; both canonicalize to one identity."
                                 :name "Alias session"
                                 :messageCount 3
                                 :modified "2026-02-24T10:00:00Z")))
-              (setq pilish--session-browser-sort "relevance")
+              (setq pilish--session-browser-view 'messages)
               (pilish--session-browser-rerender)
               (should (string-match-p "● Alias session" (buffer-string))))))
       (when (process-live-p proc)
@@ -1731,7 +1888,7 @@ not be cross-marked."
                         '(:path "/ssh:bastion|ssh:pi-host:/s/live.jsonl"
                          :name "Routed session"
                          :messageCount 3 :modified "2026-02-24T11:00:00Z")))
-            (setq pilish--session-browser-sort "relevance")
+            (setq pilish--session-browser-view 'messages)
             (pilish--session-browser-rerender)
             ;; Only the same-route row is live.
             (should (string-match-p "● Routed session" (buffer-string)))
@@ -1756,7 +1913,7 @@ child renders above a newer root, before its own descendant."
                 '(:path "/sess/new-child.jsonl" :name "New Child"
                   :parentSessionPath "/sess/old-parent.jsonl"
                   :messageCount 10 :modified "2026-01-03T00:00:00Z")))
-    (setq pilish--session-browser-sort "threaded")
+    (setq pilish--session-browser-view 'threaded)
     (pilish--session-browser-rerender)
     (let ((text (buffer-string)))
       (let ((pos-p (string-match "Old Parent" text))
@@ -1782,7 +1939,7 @@ children; ordering follows activity instead of archive order."
                   :messageCount 10 :modified "2026-01-02T00:00:00Z")
                 '(:path "/sess/x.jsonl" :name "Unrelated Session"
                   :messageCount 10 :modified "2026-01-04T00:00:00Z")))
-    (setq pilish--session-browser-sort "threaded")
+    (setq pilish--session-browser-view 'threaded)
     (setq pilish--session-browser-search-query "Query"
           pilish--session-browser-search-tokens '("Query"))
     (unwind-protect
@@ -1820,16 +1977,51 @@ children; ordering follows activity instead of archive order."
     (should (string-match-p "No sessions found" (buffer-string)))))
 
 (ert-deftest pilish-test-session-browser-header-line ()
-  "Header-line shows scope, sort, and filter state."
+  "Header-line shows scope, view, and named-only state.
+The view label is the full user-facing name; `sort' never appears."
   (with-temp-buffer
     (pilish-session-browser-mode)
-    (setq pilish--session-browser-scope "current"
-          pilish--session-browser-sort "threaded"
+    (setq pilish--session-browser-scope 'current
+          pilish--session-browser-view 'threaded
           pilish--session-browser-items '((:id "a") (:id "b")))
     (let ((header (pilish--session-browser-header-line)))
-      (should (string-match-p "current" header))
-      (should (string-match-p "threaded" header))
-      (should (string-match-p "(2)" header)))))
+      (should (string-match-p "Sessions \\[This project\\]" header))
+      (should (string-match-p "view:Threaded (fork families)" header))
+      (should (string-match-p "(2)" header))
+      (should-not (string-match-p "sort" header))
+      ;; A changed view changes the label, not just the raw value.
+      (setq pilish--session-browser-view 'messages
+            pilish--session-browser-named-only t)
+      (should (string-match-p "view:Most messages"
+                              (pilish--session-browser-header-line)))
+      (should (string-match-p "named-only"
+                              (pilish--session-browser-header-line))))))
+
+(ert-deftest pilish-test-session-browser-query-keeps-view-order ()
+  "Only a queried Threaded view is flattened to newest-first rows.
+Recent is newest-first by definition; Most messages keeps its count
+ordering under a query — the flattening is the Threaded contract,
+not a general query rule."
+  (with-temp-buffer
+    (pilish-session-browser-mode)
+    (setq pilish--session-browser-items
+          (list '(:path "/test/many.jsonl" :name "Many"
+                  :messageCount 50 :modified "2026-01-01T00:00:00Z")
+                '(:path "/test/few.jsonl" :name "Few"
+                  :messageCount 2 :modified "2026-02-01T00:00:00Z")))
+    (setq pilish--session-browser-search-query "Many\\|Few"
+          pilish--session-browser-search-tokens '("Many\\|Few"))
+    ;; Queried Most messages: count order wins over recency.
+    (setq pilish--session-browser-view 'messages)
+    (pilish--session-browser-rerender)
+    (should (< (string-match "Many" (buffer-string))
+               (string-match "Few" (buffer-string))))
+    ;; Queried Threaded: flat rows, newest first, no connectors.
+    (setq pilish--session-browser-view 'threaded)
+    (pilish--session-browser-rerender)
+    (should (< (string-match "Few" (buffer-string))
+               (string-match "Many" (buffer-string))))
+    (should-not (string-match-p "[└├]─" (buffer-string)))))
 
 ;;;; Tree Node Formatting
 
@@ -2003,7 +2195,7 @@ The type label already shows `sh', so brackets are redundant."
            (tree-data (pilish--parse-tree response)))
       (setq pilish--tree-browser-tree (plist-get tree-data :tree)
             pilish--tree-browser-leaf-id (plist-get tree-data :leafId)
-            pilish--tree-browser-filter "default")
+            pilish--tree-browser-filter 'default)
       (pilish--tree-browser-rerender)
       ;; Buffer should contain node content
       (should (string-match-p "refactor" (buffer-string)))
@@ -2020,7 +2212,7 @@ The type label already shows `sh', so brackets are redundant."
            (tree-data (pilish--parse-tree response)))
       (setq pilish--tree-browser-tree (plist-get tree-data :tree)
             pilish--tree-browser-leaf-id (plist-get tree-data :leafId)
-            pilish--tree-browser-filter "default")
+            pilish--tree-browser-filter 'default)
       (pilish--tree-browser-rerender)
       (let ((text (buffer-string)))
         ;; Branch connectors should appear
@@ -2041,7 +2233,7 @@ The type label already shows `sh', so brackets are redundant."
            (tree-data (pilish--parse-tree response)))
       (setq pilish--tree-browser-tree (plist-get tree-data :tree)
             pilish--tree-browser-leaf-id (plist-get tree-data :leafId)
-            pilish--tree-browser-filter "default")
+            pilish--tree-browser-filter 'default)
       (pilish--tree-browser-rerender)
       ;; Find margin overlays
       (let* ((ovs (overlays-in (point-min) (point-max)))
@@ -2071,7 +2263,7 @@ The type label already shows `sh', so brackets are redundant."
                               :children (vector)))))
       (setq pilish--tree-browser-tree tree
             pilish--tree-browser-leaf-id "n1"
-            pilish--tree-browser-filter "default")
+            pilish--tree-browser-filter 'default)
       (pilish--tree-browser-rerender)
       ;; Find the margin overlay
       (let* ((ovs (overlays-in (point-min) (point-max)))
@@ -2103,7 +2295,7 @@ The type label already shows `sh', so brackets are redundant."
                               :children (vector)))))
       (setq pilish--tree-browser-tree tree
             pilish--tree-browser-leaf-id "n1"
-            pilish--tree-browser-filter "default")
+            pilish--tree-browser-filter 'default)
       (pilish--tree-browser-rerender)
       (let* ((ovs (overlays-in (point-min) (point-max)))
              (margin-ovs (cl-remove-if-not
@@ -2136,18 +2328,19 @@ The type label already shows `sh', so brackets are redundant."
            (tree-data (pilish--parse-tree response)))
       (setq pilish--tree-browser-tree (plist-get tree-data :tree)
             pilish--tree-browser-leaf-id (plist-get tree-data :leafId)
-            pilish--tree-browser-filter "user-only")
+            pilish--tree-browser-filter 'user-only)
       (pilish--tree-browser-rerender)
       ;; Should have user nodes
       (should (string-match-p "you" (buffer-string)))
       ;; Should NOT have assistant nodes
       (should-not (string-match-p "\\bast\\b" (buffer-string))))))
 
-(ert-deftest pilish-test-tree-browser-initial-filter ()
-  "Tree browser opens with no-tools filter."
-  (with-temp-buffer
-    (pilish-tree-browser-mode)
-    (should (equal pilish--tree-browser-filter "no-tools"))))
+(ert-deftest pilish-test-tree-browser-mode-uses-default-filter ()
+  "Direct tree mode activation starts from the default filter."
+  (let ((pilish-tree-browser-default-filter 'user-only))
+    (with-temp-buffer
+      (pilish-tree-browser-mode)
+      (should (eq pilish--tree-browser-filter 'user-only)))))
 
 (ert-deftest pilish-test-tree-browser-header-line ()
   "Header-line shows filter mode and count."
@@ -2157,7 +2350,7 @@ The type label already shows `sh', so brackets are redundant."
            (tree-data (pilish--parse-tree response)))
       (setq pilish--tree-browser-tree (plist-get tree-data :tree)
             pilish--tree-browser-leaf-id (plist-get tree-data :leafId)
-            pilish--tree-browser-filter "no-tools")
+            pilish--tree-browser-filter 'no-tools)
       (let ((header (pilish--tree-browser-header-line)))
         (should (string-match-p "no-tools" header))
         (should (string-match-p "([0-9]+)" header))))))
@@ -2232,7 +2425,7 @@ completes in-call."
          '(("RET" . pilish-session-browser-switch)
            ("r"   . pilish-session-browser-rename)
            ("d"   . pilish-session-browser-delete)
-           ("s"   . pilish-session-browser-cycle-sort)
+           ("s"   . pilish-session-browser-cycle-view)
            ("f"   . pilish-session-browser-toggle-named)
            ("t"   . pilish-session-browser-toggle-scope)
            ("/"   . pilish-session-browser-search)
@@ -2250,15 +2443,15 @@ completes in-call."
   "Session dispatch heading reflects buffer-local state."
   (with-temp-buffer
     (pilish-session-browser-mode)
-    ;; Default state: scope before sort, no named-only
+    ;; Default state: scope before view, no named-only
     (should (equal (pilish--session-dispatch-heading)
-                   "scope:current │ sort:threaded"))
+                   "scope:This project │ view:Threaded (fork families)"))
     ;; All state active
-    (setq pilish--session-browser-sort "recent"
-          pilish--session-browser-scope "all"
+    (setq pilish--session-browser-view 'recent
+          pilish--session-browser-scope 'all
           pilish--session-browser-named-only t)
     (should (equal (pilish--session-dispatch-heading)
-                   "scope:all │ sort:recent │ named-only"))))
+                   "scope:All projects │ view:Recent activity │ named-only"))))
 
 ;;;; Tree Browser Dispatch Transient
 
@@ -2301,7 +2494,7 @@ the summarize feature (needs navigate_tree RPC)."
     (let ((heading (pilish--tree-dispatch-heading)))
       (should (string-match-p "filter:no-tools" heading)))
     ;; Change state
-    (setq pilish--tree-browser-filter "user-only")
+    (setq pilish--tree-browser-filter 'user-only)
     (let ((heading (pilish--tree-dispatch-heading)))
       (should (string-match-p "filter:user-only" heading)))))
 
@@ -2319,8 +2512,8 @@ here."
   ;; Session heading: shadowed to a browser with every toggle set.
   (with-temp-buffer
     (pilish-session-browser-mode)
-    (setq pilish--session-browser-scope "all"
-          pilish--session-browser-sort "recent"
+    (setq pilish--session-browser-scope 'all
+          pilish--session-browser-view 'recent
           pilish--session-browser-named-only t)
     (let ((browser-buf (current-buffer)))
       (with-temp-buffer
@@ -2330,11 +2523,11 @@ here."
         (let ((transient--shadowed-buffer browser-buf))
           (should (equal (transient-with-shadowed-buffer
                            (pilish--session-dispatch-heading))
-                         "scope:all │ sort:recent │ named-only"))))))
+                         "scope:All projects │ view:Recent activity │ named-only"))))))
   ;; Tree heading: same path, distinct filter state.
   (with-temp-buffer
     (pilish-tree-browser-mode)
-    (setq pilish--tree-browser-filter "user-only")
+    (setq pilish--tree-browser-filter 'user-only)
     (let ((browser-buf (current-buffer)))
       (with-temp-buffer
         (let ((transient--shadowed-buffer browser-buf))
@@ -2421,7 +2614,7 @@ point to bob.  Phase 0 restores it by section identity (value match)."
                   :messageCount 20 :modified "2026-02-23T10:00:00Z")
                 '(:path "/test/c.jsonl" :name "Session C"
                   :messageCount 10 :modified "2026-02-22T10:00:00Z")))
-    (setq pilish--session-browser-sort "relevance")
+    (setq pilish--session-browser-view 'messages)
     (pilish--session-browser-rerender)
     ;; Move point into session B's line, a few columns past bol
     (goto-char (point-min))
@@ -2444,7 +2637,7 @@ point to bob.  Phase 0 restores it by section identity (value match)."
                   :messageCount 42 :modified "2026-02-24T10:00:00Z")
                 '(:path "/test/b.jsonl" :firstMessage "Unnamed prompt"
                   :messageCount 20 :modified "2026-02-23T10:00:00Z")))
-    (setq pilish--session-browser-sort "relevance")
+    (setq pilish--session-browser-view 'messages)
     (pilish--session-browser-rerender)
     ;; Point on the unnamed session
     (goto-char (point-min))
@@ -2484,9 +2677,9 @@ displaying the buffer (same idiom as
                           :messageCount 20 :modified "2026-02-23T10:00:00Z")
                         '(:path "/test/c.jsonl" :name "Session C"
                           :messageCount 10 :modified "2026-02-22T10:00:00Z")))
-            (setq pilish--session-browser-sort "relevance")
+            (setq pilish--session-browser-view 'messages)
             (pilish--session-browser-rerender))
-          ;; Put W's point on the middle row (relevance order is A, B, C),
+          ;; Put W's point on the middle row (Most-messages order is A, B, C),
           ;; a few columns past bol, while W is selected so the buffer's
           ;; own point follows.
           (select-window w)
@@ -2539,9 +2732,9 @@ lost the captured section ident)."
                        '(:path "/test/c.jsonl" :name "Session C"
                          :messageCount 10 :modified "2026-02-22T10:00:00Z"))))
       (setq pilish--session-browser-items items
-            pilish--session-browser-sort "relevance")
+            pilish--session-browser-view 'messages)
       (pilish--session-browser-rerender)
-      ;; Point on the middle row (relevance order is A, B, C), a few
+      ;; Point on the middle row (Most-messages order is A, B, C), a few
       ;; columns past bol
       (goto-char (point-min))
       (search-forward "Session B")
@@ -2576,7 +2769,7 @@ plain rerender already guarantees."
                   :messageCount 20 :modified "2026-02-23T10:00:00Z")
                 '(:path "/test/c.jsonl" :name "Session C"
                   :messageCount 10 :modified "2026-02-22T10:00:00Z")))
-    (setq pilish--session-browser-sort "relevance")
+    (setq pilish--session-browser-view 'messages)
     (pilish--session-browser-rerender)
     ;; Point on the middle row
     (goto-char (point-min))
@@ -2618,9 +2811,9 @@ issued during another refresh."
                          :messageCount 10 :modified "2026-02-22T10:00:00Z")))
           (in-flight-callback nil))
       (setq pilish--session-browser-items items
-            pilish--session-browser-sort "relevance")
+            pilish--session-browser-view 'messages)
       (pilish--session-browser-rerender)
-      ;; Point on the middle row (relevance order is A, B, C), a few
+      ;; Point on the middle row (Most-messages order is A, B, C), a few
       ;; columns past bol
       (goto-char (point-min))
       (search-forward "Session B")
@@ -2726,13 +2919,13 @@ from disk, not the RPC)."
            (tree-data (pilish--parse-tree response)))
       (setq pilish--tree-browser-tree (plist-get tree-data :tree)
             pilish--tree-browser-leaf-id (plist-get tree-data :leafId)
-            pilish--tree-browser-filter "default")
+            pilish--tree-browser-filter 'default)
       (pilish--tree-browser-rerender)
       ;; node-4 (user message) survives the no-tools filter
       (goto-char (point-min))
       (search-forward "Actually")
       (should (equal (oref (magit-current-section) value) "node-4"))
-      (setq pilish--tree-browser-filter "no-tools")
+      (setq pilish--tree-browser-filter 'no-tools)
       (pilish--tree-browser-rerender)
       (should (equal (oref (magit-current-section) value) "node-4")))))
 
@@ -2960,7 +3153,7 @@ and non-munged directories.  scope=current scans one directory."
                   ((symbol-function 'run-at-time)
                    (lambda (_secs _repeat fn &rest args) (apply fn args))))
           (pilish--browse-load-sessions
-           "all" (lambda (items error) (push (list items error) calls))))
+           'all (lambda (items error) (push (list items error) calls))))
         (should (eq (length calls) 1))
         (pcase-let ((`(,items ,error) (car calls)))
           (should-not error)
@@ -3000,7 +3193,7 @@ and non-munged directories.  scope=current scans one directory."
                   ((symbol-function 'run-at-time)
                    (lambda (_secs _repeat fn &rest args) (apply fn args))))
           (pilish--browse-load-sessions
-           "current" (lambda (items error) (push (list items error) calls))))
+           'current (lambda (items error) (push (list items error) calls))))
         (pcase-let ((`(,items ,error) (car calls)))
           (should-not error)
           (should (equal (sort (mapcar (lambda (i) (plist-get i :path)) items)
@@ -3043,7 +3236,7 @@ by the fetch token."
             (cl-letf (((symbol-function 'run-at-time)
                        (lambda (_secs _repeat fn &rest args) (apply fn args))))
               (pilish--browse-load-sessions
-               "all" (lambda (items error) (push (list items error) calls))))
+               'all (lambda (items error) (push (list items error) calls))))
             (should (eq (length calls) 1))
             (pcase-let ((`(,items ,error) (car calls)))
               (should-not error)
@@ -3058,9 +3251,9 @@ by the fetch token."
                        (lambda (_secs _repeat fn &rest args)
                          (push (cons fn args) queue))))
               (pilish--browse-load-sessions
-               "all" (lambda (items error) (push (list items error) calls-a)))
+               'all (lambda (items error) (push (list items error) calls-a)))
               (pilish--browse-load-sessions
-               "all" (lambda (items error) (push (list items error) calls-b)))
+               'all (lambda (items error) (push (list items error) calls-b)))
               (while queue
                 (let ((job (pop queue)))
                   (apply (car job) (cdr job)))))
@@ -3077,11 +3270,11 @@ by the fetch token."
                        (lambda (_secs _repeat fn &rest args)
                          (push (cons fn args) queue))))
               (pilish--browse-load-sessions
-               "all" (lambda (items error) (push (list items error) calls-a)))
+               'all (lambda (items error) (push (list items error) calls-a)))
               (let ((job (pop queue)))
                 (apply (car job) (cdr job)))
               (pilish--browse-load-sessions
-               "all" (lambda (items error) (push (list items error) calls-b)))
+               'all (lambda (items error) (push (list items error) calls-b)))
               (while queue
                 (let ((job (pop queue)))
                   (apply (car job) (cdr job)))))
@@ -3105,7 +3298,7 @@ by the fetch token."
                 ((symbol-function 'run-at-time)
                  (lambda (_secs _repeat fn &rest args) (apply fn args))))
         (pilish--browse-load-sessions
-         "current" (lambda (items error) (push (list items error) calls))))
+         'current (lambda (items error) (push (list items error) calls))))
       (should (eq (length calls) 1))
       (pcase-let ((`(,items ,error) (car calls)))
         (should-not items)
@@ -3129,10 +3322,10 @@ and the browser names the interruption."
      path (list (pilish-test--make-session-header "sid-quit")))
     (with-temp-buffer
       (pilish-session-browser-mode)
-      ;; The fetch cycle reads the buffer-local scope; "all" sees the
-      ;; munged directory below ("current" would munge the temp root
+      ;; The fetch cycle reads the buffer-local scope; `all' sees the
+      ;; munged directory below (`current' would munge the temp root
       ;; itself, which holds no sessions).
-      (setq pilish--session-browser-scope "all")
+      (setq pilish--session-browser-scope 'all)
       (let ((default-directory root)
             (process-environment
              (cons (format "PI_CODING_AGENT_DIR=%s" (directory-file-name root))
@@ -3145,7 +3338,7 @@ and the browser names the interruption."
                    (lambda (_secs _repeat fn &rest args) (apply fn args))))
           ;; The seam reports the interruption exactly once.
           (pilish--browse-load-sessions
-           "all" (lambda (items error) (push (list items error) calls)))
+           'all (lambda (items error) (push (list items error) calls)))
           (should (eq (length calls) 1))
           (pcase-let ((`(,items ,error) (car calls)))
             (should-not items)
@@ -3455,7 +3648,7 @@ and Threaded keeps its fork-family hierarchy."
                 '(:path "/sess/child.jsonl" :name "Whitespace Child"
                   :parentSessionPath "/sess/parent.jsonl"
                   :messageCount 1 :modified "2026-01-01T00:00:00Z")))
-    (setq pilish--session-browser-sort "threaded")
+    (setq pilish--session-browser-view 'threaded)
     (cl-letf (((symbol-function 'read-string) (lambda (&rest _) "   ")))
       (call-interactively #'pilish-session-browser-search))
     ;; State: the query is cleared, not recorded as active.
@@ -3805,7 +3998,7 @@ landed-elsewhere state all leave the window alone."
     (setq pilish--session-browser-items
           '((:path "/tmp/not-used.jsonl" :name "Grouped session"
              :messageCount 1 :modified "2026-03-02T10:00:00Z"))
-          pilish--session-browser-sort "recent")
+          pilish--session-browser-view 'recent)
     (pilish--session-browser-rerender)
     (goto-char (point-min))
     (let ((prompted nil)

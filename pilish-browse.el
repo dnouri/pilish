@@ -31,6 +31,11 @@
 ;;   - Session Browser: find, filter, switch, rename, and delete sessions
 ;;   - Tree Browser: navigate conversation tree, label nodes (like TUI /tree)
 ;;
+;; The two browsers display different graphs.  The tree browser moves
+;; the active path inside ONE session file, while the session browser's
+;; Threaded view shows fork families: SEPARATE session files whose
+;; headers point back at a parent (the /fork and /clone commands).
+;;
 ;; Session data comes from time-sliced scans of JSONL files on disk,
 ;; and conversation trees are projected from the linked chat's JSONL
 ;; session file.  Browsing does not need a live pi process, but the tree
@@ -262,8 +267,8 @@ Aborted or errored messages are NOT considered empty."
 
 (defun pilish--browse-node-visible-p (node filter-mode)
   "Return non-nil if NODE should be visible under FILTER-MODE.
-FILTER-MODE is one of: \"default\", \"no-tools\", \"user-only\",
-\"labeled-only\", \"all\".
+FILTER-MODE is one of: `default', `no-tools', `user-only',
+`labeled-only', `all'.
 NODE is a tree node plist.
 
 Filtering is two-phase (matching TUI tree-selector.ts:282-311):
@@ -277,15 +282,15 @@ Filtering is two-phase (matching TUI tree-selector.ts:282-311):
     (let ((type (plist-get node :type))
           (role (plist-get node :role)))
       (pcase filter-mode
-        ("all" t)
-        ("labeled-only"
+        ('all t)
+        ('labeled-only
          (and (plist-get node :label) t))
-        ("user-only"
+        ('user-only
          (and (equal type "message") (equal role "user")))
-        ("no-tools"
+        ('no-tools
          (and (not (member type '("model_change" "thinking_level_change")))
               (not (equal type "tool_result"))))
-        (_ ;; "default"
+        (_ ;; `default'
          (not (member type '("model_change" "thinking_level_change"))))))))
 
 ;;;; Tree Flattening for Display
@@ -293,7 +298,7 @@ Filtering is two-phase (matching TUI tree-selector.ts:282-311):
 (defun pilish--flatten-tree-for-display (tree leaf-id filter-mode)
   "Flatten TREE into a display-ordered list of (NODE INDENT PREFIX) lists.
 LEAF-ID identifies the current leaf for active-branch-first ordering.
-FILTER-MODE controls which nodes are visible.
+FILTER-MODE (`no-tools', `default', ...) controls which nodes are visible.
 Each entry is (NODE INDENT-LEVEL PREFIX-STRING) where PREFIX-STRING
 contains tree connectors and gutter characters for visual structure."
   (let ((active-ids (pilish--active-path-ids tree leaf-id))
@@ -410,32 +415,53 @@ All tokens must match for the entry to be included."
   (or (null tokens)
       (cl-every (lambda (tok) (string-match-p tok text)) tokens)))
 
-;;;; Session Sort/Filter/Threading
+;;;; Session View/Filter/Threading
 
-(defconst pilish--session-sort-modes
-  '("threaded" "recent" "relevance")
-  "Available sort modes for the session browser.")
+(defconst pilish--session-view-modes
+  '(threaded recent messages)
+  "Available session browser views, in cycle order.
+`threaded' is Threaded (fork families), `recent' is Recent activity,
+and `messages' is Most messages — see
+`pilish--session-view-label' for the user-facing names.")
 
-(defun pilish--session-sort-next (current)
-  "Return the sort mode after CURRENT in the cycle."
-  (let ((modes pilish--session-sort-modes))
+(defun pilish--session-view-next (current)
+  "Return the view after CURRENT in the cycle."
+  (let ((modes pilish--session-view-modes))
     (or (cadr (member current modes))
         (car modes))))
 
-(defun pilish--session-sort-items (items sort-mode)
-  "Sort session ITEMS by SORT-MODE.
-\"recent\" sorts by modified time descending.
-\"relevance\" sorts by message count descending.
-\"threaded\" returns items as-is; fork-family ordering, including the
-query-time flattening to newest-first rows, is handled during
-rendering (see `pilish--session-thread-items')."
-  (pcase sort-mode
-    ("recent"
+(defun pilish--session-view-label (view)
+  "Return the user-facing label for the session browser VIEW.
+Threaded is a hierarchy change, not a sort, so the label spells out
+what it groups; the message-count view counts records and ranks
+nothing, so it is never called relevance or Fuzzy."
+  (pcase view
+    ('threaded "Threaded (fork families)")
+    ('recent "Recent activity")
+    ('messages "Most messages")))
+
+(defun pilish--session-scope-label (scope)
+  "Return the user-facing label for the session browser SCOPE."
+  (pcase scope
+    ('all "All projects")
+    ('current "This project")))
+
+(defun pilish--session-sort-items (items view)
+  "Order session ITEMS for the flat views of VIEW.
+`recent' (Recent activity) orders by the session file's mtime,
+descending.  `messages' (Most messages) orders by the count of
+persisted message records — tool-result records included —
+descending.  `threaded' returns ITEMS as-is; the Threaded (fork
+families) view arranges rows during rendering (see
+`pilish--session-thread-items'), and a query flattens it to
+newest-first rows.
+Missing mtimes are the oldest known value, matching
+the subtree activity fallback; ties fall back to canonical identity
+so scan order never leaks."
+  (pcase view
+    ('recent
      (sort (copy-sequence items)
            (lambda (a b)
-             ;; Missing mtimes are the oldest known value, matching
-             ;; the subtree activity fallback; equal mtimes fall back
-             ;; to canonical identity so scan order never leaks.
              (let ((ma (or (plist-get a :modified) ""))
                    (mb (or (plist-get b :modified) "")))
                (if (not (equal ma mb))
@@ -444,7 +470,7 @@ rendering (see `pilish--session-thread-items')."
                               (plist-get a :path) "")
                           (or (plist-get b :canonicalPath)
                               (plist-get b :path) "")))))))
-    ("relevance"
+    ('messages
      (sort (copy-sequence items)
            (lambda (a b)
              ;; Equal message counts fall back to canonical identity
@@ -766,7 +792,7 @@ Groups: \"Today\", \"Yesterday\", \"This Week\", \"Older\"."
 (defvar pilish-session-browser-mode-map
   (let ((map (make-sparse-keymap)))
     (set-keymap-parent map pilish-browse-mode-map)
-    (define-key map (kbd "s") #'pilish-session-browser-cycle-sort)
+    (define-key map (kbd "s") #'pilish-session-browser-cycle-view)
     (define-key map (kbd "f") #'pilish-session-browser-toggle-named)
     (define-key map (kbd "/") #'pilish-session-browser-search)
     (define-key map (kbd "t") #'pilish-session-browser-toggle-scope)
@@ -784,16 +810,76 @@ Groups: \"Today\", \"Yesterday\", \"This Week\", \"Older\"."
     map)
   "Keymap for session sections (text property on each session line).")
 
+;;;; Session Browser Default Options
+
+(defcustom pilish-session-browser-default-scope 'current
+  "Initial scope of a newly created session browser buffer.
+`current' lists only this project's sessions; `all' lists every
+project under the sessions root.
+
+The value initializes browser buffers when they are created, and
+again whenever the browser major mode is explicitly re-run.  An
+existing browser buffer — including one hidden with
+\\[quit-window] and reopened — otherwise keeps its locally changed
+state, so scope toggles stay local to that buffer."
+  :type '(choice (const :tag "This project" current)
+                 (const :tag "All projects" all))
+  :group 'pilish)
+
+(defcustom pilish-session-browser-default-view 'threaded
+  "Initial view of a newly created session browser buffer.
+Views differ in hierarchy and ordering:
+
+- `threaded' — Threaded (fork families): sessions grouped into fork
+  families through the `parentSession' header link that /fork and
+  /clone write; each parent renders before its descendants, and roots
+  and siblings are ordered by the latest activity (file mtime)
+  anywhere in the family, newest first.  A search query flattens the
+  view to newest-first rows: flat results must not draw ancestry
+  between a partial set of matches.
+- `recent' — Recent activity: flat rows ordered by the session
+  file's modification time, newest first.
+- `messages' — Most messages: flat rows ordered by the number of
+  persisted message records, tool-result records included, highest
+  first.
+
+The value initializes browser buffers when they are created, and
+again whenever the browser major mode is explicitly re-run.  An
+existing browser buffer — including one hidden with
+\\[quit-window] and reopened — otherwise keeps its locally changed
+state, so cycling views with `s' stays local to that buffer."
+  :type '(choice (const :tag "Threaded (fork families)" threaded)
+                 (const :tag "Recent activity" recent)
+                 (const :tag "Most messages" messages))
+  :group 'pilish)
+
+(defcustom pilish-session-browser-default-named-only nil
+  "Whether new session browser buffers start showing named sessions only.
+
+The value initializes browser buffers when they are created, and
+again whenever the browser major mode is explicitly re-run.  An
+existing browser buffer — including one hidden with
+\\[quit-window] and reopened — otherwise keeps its locally changed
+state, so toggling it with `f' stays local to that buffer."
+  :type 'boolean
+  :group 'pilish)
+
 ;;;; Buffer-Local State
 
-(defvar-local pilish--session-browser-scope "current"
-  "Scope for session listing: \"current\" or \"all\".")
+(defvar-local pilish--session-browser-scope 'current
+  "Scope for session listing: `current' (this project) or `all'.
+New browser buffers start from
+`pilish-session-browser-default-scope'.")
 
-(defvar-local pilish--session-browser-sort "threaded"
-  "Sort mode: \"threaded\", \"recent\", or \"relevance\".")
+(defvar-local pilish--session-browser-view 'threaded
+  "Session view: `threaded', `recent', or `messages'.
+New browser buffers start from
+`pilish-session-browser-default-view'.")
 
 (defvar-local pilish--session-browser-named-only nil
-  "When non-nil, show only named sessions.")
+  "When non-nil, show only named sessions.
+New browser buffers start from
+`pilish-session-browser-default-named-only'.")
 
 (defvar-local pilish--session-browser-items nil
   "Session items from the last `--browse-load-sessions' callback.")
@@ -827,17 +913,21 @@ against the buffer's current one.")
 
 (defun pilish--session-dispatch-heading ()
   "Return heading string for the session browser dispatch transient.
-Shows current scope, sort mode, and named-only state — the same state
+Shows current scope, view, and named-only state — the same state
 `pilish--session-browser-header-line' formats for the
-header-line.  Transient evaluates group descriptions in the invoking
-browser buffer (`transient-with-shadowed-buffer' inside
+header-line, using the same user-facing labels
+\(`pilish--session-scope-label', `pilish--session-view-label').
+Transient evaluates group descriptions in the invoking browser
+buffer \(`transient-with-shadowed-buffer' inside
 `transient--insert-group'), so these buffer-local reads see the
 browser's state on the real rendering path."
   (mapconcat #'identity
              (append (list (format "scope:%s"
-                                   pilish--session-browser-scope)
-                           (format "sort:%s"
-                                   pilish--session-browser-sort))
+                                   (pilish--session-scope-label
+                                    pilish--session-browser-scope))
+                           (format "view:%s"
+                                   (pilish--session-view-label
+                                    pilish--session-browser-view)))
                      (and pilish--session-browser-named-only
                           '("named-only")))
              " │ "))
@@ -851,10 +941,10 @@ browser's state on the real rendering path."
     ("d" "delete" pilish-session-browser-delete)
     ("g" "refresh" pilish-browse-refresh)
     ("q" "quit" quit-window)]
-   ["Filter & Sort"
-    ("s" "sort" pilish-session-browser-cycle-sort)
+   ["View & Filter"
+    ("s" "cycle view" pilish-session-browser-cycle-view)
     ("f" "named only" pilish-session-browser-toggle-named)
-    ("t" "scope" pilish-session-browser-toggle-scope)
+    ("t" "toggle scope" pilish-session-browser-toggle-scope)
     ("/" "search" pilish-session-browser-search)]])
 
 ;;;; Faces
@@ -900,8 +990,23 @@ Inherits section navigation from `magit-section-mode'."
 (define-derived-mode pilish-session-browser-mode
   pilish-browse-mode "Pi-Sessions"
   "Major mode for browsing pi sessions.
-\\{pilish-session-browser-mode-map}"
+\\{pilish-session-browser-mode-map}
+Buffers start from the `pilish-session-browser-default-scope',
+`-view', and `-named-only' options; an existing browser buffer keeps
+its toggled state when hidden and reopened, and re-running this mode
+re-initializes from the current defaults."
   :group 'pilish
+  ;; Initial state from the default options, set in the mode body so
+  ;; mode hooks observe the configured values and their overrides
+  ;; survive (idiomatic major-mode initialization).  Entry points reuse
+  ;; an existing buffer without re-running the mode, so a hidden and
+  ;; reopened browser keeps its toggled state.
+  (setq pilish--session-browser-scope
+        pilish-session-browser-default-scope
+        pilish--session-browser-view
+        pilish-session-browser-default-view
+        pilish--session-browser-named-only
+        pilish-session-browser-default-named-only)
   (setq-local header-line-format
               '(:eval (pilish--session-browser-header-line)))
   (setq pilish--browse-margin-width
@@ -918,7 +1023,15 @@ Inherits section navigation from `magit-section-mode'."
           (pilish--route-preserving-abbreviate-file-name dir)))
 
 (defun pilish--get-or-create-session-browser (dir)
-  "Get or create session browser buffer for DIR."
+  "Get or create session browser buffer for DIR.
+A newly created buffer's mode initialization starts from
+`pilish-session-browser-default-scope',
+`pilish-session-browser-default-view', and
+`pilish-session-browser-default-named-only'; an existing buffer is
+returned unchanged (the mode never re-runs), so hiding with
+\\[quit-window] and reopening keeps its locally changed state until
+the buffer is killed or the browser major mode is explicitly
+re-run."
   (let* ((name (pilish--session-browser-buffer-name dir))
          (buf (get-buffer name)))
     (or buf
@@ -963,10 +1076,10 @@ Inherits section navigation from `magit-section-mode'."
           (insert "No sessions found.\n"))
          ((null filtered)
           (insert "No matching sessions.\n"))
-         ((and (equal pilish--session-browser-sort "threaded")
+         ((and (eq pilish--session-browser-view 'threaded)
                (null pilish--session-browser-search-tokens))
           (pilish--session-browser-render-threaded filtered live-paths))
-         ((equal pilish--session-browser-sort "recent")
+         ((eq pilish--session-browser-view 'recent)
           (pilish--session-browser-render-recent filtered live-paths))
          (t
           (pilish--session-browser-render-flat
@@ -974,9 +1087,9 @@ Inherits section navigation from `magit-section-mode'."
             filtered
             ;; A query flattens Threaded to newest-first rows; a
             ;; partial match set must not draw family connectors.
-            (if (equal pilish--session-browser-sort "threaded")
-                "recent"
-              pilish--session-browser-sort))
+            (if (eq pilish--session-browser-view 'threaded)
+                'recent
+              pilish--session-browser-view))
            live-paths)))))))
 
 (defun pilish--session-browser-render-flat (items live-paths)
@@ -994,7 +1107,7 @@ Sessions in LIVE-PATHS get the live-session marker."
 (defun pilish--session-browser-render-recent (items live-paths)
   "Render ITEMS sorted by recency with time-group headers.
 Sessions in LIVE-PATHS get the live-session marker."
-  (let ((sorted (pilish--session-sort-items items "recent"))
+  (let ((sorted (pilish--session-sort-items items 'recent))
         (last-group nil))
     (dolist (item sorted)
       (let ((group (pilish--session-time-group
@@ -1057,15 +1170,20 @@ Message count and age are rendered as a right-margin overlay."
 ;;;; Header-Line
 
 (defun pilish--session-browser-header-line ()
-  "Return header-line string for the session browser."
+  "Return header-line string for the session browser.
+Shows the scope, view, named-only, query, and session count — the
+same state `pilish--session-dispatch-heading' formats for the
+transient, using the same user-facing labels."
   (let* ((scope pilish--session-browser-scope)
-         (sort pilish--session-browser-sort)
+         (view pilish--session-browser-view)
          (named pilish--session-browser-named-only)
          (query pilish--session-browser-search-query)
          (count (length (or pilish--session-browser-items '()))))
     (mapconcat #'identity
-               (append (list (format "Sessions [%s]" scope)
-                             (format "sort:%s" sort))
+               (append (list (format "Sessions [%s]"
+                                     (pilish--session-scope-label scope))
+                             (format "view:%s"
+                                     (pilish--session-view-label view)))
                        (and named '("named-only"))
                        (and query (list (format "/%s" query)))
                        (list (format "(%d)" count)
@@ -1074,14 +1192,19 @@ Message count and age are rendered as a right-margin overlay."
 
 ;;;; Session Browser Interactive Commands
 
-(defun pilish-session-browser-cycle-sort ()
-  "Cycle the session browser sort mode."
+(defun pilish-session-browser-cycle-view ()
+  "Cycle the session browser view.
+Threaded (fork families), Recent activity, and Most messages —
+see `pilish--session-view-label' for what each view shows."
   (interactive)
-  (setq pilish--session-browser-sort
-        (pilish--session-sort-next
-         pilish--session-browser-sort))
+  (setq pilish--session-browser-view
+        (pilish--session-view-next pilish--session-browser-view))
   (pilish--session-browser-rerender)
-  (message "Pi: Sort: %s" pilish--session-browser-sort))
+  (message "Pi: View: %s"
+           (pilish--session-view-label pilish--session-browser-view)))
+
+(define-obsolete-function-alias 'pilish-session-browser-cycle-sort
+  'pilish-session-browser-cycle-view "3.2.0")
 
 (defun pilish-session-browser-toggle-named ()
   "Toggle named-only filter in the session browser."
@@ -1093,13 +1216,14 @@ Message count and age are rendered as a right-margin overlay."
            (if pilish--session-browser-named-only "on" "off")))
 
 (defun pilish-session-browser-toggle-scope ()
-  "Toggle scope between current and all projects."
+  "Toggle the scope between this project and all projects."
   (interactive)
   (setq pilish--session-browser-scope
-        (if (equal pilish--session-browser-scope "current")
-            "all" "current"))
+        (if (eq pilish--session-browser-scope 'all)
+            'current 'all))
   (pilish--session-browser-fetch-and-render)
-  (message "Pi: Scope: %s" pilish--session-browser-scope))
+  (message "Pi: Scope: %s"
+           (pilish--session-scope-label pilish--session-browser-scope)))
 
 (defun pilish-session-browser-search ()
   "Search names, first messages and all user/assistant text on disk.
@@ -1520,10 +1644,40 @@ that is fine for display-only sections."
     map)
   "Keymap for tree node sections.")
 
+;;;; Tree Browser Default Options
+
+(defcustom pilish-tree-browser-default-filter 'no-tools
+  "Initial filter of a newly created tree browser buffer.
+Filters select which persisted entries the projected tree shows:
+
+- `default'       all entries except model/thinking bookkeeping;
+- `no-tools'      `default' without tool results;
+- `user-only'     user messages only;
+- `labeled-only'  labeled nodes only;
+- `all'           every displayable entry.
+
+In every filter, empty tool-dispatch assistant messages stay hidden
+\(see `pilish--browse-node-visible-p').
+
+The value initializes browser buffers when they are created, and
+again whenever the browser major mode is explicitly re-run.  An
+existing browser buffer — including one hidden with
+\\[quit-window] and reopened — otherwise keeps its locally changed
+state, so cycling filters with `f' stays local to that buffer."
+  :type '(choice (const :tag "No tool results" no-tools)
+                 (const :tag "Default" default)
+                 (const :tag "User messages only" user-only)
+                 (const :tag "Labeled nodes only" labeled-only)
+                 (const :tag "All entries" all))
+  :group 'pilish)
+
 ;;;; Tree Browser State
 
-(defvar-local pilish--tree-browser-filter "no-tools"
-  "Filter mode: \"no-tools\", \"default\", \"user-only\", \"labeled-only\", \"all\".")
+(defvar-local pilish--tree-browser-filter 'no-tools
+  "Current filter mode of the tree browser.
+One of `no-tools', `default', `user-only', `labeled-only', `all'.
+New browser buffers start from
+`pilish-tree-browser-default-filter'.")
 
 (defvar-local pilish--tree-browser-tree nil
   "Projected tree from the last `--browse-load-tree' callback.
@@ -1570,8 +1724,8 @@ labeler onto a tree the browser is not showing);
 labeling a session the chat has since left.")
 
 (defconst pilish--tree-filter-modes
-  '("no-tools" "default" "user-only" "labeled-only" "all")
-  "Available filter modes for the tree browser.")
+  '(no-tools default user-only labeled-only all)
+  "Available filter modes for the tree browser, in cycle order.")
 
 ;;;; Tree Browser Dispatch Transient
 
@@ -1645,8 +1799,15 @@ rendering path."
 (define-derived-mode pilish-tree-browser-mode
   pilish-browse-mode "Pi-Tree"
   "Major mode for browsing pi conversation tree.
-\\{pilish-tree-browser-mode-map}"
+\\{pilish-tree-browser-mode-map}
+Buffers start from `pilish-tree-browser-default-filter'; an existing
+browser buffer keeps its chosen filter when hidden and reopened, and
+re-running this mode re-initializes from the current default."
   :group 'pilish
+  ;; Initial filter from the default option, before hooks run (see
+  ;; `pilish-session-browser-mode' for the timing rationale).
+  (setq pilish--tree-browser-filter
+        pilish-tree-browser-default-filter)
   (setq-local header-line-format
               '(:eval (pilish--tree-browser-header-line)))
   (setq pilish--browse-margin-width
@@ -1663,7 +1824,12 @@ rendering path."
           (pilish--route-preserving-abbreviate-file-name dir)))
 
 (defun pilish--get-or-create-tree-browser (dir)
-  "Get or create tree browser buffer for DIR."
+  "Get or create tree browser buffer for DIR.
+A newly created buffer's mode initialization starts from
+`pilish-tree-browser-default-filter'; an existing buffer is returned
+unchanged (the mode never re-runs), so hiding with
+\\[quit-window] and reopening keeps its locally chosen filter until
+the buffer is killed or the browser major mode is explicitly re-run."
   (let* ((name (pilish--tree-browser-buffer-name dir))
          (buf (get-buffer name)))
     (or buf
@@ -2050,13 +2216,13 @@ all.  Signals when resolution itself fails."
 
 (defun pilish--browse-session-directories (scope)
   "Return the list of session directories to scan for SCOPE.
-\"current\" is the single current-project directory (see
-`pilish--browse-current-session-directory').  \"all\" is
+`current' is the single current-project directory (see
+`pilish--browse-current-session-directory').  `all' is
 every root-level munged --…-- directory under the sessions root —
 remote-anchored when a current directory is known — so .subagents
 sidecars and non-munged directories are excluded by construction.
 Missing roots read as empty; signals when resolution itself fails."
-  (if (not (equal scope "all"))
+  (if (not (eq scope 'all))
       (list (pilish--browse-current-session-directory))
     (let* ((cur (pilish--browse-current-session-directory))
            (root (if cur
@@ -2156,8 +2322,8 @@ scan with `:canonicalPath' and, for forks, `:canonicalParentSession'
 \(see `pilish--session-enrich-item'), so downstream renders need no
 archive-sized or remote canonicalization — only the few live-process
 session paths canonicalize locally per render.  ERROR is an error
-string or nil.  SCOPE is \"current\" (one project directory) or \"all\" (every
-munged directory under the sessions root).  The scan is
+string or nil.  SCOPE is `current' (one project directory) or `all'
+\(every munged directory under the sessions root).  The scan is
 chunked (see `pilish--browse-scan-session-files'), shows a
 loading state throughout, and reports exactly once; a superseded
 fetch's callback is dropped by the fetch token — a superseding fetch
@@ -2699,7 +2865,12 @@ cycle's final render."
 
 ;;;###autoload
 (defun pilish-session-browser ()
-  "Open the session browser for the current project."
+  "Open the session browser for the current project.
+A new browser starts from `pilish-session-browser-default-scope',
+`pilish-session-browser-default-view', and
+`pilish-session-browser-default-named-only'; an existing (even
+hidden) browser buffer is reused with its current state.  Re-running
+the browser major mode re-initializes from the current defaults."
   (interactive)
   (let* ((dir (pilish--session-directory))
          (new-p (not (get-buffer
@@ -2724,7 +2895,10 @@ Guard first: the tree browser reads the linked chat's session file
 from disk, so without a live chat session there is nothing to browse
 — signal `user-error' \"No pi session to browse\" BEFORE creating any
 browser buffer (a buffer with no link would only render the link
-error forever)."
+error forever).  A new browser starts from
+`pilish-tree-browser-default-filter'; an existing (even hidden)
+browser buffer is reused with its current state.  Re-running the
+browser major mode re-initializes from the current defaults."
   (interactive)
   (let ((chat-buf (pilish--get-chat-buffer)))
     (unless (and chat-buf (buffer-live-p chat-buf))

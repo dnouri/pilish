@@ -327,6 +327,30 @@ refresh markers.  Press =RET= to switch to the session at point, and
 =?= for the browser menu; =d= deletes a closed session after
 confirmation, using Emacs's trash when configured.
 
+The browser opens on this project's sessions, showing all names in
+the Threaded (fork families) view.  =s= cycles the view:
+- Threaded (fork families) — sessions grouped into fork families
+  through the =parentSession= link that =/fork= and Pi's =/clone=
+  write; each parent renders above its children, and families are
+  ordered by the latest activity anywhere in the family, newest first.
+- Recent activity — flat rows ordered by the session file's
+  modification time, newest first.
+- Most messages — flat rows ordered by the number of persisted
+  message records, tool results included, highest first.
+
+Search results are always flat — a query never draws family
+connectors.  A queried Threaded (fork families) view orders the
+rows newest-first; Most messages keeps its count ordering under a
+query.  These starting states are customizable:
+=pilish-session-browser-default-scope= (this or all projects),
+=pilish-session-browser-default-view=,
+=pilish-session-browser-default-named-only=, and — for the tree
+browser — =pilish-tree-browser-default-filter=.  Each initializes a
+browser buffer when it is created; a browser you have toggled keeps
+its state when hidden with =q= and reopened.  Killing the buffer, or
+explicitly re-running the browser major mode, re-initializes from the
+current defaults.
+
 Search matches session names, first messages, and all saved
 user/assistant text, including inactive branches; thinking, tool
 arguments and results, images, and summaries are not searched.
@@ -336,9 +360,20 @@ gathered; =q= hides the browser without cancelling its scan.
 
 The tree browser (=C-c C-p w=, or Context =w= in the menu) shows the
 conversation tree Pi persists for a session: =RET= moves the live
-conversation to the node at point, =f= cycles filters, =/= searches,
-and =l= sets or clears a label on a node.  Press =?= for its menu
-and =g= to refresh the last persisted state.
+conversation to the node at point, =f= cycles filters (starting from
+the =no-tools= default; see =pilish-tree-browser-default-filter=),
+=/= searches, and =l= sets or clears a label on a node.  Press =?=
+for its menu and =g= to refresh the last persisted state.
+
+The tree browser and forking answer different questions.  Example:
+after two turns you want to try a second approach.  The tree browser
+(Pi's =/tree=) keeps both approaches as branches of the /same/
+session file; =RET= picks which branch the live conversation
+continues on.  =C-c C-p f= (=/fork=, or Pi's =/clone=) instead writes
+a /new/ session file whose header points back at the original, so
+you get two independent sessions — and the session browser's
+Threaded (fork families) view shows that file relationship as a
+family.
 
 For multiple live sessions in the same directory, use
 =C-u M-x pilish= and enter a name; this names the Emacs buffer pair,
@@ -383,17 +418,17 @@ The main buffers:
 
 The browsers:
 
-| Key       | Context         | Description                                     |
-|-----------+-----------------+--------------------------------------------------|
-| =RET=     | sessions, tree  | Switch to session / move to node at point        |
-| =/=       | sessions, tree  | Search with regexp tokens                        |
-| =s=       | sessions        | Cycle sort order (threaded, recent, relevance)   |
-| =t=       | sessions        | Toggle current-project / all-projects scope      |
-| =f=       | sessions        | Named sessions only                              |
-| =r= / =d= | sessions        | Rename a session / delete a closed one           |
-| =l=       | tree            | Set or clear a label on a node                   |
-| =g=       | sessions, tree  | Refresh                                          |
-| =?=       | sessions, tree  | Browser menu                                     |
+| Key       | Context        | Description                                                             |
+|-----------+----------------+-------------------------------------------------------------------------|
+| =RET=     | sessions, tree | Switch to session / move to node at point                               |
+| =/=       | sessions, tree | Search with regexp tokens                                               |
+| =s=       | sessions       | Cycle view: Threaded (fork families), Recent activity, or Most messages |
+| =t=       | sessions       | Toggle This project / All projects scope                                |
+| =f=       | sessions       | Named sessions only                                                     |
+| =r= / =d= | sessions       | Rename a session / delete a closed one                                  |
+| =l=       | tree           | Set or clear a label on a node                                          |
+| =g=       | sessions, tree | Refresh                                                                 |
+| =?=       | sessions, tree | Browser menu                                                            |
 
 The transient menu (=C-c C-p=) collects the full command set — new
 session, reload, name, export, quit, compact, fork, tree, model,
@@ -680,6 +715,13 @@ Less common tuning knobs:
 
 ;; Hidden thinking uses generic line-count stubs instead of first-line previews:
 ;; (setopt pilish-thinking-hidden-preview nil)
+
+;; New browser buffers can start elsewhere; existing browsers keep
+;; their toggled state (see the Sessions and context section):
+;; (setopt pilish-session-browser-default-scope 'all)
+;; (setopt pilish-session-browser-default-view 'recent)
+;; (setopt pilish-session-browser-default-named-only t)
+;; (setopt pilish-tree-browser-default-filter 'default)
 #+end_src
 
 You can also inspect the whole customization group with:
@@ -724,11 +766,12 @@ Input buffer (normal state):
 
 Session and tree browser buffers start in motion state as well.
 Magit's own =j= / =k= section navigation works unmodified, and every
-documented browser key — sort, filters, search, scope, rename, delete,
-refresh, dispatch, =RET= — is rebound in motion state so the Evil and
-evil-collection keymap stack never swallows them (evil's motion state
-owns =/=, =?= and the =g= prefix; evil-snipe's =f= / =t= are disabled in
-these buffers, mirroring the chat buffer's =f= fork binding).
+documented browser key — views, filters, search, scope, rename,
+delete, refresh, dispatch, =RET= — is rebound in motion state so the
+Evil and evil-collection keymap stack never swallows them (evil's
+motion state owns =/=, =?= and the =g= prefix; evil-snipe's =f= / =t=
+are disabled in these buffers, mirroring the chat buffer's =f= fork
+binding).
 
 Setup also sets =pilish-copy-raw-markdown= buffer-locally in
 chat buffers, so that yanking preserves code fences and markup without

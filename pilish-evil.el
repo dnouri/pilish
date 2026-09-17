@@ -61,7 +61,7 @@
 ;; Session and tree browser buffers (motion state):
 ;;
 ;;   j / k   section navigation (Magit's own, unmodified)
-;;   Every   documented browser key — sort, filters, search, scope,
+;;   Every   documented browser key — views, filters, search, scope,
 ;;          rename, delete, refresh, dispatch, RET — is also rebound
 ;;          in motion state, because the Evil and evil-collection
 ;;          keymap stack would otherwise swallow the letters:
@@ -104,7 +104,7 @@
 (declare-function pilish-visit-file "pilish-render")
 (declare-function pilish-toggle-tool-section "pilish-render")
 (declare-function pilish-browse-refresh "pilish-browse")
-(declare-function pilish-session-browser-cycle-sort "pilish-browse")
+(declare-function pilish-session-browser-cycle-view "pilish-browse")
 (declare-function pilish-session-browser-toggle-named "pilish-browse")
 (declare-function pilish-session-browser-toggle-scope "pilish-browse")
 (declare-function pilish-session-browser-search "pilish-browse")
@@ -296,7 +296,7 @@ options `pilish-evil-chat-state',
   ;; waiting on more keys.  The major-mode bindings stay authoritative
   ;; for every state, so `emacs' state users lose nothing.
   (evil-define-key* 'motion pilish-session-browser-mode-map
-    "s" #'pilish-session-browser-cycle-sort
+    "s" #'pilish-session-browser-cycle-view
     "f" #'pilish-session-browser-toggle-named
     "t" #'pilish-session-browser-toggle-scope
     "/" #'pilish-session-browser-search

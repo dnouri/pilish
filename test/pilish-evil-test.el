@@ -98,7 +98,7 @@ of the suite."
                                          'motion)))
      (should map)
      (should (eq (lookup-key map "s")
-                 #'pilish-session-browser-cycle-sort))
+                 #'pilish-session-browser-cycle-view))
      (should (eq (lookup-key map "f")
                  #'pilish-session-browser-toggle-named))
      (should (eq (lookup-key map "t")
