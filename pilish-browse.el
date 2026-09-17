@@ -513,12 +513,14 @@ cleanly: 35 needs one digit, the 36th needs two."
       (setq capacity (* capacity 36)))
     width))
 
-(defun pilish--session-project-fields (items)
+(defun pilish--session-project-fields (items &optional ellipsis)
   "Return a hash table mapping session key to its All-projects token.
 Tokens are built from every project in ITEMS — the full loaded set,
 not the filtered rows — so a query never silently relabels the rows
 it leaves behind.  Rows whose cwd was rejected map to the
-placeholder instead; the field is always reserved.
+placeholder instead; the field is always reserved.  When ELLIPSIS is
+non-nil, it marks any generated-tail truncation; ordinary rows retain
+their established compact field when it is nil.
 
 Allocation is deterministic and exact.  Identities are deduplicated
 and sorted once, each grows the shortest readable label that
@@ -537,7 +539,8 @@ display-unsafe, or field-colliding, with its whole group — gets a
 generated token `#ORD tail': fixed-width
 base-36 ordinals over the sorted class (width scaled to the class
 size by `pilish--session-ordinal-width'), plus the label's basename
-truncated to the remaining columns.  Ordinals lead, so generated
+truncated to the remaining display columns (marked by ELLIPSIS when
+non-nil).  Ordinals lead, so generated
 fields are pairwise unique and never collide with naturals; the
 shape holds for any practical archive (15 ordinal columns cover
 36^15 - 1 positive ordinals)."
@@ -633,7 +636,7 @@ shape holds for any practical archive (15 ordinal columns cover
                                                     (split-string
                                                      (funcall label id) "/")))
                                               "/")
-                                          tail-width))
+                                          tail-width 0 nil ellipsis))
                                ""))
                      natural)))
         ;; Map every item's session key to its project's token, or the
@@ -2056,18 +2059,26 @@ A blank or whitespace-only query clears the filter."
     (when need-rerender
       (pilish--session-browser-rerender))))
 
+(defun pilish--session-browser-item-at-point ()
+  "Return the loaded session item represented at point, or nil.
+Session sections carry canonical identity keys; resolve that key in
+`pilish--session-browser-items', the complete loaded snapshot rather
+than the currently visible filtered rows."
+  (when-let* ((section (magit-current-section))
+              ((object-of-class-p section 'pilish-session-section)))
+    (cl-find (oref section value) pilish--session-browser-items
+             :key #'pilish--session-item-key :test #'equal)))
+
 (defun pilish--session-browser-path-at-point ()
   "Return the file path of the session at point, or nil.
 Sections carry canonical identities; the displayed row's raw retained
 spelling is returned so actions (switch, rename, delete) act on the
-path the user sees."
+path the user selected.  Identity-sensitive guards and relationships
+canonicalize separately."
   (when-let* ((section (magit-current-section))
               ((object-of-class-p section 'pilish-session-section)))
     (let ((key (oref section value)))
-      (or (plist-get
-           (cl-find key pilish--session-browser-items
-                    :key #'pilish--session-item-key :test #'equal)
-           :path)
+      (or (plist-get (pilish--session-browser-item-at-point) :path)
           key))))
 
 (defun pilish-session-browser-switch ()
@@ -2116,22 +2127,223 @@ in `pilish--browse-live-session-chat-buffer'."
     (user-error "Session is open in %s — close it first"
                 (buffer-name chat-buf))))
 
+(defun pilish--session-delete-safe-text (text)
+  "Return TEXT without characters that can forge a delete prompt.
+The human session/project helpers remain the source of the wording.
+After composing ordinary decomposed characters, this final display
+boundary replaces control, bidi/format, line/paragraph separator, and
+remaining zero-width characters with the replacement character."
+  (let* ((plain (substring-no-properties (if (stringp text) text "")))
+         (normalized
+          (condition-case nil
+              (ucs-normalize-NFC-string plain)
+            (error plain))))
+    (mapconcat
+     (lambda (char)
+       (if (or (memq (get-char-code-property char 'general-category)
+                     '(Cc Cf Zl Zp))
+               (pilish--session-zero-width-char-p char))
+           "\ufffd"
+         (char-to-string char)))
+     normalized "")))
+
+(defconst pilish--session-delete-name-width 50
+  "Maximum display width of a session name in a delete prompt.")
+
+(defconst pilish--session-delete-project-width 24
+  "Maximum display width of a project token in a delete prompt.")
+
+(defconst pilish--session-delete-child-name-width 26
+  "Maximum display width of each child name in a delete prompt.")
+
+(defconst pilish--session-delete-prompt-max-width 320
+  "Upper display-width bound for a session deletion prompt.
+This covers the longest fixed wording, three bounded child names,
+the bounded target identity, and ordinary finite child counts.")
+
+(defun pilish--session-delete-prompt-component (text width)
+  "Return sanitized TEXT quoted within display WIDTH, ellipsizing if needed.
+The ellipsis is part of the bound.  Quoting happens before truncation,
+so user-controlled quote and backslash escapes cannot expand the final
+component beyond WIDTH."
+  (let* ((printed (prin1-to-string
+                   (pilish--session-delete-safe-text text)))
+         ;; Strip the printer's balanced ASCII quotes, bound the escaped
+         ;; contents, then restore quotes so truncation stays readable.
+         (contents (substring printed 1 -1)))
+    (concat "\""
+            (truncate-string-to-width
+             contents (- width 2) 0 nil "…")
+            "\"")))
+
+(defun pilish--session-delete-project-context (session items)
+  "Return SESSION's safe project token within ITEMS, or \"unknown\".
+Reuse `pilish--session-project-fields', including its validated project
+identity, shortest distinguishing labels, generated collision tokens,
+and malformed-metadata placeholder.  ITEMS is the browser's complete
+loaded snapshot, so filtering and either scope cannot silently change
+that context; an unusable placeholder never falls back to the archive
+path."
+  (or
+   (condition-case nil
+       (let* ((fields (pilish--session-project-fields items "…"))
+              (token (gethash (pilish--session-item-key session) fields)))
+         (unless (or (null token)
+                     (equal token pilish--session-project-placeholder))
+           (pilish--session-delete-safe-text token)))
+     (error nil))
+   "unknown"))
+
+(defun pilish--session-direct-child-items (parent items)
+  "Return PARENT's known direct child sessions in ITEMS.
+Both sides use the canonical family identity established by
+`pilish--session-item-key' and `pilish--thread-parent-identity'.
+Equivalent path aliases therefore match and duplicate child aliases
+count once.  Grandchildren are deliberately absent: deleting a
+session does not cascade, and direct children become roots only when
+the parent no longer appears elsewhere in the archive."
+  (let* ((memo (make-hash-table :test 'equal))
+         (parent-key
+          (condition-case nil
+              (pilish--session-item-key parent memo)
+            (error nil)))
+         (seen (make-hash-table :test 'equal))
+         children)
+    (when (stringp parent-key)
+      (dolist (item items)
+        (condition-case nil
+            (let* ((key (pilish--session-item-key item memo))
+                   (parent-identity
+                    (or (plist-get item :canonicalParentSession)
+                        (pilish--thread-parent-identity
+                         (plist-get item :parentSessionPath) key memo
+                         (pilish--session-parent-anchor item)))))
+              (when (and (stringp key)
+                         (equal parent-identity parent-key)
+                         (not (equal key parent-key))
+                         (not (gethash key seen)))
+                (puthash key t seen)
+                (push item children)))
+          ;; One malformed item cannot suppress warnings for the rest
+          ;; of the already loaded snapshot.
+          (error nil))))
+    (nreverse children)))
+
+(defun pilish--session-delete-child-warning (children)
+  "Return the delete-prompt warning for direct CHILDREN, or nil.
+The count and non-cascading/root consequence are always explicit.
+At most three names are included, each display-bounded; when there are
+more, do not format names that the prompt will omit."
+  (when children
+    (let* ((count (length children))
+           (name-list
+            (when (<= count 3)
+              (format
+               " (%s)"
+               (mapconcat
+                #'identity
+                (sort
+                 (mapcar
+                  (lambda (item)
+                    (pilish--session-delete-prompt-component
+                     (pilish--session-display-name item)
+                     pilish--session-delete-child-name-width))
+                  children)
+                 #'string<)
+                ", ")))))
+      (format (concat " %d direct child session%s%s are not deleted;"
+                      " they become roots if their parent leaves the archive.")
+              count (if (= count 1) "" "s") (or name-list "")))))
+
+(defun pilish--session-delete-prompt (session items children trash-p)
+  "Return contextual confirmation for deleting SESSION from ITEMS.
+CHILDREN are its known direct forks.  TRASH-P selects wording that
+exactly matches the optional trash argument later passed to
+`delete-file'.  Policy leads the prompt; every metadata component is
+sanitized, display-bounded, and truthfully ellipsized."
+  (let ((name
+         (pilish--session-delete-prompt-component
+          (pilish--session-display-name session)
+          pilish--session-delete-name-width))
+        (project
+         (pilish--session-delete-prompt-component
+          (pilish--session-delete-project-context session items)
+          pilish--session-delete-project-width)))
+    (concat
+     (if trash-p
+         "Move session file to trash"
+       "Permanently delete session file")
+     " in project " project " — session " name "."
+     (pilish--session-delete-child-warning children)
+     " Continue? ")))
+
 (defun pilish-session-browser-delete ()
-  "Delete the session at point after confirmation.
-Refuse sessions used by a live Pilish process in this Emacs.  Processes
-outside this Emacs cannot be detected.  Pass the trash flag to
-`delete-file', so `delete-by-moving-to-trash' controls whether the file
-is moved to the system trash or permanently removed."
+  "Delete the session at point after contextual confirmation.
+The prompt leads with whether Emacs will move the file to trash or
+permanently delete it, then identifies the display-bounded human
+session name and project and reports known direct child forks from the
+full loaded snapshot.  Children are not cascade-deleted; they appear
+as roots if the parent no longer appears elsewhere in the archive,
+while deeper descendants retain their own parents.  Live/child matching
+uses canonical identity, but `delete-file' receives the selected raw
+pathname, preserving symlink and file-handler semantics.
+
+Refuse a session used by a live Pilish process before prompting and
+check that identity again after confirmation.  Also recompute the
+selected pathname's canonical identity and reject an observed change,
+such as a symlink retargeted while the prompt was active.  This is a
+best-effort observation, not locking: it cannot detect a same-path
+replacement that preserves the canonical spelling, and an independent
+writer can still change the path between this check and `delete-file'.
+Live detection
+covers only Pilish processes in this Emacs, not another Emacs or a
+system-wide process.  Cancellation and a signaled `delete-file' leave
+the browser snapshot unrefreshed; success refreshes through the existing
+scan path."
   (interactive)
-  (if-let* ((path (pilish--session-browser-path-at-point)))
-      (let ((name (file-name-nondirectory path)))
-        (pilish--browse-ensure-session-closed path)
-        (when (y-or-n-p (format "Delete session %s? " name))
-          ;; A process can open the session while confirmation is active.
-          (pilish--browse-ensure-session-closed path)
-          (delete-file path t)
+  (if-let* ((session (pilish--session-browser-item-at-point))
+            (raw-path (pilish--session-browser-path-at-point)))
+      (let* ((trash-p (and delete-by-moving-to-trash t))
+             ;; Matching is canonical, but destructive action is not:
+             ;; `delete-file' must receive the raw retained pathname so
+             ;; symlinks and file-name handlers keep Emacs semantics.
+             (identity (or (condition-case nil
+                               (pilish--session-item-key session)
+                             (error nil))
+                           raw-path))
+             (children nil)
+             (name
+              (pilish--session-delete-prompt-component
+               (pilish--session-display-name session)
+               pilish--session-delete-name-width)))
+        ;; This first identity check must precede the prompt.
+        (pilish--browse-ensure-session-closed identity)
+        (setq children
+              (pilish--session-direct-child-items
+               session pilish--session-browser-items))
+        (when (y-or-n-p
+               (pilish--session-delete-prompt
+                session pilish--session-browser-items children trash-p))
+          ;; A process can open the identity while confirmation is active.
+          (pilish--browse-ensure-session-closed identity)
+          ;; Observe the selected path again to catch a canonical retarget,
+          ;; such as a symlink changed to another target while the prompt was
+          ;; active.  This is not locking: same-path replacement preserving
+          ;; the canonical spelling and a change after this check remain
+          ;; possible for independent writers.
+          (unless (equal identity
+                         (condition-case nil
+                             (pilish--canonical-session-path raw-path)
+                           (error nil)))
+            (user-error "Selected session changed while awaiting confirmation"))
+          ;; Keep the policy named by the prompt stable even if Lisp run
+          ;; from the minibuffer changed the global option meanwhile.
+          (let ((delete-by-moving-to-trash trash-p))
+            (delete-file raw-path trash-p))
           (pilish--session-browser-fetch-and-render)
-          (message "Pi: Deleted %s" name)))
+          (if trash-p
+              (message "Pi: Moved %s to trash" name)
+            (message "Pi: Permanently deleted %s" name))))
     (message "Pi: No session at point")))
 
 (defun pilish--browse-clean-session-name (name)

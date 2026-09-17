@@ -326,8 +326,27 @@ this Emacs get a ● marker; the marker only sees Pilish processes in
 this Emacs — sessions running in another Emacs or in a terminal are
 not marked.
 Press =g= to refresh markers.  Press =RET= to switch to the session
-at point, and =?= for the browser menu; =d= deletes a closed session
-after confirmation, using Emacs's trash when configured.
+at point, and =?= for the browser menu.  =d= deletes a closed session
+only after a confirmation that names its displayed session title and
+project.  The configured =delete-by-moving-to-trash= action leads the
+prompt; unsafe title, project, and child-name characters are sanitized
+or replaced, while long metadata is ellipsized so the consequence stays
+visible.  Deletion acts on the selected archive pathname: if that entry
+is a symlink, Emacs removes or trashes the link, not its target, while
+canonical alias identity is used for live-session checks and child-fork
+matching.  If the full loaded archive snapshot contains direct child
+forks, the prompt reports their count
+(and up to three short titles): those files are /not/ deleted.  They
+appear as roots if the parent no longer appears elsewhere in the
+archive; their own descendants stay attached.  Deletion does not
+cascade.  Pilish checks for a live session before and after the prompt,
+but “live” means only a Pilish process in this Emacs, not a system-wide
+process check.  After confirmation it also rejects an observed canonical
+retarget, such as a selected symlink that now resolves to another target.
+This is observation, not locking: an independent writer can replace a
+path without changing its canonical spelling, or change it between the
+final check and =delete-file=.  Cancelling or a deletion error leaves the
+current browser snapshot in place; a successful deletion refreshes it.
 
 The browser opens on this project's sessions, showing all names in
 the Threaded (fork families) view; =t= toggles between this project

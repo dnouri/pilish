@@ -5662,22 +5662,28 @@ landed-elsewhere state all leave the window alone."
 
 ;;;; Session Delete
 
-(defun pilish-test--session-command-at-point (item command)
-  "Run COMMAND at ITEM's session-browser section."
+(defun pilish-test--session-command-at-point
+    (item command &optional items prepare)
+  "Run COMMAND at ITEM's rendered session-browser section.
+ITEMS, when non-nil, is the browser's complete loaded snapshot.
+PREPARE runs in the browser before rendering, for setting scope or
+filters without bypassing the observed command path."
   (with-temp-buffer
     (pilish-session-browser-mode)
-    (setq pilish--session-browser-items (list item))
+    (setq pilish--session-browser-items (or items (list item)))
+    (when prepare (funcall prepare))
     (pilish--session-browser-rerender)
     (goto-char (point-min))
     (search-forward (pilish--session-display-name item))
     (backward-char)
     (funcall command)))
 
-(ert-deftest pilish-test-session-delete-confirmed ()
-  "Confirmed deletion uses the trash-aware file operation and refreshes."
+(ert-deftest pilish-test-session-delete-trash-context-and-side-effects ()
+  "Trash confirmation names the session/project and performs that operation."
   (let* ((path (make-temp-file "pilish-delete-session-" nil ".jsonl"))
-         (name (file-name-nondirectory path))
-         (item (list :path path :name "Disposable session"
+         (filename (file-name-nondirectory path))
+         (item (list :path path :cwd "/work/acme"
+                     :name "Disposable session"
                      :messageCount 1 :modified "2026-03-02T10:00:00Z"))
          (real-delete (symbol-function 'delete-file))
          (delete-calls nil)
@@ -5685,15 +5691,15 @@ landed-elsewhere state all leave the window alone."
          (prompt nil)
          (messages nil))
     (unwind-protect
-        (progn
+        (let ((delete-by-moving-to-trash t))
           (cl-letf (((symbol-function 'y-or-n-p)
-                     (lambda (text)
-                       (setq prompt text)
-                       t))
+                     (lambda (text) (setq prompt text) t))
                     ((symbol-function 'delete-file)
                      (lambda (file &optional trash)
                        (push (list file trash) delete-calls)
-                       (funcall real-delete file)))
+                       ;; Keep the behavioral side effect deterministic;
+                       ;; the argument above is the contract under test.
+                       (funcall real-delete file nil)))
                     ((symbol-function 'pilish--session-browser-fetch-and-render)
                      (lambda () (setq refreshes (1+ refreshes))))
                     ((symbol-function 'message)
@@ -5701,18 +5707,439 @@ landed-elsewhere state all leave the window alone."
                        (push (apply #'format fmt args) messages))))
             (pilish-test--session-command-at-point
              item #'pilish-session-browser-delete))
-          (should (equal prompt (format "Delete session %s? " name)))
+          (should (string-prefix-p "Move session file to trash" prompt))
+          (should (string-match-p "Disposable session" prompt))
+          (should (string-match-p (regexp-quote "project \"acme\"")
+                                  prompt))
+          (should-not (string-match-p (regexp-quote path) prompt))
+          (should-not (string-match-p (regexp-quote filename) prompt))
+          (should-not (string-match-p "not deleted\\|become roots"
+                                      prompt))
           (should (equal delete-calls (list (list path t))))
           (should-not (file-exists-p path))
           (should (= refreshes 1))
-          (should (member (format "Pi: Deleted %s" name) messages)))
+          (should (seq-some (lambda (text)
+                              (and (string-match-p "Disposable session" text)
+                                   (string-match-p "trash" (downcase text))))
+                            messages)))
       (when (file-exists-p path)
-        (funcall real-delete path)))))
+        (funcall real-delete path nil)))))
+
+(ert-deftest pilish-test-session-delete-permanent-context-and-side-effects ()
+  "Permanent confirmation and delete call agree in All-projects scope."
+  (let* ((path (make-temp-file "pilish-delete-permanent-" nil ".jsonl"))
+         (item (list :path path :cwd "/clients/widgets"
+                     :name "Old investigation"
+                     :messageCount 1 :modified "2026-03-02T10:00:00Z"))
+         (real-delete (symbol-function 'delete-file))
+         (delete-calls nil)
+         (refreshes 0)
+         (prompt nil)
+         (messages nil))
+    (unwind-protect
+        (let ((delete-by-moving-to-trash nil))
+          (cl-letf (((symbol-function 'y-or-n-p)
+                     (lambda (text) (setq prompt text) t))
+                    ((symbol-function 'delete-file)
+                     (lambda (file &optional trash)
+                       (push (list file trash) delete-calls)
+                       (funcall real-delete file nil)))
+                    ((symbol-function 'pilish--session-browser-fetch-and-render)
+                     (lambda () (setq refreshes (1+ refreshes))))
+                    ((symbol-function 'message)
+                     (lambda (fmt &rest args)
+                       (push (apply #'format fmt args) messages))))
+            (pilish-test--session-command-at-point
+             item #'pilish-session-browser-delete nil
+             (lambda () (setq pilish--session-browser-scope 'all))))
+          (should (string-prefix-p "Permanently delete session file" prompt))
+          (should (string-match-p "Old investigation" prompt))
+          (should (string-match-p (regexp-quote "project \"widgets\"")
+                                  prompt))
+          (should-not (string-match-p "trash" (downcase prompt)))
+          (should-not (string-match-p (regexp-quote path) prompt))
+          (should (equal delete-calls (list (list path nil))))
+          (should-not (file-exists-p path))
+          (should (= refreshes 1))
+          (should (seq-some
+                   (lambda (text)
+                     (and (string-match-p "Old investigation" text)
+                          (string-match-p "permanently" (downcase text))))
+                   messages)))
+      (when (file-exists-p path)
+        (funcall real-delete path nil)))))
+
+(ert-deftest pilish-test-session-delete-context-safe-for-unnamed-malformed-metadata ()
+  "Confirmation reuses display fallbacks and never prints unsafe metadata."
+  (let* ((path-a (make-temp-file "pilish-delete-unnamed-" nil ".jsonl"))
+         (path-b (make-temp-file "pilish-delete-malformed-" nil ".jsonl"))
+         (bidi (string #x202e))
+         (item-a (list :path path-a
+                       :cwd (concat "/work/" bidi "forged")
+                       :name 7
+                       :firstMessage (concat "Repair" bidi " plan\nnow")
+                       :messageCount 1
+                       :modified "2026-03-02T10:00:00Z"))
+         (item-b (list :path path-b :cwd 42 :name '(not a string)
+                       :firstMessage ["not" "a" "string"]
+                       :messageCount 0
+                       :modified "2026-03-02T10:00:00Z"))
+         prompt-a prompt-b)
+    (unwind-protect
+        (let ((delete-by-moving-to-trash nil))
+          (cl-letf (((symbol-function 'y-or-n-p)
+                     (lambda (text) (setq prompt-a text) nil)))
+            (pilish-test--session-command-at-point
+             item-a #'pilish-session-browser-delete nil
+             (lambda () (setq pilish--session-browser-scope 'all))))
+          (cl-letf (((symbol-function 'y-or-n-p)
+                     (lambda (text) (setq prompt-b text) nil)))
+            (pilish-test--session-command-at-point
+             item-b #'pilish-session-browser-delete nil
+             (lambda () (setq pilish--session-browser-scope 'current))))
+          ;; The first-message fallback remains recognizable, but its
+          ;; newline and bidi control cannot forge the confirmation.
+          (should (string-match-p "Repair" prompt-a))
+          (should (string-match-p "plan now" prompt-a))
+          (should-not (string-match-p bidi prompt-a))
+          (should-not (string-match-p "forged" prompt-a))
+          (should-not (string-match-p "\n" prompt-a))
+          (should (string-match-p "unknown" (downcase prompt-a)))
+          ;; Fully malformed name/first-message metadata uses the same
+          ;; human fallback the row uses, in either scope.
+          (should (string-match-p (regexp-quote "[empty session]") prompt-b))
+          (should (string-match-p "unknown" (downcase prompt-b)))
+          (should-not (string-match-p (regexp-quote path-b) prompt-b)))
+      (delete-file path-a nil)
+      (delete-file path-b nil))))
+
+(ert-deftest pilish-test-session-delete-prompt-bounds-untrusted-fields ()
+  "Policy and project lead a bounded prompt despite hostile long metadata."
+  (let* ((bidi (string #x202e))
+         (parent-path "/tmp/pilish-delete-long-parent.jsonl")
+         (parent
+          (list :path parent-path
+                :cwd (concat "/work/" (make-string 200 ?界))
+                :name (concat "Lead" bidi "\n"
+                              (make-string 400 ?界)
+                              (make-string 600 ?A) "TAIL")
+                :messageCount 1 :modified "2026-03-02T10:00:00Z"))
+         (child-a
+          (list :path "/tmp/pilish-delete-long-child-a.jsonl"
+                :cwd "/work/long" :parentSessionPath parent-path
+                :name (concat "Child-A-" (make-string 500 ?B))
+                :messageCount 1 :modified "2026-03-02T11:00:00Z"))
+         (child-b
+          (list :path "/tmp/pilish-delete-long-child-b.jsonl"
+                :cwd "/work/long" :parentSessionPath parent-path
+                :firstMessage (concat "子供" bidi (make-string 300 ?界))
+                :messageCount 1 :modified "2026-03-02T12:00:00Z"))
+         (child-c
+          (list :path "/tmp/pilish-delete-long-child-c.jsonl"
+                :cwd "/work/long" :parentSessionPath parent-path
+                :name (concat "Child-C-" (make-string 500 ?C))
+                :messageCount 1 :modified "2026-03-02T13:00:00Z"))
+         (prompt nil)
+         (delete-calls nil))
+    (let ((delete-by-moving-to-trash nil))
+      (cl-letf (((symbol-function 'y-or-n-p)
+                 (lambda (text) (setq prompt text) nil))
+                ((symbol-function 'delete-file)
+                 (lambda (&rest args) (push args delete-calls))))
+        (pilish-test--session-command-at-point
+         parent #'pilish-session-browser-delete
+         (list parent child-a child-b child-c)
+         (lambda () (setq pilish--session-browser-scope 'all)))))
+    (should (string-prefix-p "Permanently delete session file" prompt))
+    (let* ((project-pos (string-match "project" prompt))
+           (project
+            (and project-pos
+                 (car (read-from-string
+                       (substring prompt
+                                  (+ project-pos (length "project "))))))))
+      (should project-pos)
+      (should (< project-pos 50))
+      (should (stringp project))
+      ;; The generated collision-safe token must not silently crop its
+      ;; user-controlled project tail before the prompt bounds it.
+      (should (string-match-p "…" project))
+      (should (<= (string-width project)
+                  (- pilish--session-delete-project-width 2))))
+    (should (string-match-p "Lead" prompt))
+    (should (string-match-p "Child-A" prompt))
+    (should (string-match-p "子供" prompt))
+    (should (string-match-p "Child-C" prompt))
+    (should (string-match-p "3 direct child sessions" prompt))
+    (should (string-match-p "not deleted" prompt))
+    (should (string-match-p "become roots" prompt))
+    (should (string-match-p "…" prompt))
+    (should-not (string-match-p bidi prompt))
+    (should-not (string-match-p "\n" prompt))
+    (should-not (string-match-p "TAIL" prompt))
+    (should-not (string-match-p (make-string 80 ?A) prompt))
+    (should (<= (string-width prompt)
+                pilish--session-delete-prompt-max-width))
+    (should-not delete-calls)))
+
+(ert-deftest pilish-test-session-delete-warns-direct-children-not-descendants ()
+  "Deleting an archive symlink keeps its target and warns canonical children."
+  (let* ((base (pilish-test--make-temp-directory "pilish-delete-family-"))
+         (outside (pilish-test--make-temp-directory
+                   "pilish-delete-family-target-"))
+         (target (expand-file-name "external-parent.jsonl" outside))
+         (parent-link (expand-file-name "parent.jsonl" base))
+         (child-a (expand-file-name "child-a.jsonl" base))
+         (child-b (expand-file-name "child-b.jsonl" base))
+         (grandchild (expand-file-name "grandchild.jsonl" base))
+         (parent-item (list :path parent-link :cwd "/work/family"
+                            :name "Family parent" :messageCount 1
+                            :modified "2026-03-02T10:00:00Z"))
+         (items (list parent-item
+                      (list :path child-a :cwd "/work/family"
+                            :name "Alias child"
+                            :parentSessionPath parent-link :messageCount 1
+                            :modified "2026-03-02T11:00:00Z")
+                      ;; The target spelling and archive-link spelling are
+                      ;; one family identity, but only the selected raw link
+                      ;; is the destructive action path.
+                      (list :path child-b :cwd "/work/family"
+                            :name "Direct child"
+                            :parentSessionPath target :messageCount 1
+                            :modified "2026-03-02T12:00:00Z")
+                      (list :path grandchild :cwd "/work/family"
+                            :name "Nested grandchild"
+                            :parentSessionPath child-a :messageCount 1
+                            :modified "2026-03-02T13:00:00Z")))
+         (real-delete (symbol-function 'delete-file))
+         (delete-calls nil)
+         (refreshes 0)
+         (prompt nil))
+    (unwind-protect
+        (progn
+          (write-region "external session" nil target nil 'silent)
+          (dolist (path (list child-a child-b grandchild))
+            (write-region "" nil path nil 'silent))
+          (make-symbolic-link target parent-link)
+          (let ((delete-by-moving-to-trash nil))
+            (cl-letf (((symbol-function 'y-or-n-p)
+                       (lambda (text) (setq prompt text) t))
+                      ((symbol-function 'delete-file)
+                       (lambda (file &optional trash)
+                         (push (list file trash) delete-calls)
+                         (funcall real-delete file nil)))
+                      ((symbol-function 'pilish--session-browser-fetch-and-render)
+                       (lambda () (cl-incf refreshes)))
+                      ((symbol-function 'message) #'ignore))
+              (pilish-test--session-command-at-point
+               parent-item #'pilish-session-browser-delete items)))
+          (should (string-match-p "2 direct child sessions" prompt))
+          (should (string-match-p "Alias child" prompt))
+          (should (string-match-p "Direct child" prompt))
+          (should-not (string-match-p "Nested grandchild" prompt))
+          (should (string-match-p "not deleted" prompt))
+          (should (string-match-p "become roots" prompt))
+          (should (equal delete-calls (list (list parent-link nil))))
+          (should (= refreshes 1))
+          (should-not (file-symlink-p parent-link))
+          (should (file-exists-p target))
+          (should (equal (pilish-test--file-contents target)
+                         "external session"))
+          (dolist (path (list child-a child-b grandchild))
+            (should (file-exists-p path))))
+      (when (file-directory-p base)
+        (delete-directory base t))
+      (when (file-directory-p outside)
+        (delete-directory outside t)))))
+
+(ert-deftest pilish-test-session-delete-retained-alias-target-keeps-family ()
+  "An archived alias target can remain the parent after its link is deleted."
+  (let* ((base (pilish-test--make-temp-directory
+                "pilish-delete-retained-alias-"))
+         (target (expand-file-name "z-parent-target.jsonl" base))
+         (link (expand-file-name "a-parent-link.jsonl" base))
+         (child (expand-file-name "child.jsonl" base))
+         (parent-item (list :path link :cwd "/work/retained"
+                            :name "Retained alias" :messageCount 1
+                            :modified "2026-03-02T10:00:00Z"))
+         (child-item (list :path child :cwd "/work/retained"
+                           :name "Retained child"
+                           :parentSessionPath target :messageCount 1
+                           :modified "2026-03-02T11:00:00Z"))
+         (target-item (list :path target :cwd "/work/retained"
+                            :name "Canonical parent" :messageCount 1
+                            :modified "2026-03-02T10:00:00Z"))
+         (real-delete (symbol-function 'delete-file))
+         (prompt nil))
+    (unwind-protect
+        (progn
+          (write-region "parent" nil target nil 'silent)
+          (write-region "child" nil child nil 'silent)
+          (make-symbolic-link target link)
+          (let ((delete-by-moving-to-trash nil))
+            (cl-letf (((symbol-function 'y-or-n-p)
+                       (lambda (text) (setq prompt text) t))
+                      ((symbol-function 'delete-file)
+                       (lambda (file &optional _trash)
+                         (funcall real-delete file nil)))
+                      ((symbol-function
+                        'pilish--session-browser-fetch-and-render)
+                       #'ignore)
+                      ((symbol-function 'message) #'ignore))
+              (pilish-test--session-command-at-point
+               parent-item #'pilish-session-browser-delete
+               (list parent-item child-item))))
+          (should-not (file-symlink-p link))
+          (should (file-exists-p target))
+          (should (file-exists-p child))
+          (should (string-match-p
+                   "become roots if their parent leaves the archive"
+                   prompt))
+          ;; A subsequent archive snapshot containing the retained target
+          ;; still attaches the child instead of rendering it as a root.
+          (let* ((threaded
+                  (pilish--session-thread-items
+                   (list target-item child-item)))
+                 (child-row
+                  (cl-find child threaded
+                           :key (lambda (entry)
+                                  (plist-get (car entry) :path))
+                           :test #'equal)))
+            (should child-row)
+            (should-not (string-empty-p (cadr child-row)))))
+      (when (file-directory-p base)
+        (delete-directory base t)))))
+
+(ert-deftest pilish-test-session-delete-more-than-three-skips-child-names ()
+  "A count-only warning never formats names that it will omit."
+  (let* ((parent-path "/tmp/pilish-delete-many-parent.jsonl")
+         (parent (list :path parent-path :canonicalPath parent-path
+                       :cwd "/work/many" :name "Many-child parent"
+                       :messageCount 1
+                       :modified "2026-03-02T10:00:00Z"))
+         (children
+          (cl-loop for n from 1 to 4
+                   for path = (format "/tmp/pilish-delete-many-%d.jsonl" n)
+                   collect (list :path path :canonicalPath path
+                                 :canonicalParentSession parent-path
+                                 :cwd "/work/many"
+                                 :name (format "Omitted child %d" n)
+                                 :messageCount 1
+                                 :modified "2026-03-02T11:00:00Z")))
+         (items (cons parent children))
+         (real-display (symbol-function 'pilish--session-display-name))
+         (prompt nil))
+    (with-temp-buffer
+      (pilish-session-browser-mode)
+      (setq pilish--session-browser-items items)
+      (pilish--session-browser-rerender)
+      (goto-char (point-min))
+      (search-forward "Many-child parent")
+      (backward-char)
+      (cl-letf (((symbol-function 'pilish--session-display-name)
+                 (lambda (item)
+                   (if (memq item children)
+                       (ert-fail "count-only warning formatted a child name")
+                     (funcall real-display item))))
+                ((symbol-function 'y-or-n-p)
+                 (lambda (text) (setq prompt text) nil)))
+        (pilish-session-browser-delete)))
+    (should (string-match-p "4 direct child sessions" prompt))
+    (should-not (string-match-p "Omitted child" prompt))))
+
+(ert-deftest pilish-test-session-delete-filter-does-not-hide-child-warning ()
+  "Child warning uses the full snapshot, not the visible query result."
+  (let* ((parent (make-temp-file "pilish-delete-filter-parent-" nil ".jsonl"))
+         (child (make-temp-file "pilish-delete-filter-child-" nil ".jsonl"))
+         (parent-item (list :path parent :cwd "/work/filter"
+                            :name "Only target" :messageCount 1
+                            :modified "2026-03-02T10:00:00Z"))
+         (child-item (list :path child :cwd "/work/filter"
+                           :firstMessage "Hidden fork"
+                           :parentSessionPath parent :messageCount 1
+                           :modified "2026-03-02T11:00:00Z"))
+         (prompt nil)
+         (delete-calls nil))
+    (unwind-protect
+        (let ((delete-by-moving-to-trash t))
+          (cl-letf (((symbol-function 'y-or-n-p)
+                     (lambda (text) (setq prompt text) nil))
+                    ((symbol-function 'delete-file)
+                     (lambda (&rest args) (push args delete-calls))))
+            (pilish-test--session-command-at-point
+             parent-item #'pilish-session-browser-delete
+             (list parent-item child-item)
+             (lambda ()
+               (setq pilish--session-browser-named-only t
+                     pilish--session-browser-search-query "Only target"
+                     pilish--session-browser-search-tokens
+                     '("Only" "target")))))
+          (should (string-match-p "1 direct child session" prompt))
+          (should (string-match-p "Hidden fork" prompt))
+          (should (string-match-p "not deleted" prompt))
+          (should (string-match-p "become roots" prompt))
+          (should-not delete-calls)
+          (should (file-exists-p parent))
+          (should (file-exists-p child)))
+      (delete-file parent nil)
+      (delete-file child nil))))
+
+(ert-deftest pilish-test-session-delete-project-context-distinguishes-routes ()
+  "All-projects confirmations reuse collision-safe project tokens.
+Two routes with the same host and cwd label must remain distinguishable,
+and an invisible cwd component must not enter the prompt verbatim."
+  (let* ((cgj (string #x034f))
+         (alice (list :path "/ssh:alice@host:/sessions/a.jsonl"
+                      :cwd "/ssh:alice@host:/work/app"
+                      :name "Alice session" :messageCount 1
+                      :modified "2026-03-02T10:00:00Z"))
+         (bob (list :path "/ssh:bob@host:/sessions/b.jsonl"
+                    :cwd "/ssh:bob@host:/work/app"
+                    :name "Bob session" :messageCount 1
+                    :modified "2026-03-02T11:00:00Z"))
+         (invisible (list :path "/sessions/invisible.jsonl"
+                          :cwd (concat "/work/a" cgj "pp")
+                          :name "Invisible project" :messageCount 1
+                          :modified "2026-03-02T12:00:00Z"))
+         (items (list alice bob invisible))
+         alice-prompt bob-prompt invisible-prompt)
+    (cl-letf (((symbol-function 'y-or-n-p)
+               (lambda (text) (setq alice-prompt text) nil)))
+      (pilish-test--session-command-at-point
+       alice #'pilish-session-browser-delete items
+       (lambda () (setq pilish--session-browser-scope 'all))))
+    (cl-letf (((symbol-function 'y-or-n-p)
+               (lambda (text) (setq bob-prompt text) nil)))
+      (pilish-test--session-command-at-point
+       bob #'pilish-session-browser-delete items
+       (lambda () (setq pilish--session-browser-scope 'all))))
+    (cl-letf (((symbol-function 'y-or-n-p)
+               (lambda (text) (setq invisible-prompt text) nil)))
+      (pilish-test--session-command-at-point
+       invisible #'pilish-session-browser-delete items
+       (lambda () (setq pilish--session-browser-scope 'all))))
+    (let ((context
+           (lambda (prompt)
+             (when (string-match "in project " prompt)
+               (condition-case nil
+                   (car (read-from-string
+                         (substring prompt (match-end 0))))
+                 (error nil))))))
+      (let ((alice-project (funcall context alice-prompt))
+            (bob-project (funcall context bob-prompt))
+            (invisible-project (funcall context invisible-prompt)))
+        (should alice-project)
+        (should bob-project)
+        (should invisible-project)
+        (should-not (equal alice-project bob-project))
+        (should (string-prefix-p "#" alice-project))
+        (should (string-prefix-p "#" bob-project))
+        (should (string-prefix-p "#" invisible-project))
+        (should-not (string-match-p cgj invisible-prompt))))))
 
 (ert-deftest pilish-test-session-delete-cancelled ()
   "Declining deletion leaves the session file and browser untouched."
   (let* ((path (make-temp-file "pilish-keep-session-" nil ".jsonl"))
-         (item (list :path path :name "Keep this session"
+         (item (list :path path :cwd "/work/keep" :name "Keep this session"
                      :messageCount 1 :modified "2026-03-02T10:00:00Z"))
          (delete-calls nil)
          (refreshes 0))
@@ -5728,28 +6155,67 @@ landed-elsewhere state all leave the window alone."
           (should (file-exists-p path))
           (should-not delete-calls)
           (should (= refreshes 0)))
-      (delete-file path))))
+      (delete-file path nil))))
+
+(ert-deftest pilish-test-session-delete-error-keeps-file-and-browser ()
+  "A failed delete neither refreshes nor removes the selected browser row."
+  (let* ((path (make-temp-file "pilish-delete-error-" nil ".jsonl"))
+         (item (list :path path :cwd "/work/errors" :name "Keep on error"
+                     :messageCount 1 :modified "2026-03-02T10:00:00Z"))
+         (refreshes 0))
+    (unwind-protect
+        (with-temp-buffer
+          (pilish-session-browser-mode)
+          (setq pilish--session-browser-items (list item))
+          (pilish--session-browser-rerender)
+          (goto-char (point-min))
+          (search-forward "Keep on error")
+          (let ((before (buffer-string))
+                (delete-by-moving-to-trash nil))
+            (cl-letf (((symbol-function 'y-or-n-p) (lambda (_prompt) t))
+                      ((symbol-function 'delete-file)
+                       (lambda (&rest _)
+                         (signal 'file-error '("delete refused"))))
+                      ((symbol-function 'pilish--session-browser-fetch-and-render)
+                       (lambda () (setq refreshes (1+ refreshes)))))
+              (should-error (pilish-session-browser-delete)
+                            :type 'file-error))
+            (should (equal (buffer-string) before))
+            (should (string-match-p "Keep on error" (buffer-string)))
+            (should (equal pilish--session-browser-items (list item)))
+            (should (= refreshes 0))
+            (should (file-exists-p path))))
+      (delete-file path nil))))
 
 (ert-deftest pilish-test-session-delete-refuses-live-session ()
-  "A live Pilish process blocks deletion even when its chat is not linked."
-  (let* ((path (make-temp-file "pilish-live-session-" nil ".jsonl"))
-         (item (list :path path :name "Open elsewhere"
+  "Canonical live identity blocks deletion of its selected symlink alias."
+  (let* ((base (pilish-test--make-temp-directory "pilish-delete-live-"))
+         (outside (pilish-test--make-temp-directory
+                   "pilish-delete-live-target-"))
+         (target (expand-file-name "live.jsonl" outside))
+         (link (expand-file-name "live-link.jsonl" base))
+         (item (list :path link :name "Open elsewhere"
                      :messageCount 1 :modified "2026-03-02T10:00:00Z"))
          (chat-buf (generate-new-buffer "*pilish-test-delete-live-chat*"))
          (proc (start-process "pilish-delete-live-test" nil "sleep" "30"))
          (prompted nil)
+         (delete-calls nil)
          (refreshes 0))
+    (write-region "live target" nil target nil 'silent)
+    (make-symbolic-link target link)
     (set-process-query-on-exit-flag proc nil)
     (process-put proc 'pilish-chat-buffer chat-buf)
     (with-current-buffer chat-buf
       (setq pilish--process proc
-            pilish--state (list :session-file path)))
+            pilish--state (list :session-file target)))
     (unwind-protect
         (progn
           (cl-letf (((symbol-function 'y-or-n-p)
                      (lambda (_prompt)
                        (setq prompted t)
                        t))
+                    ((symbol-function 'delete-file)
+                     (lambda (&rest args) (push args delete-calls)))
                     ((symbol-function 'pilish--session-browser-fetch-and-render)
                      (lambda () (setq refreshes (1+ refreshes)))))
             (should
@@ -5762,12 +6228,104 @@ landed-elsewhere state all leave the window alone."
               (format "Session is open in %s — close it first"
                       (buffer-name chat-buf)))))
           (should-not prompted)
-          (should (file-exists-p path))
+          (should-not delete-calls)
+          (should (file-symlink-p link))
+          (should (file-exists-p target))
           (should (= refreshes 0)))
       (when (process-live-p proc)
         (delete-process proc))
       (kill-buffer chat-buf)
-      (delete-file path))))
+      (when (file-directory-p base)
+        (delete-directory base t))
+      (when (file-directory-p outside)
+        (delete-directory outside t)))))
+
+(ert-deftest pilish-test-session-delete-rechecks-live-after-confirmation ()
+  "A session becoming live in the prompt race is not deleted."
+  (let* ((path (make-temp-file "pilish-delete-race-" nil ".jsonl"))
+         (item (list :path path :cwd "/work/race" :name "Race target"
+                     :messageCount 1 :modified "2026-03-02T10:00:00Z"))
+         (chat-buf (generate-new-buffer "*pilish-test-delete-race-chat*"))
+         (proc (start-process "pilish-delete-race-test" nil "sleep" "30"))
+         (prompted 0)
+         (delete-calls nil)
+         (refreshes 0))
+    (set-process-query-on-exit-flag proc nil)
+    (unwind-protect
+        (progn
+          (cl-letf (((symbol-function 'y-or-n-p)
+                     (lambda (_prompt)
+                       (cl-incf prompted)
+                       ;; It was closed at the first guard and becomes a
+                       ;; live Pilish session while the user decides.
+                       (process-put proc 'pilish-chat-buffer chat-buf)
+                       (with-current-buffer chat-buf
+                         (setq pilish--process proc
+                               pilish--state (list :session-file path)))
+                       t))
+                    ((symbol-function 'delete-file)
+                     (lambda (&rest args) (push args delete-calls)))
+                    ((symbol-function 'pilish--session-browser-fetch-and-render)
+                     (lambda () (setq refreshes (1+ refreshes)))))
+            (should-error
+             (pilish-test--session-command-at-point
+              item #'pilish-session-browser-delete)
+             :type 'user-error))
+          (should (= prompted 1))
+          (should-not delete-calls)
+          (should (= refreshes 0))
+          (should (file-exists-p path)))
+      (when (process-live-p proc)
+        (delete-process proc))
+      (kill-buffer chat-buf)
+      (delete-file path nil))))
+
+(ert-deftest pilish-test-session-delete-rejects-observed-canonical-retarget ()
+  "The final observation rejects a symlink retargeted during confirmation."
+  (let* ((base (pilish-test--make-temp-directory
+                "pilish-delete-canonical-retarget-"))
+         (target-a (expand-file-name "original.jsonl" base))
+         (target-b (expand-file-name "retargeted.jsonl" base))
+         (link (expand-file-name "selected.jsonl" base))
+         (item (list :path link :cwd "/work/retarget"
+                     :name "Canonical retarget"
+                     :messageCount 1 :modified "2026-03-02T10:00:00Z"))
+         (real-delete (symbol-function 'delete-file))
+         (delete-calls nil)
+         (refreshes 0))
+    (write-region "original" nil target-a nil 'silent)
+    (write-region "retargeted" nil target-b nil 'silent)
+    (make-symbolic-link target-a link)
+    (unwind-protect
+        (progn
+          (cl-letf (((symbol-function 'y-or-n-p)
+                     (lambda (_prompt)
+                       ;; Make the final canonical observation differ from
+                       ;; the one captured before confirmation.
+                       (funcall real-delete link nil)
+                       (make-symbolic-link target-b link)
+                       t))
+                    ((symbol-function 'delete-file)
+                     (lambda (&rest args) (push args delete-calls)))
+                    ((symbol-function
+                      'pilish--session-browser-fetch-and-render)
+                     (lambda () (cl-incf refreshes))))
+            (should
+             (equal
+              (error-message-string
+               (should-error
+                (pilish-test--session-command-at-point
+                 item #'pilish-session-browser-delete)
+                :type 'user-error))
+              "Selected session changed while awaiting confirmation")))
+          (should-not delete-calls)
+          (should (= refreshes 0))
+          (should (file-symlink-p link))
+          (should (equal (file-truename link) (file-truename target-b)))
+          (should (equal (pilish-test--file-contents target-a) "original"))
+          (should (equal (pilish-test--file-contents target-b) "retargeted")))
+      (when (file-directory-p base)
+        (delete-directory base t)))))
 
 (ert-deftest pilish-test-session-delete-ignores-non-session-section ()
   "Delete on a grouping header does not treat its value as a file path."
