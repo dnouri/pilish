@@ -77,11 +77,14 @@
 ;;   content, null content blocks) degrade to empty previews instead
 ;;   of throwing like the reference would; session files are parsed
 ;;   without validation and old or hand-edited files can carry them.
-;; - Entries with duplicate ids (pi generates collision-checked unique
-;;   ids, so only hand-edited files hit this) keep tree building total:
-;;   each entry expands at most once, rather than reproducing the
-;;   reference's equally degenerate output (which loops forever when a
-;;   duplicate id also closes a cycle).
+;; - Historical Pi versions could persist duplicated headers and entries
+;;   while forking.  Repeated entries with the same nonempty id and equal
+;;   content canonicalize to one occurrence.  Differing repeats use Pi's
+;;   deterministic later-wins entry while carrying an explicit ambiguity
+;;   diagnostic.  Ambiguous ids are unaddressable/unmarked, and ancestry
+;;   that would cross one fails closed; unrelated history remains useful.
+;;   Nil/empty legacy ids stay visible but unaddressable and do not
+;;   participate in duplicate detection.
 ;; - `pilish--jsonl-shorten-path' replaces the HOME (or
 ;;   USERPROFILE) prefix blindly: /home/tes also matches /home/tester/x.
 ;;   Faithful port of the upstream quirk.
@@ -93,11 +96,13 @@
 ;;   the file mtime instead of the newest message timestamp (one stat
 ;;   versus a per-line compare).  Append-only files agree, and the
 ;;   Navigation rewrites arguably make mtime more correct.
-;; - `pilish-jsonl-navigation-target's :current-p refines pi's
-;;   navigateTree raw-id no-op with the computed leaf rule and visible
-;;   resolution: a self-target that is the literal leaf remains current,
-;;   while a trailing bookkeeping leaf folds up onto the visible entry it
-;;   sits on and a re-edit target compares its parent position.
+;; - `pilish-jsonl-navigation-target's :current-p describes whether its
+;;   COMPUTED target position is already current, including the useful
+;;   historical-user re-edit case where the prompt's parent is current.
+;;   `pilish-jsonl-current-projected-id' separately preserves pi's
+;;   selected-entry identity check: a current user prompt is a no-op
+;;   before the user-message rewind rule, and trailing projection-away
+;;   bookkeeping resolves back to that prompt.
 ;;
 ;; All tree traversals are iterative (explicit stacks, reversed
 ;; pre-order bottom-up builds); real session trees reach thousands of
@@ -124,6 +129,133 @@ JSON null, absent, and non-string values all read as nil."
 Label, session_info, and custom entries are bookkeeping: they vanish and
 their children are promoted to the nearest visible ancestor."
   (member type '("label" "session_info" "custom")))
+
+(defun pilish--jsonl-canonicalize-entries (entries)
+  "Canonicalize duplicate addressable ids in ENTRIES.
+Return (:entries VECTOR :ambiguousIds LIST :repeated-p BOOL).  For each
+nonempty string id, retain only its last physical occurrence, matching
+Pi's index.  Equal repeats are benign historical duplication; differing
+repeats additionally enter :ambiguousIds in first-conflict order.
+Nil/empty/malformed legacy ids are all retained and never ambiguous."
+  (let ((missing (make-symbol "missing"))
+        (last-entry (make-hash-table :test #'equal))
+        (last-index (make-hash-table :test #'equal))
+        (ambiguous (make-hash-table :test #'equal))
+        (ambiguous-ids nil)
+        (repeated-p nil))
+    (dotimes (i (length entries))
+      (let* ((entry (aref entries i))
+             (id (pilish--normalize-string-or-null
+                  (plist-get entry :id))))
+        (when id
+          (let ((previous (gethash id last-entry missing)))
+            (unless (eq previous missing)
+              (setq repeated-p t)
+              (when (and (not (equal previous entry))
+                         (not (gethash id ambiguous)))
+                (puthash id t ambiguous)
+                (push id ambiguous-ids)))
+            (puthash id entry last-entry)
+            (puthash id i last-index)))))
+    (let (canonical)
+      (dotimes (i (length entries))
+        (let* ((entry (aref entries i))
+               (id (pilish--normalize-string-or-null
+                    (plist-get entry :id))))
+          (when (or (null id) (= i (gethash id last-index)))
+            (push entry canonical))))
+      (list :entries (vconcat (nreverse canonical))
+            :ambiguousIds (nreverse ambiguous-ids)
+            :repeated-p repeated-p))))
+
+(defun pilish--jsonl-duplicate-diagnostic (ambiguous-ids)
+  "Return an honest diagnostic for AMBIGUOUS-IDS, or nil."
+  (when ambiguous-ids
+    (format "ambiguous duplicate entry id%s: %s"
+            (if (cdr ambiguous-ids) "s" "")
+            (mapconcat (lambda (id) (format "%S" id))
+                       ambiguous-ids ", "))))
+
+(defun pilish--jsonl-add-duplicate-metadata (result ambiguous-ids)
+  "Append duplicate metadata for AMBIGUOUS-IDS to RESULT."
+  (if ambiguous-ids
+      (append result
+              (list :diagnostic
+                    (pilish--jsonl-duplicate-diagnostic ambiguous-ids)
+                    :ambiguousIds ambiguous-ids))
+    result))
+
+(defun pilish--jsonl-merge-ids (&rest id-lists)
+  "Return stable equal-deduplicated ids from ID-LISTS."
+  (let ((seen (make-hash-table :test #'equal))
+        (result nil))
+    (dolist (ids id-lists)
+      (dolist (id ids)
+        (unless (gethash id seen)
+          (puthash id t seen)
+          (push id result))))
+    (nreverse result)))
+
+(defun pilish--jsonl-raw-tree-entries (tree)
+  "Return raw TREE entries in iterative pre-order."
+  (let ((stack (append tree nil))
+        (entries nil))
+    (while stack
+      (let* ((node (pop stack))
+             (children (plist-get node :children)))
+        (push (plist-get node :entry) entries)
+        (when (vectorp children)
+          (setq stack (append (append children nil) stack)))))
+    (vconcat (nreverse entries))))
+
+(defun pilish--jsonl-raw-tree-ambiguous-ids (tree)
+  "Return stable addressable ids marked :ambiguousId in raw TREE.
+Builder output is already structurally unique, so this metadata is the
+only way the established two-argument builder-to-projector composition
+can retain a differing-duplicate diagnostic.  Traversal is iterative."
+  (let ((seen (make-hash-table :test #'equal))
+        (stack (append tree nil))
+        (ids nil))
+    (while stack
+      (let* ((node (pop stack))
+             (entry (plist-get node :entry))
+             (id (pilish--normalize-string-or-null
+                  (plist-get entry :id)))
+             (children (plist-get node :children)))
+        (when (and id
+                   (plist-get node :ambiguousId)
+                   (not (gethash id seen)))
+          (puthash id t seen)
+          (push id ids))
+        (when (vectorp children)
+          (setq stack (append (append children nil) stack)))))
+    (nreverse ids)))
+
+(defun pilish-jsonl-tree-ids-unique-p (tree &optional raw-p)
+  "Return non-nil when nested TREE has no duplicate addressable ids.
+TREE is projected when RAW-P is nil; otherwise nodes have the raw
+`:entry' shape accepted by `pilish-jsonl-project-tree'.  Traversal is
+iterative.  Repeated absent/invalid legacy ids are deliberately ignored,
+so only repeated nonempty strings fail this defensive check.  Canonical
+builder/projection results are structurally unique and carry ambiguity
+metadata separately."
+  (let ((seen (make-hash-table :test #'equal))
+        (stack (append tree nil))
+        (unique t))
+    (while (and unique stack)
+      (let* ((node (pop stack))
+             (entry (and raw-p (plist-get node :entry)))
+             (id (pilish--normalize-string-or-null
+                  (plist-get (or entry node) :id)))
+             (children (plist-get node :children)))
+        (when id
+          (if (gethash id seen)
+              (setq unique nil)
+            (puthash id t seen)))
+        (when (vectorp children)
+          (dotimes (i (length children))
+            (push (aref children i) stack)))))
+    unique))
 
 ;;;; Reading Session Files
 
@@ -444,8 +576,17 @@ order; children are sorted by timestamp with ties keeping file order.
 Label entries replay in file order with latest-wins folding onto their
 targetId, an empty label clearing like an absent one; cleared labels
 omit both label keys.  Entries unreachable from any root (cycles) are
-dropped.  Traversal is iterative."
-  (let* ((count (length entries))
+dropped.  Traversal is iterative.
+
+Duplicate nonempty ids are canonicalized before linking: equal repeats
+collapse silently, while differing repeats retain the last occurrence
+and add :diagnostic/:ambiguousIds to the result.  Raw nodes for those
+ids carry :ambiguousId t so projection and browser markers stay honest.
+Nil/empty legacy ids remain distinct and unaddressable."
+  (let* ((canonicalized (pilish--jsonl-canonicalize-entries entries))
+         (entries (plist-get canonicalized :entries))
+         (ambiguous-ids (plist-get canonicalized :ambiguousIds))
+         (count (length entries))
          (leaf-id (when (> count 0)
                     (plist-get (aref entries (1- count)) :id)))
          ;; Pass A: index every entry by id, fold labels in file order.
@@ -507,13 +648,17 @@ dropped.  Traversal is iterative."
       (dolist (entry order)
         (let* ((id (plist-get entry :id))
                (label (gethash id labels))
+               (base (append
+                      (list :entry entry
+                            :children (vconcat (gethash id child-nodes)))
+                      (when (member id ambiguous-ids)
+                        (list :ambiguousId t))))
                (node (if label
-                         (list :entry entry
-                               :children (vconcat (gethash id child-nodes))
-                               :label label
-                               :labelTimestamp (gethash id label-timestamps))
-                       (list :entry entry
-                             :children (vconcat (gethash id child-nodes)))))
+                         (append base
+                                 (list :label label
+                                       :labelTimestamp
+                                       (gethash id label-timestamps)))
+                       base))
                (parent (pilish--jsonl-entry-parent-id entry)))
           (if (or (null parent)
                   (equal parent id)
@@ -521,8 +666,10 @@ dropped.  Traversal is iterative."
               (push node built-roots)
             (puthash parent (cons node (gethash parent child-nodes))
                      child-nodes))))
-      (list :tree (vconcat built-roots)
-            :leafId leaf-id))))
+      (pilish--jsonl-add-duplicate-metadata
+       (list :tree (vconcat built-roots)
+             :leafId leaf-id)
+       ambiguous-ids))))
 
 ;;;; Text Extraction and Previews
 
@@ -839,11 +986,15 @@ BRANCH-CALLS and GLOBAL-CALLS feed tool-result resolution."
     ;; Unknown future entry types keep their type with no payload.
     (_ (append base (list :type (plist-get entry :type))))))
 
-(defun pilish--jsonl-resolve-projected-leaf-id (roots leaf-id)
+(defun pilish--jsonl-resolve-projected-leaf-id
+    (roots leaf-id &optional ambiguous-ids)
   "Resolve raw LEAF-ID to the nearest visible entry id under ROOTS.
-Walks the raw parent chain (over all nodes, filtered ones included)
-until a non-filtered entry appears.  Nil or unknown ids resolve to nil."
-  (when leaf-id
+Walk the raw parent chain (over all nodes, filtered ones included)
+until a non-filtered entry appears.  Nil or unknown ids resolve to nil.
+Any id in AMBIGUOUS-IDS also resolves to nil rather than choosing an
+occurrence.  A direct uncanonicalized duplicate tree fails closed, and
+a seen set keeps malformed parent cycles total."
+  (when (and leaf-id (pilish-jsonl-tree-ids-unique-p roots t))
     (let ((parent-by-id (make-hash-table :test #'equal))
           (visible-ids (make-hash-table :test #'equal))
           (stack (append roots nil))
@@ -851,49 +1002,99 @@ until a non-filtered entry appears.  Nil or unknown ids resolve to nil."
       (while stack
         (let* ((node (pop stack))
                (entry (plist-get node :entry))
-               (id (plist-get entry :id)))
-          (puthash id (pilish--jsonl-entry-parent-id entry)
-                   parent-by-id)
-          (unless (pilish--jsonl-filtered-entry-p
-                   (plist-get entry :type))
-            (puthash id t visible-ids))
+               (id (pilish--normalize-string-or-null
+                    (plist-get entry :id))))
+          (when id
+            (puthash id (pilish--jsonl-entry-parent-id entry)
+                     parent-by-id)
+            (unless (pilish--jsonl-filtered-entry-p
+                     (plist-get entry :type))
+              (puthash id t visible-ids)))
           (setq stack (append (plist-get node :children) stack))))
-      (let ((current leaf-id))
-        (while (and current (not found))
-          (if (gethash current visible-ids)
-              (setq found current)
-            (setq current (gethash current parent-by-id))))
+      (let ((current (pilish--normalize-string-or-null leaf-id))
+            (seen (make-hash-table :test #'equal)))
+        (while (and (stringp current)
+                    (not found)
+                    (not (gethash current seen)))
+          (puthash current t seen)
+          (cond
+           ((member current ambiguous-ids)
+            (setq current nil))
+           ((gethash current visible-ids)
+            (setq found current))
+           (t
+            (setq current (gethash current parent-by-id)))))
         found))))
 
-(defun pilish-jsonl-project-tree (tree &optional leaf-id)
+(defun pilish-jsonl-project-tree
+    (tree &optional leaf-id inherited-ambiguous-ids)
   "Project the raw session TREE to the flat display dialect.
 TREE is a vector of raw nodes (:entry :children :label
 :labelTimestamp), the output of `pilish-jsonl-build-tree' or
-pi's get_tree.  Return (:tree :leafId): bookkeeping entries (label,
-session_info, custom) are dropped with their children promoted to the
-nearest visible ancestor, toolResult messages resolve their toolCallId
-branch-locally first, and :parentId points at the nearest visible
-ancestor.  LEAF-ID, when non-nil, is a raw leaf id resolved up to the
-nearest visible entry.  Traversal is iterative."
-  (let* ((global-calls (pilish--jsonl-build-tool-call-map tree))
+pi's get_tree.  Return (:tree :leafId), plus :diagnostic and
+:ambiguousIds when differing duplicate ids were canonicalized.
+Bookkeeping entries (label, session_info, custom) are dropped with
+their children promoted to the nearest visible ancestor, toolResult
+messages resolve their toolCallId branch-locally first, and :parentId
+points at the nearest visible ancestor.  LEAF-ID, when non-nil, is a
+raw leaf id resolved up to the nearest visible entry.  Traversal is
+iterative.
+
+Direct duplicate raw trees are canonicalized too: equal repeats collapse;
+differing repeats use the later occurrence and remain explicitly marked.
+When an ambiguous bookkeeping node is filtered away, its next visible
+child carries :ambiguousParent so active ancestry cannot cross the hidden
+choice.  INHERITED-AMBIGUOUS-IDS carries build-time ambiguity explicitly;
+the established two-argument form also harvests :ambiguousId markers
+from builder output, which is already structurally unique.  Nil legacy
+ids remain."
+  (let* ((raw-entries (pilish--jsonl-raw-tree-entries tree))
+         (raw-ambiguous-ids
+          (pilish--jsonl-raw-tree-ambiguous-ids tree))
+         (canonicalized (pilish--jsonl-canonicalize-entries raw-entries))
+         (ambiguous-ids
+          (pilish--jsonl-merge-ids
+           inherited-ambiguous-ids
+           raw-ambiguous-ids
+           (plist-get canonicalized :ambiguousIds)))
+         (tree
+          (if (plist-get canonicalized :repeated-p)
+              (plist-get
+               (pilish-jsonl-build-tree
+                (plist-get canonicalized :entries))
+               :tree)
+            tree))
+         (global-calls (pilish--jsonl-build-tool-call-map tree))
          (empty-map (make-hash-table :test #'equal))
-         ;; Work items: (node parent-visible-node branch-calls).
+         ;; Work items: (node parent-visible-node branch-calls
+         ;;              ambiguous-promoted-parent-p).
          (stack nil)
          ;; RECORDS ends up holding the reversed pre-order.
          (records nil)
          (child-nodes (make-hash-table :test #'eq))
          (built-roots nil))
     (dolist (node (nreverse (append tree nil)))
-      (push (list node nil empty-map) stack))
+      (push (list node nil empty-map nil) stack))
     (while stack
-      (pcase-let ((`(,node ,parent-visible ,branch-calls) (pop stack)))
-        (let ((entry (plist-get node :entry)))
+      (pcase-let
+          ((`(,node ,parent-visible ,branch-calls ,ambiguous-parent-p)
+            (pop stack)))
+        (let* ((entry (plist-get node :entry))
+               (id (pilish--normalize-string-or-null
+                    (plist-get entry :id)))
+               (node-ambiguous-p
+                (or (plist-get node :ambiguousId)
+                    (member id ambiguous-ids))))
           (if (pilish--jsonl-filtered-entry-p
                (plist-get entry :type))
-              ;; Promote children to the same target, parent, and map.
+              ;; Promote children to the same visible parent and map.  If
+              ;; this omitted chain contains ambiguity, retain that edge
+              ;; boundary so browser ancestry markers stop truthfully.
               (dolist (child (nreverse (append (plist-get node :children)
                                                nil)))
-                (push (list child parent-visible branch-calls) stack))
+                (push (list child parent-visible branch-calls
+                            (or ambiguous-parent-p node-ambiguous-p))
+                      stack))
             (let ((child-map branch-calls))
               (when (and (equal (plist-get entry :type) "message")
                          (equal (plist-get (plist-get entry :message) :role)
@@ -906,27 +1107,41 @@ nearest visible entry.  Traversal is iterative."
                       (puthash (nth 0 call)
                                (list (nth 1 call) (nth 2 call))
                                child-map)))))
-              ;; The node itself resolves against its incoming map.
-              (push (list node parent-visible branch-calls) records)
+              ;; The node itself resolves against its incoming map.  Once
+              ;; visible, it carries any promoted boundary itself; its
+              ;; children can reach it directly and need no inherited flag.
+              (push (list node parent-visible branch-calls
+                          ambiguous-parent-p)
+                    records)
               (dolist (child (nreverse (append (plist-get node :children)
                                                nil)))
-                (push (list child node child-map) stack)))))))
+                (push (list child node child-map nil) stack)))))))
     ;; Build bottom-up: iterating RECORDS visits descendants before
     ;; parents and later siblings before earlier ones, so plain pushes
     ;; land children in natural order.
     (dolist (record records)
-      (pcase-let ((`(,node ,parent-visible ,branch-calls) record))
+      (pcase-let
+          ((`(,node ,parent-visible ,branch-calls ,ambiguous-parent-p)
+            record))
         (let* ((entry (plist-get node :entry))
                (label (pilish--normalize-string-or-null
                        (plist-get node :label)))
+               (id (pilish--normalize-string-or-null
+                    (plist-get entry :id)))
                (base (append
-                      (list :id (plist-get entry :id)
+                      (list :id id
                             :parentId (when parent-visible
-                                        (plist-get (plist-get parent-visible
-                                                              :entry)
-                                                   :id))
+                                        (pilish--normalize-string-or-null
+                                         (plist-get
+                                          (plist-get parent-visible :entry)
+                                          :id)))
                             :timestamp (plist-get entry :timestamp))
                       (when label (list :label label))
+                      (when (or (plist-get node :ambiguousId)
+                                (member id ambiguous-ids))
+                        (list :ambiguousId t))
+                      (when ambiguous-parent-p
+                        (list :ambiguousParent t))
                       (list :children (vconcat (gethash node child-nodes)))))
                (projected
                 (if (equal (plist-get entry :type) "message")
@@ -939,9 +1154,11 @@ nearest visible entry.  Traversal is iterative."
                        (cons projected (gethash parent-visible child-nodes))
                        child-nodes)
             (push projected built-roots)))))
-    (list :tree (vconcat built-roots)
-          :leafId (pilish--jsonl-resolve-projected-leaf-id
-                   tree leaf-id))))
+    (pilish--jsonl-add-duplicate-metadata
+     (list :tree (vconcat built-roots)
+           :leafId (pilish--jsonl-resolve-projected-leaf-id
+                    tree leaf-id ambiguous-ids))
+     ambiguous-ids)))
 
 (defun pilish-jsonl-project-session-file (path)
   "Read, build, and project the session file at PATH in one step.
@@ -957,28 +1174,31 @@ reads of a file a live pi appends to concurrently."
     (let ((built (pilish-jsonl-build-tree
                   (plist-get session :entries))))
       (pilish-jsonl-project-tree
-       (plist-get built :tree) (plist-get built :leafId)))))
+       (plist-get built :tree)
+       (plist-get built :leafId)
+       (plist-get built :ambiguousIds)))))
 
 ;;;; Tree Navigation
 
-(defun pilish--jsonl-resolve-visible (entries id)
-  "Resolve ID to the nearest non-filtered entry id within ENTRIES.
-Walks the parent chain up while the entry at hand is filtered from
-projection (label, session_info, custom) — the flat-entry sibling of
-`pilish--jsonl-resolve-projected-leaf-id'.  Iterative with a
-cycle guard; a nil or unknown ID, and a chain that climbs past every
-visible entry, both resolve to nil."
+(defun pilish--jsonl-resolve-visible-canonical
+    (entries id ambiguous-ids)
+  "Resolve ID through canonical ENTRIES, refusing AMBIGUOUS-IDS."
   (let ((index (make-hash-table :test #'equal)))
     (dotimes (i (length entries))
-      ;; Duplicate ids (hand-edited files only): later wins, mirroring
-      ;; `pilish-jsonl-build-tree' and pi's index build.
-      (puthash (plist-get (aref entries i) :id) (aref entries i) index))
-    (let ((current id)
+      (let* ((entry (aref entries i))
+             (entry-id (pilish--normalize-string-or-null
+                        (plist-get entry :id))))
+        (when entry-id
+          (puthash entry-id entry index))))
+    (let ((current (pilish--normalize-string-or-null id))
           (seen (make-hash-table :test #'equal))
           (found 'unresolved))
       (while (eq found 'unresolved)
         (cond
-         ((or (null current) (gethash current seen)) (setq found nil))
+         ((or (null current)
+              (member current ambiguous-ids)
+              (gethash current seen))
+          (setq found nil))
          (t
           (puthash current t seen)
           (let ((entry (gethash current index)))
@@ -989,11 +1209,53 @@ visible entry, both resolve to nil."
               (setq found (and entry current)))))))
       found)))
 
+(defun pilish--jsonl-resolve-visible (entries id)
+  "Resolve ID to the nearest non-filtered entry id within ENTRIES.
+Walk the parent chain past projection-away bookkeeping.  Equal duplicate
+entries canonicalize harmlessly.  Differing duplicates use the later
+entry for unrelated lookups, but an ambiguous id encountered at any
+point resolves to nil.  Unknown, nil, legacy, and cyclic ids also return
+nil."
+  (let* ((canonicalized (pilish--jsonl-canonicalize-entries entries))
+         (canonical (plist-get canonicalized :entries))
+         (ambiguous-ids (plist-get canonicalized :ambiguousIds)))
+    (pilish--jsonl-resolve-visible-canonical
+     canonical id ambiguous-ids)))
+
+(defun pilish-jsonl-current-projected-id (session)
+  "Return SESSION's actual current projected entry id, or nil.
+SESSION is a `pilish-jsonl-read-file' result.  Resolve its raw leaf up
+past only the bookkeeping records omitted by
+`pilish-jsonl-project-tree' (label, session_info, and custom).  Entries
+that a browser filter may hide later — tools, model changes, and
+thinking-level changes — remain projected and therefore remain the
+actual current entry."
+  (pilish--jsonl-resolve-visible
+   (plist-get session :entries) (plist-get session :leafId)))
+
+(defun pilish--jsonl-chain-touches-ambiguous-p
+    (index start-id ambiguous-ids)
+  "Return non-nil when START-ID's parent chain hits AMBIGUOUS-IDS.
+INDEX maps canonical entry ids to entries.  Unknown parents terminate
+safely, and a seen set bounds malformed parent cycles."
+  (let ((current (pilish--normalize-string-or-null start-id))
+        (seen (make-hash-table :test #'equal))
+        found)
+    (while (and current (not found) (not (gethash current seen)))
+      (puthash current t seen)
+      (if (member current ambiguous-ids)
+          (setq found t)
+        (setq current
+              (when-let* ((entry (gethash current index)))
+                (pilish--jsonl-entry-parent-id entry)))))
+    found))
+
 (defun pilish-jsonl-navigation-target (session target-id)
   "Return the navigation target for TARGET-ID within SESSION.
 SESSION is a `pilish-jsonl-read-file' result; return nil when
-TARGET-ID names no entry (a raw id the file does not carry), otherwise
-the plist (:leaf-id ID-OR-NIL :prefill TEXT? :current-p BOOL):
+TARGET-ID names no entry, is ambiguous, or computes a rewrite chain
+through an ambiguous id.  Otherwise return the plist
+  (:leaf-id ID-OR-NIL :prefill TEXT? :current-p BOOL):
 
   - :leaf-id is the entry the session file must END on after the
     navigate rewrite — pi's navigateTree leaf rule: a user message or a
@@ -1012,34 +1274,62 @@ the plist (:leaf-id ID-OR-NIL :prefill TEXT? :current-p BOOL):
     nil equal to nil).  Thus a literal self-target leaf remains pi's
     raw-id no-op, a trailing bookkeeping leaf folds up onto the entry
     it sits on, and a rewind target is current when its parent is the
-    current resolved position."
-  (let* ((entries (plist-get session :entries))
+    current resolved position.  This is deliberately different from
+    selected-entry identity: callers implementing pi's initial no-op
+    must first compare TARGET-ID with
+    `pilish-jsonl-current-projected-id', so a current user entry is not
+    mistaken for a request to re-edit it.
+
+Equal duplicate entries canonicalize to one.  A differing duplicate id
+and any target whose required ancestor chain crosses it fail closed;
+unrelated unique branches remain available through the deterministic
+later-wins canonical index."
+  (let* ((raw-entries (plist-get session :entries))
+         (canonicalized
+          (pilish--jsonl-canonicalize-entries raw-entries))
+         (entries (plist-get canonicalized :entries))
+         (ambiguous-ids (plist-get canonicalized :ambiguousIds))
          (index (make-hash-table :test #'equal)))
     (dotimes (i (length entries))
-      (puthash (plist-get (aref entries i) :id) (aref entries i) index))
-    (when-let* ((entry (and (stringp target-id)
-                            (gethash target-id index))))
-      (let* ((rewind-p (or (equal (plist-get entry :type) "custom_message")
-                           (and (equal (plist-get entry :type) "message")
-                                (equal (plist-get (plist-get entry :message) :role)
-                                       "user"))))
-             (leaf-id (if rewind-p
-                          (pilish--jsonl-entry-parent-id entry)
-                        target-id))
-             (text (when rewind-p
-                     (pilish--jsonl-extract-text
-                      (if (equal (plist-get entry :type) "custom_message")
-                          (plist-get entry :content)
-                        (plist-get (plist-get entry :message) :content))
-                      nil "")))
-             (raw-leaf (plist-get session :leafId)))
-        (append
-         (list :leaf-id leaf-id)
-         (when (and text (not (string-empty-p text)))
-           (list :prefill text))
-         (list :current-p
-               (equal (pilish--jsonl-resolve-visible entries leaf-id)
-                      (pilish--jsonl-resolve-visible entries raw-leaf))))))))
+      (let* ((entry (aref entries i))
+             (id (pilish--normalize-string-or-null
+                  (plist-get entry :id))))
+        (when id
+          (puthash id entry index))))
+    (when-let* ((normalized-target
+                 (pilish--normalize-string-or-null target-id))
+                ((not (member normalized-target ambiguous-ids)))
+                (entry (gethash normalized-target index)))
+        (let* ((rewind-p
+                (or (equal (plist-get entry :type) "custom_message")
+                    (and (equal (plist-get entry :type) "message")
+                         (equal (plist-get (plist-get entry :message) :role)
+                                "user"))))
+               (leaf-id (if rewind-p
+                            (pilish--jsonl-entry-parent-id entry)
+                          normalized-target))
+               (text (when rewind-p
+                       (pilish--jsonl-extract-text
+                        (if (equal (plist-get entry :type) "custom_message")
+                            (plist-get entry :content)
+                          (plist-get (plist-get entry :message) :content))
+                        nil "")))
+               (raw-leaf (plist-get session :leafId)))
+          ;; Even a unique target can require an ambiguous ancestor in
+          ;; the rewrite chain.  Refuse instead of choosing an occurrence.
+          (unless (or (member leaf-id ambiguous-ids)
+                      (pilish--jsonl-chain-touches-ambiguous-p
+                       index leaf-id ambiguous-ids))
+            (append
+             (list :leaf-id leaf-id)
+             (when (and text (not (string-empty-p text)))
+               (list :prefill text))
+             (list :current-p
+                   (equal
+                    (pilish--jsonl-resolve-visible-canonical
+                     entries leaf-id ambiguous-ids)
+                    (pilish--jsonl-resolve-visible-canonical
+                     entries raw-leaf ambiguous-ids)))))))))
 
 (defun pilish-jsonl-navigation-lines (path leaf-id)
   "Return PATH's raw lines reordered so the LEAF-ID chain ends the file.
@@ -1064,9 +1354,11 @@ chain walks parent ids from LEAF-ID and stops at nil, self, unknown, or
 cyclic parents (an unknown parent is a root, matching
 `pilish-jsonl-build-tree's roots rule); malformed and blank
 lines after the header are non-chain bytes preserved verbatim in their
-original relative
-positions.  Duplicate entry ids map to their last line; earlier duplicate
-physical lines remain non-chain."
+original relative positions.  Equal duplicate entries are tolerated and
+their last line is canonical.  Differing duplicate ids use that same
+later-wins index for unrelated chains, but a requested chain touching an
+ambiguous id fails closed.  Earlier duplicate and nil/legacy physical
+lines remain non-chain."
   (when leaf-id
     (condition-case nil
         (when (file-readable-p path)
@@ -1114,7 +1406,9 @@ physical lines remain non-chain."
                              (aref lines header-index))
                            'utf-8)))
                 (let* ((parsed (make-vector count nil))
-                       (id-line (make-hash-table :test #'equal)))
+                       (id-line (make-hash-table :test #'equal))
+                       (id-entry (make-hash-table :test #'equal))
+                       (ambiguous-id (make-hash-table :test #'equal)))
                   ;; Lines up to and including the header are never
                   ;; entries: the leading blanks by pi's trim rule, the
                   ;; header by definition.  Everything after parses as
@@ -1127,30 +1421,41 @@ physical lines remain non-chain."
                         (when (consp data)
                           (aset parsed i data)
                           (unless (equal (plist-get data :type) "session")
-                            (let ((id (plist-get data :id)))
-                              (when (stringp id)
-                                ;; Later duplicates win, mirroring the
-                                ;; entry index builds.
+                            (let ((id (pilish--normalize-string-or-null
+                                       (plist-get data :id))))
+                              (when id
+                                (when-let* ((previous
+                                             (gethash id id-entry)))
+                                  (unless (equal previous data)
+                                    (puthash id t ambiguous-id)))
+                                (puthash id data id-entry)
                                 (puthash id i id-line))))))))
-                  (when (gethash leaf-id id-line)
+                  (when (and (gethash leaf-id id-line)
+                             (not (gethash leaf-id ambiguous-id)))
                     ;; Walk leaf to parents using canonical line indices.
                     ;; Each push naturally builds root/orphan-root to leaf,
                     ;; with the requested leaf remaining last.
                     (let ((chain-line-p (make-vector count nil))
                           (chain-lines nil)
                           (current leaf-id)
-                          (walking t))
+                          (walking t)
+                          (valid t))
                       (while walking
-                        (let ((line-index (and current
-                                               (gethash current id-line))))
-                          (if (or (null line-index)
-                                  (aref chain-line-p line-index))
-                              (setq walking nil)
-                            (aset chain-line-p line-index t)
-                            (push line-index chain-lines)
-                            (setq current
-                                  (pilish--jsonl-entry-parent-id
-                                   (aref parsed line-index))))))
+                        (cond
+                         ((gethash current ambiguous-id)
+                          (setq valid nil
+                                walking nil))
+                         (t
+                          (let ((line-index (and current
+                                                 (gethash current id-line))))
+                            (if (or (null line-index)
+                                    (aref chain-line-p line-index))
+                                (setq walking nil)
+                              (aset chain-line-p line-index t)
+                              (push line-index chain-lines)
+                              (setq current
+                                    (pilish--jsonl-entry-parent-id
+                                     (aref parsed line-index))))))))
                       ;; Keep non-chain physical order, then append the
                       ;; canonical chain in its logical parent order.
                       ;; The leading blanks and the header line itself
@@ -1159,18 +1464,19 @@ physical lines remain non-chain."
                       ;; the file, and neither is ever a chain or
                       ;; non-chain line (the id map holds only lines
                       ;; after the header).
-                      (let (front)
-                        (cl-loop for i from (1+ header-index) below count
-                                 unless (aref chain-line-p i)
-                                 do (push (aref lines i) front))
-                        (let (head)
-                          (dotimes (i (1+ header-index))
-                            (push (aref lines i) head))
-                          (vconcat
-                           (nreverse head)
-                           (nreverse front)
-                           (mapcar (lambda (i) (aref lines i))
-                                   chain-lines)))))))))))
+                      (when valid
+                        (let (front)
+                          (cl-loop for i from (1+ header-index) below count
+                                   unless (aref chain-line-p i)
+                                   do (push (aref lines i) front))
+                          (let (head)
+                            (dotimes (i (1+ header-index))
+                              (push (aref lines i) head))
+                            (vconcat
+                             (nreverse head)
+                             (nreverse front)
+                             (mapcar (lambda (i) (aref lines i))
+                                     chain-lines))))))))))))
       (error nil))))
 
 (provide 'pilish-jsonl)

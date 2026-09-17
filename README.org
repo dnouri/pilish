@@ -403,17 +403,47 @@ All-projects archive has no
 wider scope and intentionally shows no action hint.
 
 The tree browser (=C-c C-p w=, or Context =w= in the menu) shows the
-conversation tree Pi persists for a session: =RET= moves the live
-conversation to the node at point, =f= cycles filters (starting from
-the =no-tools= default; see =pilish-tree-browser-default-filter=),
-=/= searches, and =l= sets or clears a label on a node.  Press =?=
-for its menu and =g= to refresh the last persisted state.
+conversation tree Pi persists for a session.  On its first load, point
+starts at the current projected entry or its nearest visible active
+ancestor, falling back to the first visible row when no active-path
+row survives.  =@= marks the actual current entry and =*= marks its active
+ancestors, so a filter that hides the current entry never mislabels an
+ancestor as current.  Moving point yourself wins on later refreshes;
+when a selected row disappears, point first tries its nearest visible
+ancestor from the old snapshot, then the new active path.  Switching
+the linked chat to another session file resets this orientation even
+when a fork shares node IDs with the old file.
+
+Press =RET= to continue from the selected turn.  Selecting the =@=
+entry is a strict no-op before live-process and busy/transition checks,
+including offline or streaming sessions and a current user prompt
+followed only by projected-away bookkeeping records; it neither reads
+or rewrites the session nor replaces the input draft.  A historical
+user prompt or =custom_message= is user-like: it continues from its
+parent and prefills its text when available for editing.  If that
+parent does not exist, Pilish points you to the chat's fork command.
+An assistant or any other historical entry continues from itself.
+Legacy rows without IDs are visible but cannot be continuation targets;
+open the file with Pi once to migrate it.  Historical files with exact
+repeats of the same nonempty-ID entry display that entry once.  If the
+same ID instead names different entries, the later entry is the one
+shown, unrelated unique history remains usable, and the browser shows a
+duplicate-ID warning.  That ambiguous row has no =@= or =*= marker and
+cannot be labeled or used as a continuation target.
+
+=f= cycles filters
+(starting from the =no-tools= default; see
+=pilish-tree-browser-default-filter=), =/= searches, and =l= sets or
+clears a label on a node.  Press =?= for its menu and =g= to refresh
+the last persisted state.  Display and refresh read the JSONL file from
+disk and still work offline; changing position by continuing from a
+historical turn requires the linked live, idle Pilish process.
 
 The tree browser and forking answer different questions.  Example:
 after two turns you want to try a second approach.  The tree browser
 (Pi's =/tree=) keeps both approaches as branches of the /same/
-session file; =RET= picks which branch the live conversation
-continues on.  =C-c C-p f= (=/fork=, or Pi's =/clone=) instead writes
+session file; =RET= continues the live conversation from the selected
+turn on that branch.  =C-c C-p f= (=/fork=, or Pi's =/clone=) instead writes
 a /new/ session file whose header points back at the original, so
 you get two independent sessions — and the session browser's
 Threaded (fork families) view shows that file relationship as a
@@ -464,7 +494,8 @@ The browsers:
 
 | Key       | Context        | Description                                                             |
 |-----------+----------------+-------------------------------------------------------------------------|
-| =RET=     | sessions, tree | Switch to session / move to node at point                               |
+| =RET=     | sessions       | Switch to selected session                                              |
+| =RET=     | tree           | Continue from selected turn                                             |
 | =/=       | sessions, tree | Search with regexp tokens                                               |
 | =s=       | sessions       | Cycle view: Threaded (fork families), Recent activity, or Most messages |
 | =t=       | sessions       | Toggle This project / All projects scope                                |
@@ -809,10 +840,12 @@ Input buffer (normal state):
 | =?=   | transient menu     |
 
 Session and tree browser buffers start in motion state as well.
-Magit's own =j= / =k= section navigation works unmodified, and every
-documented browser key — views, filters, search, scope, rename,
-delete, refresh, dispatch, =RET= — is rebound in motion state so the
-Evil and evil-collection keymap stack never swallows them (evil's
+Magit's own =j= / =k= section navigation works unmodified.  In the
+session browser =RET= switches to the selected session; in the tree
+browser it continues from the selected turn.  Every documented browser
+key — views, filters, search, scope, rename, delete, refresh, dispatch,
+=RET= — is rebound in motion state so the Evil and evil-collection
+keymap stack never swallows them (evil's
 motion state owns =/=, =?= and the =g= prefix; evil-snipe's =f= / =t=
 are disabled in these buffers, mirroring the chat buffer's =f= fork
 binding).

@@ -29,7 +29,7 @@
 ;;
 ;; Provides two read-only, refreshable, keyboard-driven buffers:
 ;;   - Session Browser: find, filter, switch, rename, and delete sessions
-;;   - Tree Browser: navigate conversation tree, label nodes (like TUI /tree)
+;;   - Tree Browser: continue from a selected turn and label nodes (like /tree)
 ;;
 ;; The two browsers display different graphs.  The tree browser moves
 ;; the active path inside ONE session file, while the session browser's
@@ -751,30 +751,55 @@ Returns nil on invalid input."
 ;;;; Tree Helpers
 
 (defun pilish--active-path-ids (tree leaf-id)
-  "Compute the set of node IDs on the active path.
-TREE is the root vector from get_tree.
-LEAF-ID is the current leaf node ID.
-Returns a hash table mapping active node IDs to t."
-  (let ((result (make-hash-table :test 'equal)))
-    (when leaf-id
-      ;; Build parent-id lookup from tree
+  "Compute the total set of string node IDs on TREE's active path.
+LEAF-ID is the current leaf node ID.  Return a hash table mapping
+active node IDs to t.  A malformed tree with duplicate addressable ids
+fails closed to an empty path: no occurrence can truthfully receive an
+active/current marker.  A canonical node carrying :ambiguousId is a
+hard ancestry boundary: omit it and stop, because ancestors reached only
+by choosing one conflicting occurrence are not truthful either.  A
+unique node carrying :ambiguousParent is marked itself, then stops before
+the parent; projection uses that flag when a filtered ambiguous record
+was promoted away.  A seen set bounds malformed unique-id parent cycles.
+Nil/legacy ids are never markers."
+  (let ((result (make-hash-table :test 'equal))
+        (leaf-id (pilish--normalize-string-or-null leaf-id)))
+    (when (and leaf-id (pilish-jsonl-tree-ids-unique-p tree))
+      ;; Build the parent-id lookup from the finite nested tree.
       (let ((parent-map (make-hash-table :test 'equal))
+            (ambiguous (make-hash-table :test 'equal))
+            (ambiguous-parent (make-hash-table :test 'equal))
             (stack (append tree nil)))
         (while stack
           (let* ((node (pop stack))
+                 (parent-id (pilish--normalize-string-or-null
+                             (plist-get node :id)))
                  (children (plist-get node :children)))
+            (when parent-id
+              (when (plist-get node :ambiguousId)
+                (puthash parent-id t ambiguous))
+              (when (plist-get node :ambiguousParent)
+                (puthash parent-id t ambiguous-parent)))
             (when (vectorp children)
               (dotimes (i (length children))
-                (let ((child (aref children i)))
-                  (puthash (plist-get child :id)
-                           (plist-get node :id)
-                           parent-map)
+                (let* ((child (aref children i))
+                       (child-id (pilish--normalize-string-or-null
+                                  (plist-get child :id))))
+                  (when child-id
+                    (puthash child-id parent-id parent-map))
                   (push child stack))))))
-        ;; Walk from leaf to root, marking the active path
-        (let ((current leaf-id))
-          (while current
-            (puthash current t result)
-            (setq current (gethash current parent-map))))))
+        ;; Walk from leaf to root.  Malformed declared parent links can
+        ;; still induce a cycle, so mark each addressable id once.
+        (let ((current leaf-id)
+              (seen (make-hash-table :test 'equal)))
+          (while (and current (not (gethash current seen)))
+            (puthash current t seen)
+            (if (gethash current ambiguous)
+                (setq current nil)
+              (puthash current t result)
+              (setq current
+                    (unless (gethash current ambiguous-parent)
+                      (gethash current parent-map))))))))
     result))
 
 ;;;; Tree Filter Predicates
@@ -2521,8 +2546,8 @@ across a fetch cycle whose intermediate renders destroy sections."
       (cons (magit-section-ident section)
             (- (point) (oref section start))))))
 
-(defun pilish--browse-rerender-preserving-point (buf render-fn
-                                                            &optional fallback)
+(defun pilish--browse-rerender-preserving-point
+    (buf render-fn &optional fallback missing-section-fn ignore-current-anchor)
   "Erase BUF, render via RENDER-FN, restore point by section identity.
 The section at point is captured as a `magit-section-ident' before the
 erase; after rendering, point moves to that section's start (plus the
@@ -2536,28 +2561,45 @@ cycle renders a loading state before the final render.  It is used
 only when the point-local capture yields no anchor, so a plain
 rerender (no FALLBACK) behaves exactly as before.
 
+MISSING-SECTION-FN, when non-nil, is called after rendering with the
+chosen anchor when its exact section is absent (and also when there
+was no anchor).  It may return another Magit section to select.  This
+keeps tree-specific ancestor/active-path policy inside the tree
+browser while retaining this function as the one point-restoration
+mechanism for both browsers.
+
+When IGNORE-CURRENT-ANCHOR is non-nil, do not capture the section under
+point before erasing; only FALLBACK may provide an anchor.  The tree
+browser uses this when another session file takes ownership of a reused
+buffer, so a shared node id from the old file cannot survive its loading
+render and override fresh active-leaf orientation.
+
 After the restore, every live window displaying BUF is synced to the
 restored position: `erase-buffer' clamps all displaying windows to
 bob and `goto-char' moves only the buffer's own point, so without
 `set-window-point' a pane whose window is not selected keeps showing
 point-at-top (same idiom as `pilish--with-scroll-preservation'
-in ui.el).  The sync covers both restore paths — the point-min
-fallback included."
+in ui.el).  The sync covers exact, resolved, and point-min restore
+paths."
   (with-current-buffer buf
-    (let* ((anchor (or (pilish--browse-capture-point-anchor)
+    (let* ((anchor (or (and (not ignore-current-anchor)
+                            (pilish--browse-capture-point-anchor))
                        fallback))
            (ident (car anchor))
            (offset (cdr anchor)))
       (let ((inhibit-read-only t))
         (erase-buffer)
         (funcall render-fn buf)
-        (let ((new (and ident (magit-get-section ident))))
+        (let ((new (or (and ident (magit-get-section ident))
+                       (and missing-section-fn
+                            (funcall missing-section-fn anchor)))))
           (if new
               (let ((start (oref new start))
                     (end (oref new end)))
                 (goto-char start)
-                (when (> offset 0)
-                  (forward-char (min offset (1- (- (or end (point-max)) start))))))
+                (when (and (integerp offset) (> offset 0))
+                  (forward-char
+                   (min offset (1- (- (or end (point-max)) start))))))
             (goto-char (point-min)))
           ;; `erase-buffer' clamped every displaying window's point to
           ;; bob; the `goto-char' above moved only the buffer's own
@@ -2745,15 +2787,100 @@ Same lifecycle as `pilish--session-browser-fetch-anchor': set
 from the anchor captured at fetch start, reused by a refresh issued
 while loading, cleared when the cycle's final render runs.")
 
+(defvar-local pilish--tree-browser-fetch-lineage nil
+  "Old selected-node lineage carried across the in-flight fetch cycle.
+The list runs from the selected id toward its old root.  It is captured
+before the loading render and before a replacement tree is installed,
+then cleared with `pilish--tree-browser-fetch-anchor'.")
+
+(defvar-local pilish--tree-browser-point-anchor nil
+  "Last meaningful tree-node point anchor.
+Unlike the fetch anchor, this survives a render with no matching rows,
+so clearing a search can recover the selected section identity.  A
+successful render that selects an ancestor or active-path fallback
+updates it to that actual selection.")
+
+(defvar-local pilish--tree-browser-point-lineage nil
+  "Old lineage belonging to `pilish--tree-browser-point-anchor'.
+This survives empty search/error renders with the anchor.  Missing-node
+resolution consumes this captured lineage; it never reconstructs the
+selected node's ancestry from a replacement tree.")
+
+(defvar-local pilish--tree-browser-state-file nil
+  "Session file that owns this buffer's orientation and point anchors.
+A fetch for a different file resets these states before its loading
+render, even when both files contain identical projected node ids.")
+
+(defvar-local pilish--tree-browser-point-oriented-p nil
+  "Non-nil after this browser has rendered its first tree snapshot.
+The first completed render deliberately selects the active projected
+leaf or nearest visible ancestor.  Later renders preserve the user's
+section instead and use path-aware fallback only if it disappears.
+Loading and error renders do not set this flag.")
+
 (defvar-local pilish--tree-browser-error nil
   "Error message string from the last tree fetch, or nil on success.
 Rendered as an error state with a zero visible count.")
 
+(defvar-local pilish--tree-browser-diagnostic nil
+  "Non-fatal tree diagnostic from the last successful fetch.
+Unlike `pilish--tree-browser-error', this warning renders above useful
+canonical rows and keeps the loaded-file navigation guard armed.")
+
+(defvar-local pilish--tree-browser-rendering-p nil
+  "Non-nil while any tree rerender owns the buffer transaction.")
+
+(defvar-local pilish--tree-browser-pending-load nil
+  "Newest completed load deferred by a reentrant tree render.
+The value is the argument list for `pilish--tree-browser-apply-load'.")
+
+(defvar-local pilish--tree-browser-pending-rerender nil
+  "Newest ordinary rerender deferred by an active tree render.
+A completed pending load takes precedence because it publishes newer
+state; otherwise this stores arguments for `pilish--tree-browser-rerender'.")
+
+(defvar pilish--tree-browser-render-generation nil
+  "Dynamically bound generation fencing one tree render.")
+
+(defvar pilish--tree-browser-render-owner nil
+  "Dynamically bound session-file owner fencing one tree render.")
+
 (defvar-local pilish--tree-browser-fetch-token 0
   "Generation counter for tree-browser fetches.
-`pilish--browse-load-tree' bumps it per fetch; deferred reads
-from superseded fetches drop themselves by comparing their captured
-token against the buffer's current one (mirrors the session side).")
+The browser fetch cycle claims its generation before rendering and
+passes it to `pilish--browse-load-tree', exactly like the session-side
+cycle.  Direct loader callers that omit a generation claim one at the
+loader seam.  Deferred or yielding reads validate both their captured
+generation and, for browser-owned fetches, session-file owner before
+publishing.")
+
+(defun pilish--tree-browser-generation-current-p
+    (buf generation &optional owner check-owner-p)
+  "Return non-nil when BUF still owns tree GENERATION and OWNER.
+When CHECK-OWNER-P is non-nil, OWNER must also equal BUF's
+`pilish--tree-browser-state-file'.  Direct loader callers use generation
+ownership alone; full browser fetches pass the session-file owner they
+claimed before their loading render."
+  (and (buffer-live-p buf)
+       (eq generation
+           (buffer-local-value 'pilish--tree-browser-fetch-token buf))
+       (or (not check-owner-p)
+           (equal owner
+                  (buffer-local-value 'pilish--tree-browser-state-file
+                                      buf)))))
+
+(defun pilish--tree-browser-render-current-p ()
+  "Return non-nil when the dynamically fenced render still owns state."
+  (or (null pilish--tree-browser-render-generation)
+      (pilish--tree-browser-generation-current-p
+       (current-buffer)
+       pilish--tree-browser-render-generation
+       pilish--tree-browser-render-owner t)))
+
+(defun pilish--tree-browser-ensure-render-current ()
+  "Abort the current tree render when ownership was superseded."
+  (unless (pilish--tree-browser-render-current-p)
+    (throw 'pilish--tree-browser-stale-render nil)))
 
 (defvar-local pilish--tree-browser-loaded-file nil
   "Session file the current tree was loaded from, or nil on error states.
@@ -2761,7 +2888,14 @@ Set, when a fetch succeeds, to the file the FETCH read (resolved at
 fetch start — a chat session switch mid-read cannot retarget the
 labeler onto a tree the browser is not showing);
 `pilish--browse-set-label' compares against it to refuse
-labeling a session the chat has since left.")
+labeling a session the chat has since left.  Orientation/anchor
+ownership is tracked separately by `pilish--tree-browser-state-file'
+so a transient read error does not make a retry look like a file switch.")
+
+(defvar pilish--tree-browser-resolution-lineage nil
+  "Dynamically bound old selected lineage for one tree rerender.
+`pilish--tree-browser-missing-section' consults this only after exact
+section restoration fails.")
 
 (defconst pilish--tree-filter-modes
   '(no-tools default user-only labeled-only all)
@@ -2784,7 +2918,7 @@ rendering path."
   "Tree browser help."
   [:description pilish--tree-dispatch-heading
    ["Actions"
-    ("RET" "navigate" pilish-tree-browser-navigate)
+    ("RET" "continue from selected turn" pilish-tree-browser-navigate)
     ("l" "label" pilish-tree-browser-set-label)
     ("g" "refresh" pilish-browse-refresh)
     ("q" "quit" quit-window)]
@@ -2821,7 +2955,7 @@ rendering path."
 
 (defface pilish-tree-active
   '((t :weight bold))
-  "Face for active-path marker in the tree browser."
+  "Face for current-entry and active-path markers in the tree browser."
   :group 'pilish)
 
 (defface pilish-tree-label
@@ -2961,32 +3095,168 @@ redundant.  Prefers `formattedToolCall' over `preview'."
          (or (plist-get node :preview) "")))
       (_ (or (plist-get node :preview) "")))))
 
-(defun pilish--tree-format-node-line (node is-active)
+(defun pilish--tree-format-node-line (node is-active &optional is-current)
   "Format a single NODE into a display string.
-IS-ACTIVE is non-nil if the node is on the active path.
-Labels are rendered separately as right-margin overlays."
+IS-ACTIVE is non-nil if the node is on the active path.  IS-CURRENT
+marks the actual projected leaf, rather than merely its nearest
+visible ancestor.  The ASCII marker column is separate from tree
+connectors: `@' means current, `*' means an active ancestor, and a
+blank means inactive.  Labels render separately as right-margin
+overlays."
   (let* ((face (pilish--tree-node-face node))
          (type-label (pilish--tree-node-type-label node))
          (preview (pilish--tree-node-preview node))
-         (marker (if is-active
-                     (pilish--propertize-face
-                      "• " 'pilish-tree-active)
-                   "  "))
+         (marker (cond
+                  (is-current
+                   (pilish--propertize-face "@ " 'pilish-tree-active))
+                  (is-active
+                   (pilish--propertize-face "* " 'pilish-tree-active))
+                  (t "  ")))
          (type-str (pilish--propertize-face
                     (format "%-7s" type-label) face))
          (preview-str (pilish--propertize-face preview face)))
     (concat marker type-str " " preview-str)))
 
+;;;; Tree Browser Point Orientation
+
+(defun pilish--tree-anchor-node-id (anchor)
+  "Return the tree-node id encoded in point ANCHOR, or nil.
+ANCHOR has the `(IDENT . OFFSET)' shape returned by
+`pilish--browse-capture-point-anchor'."
+  (cl-loop for component in (car-safe anchor)
+           when (and (consp component)
+                     (eq (car component) 'tree-node))
+           return (cdr component)))
+
+(defun pilish--tree-parent-index (tree)
+  "Return a hash table mapping string ids in projected TREE to parent ids.
+Traversal is iterative so browser orientation remains safe for deep
+conversation trees.  Nil/empty legacy ids are omitted.  A duplicate
+addressable id fails closed to an empty index.  Canonical :ambiguousId
+and :ambiguousParent nodes are indexed as roots so point fallback cannot
+cross an uncertain ancestry edge.  `pilish--tree-path-to-root' guards
+unique-id parent cycles."
+  (let ((parents (make-hash-table :test #'equal))
+        (stack (append tree nil)))
+    (when (pilish-jsonl-tree-ids-unique-p tree)
+      (while stack
+        (let* ((node (pop stack))
+               (id (pilish--normalize-string-or-null
+                    (plist-get node :id)))
+               (children (plist-get node :children)))
+          (when id
+            (puthash id
+                     (unless (or (plist-get node :ambiguousId)
+                                 (plist-get node :ambiguousParent))
+                       (pilish--normalize-string-or-null
+                        (plist-get node :parentId)))
+                     parents))
+          (when (vectorp children)
+            (dotimes (i (length children))
+              (push (aref children i) stack))))))
+    parents))
+
+(defun pilish--tree-path-to-root (id parents)
+  "Return IDs from ID through its ancestors according to PARENTS.
+PARENTS is the hash table from `pilish--tree-parent-index'.  Unknown
+IDs return nil.  A seen set makes malformed projected cycles total."
+  (let ((missing (make-symbol "missing"))
+        (seen (make-hash-table :test #'equal))
+        (current (pilish--normalize-string-or-null id))
+        (result nil))
+    (while (and current
+                (not (gethash current seen))
+                (not (eq (gethash current parents missing) missing)))
+      (puthash current t seen)
+      (push current result)
+      (setq current (gethash current parents)))
+    (nreverse result)))
+
+(defun pilish--tree-rendered-section-index ()
+  "Return `(BY-ID . FIRST)' for rendered tree-node sections.
+BY-ID maps addressable string node ids to Magit section objects; FIRST
+is the first tree-node section even when it is an unaddressable legacy
+row.  The walk also supports future nested sections and is iterative
+for deep trees."
+  (let ((by-id (make-hash-table :test #'equal))
+        (first nil)
+        (stack nil))
+    (when magit-root-section
+      (dolist (child (reverse (oref magit-root-section children)))
+        (push child stack)))
+    (while stack
+      (let ((section (pop stack)))
+        (when (eq (oref section type) 'tree-node)
+          (when-let* ((id (pilish--normalize-string-or-null
+                           (oref section value))))
+            (puthash id section by-id))
+          (unless first (setq first section)))
+        (dolist (child (reverse (oref section children)))
+          (push child stack))))
+    (cons by-id first)))
+
+(defun pilish--tree-first-section-on-path (ids sections)
+  "Return the first rendered section for IDS from SECTIONS, or nil."
+  (cl-loop for id in ids
+           for section = (gethash id sections)
+           when section return section))
+
+(defun pilish--tree-anchor-lineage (anchor tree)
+  "Return ANCHOR's node lineage in TREE from selected id toward root.
+Nil means ANCHOR is not an addressable tree node or its id is absent.
+Call this before replacing TREE; missing-selection resolution must use
+the old ancestry, not infer ancestry from the replacement snapshot."
+  (when-let* ((id (pilish--tree-anchor-node-id anchor)))
+    (pilish--tree-path-to-root id (pilish--tree-parent-index tree))))
+
+(defun pilish--tree-browser-missing-section (_anchor)
+  "Resolve a missing section after a tree-browser render.
+On later snapshots, first use the selected node's lineage captured
+from the OLD tree before filtering or replacement.  Never reconstruct
+that ancestry from the new tree: a vanished sibling must fall back to
+its surviving old parent before the new active leaf.  On the first
+snapshot (or after that lineage has no rendered survivor), select the
+new active projected leaf or nearest visible ancestor.  The first
+rendered row is the deterministic final fallback."
+  (let* ((parents (pilish--tree-parent-index pilish--tree-browser-tree))
+         (rendered (pilish--tree-rendered-section-index))
+         (sections (car rendered))
+         (first (cdr rendered))
+         (selected-path
+          (and pilish--tree-browser-point-oriented-p
+               pilish--tree-browser-resolution-lineage))
+         (active-path
+          (pilish--tree-path-to-root pilish--tree-browser-leaf-id parents)))
+    (or (pilish--tree-first-section-on-path selected-path sections)
+        (pilish--tree-first-section-on-path active-path sections)
+        first)))
+
 ;;;; Tree Browser Rendering
 
 (defun pilish--tree-browser-render (buf)
-  "Render the tree browser in BUF from its buffer-local state."
+  "Render the tree browser in BUF from its buffer-local state.
+A completed-load render dynamically fences its generation and owner;
+checks before and immediately after Magit's visibility-hook seam abort
+obsolete insertion when a newer load lands reentrantly."
   (with-current-buffer buf
+    (pilish--tree-browser-ensure-render-current)
     (let* ((inhibit-read-only t)
            (tree pilish--tree-browser-tree)
-           (leaf-id pilish--tree-browser-leaf-id)
-           (filter pilish--tree-browser-filter))
+           (leaf-id (pilish--normalize-string-or-null
+                     pilish--tree-browser-leaf-id))
+           (filter pilish--tree-browser-filter)
+           (diagnostic pilish--tree-browser-diagnostic)
+           (unique-ids-p (pilish-jsonl-tree-ids-unique-p tree)))
       (magit-insert-section (root)
+        ;; `magit-insert-section' ran its visibility hook before entering
+        ;; this body.  That hook can yield and complete a newer fetch.
+        (pilish--tree-browser-ensure-render-current)
+        (when (and diagnostic
+                   (not pilish--tree-browser-loading)
+                   (not pilish--tree-browser-error))
+          (insert (pilish--propertize-face
+                   (format "Warning: %s\n" diagnostic)
+                   'warning)))
         (cond
          (pilish--tree-browser-loading
           (setq pilish--tree-browser-visible-count 0)
@@ -2999,7 +3269,14 @@ Labels are rendered separately as right-margin overlays."
           (insert (pilish--propertize-face
                    (format "Error: %s\n" pilish--tree-browser-error)
                    'error)))
+         ((not unique-ids-p)
+          ;; Fail closed: bare duplicate ids cannot provide truthful
+          ;; markers, section identities, or RET targets.  Nil-id legacy
+          ;; rows remain permitted by `pilish-jsonl-tree-ids-unique-p'.
+          (setq pilish--tree-browser-visible-count 0)
+          (insert "Malformed conversation tree: duplicate entry ids.\n"))
          ((or (null tree) (= (length tree) 0))
+          (setq pilish--tree-browser-visible-count 0)
           (insert "No conversation tree.\n"))
          (t
           (let* ((flat (pilish--flatten-tree-for-display
@@ -3020,16 +3297,36 @@ Labels are rendered separately as right-margin overlays."
             (if (null visible)
                 (insert "No matching entries.\n")
               (dolist (entry visible)
+                (pilish--tree-browser-ensure-render-current)
                 (let* ((node (nth 0 entry))
                        (prefix (nth 2 entry))
-                       (node-id (plist-get node :id))
-                       (is-active (gethash node-id active-ids))
+                       (node-id (pilish--normalize-string-or-null
+                                 (plist-get node :id)))
+                       (ambiguous-p (plist-get node :ambiguousId))
+                       ;; Keep a stable, non-string Magit identity for the
+                       ;; one canonical display row.  The ambiguous bare id
+                       ;; itself must not become a section/navigation target.
+                       (section-value
+                        (if ambiguous-p
+                            (cons 'ambiguous-id node-id)
+                          node-id))
+                       ;; Legacy or ambiguous rows have no truthful
+                       ;; occurrence identity and never receive @ or *.
+                       (is-active (and node-id
+                                       (not ambiguous-p)
+                                       (gethash node-id active-ids)))
+                       (is-current (and node-id leaf-id
+                                        (not ambiguous-p)
+                                        (equal node-id leaf-id)))
                        (prefix-str (pilish--propertize-face
                                     prefix
                                     'pilish-tree-connector))
                        (line (pilish--tree-format-node-line
-                              node is-active)))
-                  (magit-insert-section (tree-node node-id)
+                              node is-active is-current)))
+                  (magit-insert-section (tree-node section-value)
+                    ;; Fence the exact seam from the adversarial repro:
+                    ;; the section visibility hook has just returned.
+                    (pilish--tree-browser-ensure-render-current)
                     (magit-insert-heading
                       (concat prefix-str line))
                     (when-let* ((label (plist-get node :label)))
@@ -3041,7 +3338,8 @@ Labels are rendered separately as right-margin overlays."
                         (pilish--make-margin-overlay
                          (pilish--propertize-face
                           (format "[%s]" truncated)
-                          'pilish-tree-label)))))))))))))))
+                          'pilish-tree-label))))))))))))
+      (pilish--tree-browser-ensure-render-current))))
 
 ;;;; Tree Browser Header-Line
 
@@ -3056,7 +3354,9 @@ tree flattening on every redisplay cycle."
                (append (list (format "Tree [%s]" filter)
                              (format "(%d)" total))
                        (and query (list (format "/%s" query)))
-                       (list (pilish--propertize-face "?:help" 'shadow)))
+                       (list (pilish--propertize-face
+                              "@ current, * active path" 'shadow)
+                             (pilish--propertize-face "?:help" 'shadow)))
                " │ ")))
 
 ;;;; Tree Browser Interactive Commands
@@ -3093,18 +3393,35 @@ tree flattening on every redisplay cycle."
       (pilish--tree-browser-rerender))))
 
 (defun pilish-tree-browser-navigate ()
-  "Navigate to the tree node at point."
+  "Continue the live conversation from the selected turn.
+Selecting the actual current projected entry is a no-op.  Projected
+legacy and ambiguous rows are visible but cannot truthfully name a
+continuation target."
   (interactive)
-  (if-let* ((section (magit-current-section))
-            (node-id (oref section value)))
-      (pilish--browse-navigate node-id)
-    (message "Pi: No tree node at point")))
+  (let* ((section (magit-current-section))
+         (value (and section (oref section value))))
+    (cond
+     ((or (null section)
+          (not (eq (oref section type) 'tree-node)))
+      (message "Pi: No tree node at point"))
+     ((eq (car-safe value) 'ambiguous-id)
+      (message
+       "Pi: Cannot continue from ambiguous duplicate entry id: %s"
+       (cdr value)))
+     ((not (stringp value))
+      (message
+       (concat
+        "Pi: Cannot continue from selected turn: legacy entry has no id; "
+        "open it with pi once to migrate, then refresh with g")))
+     (t
+      (pilish--browse-navigate value)))))
 
 (defun pilish-tree-browser-set-label ()
-  "Set or clear a label on the tree node at point."
+  "Set or clear a label on the addressable tree node at point."
   (interactive)
   (when-let* ((section (magit-current-section))
-              (node-id (oref section value)))
+              (node-id (oref section value))
+              ((stringp node-id)))
     (let* ((current-label (when pilish--tree-browser-tree
                             (pilish--tree-find-label
                              pilish--tree-browser-tree node-id)))
@@ -3495,13 +3812,18 @@ file does not exist yet (it is created on the first assistant reply)."
           (pilish--normalize-string-or-null
            (plist-get pilish--state :session-file)))))))
 
-(defun pilish--browse-load-tree (callback)
-  "Load the conversation tree, then call CALLBACK with (TREE LEAF-ID MESSAGE).
+(cl-defun pilish--browse-load-tree
+    (callback &optional (path (pilish--tree-browser-chat-session-file))
+              generation)
+  "Load PATH's conversation tree, then call CALLBACK with (TREE LEAF-ID MESSAGE).
 TREE is a vector of projected root nodes in the browse node dialect,
 LEAF-ID the projected leaf entry id, and MESSAGE an error string or
 nil on success — the same shape as the session side's (ITEMS ERROR)
 callback.  The third MESSAGE argument lets callers render precise
-error states instead of a generic \"no tree\".
+error states instead of a generic \"no tree\".  On a successful
+canonicalization with differing duplicate ids, CALLBACK receives a
+fourth DIAGNOSTIC string; callbacks on ordinary/error paths retain the
+three-argument contract.
 
 The tree comes from the linked chat's session file on DISK —
 `pilish-jsonl-project-session-file' — never an RPC get_tree.
@@ -3511,67 +3833,127 @@ rewrites this same file, and no process is needed — the state
 the last PERSISTED turn, so it lags an in-flight turn; refresh
 manually with \\[pilish-browse-refresh].
 
-The buffer's fetch token is bumped here (mirroring
-`pilish--browse-load-sessions'); then a missing chat link
-reports the link error and a link with no session file yet — or one
-naming a path that does not exist — reports the not-yet error, both
-synchronously.  Otherwise the read itself is deferred through
+PATH defaults to the linked chat's current session file for direct
+seam callers.  The browser fetch passes the path and GENERATION it
+claimed before its loading paint, so render-time reentrancy cannot
+reverse request order or retarget the read away from the file that
+owns that fetch's orientation and anchors.  Direct seam callers omit
+GENERATION and claim a new one here, mirroring
+`pilish--browse-load-sessions'.
+
+A missing chat link reports the link error and a link with no session
+file yet — or one naming a path that does not exist — reports the
+not-yet error, both synchronously while the request still owns its
+generation.  Otherwise the read itself is deferred through
 `(run-at-time 0 ...)' so the caller's forced redisplay can paint the
 loading state first (see `pilish--tree-browser-fetch-and-render':
 Emacs runs due 0-timers before redisplaying, so without the forced
 paint a single timer hop starves the loading render entirely); then
 it runs as one blocking read (a 53 MB worst-case session reads in
 ~0.6 s, typical files in tens of milliseconds; chunking would
-complicate the pure jsonl reader for no UI gain).  A deferred read
-drops itself when a newer fetch has bumped the token, and is wrapped
-in `condition-case': a nil or garbage read reports MESSAGE \"Session
-file is unreadable or not a pi session file: PATH\" instead of
-signaling, and a `quit' during the blocking read (C-g against a huge
-file) reports \"Session file read was interrupted: PATH\" — `quit'
-is not an `error', so without its own handler the callback would
-never run and the browser would sit on its loading state forever."
-  (let ((buf (current-buffer)))
-    (setq pilish--tree-browser-fetch-token
-          (1+ pilish--tree-browser-fetch-token))
-    (let ((token pilish--tree-browser-fetch-token)
-          (linked (and pilish--chat-buffer
-                       (buffer-live-p pilish--chat-buffer)))
-          (path (pilish--tree-browser-chat-session-file)))
-      (cond
-       ((not linked)
-        (funcall callback nil nil
-                 "No linked pi chat session (open the tree browser from a pi chat)"))
-       ((or (not path) (not (file-exists-p path)))
-        (funcall callback nil nil
+complicate the pure jsonl reader for no UI gain).
+
+File handlers can reenter Emacs during `file-exists-p' or the disk
+projection.  Ownership is therefore checked immediately after each
+callback-capable boundary and again by the browser callback before
+publication.  Superseded work is dropped without calling CALLBACK.
+The read remains wrapped in `condition-case': a nil or garbage read
+reports MESSAGE \"Session file is unreadable or not a pi session file:
+PATH\" instead of signaling.  A `quit' during the blocking read reports
+\"Session file read was interrupted: PATH\" — `quit' is not an `error',
+so without its own handler the
+callback would never run and the browser would sit on its loading
+state forever."
+  (let* ((buf (current-buffer))
+         (browser-owned-p (not (null generation)))
+         (token
+          (or generation
+              (setq pilish--tree-browser-fetch-token
+                    (1+ pilish--tree-browser-fetch-token))))
+         (linked (and pilish--chat-buffer
+                      (buffer-live-p pilish--chat-buffer))))
+    (cl-labels
+        ((current-p ()
+           (pilish--tree-browser-generation-current-p
+            buf token path browser-owned-p))
+         (report (tree leaf-id message &optional diagnostic)
+           (when (current-p)
+             (if diagnostic
+                 (funcall callback tree leaf-id message diagnostic)
+               (funcall callback tree leaf-id message)))))
+      ;; A browser fetch may already have been superseded by a reentrant
+      ;; loading render before reaching this seam.  Do no file I/O then.
+      (when (current-p)
+        (cond
+         ((not linked)
+          (report
+           nil nil
+           "No linked pi chat session (open the tree browser from a pi chat)"))
+         ((not path)
+          (report
+           nil nil
+           "No session file yet — it is created on the first assistant reply"))
+         (t
+          (let ((exists nil)
+                (existence-failure nil))
+            (condition-case nil
+                (setq exists (file-exists-p path))
+              (quit
+               (setq existence-failure
+                     (format "Session file read was interrupted: %s" path)))
+              (error
+               (setq existence-failure
+                     (format
+                      (concat "Session file is unreadable or not "
+                              "a pi session file: %s")
+                      path))))
+            ;; `file-exists-p' can dispatch a yielding file handler.
+            (when (current-p)
+              (cond
+               (existence-failure
+                (report nil nil existence-failure))
+               ((not exists)
+                (report
+                 nil nil
                  "No session file yet — it is created on the first assistant reply"))
-       (t
-        (run-at-time
-         0 nil
-         (lambda ()
-           (when (and (buffer-live-p buf)
-                      (eq token (buffer-local-value
-                                 'pilish--tree-browser-fetch-token
-                                 buf)))
-             (let ((tree nil)
-                   (leaf-id nil)
-                   (failure nil))
-               (condition-case nil
-                   (let ((result (pilish-jsonl-project-session-file
-                                  path)))
-                     (if result
-                         (setq tree (plist-get result :tree)
-                               leaf-id (plist-get result :leafId))
-                       (setq failure
-                             (format "Session file is unreadable or not a pi session file: %s"
-                                     path))))
-                 (quit
-                  (setq failure
-                        (format "Session file read was interrupted: %s" path)))
-                 (error
-                  (setq failure
-                        (format "Session file is unreadable or not a pi session file: %s"
-                                path))))
-               (funcall callback tree leaf-id failure))))))))))
+               (t
+                (run-at-time
+                 0 nil
+                 (lambda ()
+                   (when (current-p)
+                     (let ((tree nil)
+                           (leaf-id nil)
+                           (diagnostic nil)
+                           (failure nil))
+                       (condition-case nil
+                           (let ((result
+                                  (pilish-jsonl-project-session-file path)))
+                             (if result
+                                 (setq tree (plist-get result :tree)
+                                       leaf-id (plist-get result :leafId)
+                                       diagnostic
+                                       (plist-get result :diagnostic))
+                               (setq failure
+                                     (format
+                                      (concat
+                                       "Session file is unreadable or not "
+                                       "a pi session file: %s")
+                                      path))))
+                         (quit
+                          (setq failure
+                                (format
+                                 "Session file read was interrupted: %s"
+                                 path)))
+                         (error
+                          (setq failure
+                                (format
+                                 (concat
+                                  "Session file is unreadable or not "
+                                  "a pi session file: %s")
+                                 path))))
+                       ;; The projection can yield through a file handler.
+                       ;; Validate immediately after it before callback.
+                       (report tree leaf-id failure diagnostic)))))))))))))))
 
 (defun pilish--browse-session-file-matches-p (chat-buf path)
   "Return non-nil when CHAT-BUF's current session file is PATH.
@@ -3672,15 +4054,44 @@ replaced it."
    chat-buf win path (time-add (current-time) 30)))
 
 (defun pilish--browse-navigate (node-id)
-  "Move the live conversation onto tree node NODE-ID.
+  "Continue the live conversation from projected tree node NODE-ID.
+An addressable id identical to `pilish--tree-browser-leaf-id' is the
+actual current entry in the unique-id disk projection already loaded by
+this browser.  Return a concise no-op message for it BEFORE consulting
+any linked process,
+streaming/busy/transition guard, fresh disk state, draft, prefill,
+rewrite, resume, or settle seam.  Otherwise run the guarded continuation
+flow in `pilish--browse-navigate-noncurrent'."
+  (let* ((addressable-node-id
+          (pilish--normalize-string-or-null node-id))
+         (addressable-leaf-id
+          (pilish--normalize-string-or-null
+           pilish--tree-browser-leaf-id))
+         (node (and addressable-node-id
+                    (pilish--tree-find-node
+                     pilish--tree-browser-tree addressable-node-id))))
+    (if (and addressable-node-id
+             addressable-leaf-id
+             node
+             (not (plist-get node :ambiguousId))
+             ;; Duplicate ids have no truthful occurrence-level identity;
+             ;; fail through to the authoritative disk APIs instead of
+             ;; manufacturing a cached-id no-op.
+             (pilish-jsonl-tree-ids-unique-p pilish--tree-browser-tree)
+             (equal addressable-node-id addressable-leaf-id))
+        (message "Pi: Already at current position")
+      (pilish--browse-navigate-noncurrent node-id))))
+
+(defun pilish--browse-navigate-noncurrent (node-id)
+  "Continue from non-current tree node NODE-ID.
 Guard → rewrite → switch → reload → prefill, mirroring pi's
 navigateTree without a navigate RPC:
 
  1. a live linked chat buffer, else `user-error' \"No pi session to
-    navigate\";
+    continue from selected turn\";
  2. the loaded-file guard (as `pilish--browse-set-label'):
     a fresh session-file resolution that is nil messages \"Pi: Cannot
-    navigate: no session file\", one that disagrees with
+    continue from selected turn: no session file\", one that disagrees with
     `pilish--tree-browser-loaded-file' messages \"Pi: Session
     changed since the tree was loaded — refresh with g\" (the rewrite
     would have to pick one of two files);
@@ -3690,36 +4101,43 @@ navigateTree without a navigate RPC:
     `--session-transition-ready-p' cannot see one (status stays idle
     during the latch), and a second RET during a switch would race it;
  5. `pilish--session-transition-ready-p' with the action
-    \"navigate\" (the second half; reports its own refusal);
+    \"continue from selected turn\" (the second half; reports its own refusal);
  6. a FRESH `pilish-jsonl-read-file' — the browser's cached
     tree can lag the file — else the unreadable message;
  7. a versioned header: version 1 files (no ids) refuse with the
     migrate hint;
- 8. `pilish-jsonl-navigation-target': unknown node ids refuse
-    with the refresh hint; a nil :leaf-id (the root user message has
-    no parent to rewind to) refuses with the fork hint — the chat's
-    fork command does that job;
- 9. :current-p is the two-way no-op: without :prefill just message
-    \"Pi: Already at current position\"; with :prefill (re-editing a
-    prompt the file already sits on) prefill, message, and settle —
-    no write, no switch in either case;
-10. the resume cwd pre-flight (`--session-file-cwd-or-error') runs
+ 8. `pilish-jsonl-navigation-target': unknown node ids refuse with
+    the refresh hint;
+ 9. selected identity against `pilish-jsonl-current-projected-id': the
+    actual current projected entry just messages \"Pi: Already at
+    current position\".  This check precedes the user-message rewind
+    rule, so a current root/user prompt — including one followed by
+    projected-away bookkeeping — performs no write, switch, prefill,
+    settle wait, or draft replacement;
+10. a nil :leaf-id on a HISTORICAL root user message refuses with the
+    fork hint — the chat's fork command does that job;
+11. navigation target :current-p handles the distinct historical-user
+    re-edit case where its parent is already the current position: its
+    :prefill is restored, success is messaged, and settle is scheduled,
+    but no write or switch occurs.  A target without :prefill only
+    reports that it is already at the current position;
+12. the resume cwd pre-flight (`--session-file-cwd-or-error') runs
     BEFORE any write so its `user-error's surface before the file
     changes;
-11. the local atomic rewrite (`--browse-rewrite-session-file') — the
+13. the local atomic rewrite (`--browse-rewrite-session-file') — the
     closing rename is the ONLY call that touches the session file;
     pre-commit local failure messages and stops byte-identically;
-12. `pilish--resume-selected-session' (PROC CHAT-BUF PATH) —
+14. `pilish--resume-selected-session' (PROC CHAT-BUF PATH) —
     a same-path switch is legal, so the switch rides the normal
     choreography including the transition latch and history reload;
-13. the input prefill runs immediately after the resume RPC is
+15. the input prefill runs immediately after the resume RPC is
     scheduled (the latch blocks sending until the switch settles),
     against the input buffer captured from the chat BEFORE the RPC;
-14. \"Pi: Navigated to PREVIEW\" from the cached tree
+16. \"Pi: Continued from selected turn: PREVIEW\" from the cached tree
     (`--tree-find-node', `--tree-node-preview', truncated to 60;
-    \"Pi: Navigated\" without a preview), then
+    \"Pi: Continued from selected turn\" without a preview), then
     `pilish--browse-quit-when-settled';
-15. no auto-reopen of the browser — refresh with `g'.
+17. no auto-reopen of the browser — refresh with `g'.
 
 On ordinary local files this guard/read/rewrite path is synchronous and
 does not yield back to Emacs, so only an independent writer can stale
@@ -3731,15 +4149,15 @@ atomic.  These residual risks are accepted here rather than inventing
 cross-module writer coordination."
   (let ((chat-buf pilish--chat-buffer))
     (unless (and chat-buf (buffer-live-p chat-buf))
-      (user-error "No pi session to navigate"))
+      (user-error "No pi session to continue from selected turn"))
     ;; The input buffer is captured BEFORE the RPC: the chat may retarget
-    ;; buffers during the switch (step 12).
+    ;; buffers during the switch (step 14).
     (let ((input-buf (buffer-local-value 'pilish--input-buffer
                                          chat-buf))
           (path (pilish--tree-browser-chat-session-file)))
       (cond
        ((null path)
-        (message "Pi: Cannot navigate: no session file"))
+        (message "Pi: Cannot continue from selected turn: no session file"))
        ((not (equal pilish--tree-browser-loaded-file path))
         (message "Pi: Session changed since the tree was loaded — refresh with g"))
        (t
@@ -3747,27 +4165,44 @@ cross-module writer coordination."
           (unless (pilish--session-live-process-p proc)
             (user-error "Pi process is not running"))
           (cond
-           ((pilish--browse-transition-refused-p chat-buf "navigate")
+           ((pilish--browse-transition-refused-p
+             chat-buf "continue from selected turn")
             nil)
            (t
             (let ((session (pilish-jsonl-read-file path)))
               (cond
                ((null session)
                 (message
-                 "Pi: Cannot navigate: session file is unreadable or not a pi session file: %s"
+                 (concat
+                  "Pi: Cannot continue from selected turn: session file "
+                  "is unreadable or not a pi session file: %s")
                  path))
                ((not (plist-get (plist-get session :header) :version))
                 (message
-                 "Pi: Session file uses an old format; open it with pi once to migrate, then refresh with g"))
+                 (concat
+                  "Pi: Cannot continue from selected turn: session file uses "
+                  "an old format; open it with pi once to migrate, then refresh with g")))
                (t
                 (let ((target (pilish-jsonl-navigation-target
                                session node-id)))
                   (cond
                    ((null target)
-                    (message "Pi: No such tree node — refresh with g"))
+                    (message
+                     "Pi: Cannot continue from selected turn: no such tree node — refresh with g"))
+                   ;; Pi checks the selected entry identity before its
+                   ;; user-message rewind rule.  Do the same against the
+                   ;; resolved projected leaf: trailing label/session-info/
+                   ;; custom records cannot turn RET on the current user
+                   ;; prompt into a historical re-edit that rewrites the
+                   ;; file and replaces the draft.
+                   ((equal node-id
+                           (pilish-jsonl-current-projected-id session))
+                    (message "Pi: Already at current position"))
                    ((null (plist-get target :leaf-id))
                     (message
-                     "Pi: Cannot rewind before the first message; fork it from the chat instead"))
+                     (concat
+                      "Pi: Cannot continue from selected turn: it has no parent; "
+                      "fork it from the chat instead")))
                    ((plist-get target :current-p)
                     (if (not (plist-get target :prefill))
                         (message "Pi: Already at current position")
@@ -3786,7 +4221,9 @@ cross-module writer coordination."
                                   path (plist-get target :leaf-id))))
                       (if (null lines)
                           (message
-                           "Pi: Cannot navigate: session file is unreadable or not a pi session file: %s"
+                           (concat
+                            "Pi: Cannot continue from selected turn: session file "
+                            "is unreadable or not a pi session file: %s")
                            path)
                         (when (pilish--browse-rewrite-session-file
                                path lines)
@@ -3799,19 +4236,19 @@ cross-module writer coordination."
                            chat-buf (selected-window) path))))))))))))))))))
 
 (defun pilish--browse-navigate-message (node-id)
-  "Message the navigate success for NODE-ID from the cached tree.
+  "Message successful continuation from NODE-ID using the cached tree.
 The preview comes from `pilish--tree-find-node' and
 `pilish--tree-node-preview' over the browser's cached tree
-with no refetch, truncated to 60; without a preview the bare
-\"Pi: Navigated\"."
+with no refetch, truncated to 60; without a preview use the bare
+\"Pi: Continued from selected turn\"."
   (let* ((node (when (vectorp pilish--tree-browser-tree)
                  (pilish--tree-find-node
                   pilish--tree-browser-tree node-id)))
          (preview (if node (pilish--tree-node-preview node) "")))
     (if (and (stringp preview) (not (string-empty-p preview)))
-        (message "Pi: Navigated to %s"
+        (message "Pi: Continued from selected turn: %s"
                  (pilish--truncate-string preview 60))
-      (message "Pi: Navigated"))))
+      (message "Pi: Continued from selected turn"))))
 
 (defun pilish--browse-rewrite-session-file (path lines)
   "Atomically replace the session file at PATH with LINES.
@@ -3836,7 +4273,8 @@ append/change between the
 fresh line read and local rename can still be lost.  `unwind-protect'
 removes the temp on an error or quit before commit.  Thus on ordinary
 local files pre-commit failures leave PATH byte-identical and no temp
-behind; errors report \"Pi: Navigate failed: …\" and return nil, while quits
+behind; errors report \"Pi: Could not continue from selected turn: …\"
+and return nil, while quits
 propagate after cleanup.  Success returns non-nil."
   (let* ((contents (concat (mapconcat #'identity (append lines nil) "\n")
                            "\n"))
@@ -3858,13 +4296,14 @@ propagate after cleanup.  Success returns non-nil."
           (unless swapped
             (ignore-errors (delete-file tmp))))
       (error
-       (message "Pi: Navigate failed: %s" (error-message-string err))
+       (message "Pi: Could not continue from selected turn: %s"
+                (error-message-string err))
        nil))))
 
 (defun pilish--browse-prefill-input (input-buf text)
   "Replace INPUT-BUF's draft with TEXT; nil TEXT still erases.
 Erasing unsent input is deliberate (the fork command's precedent):
-the navigate prefill replaces whatever draft was in flight.  Runs
+continuing from the selected turn replaces whatever draft was in flight.  Runs
 immediately after the resume RPC is scheduled — the transition latch
 blocks sending until the switch settles, so the text cannot leak into
 the outgoing session.  Failures are non-fatal."
@@ -3921,6 +4360,45 @@ longer reflects."
 
 ;;;; Tree Browser Fetch and Render
 
+(defun pilish--tree-browser-apply-load
+    (buf tree leaf-id message anchor lineage owner generation
+         &optional diagnostic)
+  "Publish one completed tree load in BUF while it still owns it.
+TREE, LEAF-ID, MESSAGE, and optional DIAGNOSTIC are the loader result.
+ANCHOR and LINEAGE belong to the pre-fetch selection.  OWNER and
+GENERATION were claimed at fetch entry before the loading render.
+Ownership is checked at callback entry and immediately before state
+publication, matching the session-side apply pattern.
+
+Rendering is one buffer-local transaction.  A newer apply that lands
+from Magit's callback-capable visibility hook is queued instead of
+nesting another section tree.  Generation checks inside the active
+render abort its resumed insertion and all post-render orientation;
+the unwind then applies only the newest queued owner, whose clean render
+erases any partial obsolete text."
+  (when (pilish--tree-browser-generation-current-p
+         buf generation owner t)
+    (with-current-buffer buf
+      (when (pilish--tree-browser-generation-current-p
+             buf generation owner t)
+        (if pilish--tree-browser-rendering-p
+            (setq pilish--tree-browser-pending-load
+                  (list buf tree leaf-id message anchor lineage
+                        owner generation diagnostic))
+          ;; No callback-capable boundary exists between this final check,
+          ;; publication, and the rerender acquiring its transaction lock.
+          (setq pilish--tree-browser-loading nil
+                pilish--tree-browser-fetch-anchor nil
+                pilish--tree-browser-fetch-lineage nil
+                pilish--tree-browser-error message
+                pilish--tree-browser-diagnostic diagnostic
+                pilish--tree-browser-tree tree
+                pilish--tree-browser-leaf-id leaf-id
+                pilish--tree-browser-loaded-file
+                (and (not message) owner))
+          (pilish--tree-browser-rerender
+           anchor lineage nil generation owner))))))
+
 (defun pilish--tree-browser-fetch-and-render ()
   "Fetch tree and re-render the tree browser.
 The tree is read from the linked chat's session file on disk, so no
@@ -3928,16 +4406,21 @@ live pi process is required.  The callback reports (TREE LEAF-ID
 MESSAGE): a non-nil MESSAGE renders as an error state with a zero
 visible count.  On success, `pilish--tree-browser-loaded-file'
 records the file resolved before the deferred read, so a chat session
-switch mid-read leaves the label and navigation guards comparing
+switch mid-read leaves the label and continuation guards comparing
 against the tree actually displayed; it is nil on error states.
 
-The point anchor is captured before the loading-state render — that
-render destroys the node sections, so without carrying the anchor
-across the cycle the final render would find nothing under point to
-restore (see `pilish--browse-rerender-preserving-point').
-A refresh issued while another fetch is still loading finds no
-sections to capture and reuses the in-flight cycle's anchor (see
-`pilish--tree-browser-fetch-anchor').
+The point anchor AND its old selected-node lineage are captured before
+the loading render and before the callback replaces the tree.  A
+missing selected node can therefore resolve to its nearest surviving
+OLD ancestor instead of inventing ancestry from the replacement tree.
+A refresh issued while another fetch is loading reuses both in-flight
+values.
+
+`pilish--tree-browser-state-file' owns orientation and anchors.  A
+fetch for another file resets them and suppresses capture from the old
+sections during the loading render; shared ids across session files
+therefore cannot override fresh active-leaf orientation.  A same-file
+refresh retains the ordinary point-preservation behavior.
 
 The loading state is painted EXPLICITLY: the deferred read is a
 single `(run-at-time 0 ...)' hop, and Emacs runs due 0-timers before
@@ -3945,41 +4428,165 @@ redisplaying, so without the forced `redisplay' here the loading
 render would never become visible (the chunked session scan yields
 to redisplay between its slices; one timer hop never does)."
   (let* ((buf (current-buffer))
+         ;; Claim generation before resolving/painting anything: either
+         ;; step can reenter Lisp, and a newer fetch must stay newer when
+         ;; this invocation resumes (the session fetch has the same rule).
+         (token (setq pilish--tree-browser-fetch-token
+                      (1+ pilish--tree-browser-fetch-token)))
          (loaded (pilish--tree-browser-chat-session-file))
-         (anchor (or (pilish--browse-capture-point-anchor)
-                     ;; Mid-flight refresh: the loading render already
-                     ;; destroyed the sections under point, so carry
-                     ;; the anchor the in-flight cycle captured.
-                     (and pilish--tree-browser-loading
-                          pilish--tree-browser-fetch-anchor))))
-    (setq pilish--tree-browser-loading t
-          pilish--tree-browser-fetch-anchor anchor)
-    ;; Loading-state render: default point behavior (nothing to keep).
-    (pilish--tree-browser-rerender)
+         (new-owner-p
+          (not (equal loaded pilish--tree-browser-state-file)))
+         (captured (and (not new-owner-p)
+                        (pilish--browse-capture-point-anchor)))
+         (anchor
+          (and (not new-owner-p)
+               (or captured
+                   ;; Mid-flight refresh: the loading render already
+                   ;; destroyed the sections under point.
+                   (and pilish--tree-browser-loading
+                        pilish--tree-browser-fetch-anchor)
+                   pilish--tree-browser-point-anchor)))
+         (lineage
+          (and (not new-owner-p)
+               (cond
+                (captured
+                 (pilish--tree-anchor-lineage
+                  captured pilish--tree-browser-tree))
+                (pilish--tree-browser-loading
+                 pilish--tree-browser-fetch-lineage)
+                (t pilish--tree-browser-point-lineage)))))
+    (when new-owner-p
+      (setq pilish--tree-browser-point-oriented-p nil
+            pilish--tree-browser-point-anchor nil
+            pilish--tree-browser-point-lineage nil
+            pilish--tree-browser-fetch-anchor nil
+            pilish--tree-browser-fetch-lineage nil))
+    (setq pilish--tree-browser-state-file loaded
+          pilish--tree-browser-loading t
+          pilish--tree-browser-fetch-anchor anchor
+          pilish--tree-browser-fetch-lineage lineage)
+    ;; On a file switch, the old sections are still in the buffer here;
+    ;; explicitly suppress their capture while painting loading state.
+    (pilish--tree-browser-rerender nil nil new-owner-p)
     ;; Paint it before scheduling the read — see docstring.
     (redisplay)
     (pilish--browse-load-tree
-     (lambda (tree leaf-id message)
-       (when (buffer-live-p buf)
-         ;; The load calls back from a timer in whatever buffer is
-         ;; current; render in the browser buffer, not that one.
-         (with-current-buffer buf
-           (setq pilish--tree-browser-loading nil
-                 pilish--tree-browser-fetch-anchor nil
-                 pilish--tree-browser-error message
-                 pilish--tree-browser-tree tree
-                 pilish--tree-browser-leaf-id leaf-id
-                 pilish--tree-browser-loaded-file
-                 (and (not message) loaded))
-           (pilish--tree-browser-rerender anchor)))))))
+     (lambda (tree leaf-id message &optional diagnostic)
+       ;; The timer may call back in any current buffer.  The apply helper
+       ;; returns to BUF and validates generation + file ownership twice.
+       (pilish--tree-browser-apply-load
+        buf tree leaf-id message anchor lineage loaded token diagnostic))
+     loaded token)))
 
-(defun pilish--tree-browser-rerender (&optional fallback)
+(defun pilish--tree-browser-rerender
+    (&optional fallback fallback-lineage ignore-current-anchor
+               generation owner)
   "Re-render the tree browser from local state, preserving point.
-FALLBACK is a pre-fetch `(IDENT . OFFSET)' anchor handed to
-`pilish--browse-rerender-preserving-point' for the fetch
-cycle's final render."
-  (pilish--browse-rerender-preserving-point
-   (current-buffer) #'pilish--tree-browser-render fallback))
+FALLBACK is a pre-fetch `(IDENT . OFFSET)' anchor and
+FALLBACK-LINEAGE is its ancestry captured from the old tree.  A fresh
+tree snapshot instead orients to its active projected leaf (or nearest
+visible ancestor).  Subsequent renders preserve the selected section;
+if it disappears, the resolver tries the captured old lineage before
+the new active path and deterministic first-row fallback.
+
+When IGNORE-CURRENT-ANCHOR is non-nil, neither this function nor the
+generic renderer captures the section currently under point.  A new
+session-file owner uses that mode for its loading render.  GENERATION
+and OWNER, when supplied by a completed load, fence actual Magit
+insertion and every post-render orientation/point write.  Every other
+render snapshots the current generation and owner, so loading,
+filtering, and search renders have the same protection.
+
+Only one render transaction runs per buffer.  Reentrant rerenders and
+completed loads retain only their newest request.  On unwind, a current
+completed load wins; otherwise the newest ordinary rerender repaints.
+An obsolete transaction throws to its local boundary first, ensuring a
+successor always starts from a clean erase instead of a mixed section
+tree."
+  (if pilish--tree-browser-rendering-p
+      (setq pilish--tree-browser-pending-rerender
+            (list fallback fallback-lineage ignore-current-anchor
+                  generation owner))
+    (setq pilish--tree-browser-rendering-p t)
+    (unwind-protect
+        (let ((pilish--tree-browser-render-generation
+               (or generation pilish--tree-browser-fetch-token))
+              (pilish--tree-browser-render-owner
+               (if generation owner pilish--tree-browser-state-file)))
+          (pilish--tree-browser-rerender-transaction
+           fallback fallback-lineage ignore-current-anchor))
+      (setq pilish--tree-browser-rendering-p nil)
+      (let ((pending-load pilish--tree-browser-pending-load)
+            (pending-rerender pilish--tree-browser-pending-rerender))
+        (setq pilish--tree-browser-pending-load nil
+              pilish--tree-browser-pending-rerender nil)
+        (if (and pending-load
+                 (pilish--tree-browser-generation-current-p
+                  (nth 0 pending-load) (nth 7 pending-load)
+                  (nth 6 pending-load) t))
+            (apply #'pilish--tree-browser-apply-load pending-load)
+          (when pending-rerender
+            (apply #'pilish--tree-browser-rerender pending-rerender)))))))
+
+(defun pilish--tree-browser-rerender-transaction
+    (fallback fallback-lineage ignore-current-anchor)
+  "Perform one fenced tree render using FALLBACK and FALLBACK-LINEAGE.
+IGNORE-CURRENT-ANCHOR has the meaning documented by
+`pilish--tree-browser-rerender'.  The wrapper owns serialization and
+dynamically binds the generation/owner checked at each render seam."
+  (catch 'pilish--tree-browser-stale-render
+    (pilish--tree-browser-ensure-render-current)
+    (let* ((captured (and (not ignore-current-anchor)
+                          (pilish--browse-capture-point-anchor)))
+           (anchor (or captured
+                       fallback
+                       pilish--tree-browser-point-anchor))
+           (lineage
+            (cond
+             (captured
+              (pilish--tree-anchor-lineage
+               captured pilish--tree-browser-tree))
+             ;; A fetch fallback belongs to the OLD tree.  Even when its
+             ;; captured lineage is nil, never reconstruct it from the
+             ;; replacement snapshot.
+             (fallback fallback-lineage)
+             ((equal anchor pilish--tree-browser-point-anchor)
+              pilish--tree-browser-point-lineage))))
+      ;; Remember the user's last addressable node before a loading or
+      ;; empty render destroys all node sections, together with ancestry
+      ;; from the tree that still contains that node.
+      (when (stringp (pilish--tree-anchor-node-id anchor))
+        (setq pilish--tree-browser-point-anchor anchor
+              pilish--tree-browser-point-lineage lineage))
+      (let ((pilish--tree-browser-resolution-lineage lineage))
+        (pilish--browse-rerender-preserving-point
+         (current-buffer) #'pilish--tree-browser-render anchor
+         ;; Loading/error renders have no node sections; do not walk a
+         ;; potentially huge cached tree merely to rediscover that fact.
+         (and (not pilish--tree-browser-loading)
+              (not pilish--tree-browser-error)
+              pilish--tree-browser-tree
+              #'pilish--tree-browser-missing-section)
+         ignore-current-anchor))
+      (pilish--tree-browser-ensure-render-current)
+      ;; Loading/error placeholders are not a first tree snapshot.  Once
+      ;; a real snapshot has rendered, ordinary refreshes must never
+      ;; reapply initial active-leaf orientation over a user's selection.
+      (unless (or pilish--tree-browser-loading
+                  pilish--tree-browser-error
+                  (null pilish--tree-browser-tree))
+        (setq pilish--tree-browser-point-oriented-p t))
+      (pilish--tree-browser-ensure-render-current)
+      ;; Record the section actually chosen by exact identity, old
+      ;; ancestor, active path, or fallback.  With no addressable rows,
+      ;; retain the old anchor so clearing a search can recover it.
+      (when-let* ((selected (pilish--browse-capture-point-anchor))
+                  ((stringp (pilish--tree-anchor-node-id selected))))
+        (pilish--tree-browser-ensure-render-current)
+        (setq pilish--tree-browser-point-anchor selected
+              pilish--tree-browser-point-lineage
+              (pilish--tree-anchor-lineage
+               selected pilish--tree-browser-tree))))))
 
 ;;;; Tree Browser Refresh Integration
 

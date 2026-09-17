@@ -287,6 +287,82 @@ displayed), `--browse-apply-margins' must not touch `selected-window'."
     ;; Compaction root node-10 is not on active path
     (should-not (gethash "node-10" active))))
 
+(ert-deftest pilish-test-active-path-stops-at-ambiguous-parent ()
+  "A unique current leaf is marked, but uncertain ancestry is not.
+The leaf id itself is truthful.  Its bare parent id names conflicting
+physical entries, so neither that row nor ancestors reached only by the
+canonical parent choice may receive an active marker."
+  (let* ((tree
+          [(:id "top" :type "message" :role "user" :preview "top"
+            :children
+            [(:id "dup" :parentId "top" :ambiguousId t
+              :type "message" :role "assistant" :preview "ambiguous"
+              :children
+              [(:id "leaf" :parentId "dup" :type "message"
+                :role "assistant" :preview "unique leaf" :children [])])])])
+         (active (pilish--active-path-ids tree "leaf")))
+    (should (gethash "leaf" active))
+    (should-not (gethash "dup" active))
+    (should-not (gethash "top" active))
+    (let ((parents (pilish--tree-parent-index tree)))
+      (should (equal (gethash "leaf" parents) "dup"))
+      (should-not (gethash "dup" parents))))
+  ;; Projection promotes children of filtered bookkeeping.  Preserve the
+  ;; same boundary explicitly when the ambiguous row itself is absent.
+  (let* ((promoted
+          [(:id "top" :type "message" :role "user" :preview "top"
+            :children
+            [(:id "leaf" :parentId "top" :ambiguousParent t
+              :type "message" :role "assistant" :preview "unique leaf"
+              :children [])])])
+         (active (pilish--active-path-ids promoted "leaf")))
+    (should (gethash "leaf" active))
+    (should-not (gethash "top" active))
+    (should-not (gethash "leaf" (pilish--tree-parent-index promoted)))))
+
+(ert-deftest pilish-test-active-path-duplicate-id-cycle-renders-bounded ()
+  "Duplicate ids fail closed before markers, sections, or RET identity.
+The nested value is finite, but its ids imply dup → mid → dup and its
+root/leaf are distinct `dup' occurrences.  Active-path construction
+must remain bounded and return no alleged path.  Rendering exposes no
+ambiguous rows, so there are zero @ markers and zero duplicate Magit
+section identities; RET cannot take the cached-id fast no-op."
+  (let* ((tree
+          [(:id "dup" :type "message" :role "user" :preview "root dup"
+            :children
+            [(:id "mid" :parentId "dup" :type "message" :role "assistant"
+              :preview "middle" :children
+              [(:id "dup" :parentId "mid" :type "message" :role "user"
+                :preview "leaf dup" :children [])])])])
+         (real-puthash (symbol-function 'puthash))
+         (writes 0)
+         active)
+    (cl-letf (((symbol-function 'puthash)
+               (lambda (key value table)
+                 (cl-incf writes)
+                 (when (> writes 24)
+                   (ert-fail "active-path parent cycle did not terminate"))
+                 (funcall real-puthash key value table))))
+      (setq active (pilish--active-path-ids tree "dup")))
+    (should (= (hash-table-count active) 0))
+    (with-temp-buffer
+      (pilish-tree-browser-mode)
+      (setq pilish--tree-browser-tree tree
+            pilish--tree-browser-leaf-id "dup"
+            pilish--tree-browser-filter 'default)
+      (pilish--tree-browser-rerender)
+      (should (= pilish--tree-browser-visible-count 0))
+      (should (string-match-p "duplicate entry ids" (buffer-string)))
+      (should-not (cdr (pilish--tree-rendered-section-index)))
+      (should-not (string-match-p "[@*] " (buffer-string)))
+      ;; A programmatic call with the ambiguous bare id must enter the
+      ;; authoritative disk path, not claim either occurrence is current.
+      (let (delegated)
+        (cl-letf (((symbol-function 'pilish--browse-navigate-noncurrent)
+                   (lambda (node-id) (setq delegated node-id))))
+          (pilish--browse-navigate "dup"))
+        (should (equal delegated "dup"))))))
+
 ;;;; Deep Tree Safety
 
 (defun pilish-test--make-deep-tree (n)
@@ -3727,18 +3803,25 @@ The type label already shows `sh', so brackets are redundant."
     (should-not (string-match-p "\\[bash:" line))
     (should (string-match-p "git log --oneline" line))))
 
-(ert-deftest pilish-test-tree-format-node-active ()
-  "Active path nodes get bullet marker."
-  (let ((line (pilish--tree-format-node-line
-               '(:type "message" :role "user" :preview "hello") t)))
-    (should (string-match-p "•" line))
-    (should (string-match-p "hello" line))))
+(ert-deftest pilish-test-tree-format-node-distinguishes-active-and-current ()
+  "Text markers distinguish an active ancestor from the current entry."
+  (let ((active (pilish--tree-format-node-line
+                 '(:type "message" :role "user" :preview "ancestor")
+                 t nil))
+        (current (pilish--tree-format-node-line
+                  '(:type "message" :role "assistant" :preview "leaf")
+                  t t)))
+    (should (string-prefix-p "* " active))
+    (should (string-prefix-p "@ " current))
+    (should (string-match-p "ancestor" active))
+    (should (string-match-p "leaf" current))))
 
 (ert-deftest pilish-test-tree-format-node-inactive ()
-  "Inactive nodes get space instead of bullet."
+  "Inactive nodes get a blank marker column."
   (let ((line (pilish--tree-format-node-line
-               '(:type "message" :role "user" :preview "hello") nil)))
-    (should-not (string-match-p "•" line))
+               '(:type "message" :role "user" :preview "hello") nil nil)))
+    (should (string-prefix-p "  " line))
+    (should-not (string-match-p "[@*]" (substring line 0 2)))
     (should (string-match-p "hello" line))))
 
 (ert-deftest pilish-test-tree-format-node-with-label ()
@@ -3766,8 +3849,9 @@ The type label already shows `sh', so brackets are redundant."
       (pilish--tree-browser-rerender)
       ;; Buffer should contain node content
       (should (string-match-p "refactor" (buffer-string)))
-      ;; Active path nodes should have bullet marker
-      (should (string-match-p "•" (buffer-string)))
+      ;; The current leaf and its active ancestors have distinct text markers.
+      (should (string-match-p "@ ast" (buffer-string)))
+      (should (string-match-p "\\* you" (buffer-string)))
       ;; Label should NOT be in buffer text (it's in margin overlay)
       (should-not (string-match-p "\\[checkpoint\\]" (buffer-string))))))
 
@@ -3787,10 +3871,29 @@ The type label already shows `sh', so brackets are redundant."
         (should (string-match-p "└─" text))
         ;; Gutter continuation should appear
         (should (string-match-p "│" text))
-        ;; Active branch child line: connector + bullet
-        (should (string-match-p "├─ •" text))
-        ;; Last branch child: connector without bullet (inactive)
-        (should (string-match-p "└─  " text))))))
+        ;; Marker column follows, rather than becoming part of, topology.
+        (should (string-match-p "├─ \\*" text))
+        (should (string-match-p "│  @" text))
+        ;; Last branch child: connector plus a blank marker (inactive).
+        (should (string-match-p "└─   " text))))))
+
+(ert-deftest pilish-test-tree-browser-filtered-current-marker-is-truthful ()
+  "A hidden current leaf does not turn its visible ancestor into current."
+  (with-temp-buffer
+    (pilish-tree-browser-mode)
+    (let* ((response (pilish-test--read-json-fixture "browse-tree.json"))
+           (tree-data (pilish--parse-tree response)))
+      (setq pilish--tree-browser-tree (plist-get tree-data :tree)
+            pilish--tree-browser-leaf-id (plist-get tree-data :leafId)
+            ;; node-8 is an assistant; node-7 is its visible user ancestor.
+            pilish--tree-browser-filter 'user-only)
+      (pilish--tree-browser-rerender)
+      (should (equal (oref (magit-current-section) value) "node-7"))
+      (should-not (string-match-p "^@ " (buffer-string)))
+      (goto-char (point-min))
+      (search-forward "That looks good")
+      (beginning-of-line)
+      (should (looking-at-p "\\* you")))))
 
 (ert-deftest pilish-test-tree-browser-label-in-margin ()
   "Labels appear as right-margin overlays, not inline text."
@@ -4052,7 +4155,13 @@ the summarize feature (needs navigate_tree RPC)."
              (suffix (transient-get-suffix
                       'pilish-tree-browser-dispatch key))
              (actual (plist-get (cdr suffix) :command)))
-        (should (eq actual cmd))))))
+        (should (eq actual cmd)))))
+  ;; RET changes where the conversation continues; "navigate" does
+  ;; not tell the user what the consequential action actually does.
+  (let ((ret (transient-get-suffix
+              'pilish-tree-browser-dispatch "RET")))
+    (should (equal (plist-get (cdr ret) :description)
+                   "continue from selected turn"))))
 
 (ert-deftest pilish-test-tree-dispatch-heading ()
   "Tree dispatch heading reflects buffer-local filter state."
@@ -4494,7 +4603,7 @@ from disk, not the RPC)."
         (with-temp-buffer
           (pilish-tree-browser-mode)
           (cl-letf (((symbol-function 'pilish--browse-load-tree)
-                     (lambda (callback)
+                     (lambda (callback &optional _path _generation)
                        ;; Callback fires with some OTHER buffer current.
                        (with-current-buffer other
                          (funcall callback
@@ -4514,8 +4623,8 @@ from disk, not the RPC)."
                                         (buffer-string)))))
       (kill-buffer other))))
 
-(ert-deftest pilish-test-tree-browser-rerender-restores-point ()
-  "Tree rerender keeps point on the same node across filter changes."
+(ert-deftest pilish-test-tree-browser-first-render-selects-active-leaf ()
+  "A fresh tree render puts point on the active projected leaf."
   (with-temp-buffer
     (pilish-tree-browser-mode)
     (let* ((response (pilish-test--read-json-fixture "browse-tree.json"))
@@ -4524,13 +4633,190 @@ from disk, not the RPC)."
             pilish--tree-browser-leaf-id (plist-get tree-data :leafId)
             pilish--tree-browser-filter 'default)
       (pilish--tree-browser-rerender)
-      ;; node-4 (user message) survives the no-tools filter
+      (should (equal (oref (magit-current-section) value) "node-8")))))
+
+(ert-deftest pilish-test-tree-browser-first-render-selects-visible-active-ancestor ()
+  "A filtered current tool/setting leaf selects its nearest visible ancestor."
+  (let ((tree
+         [(:id "u1" :type "message" :role "user" :preview "root"
+           :children
+           [(:id "a1" :parentId "u1" :type "message" :role "assistant"
+             :preview "answer"
+             :children
+             [(:id "t1" :parentId "a1" :type "tool_result" :toolName "read"
+               :preview "[read: file]"
+               :children
+               [(:id "m1" :parentId "t1" :type "model_change"
+                 :provider "test" :modelId "model"
+                 :children
+                 [(:id "h1" :parentId "m1" :type "thinking_level_change"
+                   :thinkingLevel "high" :children [])])])])])]))
+    (dolist (case '(("t1" no-tools "a1")
+                    ("m1" default "t1")
+                    ("h1" default "t1")
+                    ("h1" no-tools "a1")))
+      (with-temp-buffer
+        (pilish-tree-browser-mode)
+        (setq pilish--tree-browser-tree tree
+              pilish--tree-browser-leaf-id (nth 0 case)
+              pilish--tree-browser-filter (nth 1 case))
+        (pilish--tree-browser-rerender)
+        (should (equal (oref (magit-current-section) value)
+                       (nth 2 case)))))))
+
+(ert-deftest pilish-test-tree-browser-first-render-has-deterministic-fallback ()
+  "When the whole active path is hidden, select the first visible row."
+  (with-temp-buffer
+    (pilish-tree-browser-mode)
+    (setq pilish--tree-browser-tree
+          [(:id "root" :type "message" :role "user" :preview "root"
+            :children
+            [(:id "active" :parentId "root" :type "message"
+              :role "assistant" :preview "active" :children [])
+             (:id "labeled" :parentId "root" :type "message"
+              :role "assistant" :preview "saved" :label "keep"
+              :children [])])]
+          pilish--tree-browser-leaf-id "active"
+          pilish--tree-browser-filter 'labeled-only)
+    (pilish--tree-browser-rerender)
+    (should (equal (oref (magit-current-section) value) "labeled"))))
+
+(ert-deftest pilish-test-tree-browser-first-render-deep-active-leaf ()
+  "Fresh orientation remains iterative for a deeply nested active path."
+  (let* ((count 1500)
+         (leaf (format "node-%d" count)))
+    (with-temp-buffer
+      (pilish-tree-browser-mode)
+      (setq pilish--tree-browser-tree (pilish-test--make-deep-tree count)
+            pilish--tree-browser-leaf-id leaf
+            pilish--tree-browser-filter 'default)
+      (pilish--tree-browser-rerender)
+      (should (equal (oref (magit-current-section) value) leaf)))))
+
+(ert-deftest pilish-test-tree-browser-rerender-restores-point ()
+  "A user move wins over active-leaf orientation on later rerenders."
+  (with-temp-buffer
+    (pilish-tree-browser-mode)
+    (let* ((response (pilish-test--read-json-fixture "browse-tree.json"))
+           (tree-data (pilish--parse-tree response)))
+      (setq pilish--tree-browser-tree (plist-get tree-data :tree)
+            pilish--tree-browser-leaf-id (plist-get tree-data :leafId)
+            pilish--tree-browser-filter 'default)
+      (pilish--tree-browser-rerender)
+      (should (equal (oref (magit-current-section) value) "node-8"))
+      ;; The user moves to node-4; it survives the no-tools filter.
       (goto-char (point-min))
       (search-forward "Actually")
       (should (equal (oref (magit-current-section) value) "node-4"))
       (setq pilish--tree-browser-filter 'no-tools)
       (pilish--tree-browser-rerender)
       (should (equal (oref (magit-current-section) value) "node-4")))))
+
+(ert-deftest pilish-test-tree-browser-missing-selection-uses-path-then-active ()
+  "Filter/search loss selects an ancestor, then the active-path target."
+  (with-temp-buffer
+    (pilish-tree-browser-mode)
+    (setq pilish--tree-browser-tree
+          [(:id "root" :type "message" :role "user" :preview "common root"
+            :children
+            [(:id "active-parent" :parentId "root" :type "message"
+              :role "assistant" :preview "active parent"
+              :children
+              [(:id "active-leaf" :parentId "active-parent" :type "message"
+                :role "user" :preview "active target" :children [])])
+             (:id "other-parent" :parentId "root" :type "message"
+              :role "assistant" :preview "inactive ancestor"
+              :children
+              [(:id "other-tool" :parentId "other-parent" :type "tool_result"
+                :toolName "read" :preview "[read: hidden child]"
+                :children [])])])]
+          pilish--tree-browser-leaf-id "active-leaf"
+          pilish--tree-browser-filter 'default)
+    (pilish--tree-browser-rerender)
+    ;; Select an inactive-branch tool.  It survives a matching query.
+    (goto-char (point-min))
+    (search-forward "hidden child")
+    (should (equal (oref (magit-current-section) value) "other-tool"))
+    (setq pilish--tree-browser-search-query "hidden"
+          pilish--tree-browser-search-tokens '("hidden"))
+    (pilish--tree-browser-rerender)
+    (should (equal (oref (magit-current-section) value) "other-tool"))
+    ;; no-tools removes it; its nearest visible projected ancestor wins.
+    (setq pilish--tree-browser-search-query nil
+          pilish--tree-browser-search-tokens nil
+          pilish--tree-browser-filter 'no-tools)
+    (pilish--tree-browser-rerender)
+    (should (equal (oref (magit-current-section) value) "other-parent"))
+    ;; A query can remove that whole path; then orient to the visible
+    ;; active-path target rather than an unrelated numeric row.
+    (setq pilish--tree-browser-search-query "active target"
+          pilish--tree-browser-search-tokens '("active" "target"))
+    (pilish--tree-browser-rerender)
+    (should (equal (oref (magit-current-section) value) "active-leaf"))))
+
+(ert-deftest pilish-test-tree-browser-refresh-uses-old-selected-lineage ()
+  "A vanished selection resolves through its old, not replacement, lineage.
+The old root has active and selected children; the replacement keeps
+only root → active.  Root is the nearest surviving old ancestor and
+must win over the replacement's active leaf."
+  (let ((old-tree
+         [(:id "root" :type "message" :role "user" :preview "root"
+           :children
+           [(:id "active" :parentId "root" :type "message"
+             :role "assistant" :preview "active" :children [])
+            (:id "selected" :parentId "root" :type "message"
+             :role "assistant" :preview "selected" :children [])])])
+        (new-tree
+         [(:id "root" :type "message" :role "user" :preview "root"
+           :children
+           [(:id "active" :parentId "root" :type "message"
+             :role "assistant" :preview "active" :children [])])])
+        (chat-buf (generate-new-buffer " *test-tree-old-lineage-chat*"))
+        (responses nil))
+    (unwind-protect
+        (progn
+          (with-current-buffer chat-buf
+            (setq pilish--state '(:session-file "/tmp/old-lineage.jsonl")))
+          (setq responses (list (list old-tree "active")
+                                (list new-tree "active")))
+          (pilish-test--with-tree-link chat-buf
+            (cl-letf (((symbol-function 'redisplay) #'ignore)
+                      ((symbol-function 'pilish--browse-load-tree)
+                       (lambda (callback &optional _path _generation)
+                         (pcase-let ((`(,tree ,leaf) (pop responses)))
+                           (funcall callback tree leaf nil)))))
+              (pilish--tree-browser-fetch-and-render)
+              (goto-char (point-min))
+              (search-forward "selected")
+              (should (equal (oref (magit-current-section) value)
+                             "selected"))
+              (pilish--tree-browser-fetch-and-render)
+              (should (equal (oref (magit-current-section) value)
+                             "root")))))
+      (kill-buffer chat-buf))))
+
+(ert-deftest pilish-test-tree-browser-empty-search-remembers-selection ()
+  "An empty search result does not discard the last section identity."
+  (with-temp-buffer
+    (pilish-tree-browser-mode)
+    (setq pilish--tree-browser-tree
+          [(:id "u1" :type "message" :role "user" :preview "first"
+            :children
+            [(:id "a1" :parentId "u1" :type "message" :role "assistant"
+              :preview "second" :children [])])]
+          pilish--tree-browser-leaf-id "a1"
+          pilish--tree-browser-filter 'default)
+    (pilish--tree-browser-rerender)
+    (goto-char (point-min))
+    (should (equal (oref (magit-current-section) value) "u1"))
+    (setq pilish--tree-browser-search-query "absent"
+          pilish--tree-browser-search-tokens '("absent"))
+    (pilish--tree-browser-rerender)
+    (should (string-match-p "No matching entries" (buffer-string)))
+    (setq pilish--tree-browser-search-query nil
+          pilish--tree-browser-search-tokens nil)
+    (pilish--tree-browser-rerender)
+    (should (equal (oref (magit-current-section) value) "u1"))))
 
 ;;;; Phase 0 Stub Seams
 
@@ -6696,7 +6982,70 @@ freshly resolved file in `--tree-browser-loaded-file' and renders it."
             (should (equal pilish--tree-browser-loaded-file path))
             (should-not pilish--tree-browser-loading)
             (should-not pilish--tree-browser-error)
-            (should (string-match-p "fix the parser" (buffer-string)))))
+            (should (string-match-p "fix the parser" (buffer-string)))
+            ;; Raw leaf l1 is projected away; fresh point follows the
+            ;; resolved projected leaf m4 rather than the first row.
+            (should (equal (oref (magit-current-section) value) "m4"))))
+      (kill-buffer chat-buf))))
+
+(ert-deftest pilish-test-tree-browser-ambiguous-duplicate-shows-diagnostic ()
+  "Differing duplicate ids keep safe rows and show an honest warning.
+The later `dup' occurrence is the one canonical display row, but gets
+a non-string section identity and RET refuses it locally.  `safe'
+remains addressable, and the ambiguous raw leaf produces no @/* claim.
+Loading succeeds, so the loaded-file guard remains armed."
+  (let* ((dir (pilish-test--make-temp-directory "pi-tree-ambiguous"))
+         (path (expand-file-name "session.jsonl" dir))
+         (chat-buf (generate-new-buffer " *test-tree-ambiguous-chat*")))
+    (pilish-test--write-session-lines
+     path
+     (list (pilish-test--make-session-header "sid-ambiguous")
+           (pilish-test--user-line "dup" nil "first ambiguous row")
+           (pilish-test--jsonl-line
+            "message" "safe" nil
+            :message '(:role "assistant" :content "safe unique row"
+                       :stopReason "end_turn"))
+           (pilish-test--user-line "dup" nil "later canonical row")))
+    (unwind-protect
+        (progn
+          (with-current-buffer chat-buf
+            (setq pilish--state (list :session-file path)))
+          (pilish-test--with-tree-link chat-buf
+            (pilish-test--sync-timers
+              (lambda () (pilish--tree-browser-fetch-and-render)))
+            (should-not pilish--tree-browser-error)
+            (should (string-match-p
+                     "dup" pilish--tree-browser-diagnostic))
+            (should (equal pilish--tree-browser-loaded-file path))
+            (should (string-match-p "duplicate entry id" (buffer-string)))
+            (should (string-match-p "safe unique row" (buffer-string)))
+            (should (string-match-p "later canonical row" (buffer-string)))
+            (should-not (string-match-p "first ambiguous row"
+                                        (buffer-string)))
+            (should (= pilish--tree-browser-visible-count 2))
+            (should (= (how-many "^@ " (point-min) (point-max)) 0))
+            (should (= (how-many "^\\* " (point-min) (point-max)) 0))
+            (let ((sections
+                   (car (pilish--tree-rendered-section-index))))
+              (should (= (hash-table-count sections) 1))
+              (should (gethash "safe" sections))
+              (should-not (gethash "dup" sections)))
+            (goto-char (point-min))
+            (search-forward "later canonical row")
+            (beginning-of-line)
+            (should (equal (oref (magit-current-section) value)
+                           '(ambiguous-id . "dup")))
+            (let (navigated refusal)
+              (cl-letf (((symbol-function 'pilish--browse-navigate)
+                         (lambda (&rest _args) (setq navigated t)))
+                        ((symbol-function 'message)
+                         (lambda (format-string &rest args)
+                           (setq refusal
+                                 (apply #'format format-string args)))))
+                (pilish-tree-browser-navigate))
+              (should-not navigated)
+              (should (string-match-p
+                       "ambiguous duplicate entry id: dup" refusal)))))
       (kill-buffer chat-buf))))
 
 (ert-deftest pilish-test-load-tree-no-chat-link ()
@@ -6837,12 +7186,255 @@ projected tree and no error."
                                "fix the parser"))))))
       (kill-buffer chat-buf))))
 
+(ert-deftest pilish-test-tree-browser-fetch-claims-generation-before-render ()
+  "A loading render cannot reverse reentrant tree-fetch ownership.
+Fetch A claims its generation and file owner before painting.  Its
+loading rerender starts fetch B; after A resumes, only B may queue and
+publish.  In particular, A must never pair its tree with B's
+`pilish--tree-browser-state-file'."
+  (let* ((dir (pilish-test--make-temp-directory "pi-tree-reentrant"))
+         (path-a (expand-file-name "a.jsonl" dir))
+         (path-b (expand-file-name "b.jsonl" dir))
+         (chat-buf (generate-new-buffer " *test-tree-reentrant-chat*")))
+    (pilish-test--write-session-lines
+     path-a
+     (list (pilish-test--make-session-header "sid-reentrant-a")
+           (pilish-test--user-line "a-root" nil "tree owned by A")))
+    (pilish-test--write-session-lines
+     path-b
+     (list (pilish-test--make-session-header "sid-reentrant-b")
+           (pilish-test--user-line "b-root" nil "tree owned by B")))
+    (unwind-protect
+        (progn
+          (with-current-buffer chat-buf
+            (setq pilish--state (list :session-file path-a)))
+          (pilish-test--with-tree-link chat-buf
+            (let ((first-render t)
+                  (queue nil))
+              (cl-letf (((symbol-function 'pilish--tree-browser-rerender)
+                         (lambda (&rest _)
+                           (when first-render
+                             (setq first-render nil)
+                             (with-current-buffer chat-buf
+                               (setq pilish--state
+                                     (list :session-file path-b)))
+                             (pilish--tree-browser-fetch-and-render))))
+                        ((symbol-function 'redisplay) #'ignore)
+                        ((symbol-function 'run-at-time)
+                         (lambda (_seconds _repeat function &rest args)
+                           (push (cons function args) queue))))
+                (pilish--tree-browser-fetch-and-render)
+                ;; Run in scheduling order: B was queued while A's
+                ;; loading render was still on the stack.
+                (dolist (job (nreverse queue))
+                  (apply (car job) (cdr job)))))
+            (should (= pilish--tree-browser-fetch-token 2))
+            (should (equal pilish--tree-browser-state-file path-b))
+            (should (equal pilish--tree-browser-loaded-file path-b))
+            (should (equal pilish--tree-browser-leaf-id "b-root"))
+            (should (equal (plist-get
+                            (aref pilish--tree-browser-tree 0)
+                            :preview)
+                           "tree owned by B"))))
+      (kill-buffer chat-buf))))
+
+(ert-deftest pilish-test-tree-browser-load-render-is-generation-fenced ()
+  "A newer load landing inside real section insertion wins atomically.
+A's second tree-node visibility hook publishes generation 2/B after
+A's root row was already inserted and while generation 1 remains on
+the stack.  When that hook returns, A must not resume or perform stale
+orientation writes: the clean repaint and all ownership state are B."
+  (with-temp-buffer
+    (pilish-tree-browser-mode)
+    (let* ((buf (current-buffer))
+           (owner-a "owner-a")
+           (owner-b "owner-b")
+           (tree-a
+            [(:id "a-root" :type "message" :role "user"
+              :preview "A root" :children
+              [(:id "a-leaf" :parentId "a-root" :type "message"
+                :role "assistant" :preview "A leaf" :children [])])])
+           (tree-b
+            [(:id "b-root" :type "message" :role "user"
+              :preview "B root" :children
+              [(:id "b-leaf" :parentId "b-root" :type "message"
+                :role "assistant" :preview "B leaf" :children [])])])
+           (tree-node-hooks 0)
+           (armed t)
+           (magit-section-set-visibility-hook
+            (list
+             (lambda (section)
+               (when (eq (oref section type) 'tree-node)
+                 (setq tree-node-hooks (1+ tree-node-hooks))
+                 (when (and armed (= tree-node-hooks 2))
+                   (setq armed nil
+                         pilish--tree-browser-fetch-token 2
+                         pilish--tree-browser-state-file owner-b)
+                   (pilish--tree-browser-apply-load
+                    buf tree-b "b-leaf" nil nil nil owner-b 2)))
+               nil))))
+      (setq pilish--tree-browser-fetch-token 1
+            pilish--tree-browser-state-file owner-a)
+      (pilish--tree-browser-apply-load
+       buf tree-a "a-leaf" nil nil nil owner-a 1)
+      (should-not armed)
+      (should (= pilish--tree-browser-fetch-token 2))
+      (should (equal pilish--tree-browser-state-file owner-b))
+      (should (equal pilish--tree-browser-loaded-file owner-b))
+      (should (equal pilish--tree-browser-leaf-id "b-leaf"))
+      (should pilish--tree-browser-point-oriented-p)
+      (should (equal (oref (magit-current-section) value) "b-leaf"))
+      (should (equal (pilish--tree-anchor-node-id
+                      pilish--tree-browser-point-anchor)
+                     "b-leaf"))
+      (should (equal pilish--tree-browser-point-lineage
+                     '("b-leaf" "b-root")))
+      (should (string-match-p "B root" (buffer-string)))
+      (should (string-match-p "B leaf" (buffer-string)))
+      (should-not (string-match-p "A root" (buffer-string)))
+      (should-not (string-match-p "A leaf" (buffer-string)))
+      (should (= (how-many "^@ " (point-min) (point-max)) 1)))))
+
+(ert-deftest pilish-test-tree-browser-ordinary-render-is-generation-fenced ()
+  "A load landing inside a filter-style render replaces partial text.
+Unlike the completed-load test, A enters through an ordinary rerender;
+the buffer-wide render transaction must still queue B, abort A after
+the visibility hook, and repaint only B."
+  (with-temp-buffer
+    (pilish-tree-browser-mode)
+    (let* ((buf (current-buffer))
+           (owner-a "ordinary-owner-a")
+           (owner-b "ordinary-owner-b")
+           (tree-a
+            [(:id "ordinary-a-root" :type "message" :role "user"
+              :preview "ordinary A root" :children
+              [(:id "ordinary-a-leaf" :parentId "ordinary-a-root"
+                :type "message" :role "assistant"
+                :preview "ordinary A leaf" :children [])])])
+           (tree-b
+            [(:id "ordinary-b" :type "message" :role "assistant"
+              :preview "ordinary B only" :children [])])
+           (tree-node-hooks 0)
+           (armed t)
+           (magit-section-set-visibility-hook
+            (list
+             (lambda (section)
+               (when (eq (oref section type) 'tree-node)
+                 (setq tree-node-hooks (1+ tree-node-hooks))
+                 (when (and armed (= tree-node-hooks 2))
+                   (setq armed nil
+                         pilish--tree-browser-fetch-token 2
+                         pilish--tree-browser-state-file owner-b)
+                   (pilish--tree-browser-apply-load
+                    buf tree-b "ordinary-b" nil nil nil owner-b 2)))
+               nil))))
+      (setq pilish--tree-browser-fetch-token 1
+            pilish--tree-browser-state-file owner-a
+            pilish--tree-browser-loaded-file owner-a
+            pilish--tree-browser-tree tree-a
+            pilish--tree-browser-leaf-id "ordinary-a-leaf")
+      (pilish--tree-browser-rerender)
+      (should-not armed)
+      (should (equal pilish--tree-browser-loaded-file owner-b))
+      (should (equal pilish--tree-browser-leaf-id "ordinary-b"))
+      (should (string-match-p "ordinary B only" (buffer-string)))
+      (should-not (string-match-p "ordinary A" (buffer-string))))))
+
+(ert-deftest pilish-test-tree-browser-loading-render-is-generation-fenced ()
+  "A load landing inside the real loading paint wins without mixing.
+The loading render is not itself a completed load, but it must own the
+same buffer-wide transaction so B can queue at Magit's root visibility
+hook and repaint after A aborts.  A's now-stale loader seam is harmless."
+  (with-temp-buffer
+    (pilish-tree-browser-mode)
+    (let* ((buf (current-buffer))
+           (owner-a "loading-owner-a")
+           (owner-b "loading-owner-b")
+           (tree-b
+            [(:id "loading-b" :type "message" :role "assistant"
+              :preview "loading B only" :children [])])
+           (armed t)
+           (old-load-called nil)
+           (magit-section-set-visibility-hook
+            (list
+             (lambda (section)
+               (when (and armed
+                          (eq (oref section type) 'root))
+                 (setq armed nil
+                       pilish--tree-browser-fetch-token 2
+                       pilish--tree-browser-state-file owner-b)
+                 (pilish--tree-browser-apply-load
+                  buf tree-b "loading-b" nil nil nil owner-b 2))
+               nil))))
+      (cl-letf (((symbol-function 'pilish--tree-browser-chat-session-file)
+                 (lambda () owner-a))
+                ((symbol-function 'pilish--browse-load-tree)
+                 (lambda (&rest _args)
+                   (setq old-load-called t))))
+        (pilish--tree-browser-fetch-and-render))
+      (should-not armed)
+      (should old-load-called)
+      (should (equal pilish--tree-browser-loaded-file owner-b))
+      (should (equal pilish--tree-browser-leaf-id "loading-b"))
+      (should (string-match-p "loading B only" (buffer-string)))
+      (should-not (string-match-p "Loading tree" (buffer-string))))))
+
+(ert-deftest pilish-test-tree-file-switch-resets-shared-id-anchor ()
+  "A different session file owns a fresh orientation even with shared ids.
+The two same-project files share root id `shared'.  Point is moved to
+that root in file A; switching the chat to file B must ignore the
+still-valid old section identity and select B's projected active leaf.
+An ordinary same-file refresh then preserves a manual selection."
+  (let* ((dir (pilish-test--make-temp-directory "pi-tree-owner"))
+         (path-a (expand-file-name "a.jsonl" dir))
+         (path-b (expand-file-name "b.jsonl" dir))
+         (chat-buf (generate-new-buffer " *test-tree-owner-chat*")))
+    (pilish-test--write-session-lines
+     path-a
+     (list (pilish-test--make-session-header "sid-owner-a")
+           (pilish-test--user-line "shared" nil "shared root A")
+           (pilish-test--jsonl-line
+            "message" "a-leaf" "shared"
+            :message '(:role "assistant" :content "active A"
+                       :stopReason "end_turn"))))
+    (pilish-test--write-session-lines
+     path-b
+     (list (pilish-test--make-session-header "sid-owner-b")
+           (pilish-test--user-line "shared" nil "shared root B")
+           (pilish-test--jsonl-line
+            "message" "b-leaf" "shared"
+            :message '(:role "assistant" :content "active B"
+                       :stopReason "end_turn"))))
+    (unwind-protect
+        (progn
+          (with-current-buffer chat-buf
+            (setq pilish--state (list :session-file path-a)))
+          (pilish-test--with-tree-link chat-buf
+            (pilish-test--sync-timers
+              (lambda () (pilish--tree-browser-fetch-and-render)))
+            (goto-char (point-min))
+            (search-forward "shared root A")
+            (should (equal (oref (magit-current-section) value) "shared"))
+            (with-current-buffer chat-buf
+              (setq pilish--state (list :session-file path-b)))
+            (pilish-test--sync-timers
+              (lambda () (pilish--tree-browser-fetch-and-render)))
+            (should (equal pilish--tree-browser-loaded-file path-b))
+            (should (equal (oref (magit-current-section) value) "b-leaf"))
+            ;; Same-file refresh still honors a subsequent manual move.
+            (goto-char (point-min))
+            (search-forward "shared root B")
+            (pilish-test--sync-timers
+              (lambda () (pilish--tree-browser-fetch-and-render)))
+            (should (equal (oref (magit-current-section) value) "shared"))))
+      (kill-buffer chat-buf))))
+
 (ert-deftest pilish-test-tree-fetch-without-process ()
-  "The tree browser fetch proceeds without a live pi process.
-Phase 3 reads the tree from the linked chat's session file on disk, so
-the Phase 0 no-process guard is gone: real previews render with no
---get-process mock anywhere, the loading state clears, and no error is
-recorded."
+  "Offline fetch orients once, then preserves a user's selected turn.
+The tree comes from disk without a live process.  Its first completed
+load selects active leaf m4.  After the user moves to m1, an ordinary
+refresh preserves that section identity instead of stealing point back
+to m4."
   (let* ((dir (pilish-test--make-temp-directory "pi-tree-noproc"))
          (path (expand-file-name "session.jsonl" dir))
          (chat-buf (generate-new-buffer " *test-tree-noproc-chat*")))
@@ -6856,8 +7448,45 @@ recorded."
             (pilish-test--sync-timers
               (lambda () (pilish--tree-browser-fetch-and-render)))
             (should (string-match-p "fix the parser" (buffer-string)))
+            (should (equal (oref (magit-current-section) value) "m4"))
             (should-not pilish--tree-browser-loading)
-            (should-not pilish--tree-browser-error)))
+            (should-not pilish--tree-browser-error)
+            ;; Move away from the active leaf before the disk refresh.
+            (goto-char (point-min))
+            (search-forward "fix the parser")
+            (should (equal (oref (magit-current-section) value) "m1"))
+            (pilish-test--sync-timers
+              (lambda () (pilish--tree-browser-fetch-and-render)))
+            (should (equal (oref (magit-current-section) value) "m1"))))
+      (kill-buffer chat-buf))))
+
+(ert-deftest pilish-test-tree-refresh-missing-selection-uses-old-parent ()
+  "A disk refresh whose selected node vanished selects its old parent.
+The user first selects off-branch b1.  An external rewrite removes b1
+while leaving both its old parent u1 and current leaf c1; the nearest
+surviving old ancestor wins before the fresh active path."
+  (let* ((dir (pilish-test--make-temp-directory "pi-tree-refresh-point"))
+         (path (expand-file-name "session.jsonl" dir))
+         (chat-buf (generate-new-buffer " *test-tree-refresh-chat*"))
+         (initial (pilish-test--navigable-session-lines)))
+    (pilish-test--write-session-lines path initial)
+    (unwind-protect
+        (progn
+          (with-current-buffer chat-buf
+            (setq pilish--state (list :session-file path)))
+          (pilish-test--with-tree-link chat-buf
+            (pilish-test--sync-timers
+              (lambda () (pilish--tree-browser-fetch-and-render)))
+            (goto-char (point-min))
+            (search-forward "abandoned branch")
+            (should (equal (oref (magit-current-section) value) "b1"))
+            ;; Remove only b1; c1 stays the raw/projected active leaf,
+            ;; while b1's old parent u1 survives.
+            (pilish-test--write-session-lines
+             path (append (cl-subseq initial 0 2) (nthcdr 3 initial)))
+            (pilish-test--sync-timers
+              (lambda () (pilish--tree-browser-fetch-and-render)))
+            (should (equal (oref (magit-current-section) value) "u1"))))
       (kill-buffer chat-buf))))
 
 (ert-deftest pilish-test-set-label-appends-label-entry ()
@@ -7058,6 +7687,40 @@ state clears and the buffer names the interruption."
             (should (= pilish--tree-browser-visible-count 0))))
       (kill-buffer chat-buf))))
 
+(ert-deftest pilish-test-tree-fetch-path-owned-before-loading-paint ()
+  "A session switch during the loading paint cannot retarget the fetch.
+The fetch claims file A before `redisplay'; if process/UI work changes
+the linked chat to B during that paint, the loader must still read A so
+tree, loaded-file guard, orientation, and anchor ownership all agree."
+  (let* ((dir (pilish-test--make-temp-directory "pi-tree-paint-owner"))
+         (path-a (expand-file-name "a.jsonl" dir))
+         (path-b (expand-file-name "b.jsonl" dir))
+         (chat-buf (generate-new-buffer " *test-tree-paint-owner-chat*")))
+    (pilish-test--write-session-lines
+     path-a
+     (list (pilish-test--make-session-header "sid-paint-a")
+           (pilish-test--user-line "a-root" nil "owned by A")))
+    (pilish-test--write-session-lines
+     path-b
+     (list (pilish-test--make-session-header "sid-paint-b")
+           (pilish-test--user-line "b-root" nil "retargeted to B")))
+    (unwind-protect
+        (progn
+          (with-current-buffer chat-buf
+            (setq pilish--state (list :session-file path-a)))
+          (pilish-test--with-tree-link chat-buf
+            (cl-letf (((symbol-function 'redisplay)
+                       (lambda (&rest _)
+                         (with-current-buffer chat-buf
+                           (setq pilish--state (list :session-file path-b))))))
+              (pilish-test--sync-timers
+                (lambda () (pilish--tree-browser-fetch-and-render))))
+            (should (equal pilish--tree-browser-state-file path-a))
+            (should (equal pilish--tree-browser-loaded-file path-a))
+            (should (string-match-p "owned by A" (buffer-string)))
+            (should-not (string-match-p "retargeted to B" (buffer-string)))))
+      (kill-buffer chat-buf))))
+
 (ert-deftest pilish-test-load-tree-mid-read-session-switch ()
   "A chat session switch between fetch start and the deferred read
 leaves `--tree-browser-loaded-file' pinned to the file the fetch
@@ -7106,6 +7769,56 @@ labeling must refuse with the refresh message and touch nothing."
                              before-b)))))
       (kill-buffer chat-buf))))
 
+(ert-deftest pilish-test-load-tree-mid-read-invalidation-drops-stale-publication ()
+  "A newer owner started during callback-capable disk I/O wins.
+Fetch A's projected-file read reentrantly switches the chat to B and
+completes a B fetch.  When A's yielding read resumes, it must validate
+both its generation and file owner before callback/publication; B's
+state, tree, and loaded-file remain paired."
+  (let* ((dir (pilish-test--make-temp-directory "pi-tree-midread-owner"))
+         (path-a (expand-file-name "a.jsonl" dir))
+         (path-b (expand-file-name "b.jsonl" dir))
+         (chat-buf (generate-new-buffer " *test-tree-midread-owner-chat*")))
+    (pilish-test--write-session-lines
+     path-a
+     (list (pilish-test--make-session-header "sid-midread-a")
+           (pilish-test--user-line "a-root" nil "stale tree A")))
+    (pilish-test--write-session-lines
+     path-b
+     (list (pilish-test--make-session-header "sid-midread-b")
+           (pilish-test--user-line "b-root" nil "winning tree B")))
+    (unwind-protect
+        (progn
+          (with-current-buffer chat-buf
+            (setq pilish--state (list :session-file path-a)))
+          (pilish-test--with-tree-link chat-buf
+            (let ((first-read t))
+              (cl-letf* ((real
+                          (symbol-function
+                           'pilish-jsonl-project-session-file))
+                         ((symbol-function
+                           'pilish-jsonl-project-session-file)
+                          (lambda (path)
+                            (when first-read
+                              (setq first-read nil)
+                              (with-current-buffer chat-buf
+                                (setq pilish--state
+                                      (list :session-file path-b)))
+                              (pilish--tree-browser-fetch-and-render))
+                            (funcall real path)))
+                         ((symbol-function 'redisplay) #'ignore))
+                (pilish-test--sync-timers
+                  (lambda () (pilish--tree-browser-fetch-and-render)))))
+            (should (= pilish--tree-browser-fetch-token 2))
+            (should (equal pilish--tree-browser-state-file path-b))
+            (should (equal pilish--tree-browser-loaded-file path-b))
+            (should (equal pilish--tree-browser-leaf-id "b-root"))
+            (should (equal (plist-get
+                            (aref pilish--tree-browser-tree 0)
+                            :preview)
+                           "winning tree B"))))
+      (kill-buffer chat-buf))))
+
 (ert-deftest pilish-test-tree-fetch-paints-loading-state ()
   "The loading render is painted before the deferred read is scheduled.
 Emacs runs due 0-timers before redisplaying, so a single timer hop to
@@ -7119,7 +7832,8 @@ seam call."
       (cl-letf (((symbol-function 'redisplay)
                  (lambda (&rest _) (push :redisplay log)))
                 ((symbol-function 'pilish--browse-load-tree)
-                 (lambda (_callback) (push :load log))))
+                 (lambda (_callback &optional _path _generation)
+                   (push :load log))))
         (pilish--tree-browser-fetch-and-render))
       ;; Strict order: the paint lands before the seam (and thus
       ;; before any deferred read) is even scheduled.
@@ -7201,10 +7915,11 @@ appended anywhere."
 (defun pilish-test--navigable-session-lines ()
   "Return raw session lines with a branch point for navigation tests.
 u1 (root user) has two assistant children — b1, an abandoned sibling,
-and a1, the active branch — whose user child u2 is the raw leaf.
-Navigating to u2 must rewind the leaf to a1: the header stays first,
-the off-chain b1 and u2 keep their relative order ahead of the root
-chain u1, a1, and a1 becomes the new last line."
+and a1 — whose historical user child u2 has a newer assistant c1.
+Thus u2 is not the actual current projected entry.  Continuing from u2
+must retain the established user re-edit rule and rewind the leaf to
+a1: the header stays first, off-chain b1/u2/c1 keep their relative
+order ahead of root chain u1/a1, and a1 becomes the new last line."
   (list (pilish-test--make-session-header "sid-nav")
         (pilish-test--user-line "u1" nil "fix the parser")
         (pilish-test--jsonl-line
@@ -7215,14 +7930,19 @@ chain u1, a1, and a1 becomes the new last line."
          "message" "a1" "u1"
          :message '(:role "assistant" :content "checking"
                     :stopReason "end_turn"))
-        (pilish-test--user-line "u2" "a1" "try the other way")))
+        (pilish-test--user-line "u2" "a1" "try the other way")
+        (pilish-test--jsonl-line
+         "message" "c1" "u2"
+         :message '(:role "assistant" :content "current answer"
+                    :stopReason "end_turn"))))
 
 (defun pilish-test--navigate-rewritten-contents
     (lines &optional separator)
-  "Return expected bytes after navigating LINES to u2.
-LINES start (header, u1, b1, a1, u2); any remaining malformed lines
-are off-chain.  The stable partition is header, b1, u2, malformed…,
-u1, a1.  SEPARATOR defaults to LF and is also appended once at end."
+  "Return expected bytes after continuing from historical u2.
+LINES start (header, u1, b1, a1, u2); every remaining line (normally
+current child c1, plus any malformed lines) is off the target chain.
+The stable partition is header, b1, u2, remaining…, u1, a1.  SEPARATOR
+defaults to LF and is also appended once at end."
   (let ((separator (string-as-unibyte (or separator "\n"))))
     (concat (mapconcat #'string-as-unibyte
                        (append (list (nth 0 lines) (nth 2 lines)
@@ -7309,7 +8029,7 @@ flow uncalled."
                     (should-error
                      (pilish--browse-navigate "u2")
                      :type 'user-error))
-                   "No pi session to navigate")))
+                   "No pi session to continue from selected turn")))
   ;; No session file: message, nothing written.
   (let* ((chat-buf (generate-new-buffer " *test-nav-nofile-chat*"))
          (messages nil))
@@ -7322,8 +8042,9 @@ flow uncalled."
                        (lambda (fmt &rest args)
                          (push (apply #'format fmt args) messages))))
               (pilish--browse-navigate "u2"))
-            (should (member "Pi: Cannot navigate: no session file"
-                            messages))))
+            (should (member
+                     "Pi: Cannot continue from selected turn: no session file"
+                     messages))))
       (kill-buffer chat-buf)))
   ;; Stale loaded file: the chat moved to another session.
   (pilish-test--with-navigate-fixture
@@ -7371,13 +8092,14 @@ flow uncalled."
       (with-current-buffer chat-buf
         (setq pilish--session-transition-active t))
       (pilish--browse-navigate "u2")
-      (should (member "Pi: Cannot navigate while switching sessions"
-                      messages))
+      (should (member
+               "Pi: Cannot continue from selected turn while switching sessions"
+               messages))
       (should (equal (pilish-test--file-contents path) before))
       (should-not resume-calls)
       (should-not ready-calls)))
-  ;; Not ready: the guard reports its own refusal and navigate
-  ;; returns quietly, passing the "navigate" action.
+  ;; Not ready: the guard reports its own refusal and continuation
+  ;; returns quietly, passing the user-facing action wording.
   (pilish-test--with-navigate-fixture
       (pilish-test--navigable-session-lines)
       path chat-buf input-buf proc messages resume-calls quit-calls
@@ -7389,35 +8111,64 @@ flow uncalled."
                    (push (list chat-buf action) ready-calls)
                    nil)))
         (pilish--browse-navigate "u2"))
-      (should (equal ready-calls (list (list chat-buf "navigate"))))
+      (should (equal ready-calls
+                     (list (list chat-buf "continue from selected turn"))))
       (should (equal (pilish-test--file-contents path) before))
       (should-not resume-calls))))
 
-(ert-deftest pilish-test-navigate-old-format ()
-  "A version-1 session file (no header :version, no entry ids) reads
-fine but refuses navigation with the migrate hint — the version guard
-fires before any node lookup.  The file is untouched and no switch is
-scheduled."
-  (let ((old-lines
-         (list (json-encode
-                (list :type "session"
-                      :id "sid-old"
-                      :timestamp pilish-test--browse-timestamp
-                      :cwd "/home/fake/a"))
-               (json-encode
-                (list :type "message"
-                      :timestamp pilish-test--browse-timestamp
-                      :message '(:role "user" :content "v1 prompt"))))))
-    (pilish-test--with-navigate-fixture
-        old-lines path chat-buf input-buf proc messages resume-calls
-        quit-calls ready-calls
-      (let ((before (pilish-test--file-contents path)))
-        (pilish--browse-navigate "u1")
-        (should (member
-                 "Pi: Session file uses an old format; open it with pi once to migrate, then refresh with g"
-                 messages))
-        (should (equal (pilish-test--file-contents path) before))
-        (should-not resume-calls)))))
+(ert-deftest pilish-test-tree-legacy-projection-has-no-false-markers-or-ret-target ()
+  "Actual legacy nil/empty-id rows are visible but unaddressable.
+The projected leaf is nil.  Rendering must not infer absent == absent
+as current/active or give an empty id a section identity; RET truthfully
+explains that the selected legacy row cannot be continued from and never
+calls the internal continuation seam."
+  (let* ((dir (pilish-test--make-temp-directory "pi-tree-legacy"))
+         (path (expand-file-name "old.jsonl" dir))
+         (chat-buf (generate-new-buffer " *test-tree-legacy-chat*"))
+         (messages nil)
+         (continue-calls nil))
+    (pilish-test--write-session-lines
+     path
+     (list (json-encode
+            (list :type "session"
+                  :id "sid-old"
+                  :timestamp pilish-test--browse-timestamp
+                  :cwd "/home/fake/a"))
+           (json-encode
+            (list :type "message"
+                  :timestamp pilish-test--browse-timestamp
+                  :message '(:role "user" :content "v1 prompt")))
+           (json-encode
+            (list :type "message"
+                  :id ""
+                  :timestamp pilish-test--browse-timestamp
+                  :message '(:role "assistant"
+                             :content "malformed empty id")))))
+    (unwind-protect
+        (progn
+          (with-current-buffer chat-buf
+            (setq pilish--state (list :session-file path)))
+          (pilish-test--with-tree-link chat-buf
+            (pilish-test--sync-timers
+              (lambda () (pilish--tree-browser-fetch-and-render)))
+            (should (string-match-p "v1 prompt" (buffer-string)))
+            (should (string-match-p "malformed empty id" (buffer-string)))
+            (should-not pilish--tree-browser-leaf-id)
+            (should-not (oref (magit-current-section) value))
+            (should-not (string-match-p "^[@*] " (buffer-string)))
+            (cl-letf (((symbol-function 'message)
+                       (lambda (fmt &rest args)
+                         (push (apply #'format fmt args) messages)))
+                      ((symbol-function 'pilish--browse-navigate)
+                       (lambda (&rest args) (push args continue-calls))))
+              (pilish-tree-browser-navigate))
+            (should-not continue-calls)
+            (should (member
+                     (concat
+                      "Pi: Cannot continue from selected turn: legacy entry "
+                      "has no id; open it with pi once to migrate, then refresh with g")
+                     messages))))
+      (kill-buffer chat-buf))))
 
 (ert-deftest pilish-test-navigate-unknown-node ()
   "A node id the session file does not carry refuses with the refresh
@@ -7428,14 +8179,17 @@ hint; the file is untouched and no switch is scheduled."
       ready-calls
     (let ((before (pilish-test--file-contents path)))
       (pilish--browse-navigate "deadbeef")
-      (should (member "Pi: No such tree node — refresh with g" messages))
+      (should (member
+               "Pi: Cannot continue from selected turn: no such tree node — refresh with g"
+               messages))
       (should (equal (pilish-test--file-contents path) before))
       (should-not resume-calls))))
 
-(ert-deftest pilish-test-navigate-already-at-position ()
-  "Targeting the current position (no prefill to restore) just says
-so: no write, no switch, no settle-wait.  The raw leaf is a trailing
-label child of a1, which resolves up to a1 — the target itself."
+(ert-deftest pilish-test-navigate-current-assistant-bypasses-all-live-guards ()
+  "RET on the loaded @ assistant is a strict no-op before live guards.
+Even if the linked chat is simultaneously offline, streaming, busy,
+and switching, no process/read/guard/target or mutation seam runs.
+The raw leaf is a trailing projected-away label resolving to a1."
   (pilish-test--with-navigate-fixture
       (list (pilish-test--make-session-header "sid-here")
             (pilish-test--user-line "u1" nil "fix the parser")
@@ -7447,13 +8201,135 @@ label child of a1, which resolves up to a1 — the target itself."
              "label" "l1" "a1" :targetId "u1" :label "checkpoint"))
       path chat-buf input-buf proc messages resume-calls quit-calls
       ready-calls
-    (let ((before (pilish-test--file-contents path)))
-      (pilish--browse-navigate "a1")
+    (should (equal (oref (magit-current-section) value) "a1"))
+    (beginning-of-line)
+    (should (looking-at-p "@ ast"))
+    (with-current-buffer chat-buf
+      (setq pilish--process nil
+            pilish--status 'streaming
+            pilish--session-transition-active t))
+    (let ((before (pilish-test--file-contents path))
+          (forbidden nil)
+          (real-read (symbol-function 'pilish-jsonl-read-file))
+          (real-target (symbol-function 'pilish-jsonl-navigation-target)))
+      (cl-letf (((symbol-function 'pilish--session-live-process-p)
+                 (lambda (&rest _) (push :process-guard forbidden) t))
+                ((symbol-function 'pilish--browse-transition-refused-p)
+                 (lambda (&rest _) (push :transition-guards forbidden) nil))
+                ((symbol-function 'pilish-jsonl-read-file)
+                 (lambda (p)
+                   (push :disk-read forbidden)
+                   (funcall real-read p)))
+                ((symbol-function 'pilish-jsonl-navigation-target)
+                 (lambda (&rest args)
+                   (push :target forbidden)
+                   (apply real-target args)))
+                ((symbol-function 'pilish-jsonl-current-projected-id)
+                 (lambda (&rest _) (push :fresh-current forbidden) "a1"))
+                ((symbol-function 'pilish-jsonl-navigation-lines)
+                 (lambda (&rest _) (push :lines forbidden) []))
+                ((symbol-function 'pilish--browse-rewrite-session-file)
+                 (lambda (&rest _) (push :rewrite forbidden) t))
+                ((symbol-function 'pilish--resume-selected-session)
+                 (lambda (&rest _) (push :resume forbidden)))
+                ((symbol-function 'pilish--browse-prefill-input)
+                 (lambda (&rest _) (push :prefill forbidden)))
+                ((symbol-function 'pilish--browse-quit-when-settled)
+                 (lambda (&rest _) (push :settle forbidden)))
+                ((symbol-function 'pilish--session-file-cwd-or-error)
+                 (lambda (&rest _) (push :cwd forbidden))))
+        (pilish-tree-browser-navigate))
+      (should-not forbidden)
       (should (member "Pi: Already at current position" messages))
       (should (equal (pilish-test--file-contents path) before))
       (should-not resume-calls)
       (should-not quit-calls)
-      ;; The stale draft survives: there is nothing to re-edit.
+      (should-not ready-calls)
+      (should (equal (with-current-buffer input-buf (buffer-string))
+                     "stale draft")))))
+
+(ert-deftest pilish-test-navigate-current-user-with-bookkeeping-is-no-op ()
+  "Selecting the actual current projected user entry changes nothing.
+Trailing label/session-info/custom records project away to u2.  RET on
+u2 must not apply the historical-user rewind rule: no rewrite, resume,
+prefill, settle wait, or draft loss."
+  (pilish-test--with-navigate-fixture
+      (list (pilish-test--make-session-header "sid-current-user")
+            (pilish-test--user-line "u1" nil "root prompt")
+            (pilish-test--jsonl-line
+             "message" "a1" "u1"
+             :message '(:role "assistant" :content "reply"
+                        :stopReason "end_turn"))
+            (pilish-test--user-line "u2" "a1" "current prompt")
+            (pilish-test--jsonl-line
+             "label" "l1" "u2" :targetId "u2" :label "current")
+            (pilish-test--jsonl-line
+             "session_info" "s1" "l1" :name "named")
+            (pilish-test--jsonl-line
+             "custom" "c1" "s1" :customType "bookkeeping" :data '(:ok t)))
+      path chat-buf input-buf proc messages resume-calls quit-calls
+      ready-calls
+    (should (equal (oref (magit-current-section) value) "u2"))
+    (beginning-of-line)
+    (should (looking-at-p "@ you"))
+    (with-current-buffer chat-buf
+      (setq pilish--process nil
+            pilish--status 'streaming
+            pilish--session-transition-active t))
+    (let ((before (pilish-test--file-contents path))
+          (forbidden nil)
+          (real-read (symbol-function 'pilish-jsonl-read-file))
+          (real-target (symbol-function 'pilish-jsonl-navigation-target)))
+      (cl-letf (((symbol-function 'pilish--session-live-process-p)
+                 (lambda (&rest _) (push :process-guard forbidden) t))
+                ((symbol-function 'pilish--browse-transition-refused-p)
+                 (lambda (&rest _) (push :transition-guards forbidden) nil))
+                ((symbol-function 'pilish-jsonl-read-file)
+                 (lambda (p)
+                   (push :disk-read forbidden)
+                   (funcall real-read p)))
+                ((symbol-function 'pilish-jsonl-navigation-target)
+                 (lambda (&rest args)
+                   (push :target forbidden)
+                   (apply real-target args)))
+                ((symbol-function 'pilish-jsonl-current-projected-id)
+                 (lambda (&rest _) (push :fresh-current forbidden) "u2"))
+                ((symbol-function 'pilish-jsonl-navigation-lines)
+                 (lambda (&rest _) (push :lines forbidden) []))
+                ((symbol-function 'pilish--browse-rewrite-session-file)
+                 (lambda (&rest _) (push :rewrite forbidden) t))
+                ((symbol-function 'pilish--resume-selected-session)
+                 (lambda (&rest _) (push :resume forbidden)))
+                ((symbol-function 'pilish--browse-prefill-input)
+                 (lambda (&rest _) (push :prefill forbidden)))
+                ((symbol-function 'pilish--browse-quit-when-settled)
+                 (lambda (&rest _) (push :settle forbidden)))
+                ((symbol-function 'pilish--session-file-cwd-or-error)
+                 (lambda (&rest _) (push :cwd forbidden))))
+        ;; Exercise RET at the oriented current user row.
+        (pilish-tree-browser-navigate))
+      (should (member "Pi: Already at current position" messages))
+      (should-not forbidden)
+      (should (equal (pilish-test--file-contents path) before))
+      (should-not resume-calls)
+      (should-not quit-calls)
+      (should-not ready-calls)
+      (should (equal (with-current-buffer input-buf (buffer-string))
+                     "stale draft")))))
+
+(ert-deftest pilish-test-navigate-current-root-user-is-no-op ()
+  "A current root user is a no-op, while historical root still refuses."
+  (pilish-test--with-navigate-fixture
+      (list (pilish-test--make-session-header "sid-current-root")
+            (pilish-test--user-line "u1" nil "only prompt"))
+      path chat-buf input-buf proc messages resume-calls quit-calls
+      ready-calls
+    (let ((before (pilish-test--file-contents path)))
+      (pilish--browse-navigate "u1")
+      (should (member "Pi: Already at current position" messages))
+      (should (equal (pilish-test--file-contents path) before))
+      (should-not resume-calls)
+      (should-not quit-calls)
       (should (equal (with-current-buffer input-buf (buffer-string))
                      "stale draft")))))
 
@@ -7471,7 +8347,9 @@ settle — but writes nothing and switches nothing."
       (pilish--browse-navigate "u2")
       (should (equal (with-current-buffer input-buf (buffer-string))
                      "try the other way"))
-      (should (member "Pi: Navigated to try the other way" messages))
+      (should (member
+               "Pi: Continued from selected turn: try the other way"
+               messages))
       (should (equal quit-calls
                      (list (list chat-buf (selected-window) path))))
       (should (equal (pilish-test--file-contents path) before))
@@ -7512,9 +8390,31 @@ file remains."
                      (list (list chat-buf (selected-window) path))))
       (should (equal (with-current-buffer input-buf (buffer-string))
                      "try the other way"))
-      (should (member "Pi: Navigated to try the other way" messages))
+      (should (member
+               "Pi: Continued from selected turn: try the other way"
+               messages))
       (should-not (directory-files (file-name-directory path)
                                    nil "\\.pi-nav-")))))
+
+(ert-deftest pilish-test-navigate-historical-assistant-targets-itself ()
+  "A historical assistant continues from that assistant entry.
+Unlike a historical user, it neither rewinds to its parent nor carries
+prefill; the existing nil-prefill behavior clears the input draft after
+the atomic rewrite and resume are scheduled."
+  (pilish-test--with-navigate-fixture
+      (pilish-test--navigable-session-lines)
+      path chat-buf input-buf proc messages resume-calls quit-calls
+      ready-calls
+    (pilish--browse-navigate "b1")
+    (let ((session (pilish-jsonl-read-file path))
+          (projected (pilish-jsonl-project-session-file path)))
+      (should (equal (plist-get session :leafId) "b1"))
+      (should (equal (plist-get projected :leafId) "b1")))
+    (should (equal resume-calls (list (list proc chat-buf path))))
+    (should (equal (with-current-buffer input-buf (buffer-string)) ""))
+    (should (member
+             "Pi: Continued from selected turn: abandoned branch"
+             messages))))
 
 (ert-deftest pilish-test-navigate-shape ()
   "The navigated file reads back in the navigated shape: read-file's
@@ -7557,8 +8457,11 @@ creates a partial temp file, proving cleanup rather than non-creation."
       (should (equal (pilish-test--file-contents path) before))
       (should-not (directory-files dir nil "\\.pi-nav-"))
       (should-not resume-calls)
-      (should (cl-some (lambda (m) (string-match-p "\\`Pi: Navigate failed: " m))
-                       messages))
+      (should (cl-some
+               (lambda (m)
+                 (string-match-p
+                  "\\`Pi: Could not continue from selected turn: " m))
+               messages))
       ;; rename-file failure: the temp file is removed again, never
       ;; swapped in.
       (setq messages nil)
@@ -7569,8 +8472,11 @@ creates a partial temp file, proving cleanup rather than non-creation."
       (should (equal (pilish-test--file-contents path) before))
       (should-not (directory-files dir nil "\\.pi-nav-"))
       (should-not resume-calls)
-      (should (cl-some (lambda (m) (string-match-p "\\`Pi: Navigate failed: " m))
-                       messages))
+      (should (cl-some
+               (lambda (m)
+                 (string-match-p
+                  "\\`Pi: Could not continue from selected turn: " m))
+               messages))
       ;; A quit after a partial temp write is not an `error', so it
       ;; propagates; the unwind still removes the file.
       (let ((real-write (symbol-function 'write-region)))
@@ -7637,7 +8543,9 @@ the fork hint fires, nothing is written, no switch runs."
     (let ((before (pilish-test--file-contents path)))
       (pilish--browse-navigate "u1")
       (should (member
-               "Pi: Cannot rewind before the first message; fork it from the chat instead"
+               (concat
+                "Pi: Cannot continue from selected turn: it has no parent; "
+                "fork it from the chat instead")
                messages))
       (should (equal (pilish-test--file-contents path) before))
       (should-not resume-calls))))

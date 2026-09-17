@@ -61,6 +61,8 @@
 ;; Session and tree browser buffers (motion state):
 ;;
 ;;   j / k   section navigation (Magit's own, unmodified)
+;;   RET     switch to the selected session, or in the tree browser
+;;           continue from the selected turn
 ;;   Every   documented browser key — views, filters, search, scope,
 ;;          rename, delete, refresh, dispatch, RET — is also rebound
 ;;          in motion state, because the Evil and evil-collection
