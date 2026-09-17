@@ -689,5 +689,179 @@ buffer (jit-lock active) to verify under real GUI conditions."
                              (memq 'font-lock-keyword-face face))))))
       (kill-buffer buf))))
 
+(defun pilish-gui-test--display-prefix (line width)
+  "Return LINE's prefix occupying the first WIDTH display columns."
+  (let ((chars nil) (w 0))
+    (catch 'done
+      (dotimes (i (length line))
+        (let ((cw (string-width (substring line i (1+ i)))))
+          (when (> (+ w cw) width) (throw 'done nil))
+          (push (aref line i) chars)
+          (setq w (+ w cw)))))
+    (concat (nreverse chars))))
+
+(ert-deftest pilish-gui-test-session-browser-narrow-visibility ()
+  "All-projects identity and live status stay visible on a real narrow
+window.
+Renders the session browser in a dedicated buffer and frame whose
+window body is exactly 32 columns wide — the text area of a
+52-column terminal next to the mode's 20-column right margin
+\\(`window-body-width' already excludes margins) — and checks
+visibility with display widths (`string-width'), not character
+offsets.  Adversarial fixtures: two projects sharing a long common
+prefix (ordinal-front tokens), a wide-character project name, a
+depth-18 threaded connector with the live marker behind it, and long
+identical titles.  On every row the bounded token field and the
+two-column live field must end inside the visible columns, with
+`truncate-lines' on and no horizontal scroll; empty-state hint lines
+keep their recovery keys on screen too."
+  (let* ((long-title (make-string 60 ?x))
+         (deep-dir "/home/u/long-common-prefix-abcdef")
+         (token-width 16)
+         (items
+          (append
+           (list (list :path "/a/one.jsonl" :cwd (concat deep-dir "/app")
+                       :name (concat "One " long-title)
+                       :messageCount 2 :modified "2026-03-11T10:00:00Z")
+                 (list :path "/a/two.jsonl"
+                       :cwd "/home/u/long-common-prefix-abcdeg/app"
+                       :name (concat "Two " long-title)
+                       :messageCount 4 :modified "2026-03-11T11:00:00Z")
+                 (list :path "/a/wide.jsonl" :cwd "/home/u/\u4e2d\u6587\u9879\u76ee"
+                       :name (concat "Wide " long-title)
+                       :messageCount 1 :modified "2026-03-11T12:00:00Z")
+                 ;; A malformed row: recorded cwd is rejected, but the
+                 ;; bounded field is still reserved for it.
+                 (list :path "/a/broken.jsonl" :cwd "/a\0b"
+                       :name (concat "Broken " long-title)
+                       :messageCount 1 :modified "2026-03-11T13:00:00Z"))
+           ;; A depth-18 chain under the first project whose last
+           ;; child is the live session: its connector alone would
+           ;; far exceed the body.
+           (let ((chain nil) (parent "/a/one.jsonl"))
+             (dotimes (i 18)
+               (let ((path (format "/a/deep-%02d.jsonl" i)))
+                 (push (list :path path :cwd (concat deep-dir "/app")
+                             :name (format "Deep %02d" i)
+                             :parentSessionPath parent
+                             :messageCount 1
+                             :modified "2026-03-11T10:00:00Z")
+                       chain)
+                 (setq parent path)))
+             (nreverse chain))))
+         (live-line-title "Deep 17")
+         frame win buffer chat-buf proc)
+    ;; Enter cleanup protection before acquiring any GUI/process
+    ;; resource, so a failure halfway through setup cannot leak those
+    ;; already created.
+    (unwind-protect
+        (progn
+          (setq frame (make-frame '((width . 52) (height . 22))))
+          (setq win (frame-selected-window frame))
+          (setq buffer (generate-new-buffer " *pilish-gui-narrow*"))
+          (setq chat-buf
+                (generate-new-buffer " *pilish-gui-narrow-chat*"))
+          (setq proc (start-process "pilish-gui-narrow" nil "sleep" "30"))
+          (set-process-query-on-exit-flag proc nil)
+          (process-put proc 'pilish-chat-buffer chat-buf)
+          (with-current-buffer chat-buf
+            (setq pilish--process proc
+                  pilish--state
+                  (list :session-file "/a/deep-17.jsonl")))
+          (set-window-buffer win buffer)
+          (with-current-buffer buffer
+            (pilish-session-browser-mode)
+            ;; Bounded resize: let the mode's window-configuration
+            ;; hook apply the right margin, then adjust the frame
+            ;; until the body is exactly 32 columns; the assertion
+            ;; catches an oscillating or stuck body.
+            (redisplay)
+            (let ((attempts 0))
+              (while (not (= 32 (window-body-width win)))
+                (cl-assert (< (cl-incf attempts) 60) t
+                           "body width stuck at %d"
+                           (window-body-width win))
+                (set-frame-width
+                 frame (+ (frame-width frame)
+                          (- 32 (window-body-width win))))
+                (redisplay)))
+            (setq pilish--session-browser-scope 'all
+                  pilish--session-browser-items items
+                  pilish--session-browser-view 'threaded)
+            (pilish--session-browser-rerender)
+            (redisplay)
+            (let* ((usable (window-body-width win))
+                   (rows
+                    (seq-remove
+                     (lambda (line)
+                       (or (string-empty-p line)
+                           (not (string-match-p
+                                 "One x\\|Two x\\|Wide x\\|Broken x\\|Deep "
+                                 line))))
+                     (split-string
+                      (buffer-substring-no-properties
+                       (point-min) (point-max))
+                      "\n"))))
+              (should (= usable 32))
+              (should truncate-lines)
+              (should (zerop (window-hscroll win)))
+              (should (= (length rows) (length items)))
+              (dolist (line rows)
+                ;; Token field is exactly the fixed display width on
+                ;; every row, and the two-column live field follows at
+                ;; one constant column before any unbounded content.
+                (let* ((tok (pilish-gui-test--display-prefix
+                             line token-width))
+                       (marker
+                        (substring-no-properties
+                         line (length tok) (+ (length tok) 2))))
+                  (should (= (string-width tok) token-width))
+                  (should (member marker '("\u25cf " "  ")))
+                  ;; The visible invariant: identity plus live field
+                  ;; end inside the narrow body.
+                  (should (<= (+ token-width 2) usable))))
+              ;; The malformed row keeps the placeholder field —
+              ;; bounded and truthful even behind a long title.
+              (let ((broken (cl-find "Broken " rows :test #'string-match-p)))
+                (should broken)
+                (should (string-prefix-p
+                         "?"
+                         (string-trim-right
+                          (pilish-gui-test--display-prefix
+                           broken token-width)))))
+              ;; The live marker really is on the depth-18 child.
+              (let ((live-line (cl-find live-line-title rows
+                                        :test #'string-match-p)))
+                (should live-line)
+                (should (string-prefix-p
+                         "\u25cf "
+                         (substring-no-properties
+                          live-line
+                          (length (pilish-gui-test--display-prefix
+                                   live-line token-width))
+                          (+ (length (pilish-gui-test--display-prefix
+                                      live-line token-width))
+                             2))))))
+            ;; Empty state: every hint line fits the same narrow body.
+            (setq pilish--session-browser-search-query "zzz-no-match"
+                  pilish--session-browser-search-tokens '("zzz-no-match"))
+            (pilish--session-browser-rerender)
+            (redisplay)
+            (goto-char (point-min))
+            (while (< (point) (point-max))
+              (should (<= (string-width
+                           (buffer-substring-no-properties
+                            (line-beginning-position) (line-end-position)))
+                          (window-body-width win)))
+              (forward-line 1))))
+      (when (and proc (process-live-p proc))
+        (delete-process proc))
+      (when (buffer-live-p chat-buf)
+        (kill-buffer chat-buf))
+      (when (buffer-live-p buffer)
+        (kill-buffer buffer))
+      (when (and frame (frame-live-p frame))
+        (delete-frame frame)))))
+
 (provide 'pilish-gui-tests)
 ;;; pilish-gui-tests.el ends here

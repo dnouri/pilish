@@ -321,20 +321,40 @@ hides and shows the session windows in the current frame.
 session browser.  It reads Pi's session archive from disk —
 =~/.pi/agent/sessions/= by default, or =$PI_CODING_AGENT_DIR/sessions/=
 — so browsing, searching, renaming, and deleting work with no live
-process at all.  Sessions currently open in this Emacs get a ●
-marker (the browser never scans system processes); press =g= to
-refresh markers.  Press =RET= to switch to the session at point, and
-=?= for the browser menu; =d= deletes a closed session after
-confirmation, using Emacs's trash when configured.
+process at all.  Sessions with a currently live Pilish process in
+this Emacs get a ● marker; the marker only sees Pilish processes in
+this Emacs — sessions running in another Emacs or in a terminal are
+not marked.
+Press =g= to refresh markers.  Press =RET= to switch to the session
+at point, and =?= for the browser menu; =d= deletes a closed session
+after confirmation, using Emacs's trash when configured.
 
 The browser opens on this project's sessions, showing all names in
-the Threaded (fork families) view.  =s= cycles the view:
+the Threaded (fork families) view; =t= toggles between this project
+and All projects.  All-projects rows lead with a bounded project
+token in a fixed-width field — the project directory's name,
+prefixed with the host for remote sessions (=build-host:site=) —
+followed by the live marker, and only then connectors and the
+session title, so identity and live status stay visible on narrow
+terminals no matter how deep the fork nesting or how long the
+titles.  Projects sharing a directory name grow parent components
+(=client-a/app= vs =client-b/app=) until distinct; labels that
+cannot fit or distinguish fall back to an ordinal-front token
+(=#ORD app=, with a compact base-36 ordinal); a session run in =/=
+labels as =/=.  Windows drive
+and UNC working directories are recognized lexically, and
+this-project rows carry no token because the scope already fixes
+the project.  =s= cycles the view:
 - Threaded (fork families) — sessions grouped into fork families
   through the =parentSession= link that =/fork= and Pi's =/clone=
   write; each parent renders above its children, and families are
   ordered by the latest activity anywhere in the family, newest first.
 - Recent activity — flat rows ordered by the session file's
-  modification time, newest first.
+  modification time, newest first, under calendar Future / Today /
+  Yesterday / This Week / Older headings: a late-night session moves
+  to Yesterday at midnight, a clock-skewed future mtime groups as
+  Future at the top, and on Monday last week reads as Older (Sunday
+  stays Yesterday).
 - Most messages — flat rows ordered by the number of persisted
   message records, tool results included, highest first.
 
@@ -356,7 +376,12 @@ user/assistant text, including inactive branches; thinking, tool
 arguments and results, images, and summaries are not searched.
 Tokens are whitespace-separated regexps that must all match.
 Searching a very large archive can pause Emacs while results are
-gathered; =q= hides the browser without cancelling its scan.
+gathered; =q= hides the browser without cancelling its scan.  When
+an empty listing or search result can be widened, it names up to two
+of the most relevant keys: =t= switches scope, =f= clears named-only,
+and submitting an empty =/= query clears the filter.  An empty
+All-projects archive has no
+wider scope and intentionally shows no action hint.
 
 The tree browser (=C-c C-p w=, or Context =w= in the menu) shows the
 conversation tree Pi persists for a session: =RET= moves the live

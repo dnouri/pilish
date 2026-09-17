@@ -1639,17 +1639,94 @@ target, like pi's realpath identity."
 
 ;;;; Time Groups
 
+(defun pilish-test--local-time-iso (time)
+  "Return TIME as a UTC ISO string that round-trips to the same instant.
+Built from local wall-clock input, so calendar-date expectations hold in
+every runner timezone."
+  (format-time-string "%Y-%m-%dT%H:%M:%SZ" time t))
+
 (ert-deftest pilish-test-session-time-group ()
-  "Time group labels for ISO timestamps."
-  ;; Now → Today
-  (let ((now (format-time-string "%Y-%m-%dT%H:%M:%S.000Z" (current-time) t)))
-    (should (equal (pilish--session-time-group now) "Today")))
-  ;; 2 days ago → Yesterday or This Week depending on time of day
-  ;; 30 days ago → Older
-  (let ((old (format-time-string "%Y-%m-%dT%H:%M:%S.000Z"
-                                 (time-subtract (current-time) (days-to-time 30))
-                                 t)))
-    (should (equal (pilish--session-time-group old) "Older"))))
+  "Time group labels use one pinned production clock."
+  (let ((fixed-now (encode-time '(0 0 8 11 3 2026 nil nil nil))))
+    (cl-letf (((symbol-function 'current-time) (lambda () fixed-now)))
+      ;; Exercise the default NOW path, not only the explicit test seam.
+      (should (equal (pilish--session-time-group
+                      (pilish-test--local-time-iso fixed-now))
+                     "Today"))
+      (should (equal (pilish--session-time-group
+                      (pilish-test--local-time-iso
+                       (time-subtract fixed-now (days-to-time 30))))
+                     "Older")))))
+
+(ert-deftest pilish-test-session-time-group-calendar-boundaries ()
+  "Group labels follow local calendar dates, not rolling 24-hour windows.
+Pinned NOW is Wednesday 2026-03-11 08:00 local; Monday 2026-03-09
+starts the current Monday-start week and Friday 2026-03-06 falls in
+the previous one.  Under rolling durations a 23:00 session from nine
+hours ago claimed Today, a two-day-old session claimed Yesterday,
+and last Friday claimed This Week."
+  (let* ((now (encode-time '(0 0 8 11 3 2026 nil nil nil)))
+         (group (lambda (hms)
+                   (pilish--session-time-group
+                    (pilish-test--local-time-iso (apply #'encode-time hms))
+                    now))))
+    ;; Same local date, however many hours ago: Today.
+    (should (equal (funcall group '(0 0 7 11 3 2026)) "Today"))
+    ;; Yesterday 23:00 — nine hours ago, previous calendar day.
+    (should (equal (funcall group '(0 0 23 10 3 2026)) "Yesterday"))
+    ;; Yesterday 00:30 — 31.5 hours ago, still one calendar day back.
+    (should (equal (funcall group '(30 0 0 10 3 2026)) "Yesterday"))
+    ;; Monday 23:00 — two calendar days back, current Monday-start week.
+    (should (equal (funcall group '(0 0 23 9 3 2026)) "This Week"))
+    ;; Previous Friday 23:00 — under five days ago, previous ISO week.
+    (should (equal (funcall group '(0 0 23 6 3 2026)) "Older"))))
+
+(ert-deftest pilish-test-session-time-group-dst-yesterday ()
+  "Yesterday stays one calendar day back across DST transitions.
+Europe/Berlin springs forward on 2026-03-29 (02:00→03:00).  Just
+after midnight on the 30th, yesterday arithmetic that reuses the
+current numeric offset encodes the 29th's wall time an hour early and
+computes March 28 — grouping the 29th's late sessions as This Week
+or Older instead of Yesterday.  Noon-anchored calendar arithmetic
+asks the local zone for the target date itself."
+  (let ((saved (getenv "TZ")))
+    (unwind-protect
+        (progn
+          (set-time-zone-rule "Europe/Berlin")
+          ;; Now: Mon 2026-03-30 00:30 CEST, the hour after the night the
+          ;; clocks jumped.  Yesterday is Sun 2026-03-29, the transition day.
+          (let* ((now (encode-time 30 0 0 30 3 2026))
+                 (ts (pilish-test--local-time-iso
+                      (encode-time 0 0 23 29 3 2026))))
+            (should (equal (pilish--session-time-group ts now)
+                           "Yesterday")))
+          ;; Fall-back edge: 2026-10-25 (03:00→02:00); now Mon Oct 26 00:30.
+          (let* ((now (encode-time 30 0 0 26 10 2026))
+                 (ts (pilish-test--local-time-iso
+                      (encode-time 0 0 23 25 10 2026))))
+            (should (equal (pilish--session-time-group ts now)
+                           "Yesterday"))))
+      (if saved
+          (set-time-zone-rule saved)
+        (set-time-zone-rule nil)))))
+
+(ert-deftest pilish-test-session-time-group-future-dates ()
+  "A later calendar date groups as Future, whatever the week.
+Clock-skewed future mtimes otherwise land in This Week — repeating
+the heading noncontiguously between Today and Yesterday — or in
+Older for a future date next week.  A same-date future hour stays
+Today: the label, like the others, is calendar-semantic."
+  (let* ((now (encode-time '(0 0 8 11 3 2026 nil nil nil)))
+         (group (lambda (hms)
+                   (pilish--session-time-group
+                    (pilish-test--local-time-iso (apply #'encode-time hms))
+                    now))))
+    ;; Same date, hours ahead: Today, not Future.
+    (should (equal (funcall group '(0 0 20 11 3 2026)) "Today"))
+    ;; Tomorrow: Future.
+    (should (equal (funcall group '(0 0 23 12 3 2026)) "Future"))
+    ;; A future date in the next ISO week: Future, never Older.
+    (should (equal (funcall group '(0 0 9 18 3 2026)) "Future"))))
 
 ;;;; Session Browser Rendering
 
@@ -1727,6 +1804,1064 @@ target, like pi's realpath identity."
     ;; Threading connector should appear, but NOT fork: prefix
     (should (string-match-p "└─" (buffer-string)))
     (should-not (string-match-p "fork:" (buffer-string)))))
+
+;;;; All-Projects Project Identity and Bounded Tokens
+
+(defconst pilish-test--token-width 16
+  "Display width of the project token field on All-projects rows.")
+
+(defun pilish-test--project-item (path cwd name)
+  "Return a loaded-like browse item for PATH, CWD, and NAME.
+Real scan results already carry their canonical session key, so the
+fixture does too and project-field tests perform no incidental
+filesystem canonicalization."
+  (list :path path :canonicalPath path :cwd cwd :name name
+        :messageCount 1 :modified "2026-03-11T10:00:00Z"))
+
+(defun pilish-test--pad-display (string width)
+  "Return STRING left-justified by spaces to display WIDTH columns."
+  (concat string (make-string (max 0 (- width (string-width string)))
+                              ?\s)))
+
+(defun pilish-test--row (token title &optional live)
+  "Return the expected All-projects row prefix for TOKEN and TITLE.
+LIVE non-nil marks the row live.  The row is the fixed-width token
+field, the two-column live field, then the title."
+  (concat (pilish-test--pad-display token pilish-test--token-width)
+          (if live "● " "  ")
+          title))
+
+(defun pilish-test--display-prefix (line width)
+  "Return LINE's prefix occupying the first WIDTH display columns."
+  (let ((chars nil) (w 0))
+    (catch 'done
+      (dotimes (i (length line))
+        (let ((cw (string-width (substring line i (1+ i)))))
+          (when (> (+ w cw) width) (throw 'done nil))
+          (push (aref line i) chars)
+          (setq w (+ w cw)))))
+    (concat (nreverse chars))))
+
+(ert-deftest pilish-test-session-browser-all-scope-token-field-layout ()
+  "All-projects rows carry a bounded, globally unique project token
+and the live marker before any unbounded content, on a fixed layout:
+the token field is padded to a fixed display width so connector
+indentation and titles start at the same column on every row, and
+depth-18 connectors, long common-prefix labels, wide project names,
+and long titles can never push identity or live status out of a
+32-column body."
+  (let* ((deep-dir "/home/u/long-common-prefix-abcdef")
+         (items
+          (append
+           ;; Two over-bound labels sharing a long common prefix.
+           (list (pilish-test--project-item
+                  "/a/one.jsonl" (concat deep-dir "/app") "One")
+                 (pilish-test--project-item
+                  "/a/two.jsonl" "/home/u/long-common-prefix-abcdeg/app"
+                  "Two"))
+           ;; A wide-character project name.
+           (list (pilish-test--project-item
+                  "/a/wide.jsonl" "/home/u/\u4e2d\u6587\u9879\u76ee"
+                  "Wide"))
+           ;; A depth-18 fork chain under the first project's session.
+           (let ((chain nil) (parent "/a/one.jsonl"))
+             (dotimes (i 18)
+               (let ((path (format "/a/deep-%02d.jsonl" i)))
+                 (push (list :path path
+                             :cwd (concat deep-dir "/app")
+                             :name (format "Deep %d" i)
+                             :parentSessionPath parent
+                             :messageCount 1
+                             :modified "2026-03-11T10:00:00Z")
+                       chain)
+                 (setq parent path)))
+             (nreverse chain)))))
+    (with-temp-buffer
+      (pilish-session-browser-mode)
+      (setq pilish--session-browser-scope 'all
+            pilish--session-browser-items items)
+      (pilish--session-browser-rerender)
+      (let* ((text (buffer-string))
+             (rows (seq-remove
+                    (lambda (line)
+                      (or (string-empty-p line)
+                          ;; Time-group and time rows are absent here;
+                          ;; every rendered line is a session row.
+                          (not (string-match-p
+                                "One\\|Two\\|Wide\\|Deep" line))))
+                    (split-string text "\n"))))
+        (should (= (length rows) (length items)))
+        (dolist (line rows)
+          ;; The token occupies exactly the fixed display width and is
+          ;; itself within it — never truncated, never wider.
+          (let* ((token (pilish-test--display-prefix
+                         line pilish-test--token-width))
+                 (field (pilish-test--display-prefix
+                         line (+ pilish-test--token-width 2))))
+            (should (= (string-width token) pilish-test--token-width))
+            ;; The two-column live field follows at a constant column,
+            ;; before any connector or title.
+            (should (member (substring field (length token))
+                            '("● " "  ")))))))))
+
+(ert-deftest pilish-test-session-browser-all-scope-token-field-live-first ()
+  "The live marker sits in its fixed field before connectors and
+titles, so a depth-18 live fork stays visibly live in a narrow body,
+and non-live rows keep the same connector column."
+  (let* ((path "/test/live-deep.jsonl")
+         (chat-buf (generate-new-buffer "*pilish-test-token-live*"))
+         (proc (start-process "pilish-token-live" nil "sleep" "30"))
+         (parent "/test/p0.jsonl")
+         (chain nil))
+    (dotimes (i 17)
+      (let ((p (format "/test/p%d.jsonl" (1+ i))))
+        (push (list :path p :cwd "/home/u/site" :name (format "Anc %d" i)
+                    :parentSessionPath parent :messageCount 1
+                    :modified "2026-03-11T10:00:00Z")
+              chain)
+        (setq parent p)))
+    (set-process-query-on-exit-flag proc nil)
+    (process-put proc 'pilish-chat-buffer chat-buf)
+    (with-current-buffer chat-buf
+      (setq pilish--process proc
+            pilish--state (list :session-file path)))
+    (unwind-protect
+        (with-temp-buffer
+          (pilish-session-browser-mode)
+          (setq pilish--session-browser-scope 'all
+                pilish--session-browser-items
+                (append (nreverse chain)
+                        (list (list :path path :cwd "/home/u/site"
+                                    :name "Live deep" :messageCount 1
+                                    :modified "2026-03-11T10:00:00Z"))))
+          (setq pilish--session-browser-view 'threaded)
+          (pilish--session-browser-rerender)
+          (let* ((text (buffer-string))
+                 (line (cl-find "Live deep"
+                                (split-string text "\n")
+                                :test #'string-match-p)))
+            (should line)
+            ;; Marker inside the fixed field at the constant column.
+            (should (equal (substring-no-properties
+                            line pilish-test--token-width
+                            (+ pilish-test--token-width 2))
+                           "\u25cf "))
+            ;; The depth-18 connector follows the field, and the
+            ;; identity token stays fully inside the field.
+            (should (string-match-p
+                     (format "^%s"
+                             (regexp-quote
+                              (pilish-test--display-prefix
+                               line pilish-test--token-width)))
+                     line))))
+      (delete-process proc)
+      (kill-buffer chat-buf))))
+
+(ert-deftest pilish-test-session-browser-all-scope-tokens-natural ()
+  "Within the bound, tokens stay human-readable compact labels:
+unique projects keep the bare name, colliding basenames grow parent
+components, and the root labels as /."
+  (with-temp-buffer
+    (pilish-session-browser-mode)
+    (setq pilish--session-browser-scope 'all
+          pilish--session-browser-items
+          (list (pilish-test--project-item
+                 "/a/one.jsonl" "/home/u/client-a/app" "One")
+                (pilish-test--project-item
+                 "/a/two.jsonl" "/home/u/client-b/app" "Two")
+                (pilish-test--project-item "/a/three.jsonl"
+                                           "/home/u/site" "Three")
+                (pilish-test--project-item "/a/r.jsonl" "/" "Root")))
+    (pilish--session-browser-rerender)
+    (let ((text (buffer-string)))
+      (should (string-match-p
+               (regexp-quote (pilish-test--row "client-a/app" "One"))
+               text))
+      (should (string-match-p
+               (regexp-quote (pilish-test--row "client-b/app" "Two"))
+               text))
+      (should (string-match-p
+               (regexp-quote (pilish-test--row "site" "Three")) text))
+      (should (string-match-p
+               (regexp-quote (pilish-test--row "/" "Root")) text)))))
+
+(ert-deftest pilish-test-session-browser-all-scope-tokens-filter-stable ()
+  "Tokens are built from all loaded projects, not filtered rows, so a
+query never silently relabels the rows it leaves behind."
+  (with-temp-buffer
+    (pilish-session-browser-mode)
+    (setq pilish--session-browser-scope 'all
+          pilish--session-browser-items
+          (list (pilish-test--project-item
+                 "/a/one.jsonl" "/home/u/client-a/app" "Unique words One")
+                (pilish-test--project-item
+                 "/a/two.jsonl" "/home/u/client-b/app" "Other words Two"))
+          pilish--session-browser-search-query "Unique"
+          pilish--session-browser-search-tokens '("Unique"))
+    (unwind-protect
+        (progn
+          (pilish--session-browser-rerender)
+          (should (string-match-p
+                   (regexp-quote
+                    (pilish-test--row "client-a/app" "Unique words One"))
+                   (buffer-string)))
+          (should-not (string-match-p "Other words" (buffer-string))))
+      (setq pilish--session-browser-search-query nil
+            pilish--session-browser-search-tokens nil))))
+
+(ert-deftest pilish-test-session-browser-all-scope-tokens-unique ()
+  "Final identity is the exact padded 16-column field, checked
+globally: a project name with a trailing space pads to the same
+field as its unspaced twin, so BOTH go to the generated class with
+distinct ordinals — assertions never trim away the distinction."
+  (with-temp-buffer
+    (pilish-session-browser-mode)
+    (setq pilish--session-browser-scope 'all
+          pilish--session-browser-items
+          (list (pilish-test--project-item
+                 "/a/plain.jsonl" "/home/u/app" "Plain")
+                (pilish-test--project-item
+                 "/a/spaced.jsonl" "/home/u/app " "Trailing space")))
+    (pilish--session-browser-rerender)
+    (let* ((text (buffer-string))
+           (fields
+            (delq nil
+                  (mapcar (lambda (line)
+                            (and (string-match-p "Plain\\|Trailing space"
+                                                 line)
+                                 (pilish-test--display-prefix
+                                  line pilish-test--token-width)))
+                          (split-string text "\n")))))
+      ;; Both rows render, with distinct exact fields — no trimming.
+      (should (= (length fields) 2))
+      (should (= (length (delete-dups fields)) 2))
+      ;; Neither field is the plain readable name: the collision
+      ;; moved both twins to the generated namespace.
+      (dolist (field fields)
+        (should (string-prefix-p "#" field))
+        (should (string-match-p "\\`#[0-9a-z]\\{1,\\} " field)))
+      ;; The ordinals differ.
+      (should-not (equal (nth 0 fields) (nth 1 fields))))))
+
+(ert-deftest pilish-test-session-browser-all-scope-tokens-deterministic ()
+  "The identity-to-field mapping depends only on the loaded set, not
+on hash-table iteration or input order: reversed input yields the
+identical mapping, and a readable-collision group never lets an
+arbitrary winner keep the natural spelling."
+  (let ((fields-for
+         (lambda (items)
+           (with-temp-buffer
+             (pilish-session-browser-mode)
+             (setq pilish--session-browser-scope 'all
+                   pilish--session-browser-items items)
+             (pilish--session-browser-rerender)
+             (let ((map nil))
+               (dolist (line (split-string (buffer-string) "\n"))
+                 (dolist (title '("One" "Two" "Three"))
+                   (when (string-match-p
+                          (concat (regexp-quote title) "\\'") line)
+                     (push (cons title
+                                 (pilish-test--display-prefix
+                                  line pilish-test--token-width))
+                           map))))
+               (sort map (lambda (a b) (string< (car a) (car b)))))))))
+    (let* ((items (list (pilish-test--project-item
+                         "/a/one.jsonl" "/home/u/client-a/app" "One")
+                        (pilish-test--project-item
+                         "/a/two.jsonl" "/home/u/client-b/app" "Two")
+                        (pilish-test--project-item
+                         "/a/three.jsonl" "/home/u/site" "Three")))
+           (forward (funcall fields-for items))
+           (reversed (funcall fields-for (reverse items))))
+      (should (= (length forward) 3))
+      (should (equal forward reversed))
+      ;; Readable distinct labels survive; collisions resolved by
+      ;; parents — the mapping itself, in both orders.
+      (should (equal (cdr (assoc "One" forward))
+                     (pilish-test--pad-display
+                      "client-a/app" pilish-test--token-width)))
+      (should (equal (cdr (assoc "Three" forward))
+                     (pilish-test--pad-display
+                      "site" pilish-test--token-width))))))
+
+(ert-deftest pilish-test-session-browser-all-scope-tokens-generated-ordinals ()
+  "Generated tokens are `#ORD tail' with fixed-width base-36
+ordinals over sorted identities: over-bound labels and natural
+spelling collisions all land there together, ordered and unique."
+  (with-temp-buffer
+    (pilish-session-browser-mode)
+    (setq pilish--session-browser-scope 'all
+          pilish--session-browser-items
+          (list (pilish-test--project-item
+                 "/a/x.jsonl" "/home/u/long-common-prefix-abcdef/app"
+                 "X")
+                (pilish-test--project-item
+                 "/a/y.jsonl" "/home/u/long-common-prefix-abcdeg/app"
+                 "Y")
+                (pilish-test--project-item
+                 "/a/nat.jsonl" "/home/u/#nat" "Hash-named")
+                (pilish-test--project-item
+                 "/a/z.jsonl" "/home/u/site" "Z")))
+    (pilish--session-browser-rerender)
+    (let* ((text (buffer-string))
+           (fields
+            (delq nil
+                  (mapcar (lambda (line)
+                            (and (string-match-p "X\\'\\|Y\\'\\|Hash-named\\'\\|Z\\'"
+                                                 line)
+                                 (pilish-test--display-prefix
+                                  line pilish-test--token-width)))
+                          (split-string text "\n")))))
+      (should (= (length fields) 4))
+      (should (= (length (delete-dups fields)) 4))
+      ;; The unique natural project keeps its readable field.
+      (should (member (pilish-test--pad-display
+                       "site" pilish-test--token-width)
+                      fields))
+      ;; Over-bound labels and the #-leading reserved spelling go to
+      ;; the generated namespace — three ordinal tokens, sorted
+      ;; identities meaning ascending ordinals, distinct fields.
+      (let ((generated (seq-filter
+                        (lambda (f) (string-prefix-p "#" f)) fields)))
+        (should (= (length generated) 3))
+        (dolist (g generated)
+          (should (string-match-p "\\`#[0-9a-z]\\{1,\\} " g)))
+        (should (= (length (delete-dups generated)) 3))))))
+
+(ert-deftest pilish-test-session-route-host ()
+  "Parse every route hop with Emacs 30's default TRAMP lexical grammar.
+The production parser remains pure string syntax, but its method,
+user, host, numeric-port, and bracketed-IPv6 boundaries match the
+installed grammar: a greedy user ends at the last @, so @ and # may
+occur inside it.  Every hop is validated, a first host is explicit,
+and later hostless hops inherit the nearest explicit host."
+  ;; Any `file-remote-p' call would let machine-local TRAMP defaults
+  ;; determine the answer; this helper must use only ROUTE's text.
+  (cl-letf (((symbol-function 'file-remote-p)
+             (lambda (&rest _)
+               (ert-fail "route host parser consulted file-remote-p"))))
+    ;; Valid table includes all established routes plus the grammar
+    ;; boundaries confirmed against `tramp-dissect-file-name'.
+    (dolist (case '(("/ssh:host:" "host")
+                    ("/ssh:h:" "h")
+                    ("/ssh:user@host:" "host")
+                    ("/ssh:user@example.com@host:" "host")
+                    ("/ssh:user#tag@host:" "host")
+                    ("/ssh:user#tag@host#22:" "host")
+                    ("/ssh:user!tag@host:" "host")
+                    ("/ssh:host#2222:" "host")
+                    ("/-:h:" "h")
+                    ("/äx:h:" "h")
+                    ("/ssh:b|sudo:root@host:" "host")
+                    ("/ssh:[::1]:" "[::1]")
+                    ("/ssh:b|sudo::" "b")
+                    ("/ssh:u@b#22|sudo:root@:" "b")
+                    ("/ssh:u@[2001:db8::1]#22|sudo::"
+                     "[2001:db8::1]")))
+      (should (equal (pilish--session-route-host (car case))
+                     (cadr case))))
+    ;; Required incompatibility repros plus malformed whole-hop cases.
+    (dolist (route '("/ssh:host#ssh:"
+                     "/ssh:host#:"
+                     "/ssh:host#22x:"
+                     "/s:h:"
+                     "/!:h:"
+                     "/ssh:foo!bar:"
+                     "/ssh:[garbage]:"
+                     "/ssh:[fe80::1%eth0]:"
+                     "/ssh:|sudo:root@h:"
+                     "/ssh:h|bad|sudo:x:"
+                     "/ssh::"))
+      (should-not (pilish--session-route-host route)))
+    ;; Unsafe/default-invisible route text never becomes a field label.
+    (dolist (route (list "/ssh:u\t@h:"
+                         (concat "/ssh:h" (string #x202e) ":")
+                         (concat "/ssh:h" (string #x034f) ":")))
+      (should-not (pilish--session-route-host route)))
+    (should (equal (pilish--session-route-host
+                    "/ssh:no-such.invalid:")
+                   "no-such.invalid"))))
+
+(ert-deftest pilish-test-session-ordinal36-dynamic-width ()
+  "One-based ordinals widen at exact powers instead of truncating.
+There are only 35 positive one-digit base-36 ordinals and 1295
+positive two-digit ordinals because zero is not allocated."
+  (should (equal (mapcar #'pilish--session-ordinal-width
+                         '(35 36 37 1295 1296 1297))
+                 '(1 2 2 2 3 3)))
+  (should (equal (pilish--session-ordinal36 1 1) "#1"))
+  (should (equal (pilish--session-ordinal36 35 1) "#z"))
+  (should (equal (pilish--session-ordinal36 36 2) "#10"))
+  (should (equal (pilish--session-ordinal36 1295 2) "#zz"))
+  (should (equal (pilish--session-ordinal36 1296 3) "#100"))
+  ;; A wide case proven at the helper seam: 36^5 needs six digits.
+  (should (equal (pilish--session-ordinal36 (expt 36 5) 6) "#100000"))
+  (should-error (pilish--session-ordinal36 36 1)))
+
+(defun pilish-test--generated-project-items (count)
+  "Return COUNT loaded-like items that all require generated tokens.
+Stored canonical paths avoid filesystem work, as real scanned items
+already carry them; unique over-width basenames force the production
+allocator's generated-token path."
+  (let (items)
+    (dotimes (i count (nreverse items))
+      (let ((path (format "/sessions/boundary-%04d.jsonl" i)))
+        (push (list :path path :canonicalPath path
+                    :cwd (format
+                          "/projects/project-%04d-abcdefghijklmnop" i)
+                    :name (format "Boundary %04d" i)
+                    :messageCount 1
+                    :modified "2026-03-11T10:00:00Z")
+              items)))))
+
+(defun pilish-test--allocated-project-fields (items)
+  "Return ITEMS' sorted key-to-exact-field allocation."
+  (let ((table (pilish--session-project-fields items))
+        result)
+    (dolist (item items)
+      (let ((key (pilish--session-item-key item)))
+        (push (cons key
+                    (pilish--session-pad-display
+                     (gethash key table) pilish-test--token-width))
+              result)))
+    (sort result (lambda (a b) (string< (car a) (car b))))))
+
+(defun pilish-test--assert-generated-project-boundary (count ordinal-width)
+  "Assert allocation and rendering at COUNT with ORDINAL-WIDTH digits."
+  (let* ((items (pilish-test--generated-project-items count))
+         (forward (pilish-test--allocated-project-fields items))
+         (reversed (pilish-test--allocated-project-fields
+                    (reverse items)))
+         (fields (mapcar #'cdr forward))
+         (ordinal-re (format "\\`#[0-9a-z]\\{%d\\} " ordinal-width)))
+    ;; Allocation is input-order independent and every final padded
+    ;; field is exactly 16 display columns, generated, and unique.
+    (should (= (length forward) count))
+    (should (equal forward reversed))
+    (should (= (length (delete-dups (copy-sequence fields))) count))
+    (dolist (field fields)
+      (should (= (string-width field) pilish-test--token-width))
+      (should (string-match-p ordinal-re field)))
+    ;; Exercise the full browser rendering seam as well as allocation.
+    ;; A rollover error used to erase the buffer before signaling.
+    (with-temp-buffer
+      (pilish-session-browser-mode)
+      (setq pilish--session-browser-scope 'all
+            pilish--session-browser-view 'messages
+            pilish--session-browser-items items)
+      (pilish--session-browser-rerender)
+      (should-not (string-empty-p (buffer-string)))
+      (let* ((rows (seq-remove #'string-empty-p
+                               (split-string (buffer-string) "\n")))
+             (rendered-fields
+              (mapcar (lambda (line)
+                        (pilish-test--display-prefix
+                         line pilish-test--token-width))
+                      rows)))
+        (should (= (length rows) count))
+        (should (= (length (delete-dups
+                            (copy-sequence rendered-fields)))
+                   count))
+        (should (equal (sort rendered-fields #'string<)
+                       (sort (copy-sequence fields) #'string<)))))))
+
+(ert-deftest pilish-test-session-browser-generated-ordinal-lower-boundaries ()
+  "Render 35, 36, and 37 generated projects across one-digit rollover."
+  (dolist (case '((35 1) (36 2) (37 2)))
+    (pilish-test--assert-generated-project-boundary
+     (nth 0 case) (nth 1 case))))
+
+(ert-deftest pilish-test-session-browser-generated-ordinal-upper-boundaries ()
+  "Render 1295, 1296, and 1297 projects across two-digit rollover."
+  (dolist (case '((1295 2) (1296 3) (1297 3)))
+    (pilish-test--assert-generated-project-boundary
+     (nth 0 case) (nth 1 case))))
+
+(ert-deftest pilish-test-session-browser-project-fields-visible-equivalence ()
+  "Visually unsafe or equivalent readable labels become generated fields.
+A whitespace-only basename cannot produce a blank natural field; a
+zero-width combining grapheme joiner cannot hide an identity suffix;
+and canonically equivalent NFC/NFD labels cannot receive visually
+identical natural fields.  Their legal cwd identities remain distinct,
+while exact 16-column output stays unique and input-order independent."
+  (let* ((items
+          (list (pilish-test--project-item
+                 "/a/space.jsonl" "/ " "Whitespace")
+                (pilish-test--project-item
+                 "/a/plain.jsonl" "/x" "Plain x")
+                (pilish-test--project-item
+                 "/a/cgj.jsonl" (concat "/x" (string #x034f)) "CGJ x")
+                (pilish-test--project-item
+                 "/a/nfc.jsonl" "/é" "NFC e")
+                (pilish-test--project-item
+                 "/a/nfd.jsonl" (concat "/e" (string #x0301)) "NFD e")))
+         (forward (pilish-test--allocated-project-fields items))
+         (reversed (pilish-test--allocated-project-fields
+                    (reverse items)))
+         (fields (mapcar #'cdr forward)))
+    (should (equal forward reversed))
+    (should (= (length (delete-dups (copy-sequence fields))) 5))
+    (dolist (field fields)
+      (should (= (string-width field) pilish-test--token-width)))
+    (dolist (path '("/a/space.jsonl" "/a/cgj.jsonl"
+                    "/a/nfc.jsonl" "/a/nfd.jsonl"))
+      (should (string-prefix-p "#" (cdr (assoc path forward)))))
+    ;; The safe, noncolliding plain label remains readable.
+    (should (equal (cdr (assoc "/a/plain.jsonl" forward))
+                   (pilish-test--pad-display
+                    "x" pilish-test--token-width)))
+    ;; The production renderer emits the same exact unique fields.
+    (with-temp-buffer
+      (pilish-session-browser-mode)
+      (setq pilish--session-browser-scope 'all
+            pilish--session-browser-view 'messages
+            pilish--session-browser-items items)
+      (pilish--session-browser-rerender)
+      (let ((rendered
+             (mapcar (lambda (line)
+                       (pilish-test--display-prefix
+                        line pilish-test--token-width))
+                     (seq-remove #'string-empty-p
+                                 (split-string (buffer-string) "\n")))))
+        (should (= (length rendered) 5))
+        (should (= (length (delete-dups (copy-sequence rendered))) 5))
+        (should (equal (sort rendered #'string<)
+                       (sort (copy-sequence fields) #'string<)))))))
+
+(ert-deftest pilish-test-session-browser-project-fields-compatibility-blanks ()
+  "Blank/filler glyphs and compatibility-equivalent labels are generated.
+Unicode names ending in BLANK or FILLER identify conservative
+blank-looking natural labels even when their general category and
+column width look printable.  NFKC display keys also group ordinary
+space and EN SPACE spellings, and reserve compatibility variants of
+`#' from colliding with generated ordinals.  Legal cwd identities stay
+distinct, and every exact padded field remains deterministic and unique."
+  (let* ((en-space (string #x2002))
+         (items
+          (list (pilish-test--project-item
+                 "/b/braille.jsonl" (concat "/" (string #x2800))
+                 "Braille blank")
+                (pilish-test--project-item
+                 "/b/hangul.jsonl" (concat "/" (string #x3164))
+                 "Hangul filler")
+                (pilish-test--project-item
+                 "/b/choseong.jsonl" (concat "/" (string #x115f))
+                 "Choseong filler")
+                (pilish-test--project-item
+                 "/b/halfwidth.jsonl" (concat "/" (string #xffa0))
+                 "Halfwidth filler")
+                (pilish-test--project-item
+                 "/b/space.jsonl" "/a b" "ASCII space")
+                (pilish-test--project-item
+                 "/b/en-space.jsonl" (concat "/a" en-space "b")
+                 "EN SPACE")
+                (pilish-test--project-item
+                 "/b/question.jsonl" "/?" "Question placeholder")
+                (pilish-test--project-item
+                 "/b/compat-hash.jsonl"
+                 (concat "/" (string #xfe5f) "1 ?")
+                 "Compatibility hash")
+                (pilish-test--project-item
+                 "/b/plain.jsonl" "/plain" "Plain")))
+         (forward (pilish-test--allocated-project-fields items))
+         (reversed (pilish-test--allocated-project-fields (reverse items)))
+         (generated-paths '("/b/braille.jsonl" "/b/hangul.jsonl"
+                            "/b/choseong.jsonl" "/b/halfwidth.jsonl"
+                            "/b/space.jsonl" "/b/en-space.jsonl"
+                            "/b/question.jsonl"
+                            "/b/compat-hash.jsonl"))
+         (fields (mapcar #'cdr forward)))
+    (should (equal forward reversed))
+    (should (= (length (delete-dups (copy-sequence fields)))
+               (length items)))
+    (should (= (length (delete-dups
+                        (mapcar #'ucs-normalize-NFKC-string fields)))
+               (length items)))
+    (dolist (field fields)
+      (should (= (string-width field) pilish-test--token-width)))
+    (dolist (path generated-paths)
+      (should (string-prefix-p "#" (cdr (assoc path forward)))))
+    (should (equal (cdr (assoc "/b/plain.jsonl" forward))
+                   (pilish-test--pad-display
+                    "plain" pilish-test--token-width)))
+    ;; Assert the full renderer emits exactly the allocator's fields.
+    (with-temp-buffer
+      (pilish-session-browser-mode)
+      (setq pilish--session-browser-scope 'all
+            pilish--session-browser-view 'messages
+            pilish--session-browser-items items)
+      (pilish--session-browser-rerender)
+      (let ((rendered
+             (mapcar (lambda (line)
+                       (pilish-test--display-prefix
+                        line pilish-test--token-width))
+                     (seq-remove #'string-empty-p
+                                 (split-string (buffer-string) "\n")))))
+        (should (equal (sort rendered #'string<)
+                       (sort (copy-sequence fields) #'string<)))))))
+
+(ert-deftest pilish-test-session-browser-all-scope-placeholder-field-reserved ()
+  "The placeholder's exact padded field is reserved like the #
+namespace: a project literally named ? is real and gets a generated
+token, while malformed rows keep the bare placeholder — their exact
+fields differ."
+  (with-temp-buffer
+    (pilish-session-browser-mode)
+    (setq pilish--session-browser-scope 'all
+          pilish--session-browser-items
+          (list (pilish-test--project-item "/a/q.jsonl" "/?" "Question project")
+                (pilish-test--project-item "/a/bad.jsonl" "not-absolute"
+                                           "Malformed twin")))
+    (pilish--session-browser-rerender)
+    (let* ((text (buffer-string))
+           (field-of
+            (lambda (title)
+              (pilish-test--display-prefix
+               (cl-find title (split-string text "\n") :test #'string-match-p)
+               pilish-test--token-width))))
+      (let ((question (funcall field-of "Question project"))
+            (malformed (funcall field-of "Malformed twin")))
+        ;; The valid ? project is generated, not the placeholder.
+        (should (string-prefix-p "#" question))
+        (should (equal (string-trim-right malformed)
+                       pilish--session-project-placeholder))
+        (should-not (equal question malformed))))))
+
+(ert-deftest pilish-test-session-browser-all-scope-cwd-tramp-localnames ()
+  "A TRAMP-spelled cwd splits into route and localname first and the
+LOCALNAME is validated: an empty localname (/ssh:h:) and an explicit
+root (/ssh:h:/) are different spellings and only the root is a
+usable project; a relative localname and a remote-home spelling are
+rejected.  A single-hop route with an empty host would be completed
+from TRAMP's local defaults — an identity that shifts with
+configuration — and yields the truthful placeholder instead.
+Rejected rows still reserve the full bounded token field."
+  (with-temp-buffer
+    (pilish-session-browser-mode)
+    (setq pilish--session-browser-scope 'all
+          pilish--session-browser-items
+          (list (pilish-test--project-item
+                 "/ssh:h:/s/a.jsonl" "/ssh:h:relative" "Relative localname")
+                (pilish-test--project-item
+                 "/ssh:h:/s/b.jsonl" "/ssh:h:~/proj" "Remote home")
+                (pilish-test--project-item
+                 "/ssh:h:/s/c.jsonl" "/ssh:h:" "Empty localname")
+                (pilish-test--project-item
+                 "/ssh:h:/s/d.jsonl" "/ssh:h:/" "Explicit root")
+                (pilish-test--project-item
+                 "/ssh::/s/e.jsonl" "/ssh::/x/app" "Empty host")))
+    (pilish--session-browser-rerender)
+    (let ((text (buffer-string)))
+      ;; Rejected metadata still gets the bounded placeholder field —
+      ;; the rows are uniform, never bare titles.
+      (dolist (title '("Relative localname" "Remote home"
+                       "Empty localname" "Empty host"))
+        (should (string-match-p
+                 (regexp-quote (pilish-test--row "?" title)) text)))
+      (should-not (string-match-p ":app" text))
+      ;; The explicit remote root is a real project: host:/.
+      (should (string-match-p
+               (regexp-quote (pilish-test--row "h:/" "Explicit root"))
+               text)))))
+
+(ert-deftest pilish-test-session-browser-all-scope-cwd-tramp-inherited-host ()
+  "Hostless final hops render the preceding explicit route host.
+Both ordinary and user/port predecessors inherit lexically, as does
+a bracketed IPv6 predecessor; the bounded field shows that host
+rather than the rejected-project placeholder."
+  (with-temp-buffer
+    (pilish-session-browser-mode)
+    (setq pilish--session-browser-scope 'all
+          pilish--session-browser-items
+          (list (pilish-test--project-item
+                 "/ssh:b|sudo::/s/a.jsonl"
+                 "/ssh:b|sudo::/work/bare" "Hostless sudo")
+                (pilish-test--project-item
+                 "/ssh:u@b#22|sudo:root@:/s/b.jsonl" "/work/user-port"
+                 "Hostless sudo user")
+                (pilish-test--project-item
+                 "/ssh:[::1]|sudo::/s/c.jsonl"
+                 "/ssh:[::1]|sudo::/work/v6" "Hostless sudo IPv6")))
+    (pilish--session-browser-rerender)
+    (let ((text (buffer-string)))
+      (should (string-match-p
+               (regexp-quote
+                (pilish-test--row "b:bare" "Hostless sudo"))
+               text))
+      (should (string-match-p
+               (regexp-quote
+                (pilish-test--row "b:user-port" "Hostless sudo user"))
+               text))
+      (should (string-match-p
+               (regexp-quote
+                (pilish-test--row "[::1]:v6" "Hostless sudo IPv6"))
+               text))
+      (should-not (string-match-p
+                   (regexp-quote (pilish-test--row "?" "Hostless"))
+                   text)))))
+
+(ert-deftest pilish-test-session-browser-all-scope-cwd-tramp-invalid-routes ()
+  "Whole-route validation rejects contextual or unsafe project hosts.
+Direct project specs, allocated fields, and rendered rows all use
+the placeholder for a hostless first hop, malformed middle hop, or
+unsafe/default-invisible route text.  A valid inherited route remains
+usable, and no TRAMP configuration, network, or filesystem function is
+consulted anywhere along this loaded-item rendering path."
+  (let* ((unsafe-bidi (concat "/ssh:h" (string #x202e) ":/s/bidi.jsonl"))
+         (unsafe-cgj (concat "/ssh:h" (string #x034f) ":/s/cgj.jsonl"))
+         (items
+          (list (pilish-test--project-item
+                 "/ssh:b|sudo::/s/good.jsonl"
+                 "/ssh:b|sudo::/work/good" "Valid inherited")
+                (pilish-test--project-item
+                 "/ssh:|sudo:root@h:/s/default.jsonl"
+                 "/work/default" "Default first hop")
+                (pilish-test--project-item
+                 "/ssh:h|bad|sudo:x:/s/malformed.jsonl"
+                 "/work/malformed" "Malformed middle hop")
+                (pilish-test--project-item
+                 "/ssh:u\t@h:/s/tab.jsonl" "/work/tab" "Tab route")
+                (pilish-test--project-item
+                 unsafe-bidi "/work/bidi" "Bidi route")
+                (pilish-test--project-item
+                 unsafe-cgj "/work/cgj" "Invisible route"))))
+    (cl-letf (((symbol-function 'file-remote-p)
+               (lambda (&rest _)
+                 (ert-fail "project fields consulted TRAMP")))
+              ((symbol-function 'file-truename)
+               (lambda (&rest _)
+                 (ert-fail "loaded project fields touched filesystem"))))
+      (should (equal (pilish--session-project-spec (car items))
+                     '("/ssh:b|sudo::/work/good" "b" ("work" "good"))))
+      ;; A colon in a real local POSIX component remains legal; only a
+      ;; TRAMP-routed session treats a malformed route-looking cwd as such.
+      (should (equal
+               (pilish--session-project-spec
+                (pilish-test--project-item
+                 "/local/session.jsonl" "/foo:bar/app" "Local colon"))
+               '("/foo:bar/app" nil ("foo:bar" "app"))))
+      (dolist (item (cdr items))
+        (should-not (pilish--session-project-spec item)))
+      (let ((fields (pilish--session-project-fields items)))
+        (should (equal (gethash "/ssh:b|sudo::/s/good.jsonl" fields)
+                       "b:good"))
+        (dolist (item (cdr items))
+          (should (equal (gethash (plist-get item :canonicalPath) fields)
+                         pilish--session-project-placeholder))))
+      (with-temp-buffer
+        (pilish-session-browser-mode)
+        (setq pilish--session-browser-scope 'all
+              pilish--session-browser-view 'messages
+              pilish--session-browser-items items)
+        (pilish--session-browser-rerender)
+        (let ((text (buffer-string)))
+          (should (string-match-p
+                   (regexp-quote
+                    (pilish-test--row "b:good" "Valid inherited"))
+                   text))
+          (dolist (title '("Default first hop" "Malformed middle hop"
+                           "Tab route" "Bidi route" "Invisible route"))
+            (should (string-match-p
+                     (regexp-quote (pilish-test--row "?" title))
+                     text))))))))
+
+(ert-deftest pilish-test-session-project-cwd-local-symlink-identity ()
+  "Scan enrichment canonicalizes local cwd aliases to one project.
+Two real session rows retain distinct session identities, but a real
+directory and symlink spelling of the same cwd receive one canonical
+project spec and the same rendered token."
+  (let* ((base (pilish-test--make-temp-directory "pi-project-alias-"))
+         (real (expand-file-name "real/app" base))
+         (alias (expand-file-name "alias" base)))
+    (unwind-protect
+        (progn
+          (make-directory real t)
+          (make-symbolic-link (expand-file-name "real" base) alias)
+          (let* ((a (pilish--session-enrich-item
+                     (pilish-test--project-item
+                      (expand-file-name "a.jsonl" base)
+                      real "Real cwd")))
+                 (b (pilish--session-enrich-item
+                     (pilish-test--project-item
+                      (expand-file-name "b.jsonl" base)
+                      (expand-file-name "app" alias) "Alias cwd")))
+                 (items (list a b))
+                 (a-spec (pilish--session-project-spec a))
+                 (b-spec (pilish--session-project-spec b))
+                 (fields (pilish--session-project-fields items)))
+            (should (equal a-spec b-spec))
+            (should (equal (gethash (pilish--session-item-key a) fields)
+                           (gethash (pilish--session-item-key b) fields)))
+            (with-temp-buffer
+              (pilish-session-browser-mode)
+              (setq pilish--session-browser-scope 'all
+                    pilish--session-browser-view 'messages
+                    pilish--session-browser-items items)
+              (pilish--session-browser-rerender)
+              (let ((text (buffer-string)))
+                (should (string-match-p
+                         (regexp-quote
+                          (pilish-test--row "app" "Real cwd"))
+                         text))
+                (should (string-match-p
+                         (regexp-quote
+                          (pilish-test--row "app" "Alias cwd"))
+                         text)))))
+      (when (file-directory-p base)
+        (delete-directory base t))))))
+
+(ert-deftest pilish-test-session-project-cwd-symlink-before-dot-collapse ()
+  "Resolve an ordinary local cwd's symlinks before its dot segments.
+For a/link -> ../b/inner, a/link/../project names b/project under
+kernel path-walk semantics; lexical collapse first would incorrectly
+turn it into a/project."
+  (let* ((base (pilish-test--make-temp-directory "pi-project-dotlink-"))
+         (a (expand-file-name "a" base))
+         (inner (expand-file-name "b/inner" base))
+         (target (expand-file-name "b/project" base))
+         (link (expand-file-name "link" a))
+         ;; Do not use `expand-file-name' here: it would erase the
+         ;; very dot segment whose ordering this regression exercises.
+         (raw (concat link "/../project")))
+    (unwind-protect
+        (progn
+          (make-directory a t)
+          (make-directory inner t)
+          (make-directory target t)
+          (make-symbolic-link "../b/inner" link)
+          (let* ((item (pilish--session-enrich-item
+                        (pilish-test--project-item
+                         (expand-file-name "session.jsonl" base)
+                         raw "Symlink then dot")))
+                 (spec (pilish--session-project-spec item))
+                 (expected (file-truename target)))
+            (should (equal (car spec) expected))
+            (should (equal (nth 2 spec) (split-string expected "/" t)))
+            (should-not (equal (car spec)
+                               (expand-file-name "a/project" base)))))
+      (when (file-directory-p base)
+        (delete-directory base t)))))
+
+(ert-deftest pilish-test-session-project-cwd-handler-safe-boundary ()
+  "Local cwd canonicalization cannot dispatch arbitrary file handlers.
+A matching handler records no call.  Even a compromised/native
+`file-truename' result that looks remote is rejected in favor of the
+validated lexical local identity; remote, UNC, and Windows spellings
+continue to bypass local canonicalization entirely."
+  (let* ((base (pilish-test--make-temp-directory "pi-project-handler-"))
+         (cwd (expand-file-name "handled/project" base))
+         (calls 0)
+         (handler
+          (lambda (operation &rest _args)
+            (cl-incf calls)
+            (if (eq operation 'file-truename)
+                "/ssh:handler.example:/escaped"
+              (ert-fail (format "unexpected handler operation %S"
+                                operation))))))
+    (unwind-protect
+        (progn
+          (make-directory cwd t)
+          (let ((file-name-handler-alist
+                 (cons (cons (concat "\\`" (regexp-quote base)) handler)
+                       file-name-handler-alist)))
+            (should (equal (pilish--session-canonical-project-spec
+                            (pilish-test--project-item
+                             "/sessions/local.jsonl" cwd "Handled"))
+                           (list cwd nil (split-string cwd "/" t))))
+            (should (= calls 0)))
+          ;; Result validation is independent of handler inhibition.
+          (cl-letf (((symbol-function 'file-truename)
+                     (lambda (_path) "/ssh:h:/escaped")))
+            (should (equal (pilish--session-canonical-project-spec
+                            (pilish-test--project-item
+                             "/sessions/local.jsonl" cwd "Escaped"))
+                           (list cwd nil (split-string cwd "/" t)))))
+          ;; These lexical classes must never cross the local boundary.
+          (cl-letf (((symbol-function 'file-truename)
+                     (lambda (&rest _)
+                       (ert-fail "nonlocal cwd reached file-truename"))))
+            (dolist (item (list
+                           (pilish-test--project-item
+                            "/ssh:h:/s/x.jsonl" "/work/app" "Remote")
+                           (pilish-test--project-item
+                            "/s/u.jsonl" "//server/share/app" "UNC")
+                           (pilish-test--project-item
+                            "/s/w.jsonl" "C:/Users/u/app" "Windows")))
+              (should (pilish--session-canonical-project-spec item)))))
+      (when (file-directory-p base)
+        (delete-directory base t)))))
+
+(ert-deftest pilish-test-session-project-cwd-canonical-fallback-and-remote ()
+  "Local cwd canonicalization falls back lexically; remote cwd never stats.
+The scan-enrichment seam attempts a local project cwd once and keeps
+its normalized lexical spec when canonicalization fails.  A remote
+route reaches the same seam without passing any remote spelling to
+`file-truename'."
+  (let ((calls nil))
+    (cl-letf (((symbol-function 'file-truename)
+               (lambda (path)
+                 (push path calls)
+                 (if (equal path "/project/alias")
+                     (error "canonicalization failed")
+                   path))))
+      (let* ((item (pilish--session-enrich-item
+                    (pilish-test--project-item
+                     "/sessions/local.jsonl" "/project/alias" "Local")))
+             (spec (pilish--session-project-spec item)))
+        (should (member "/project/alias" calls))
+        (should (equal spec
+                       '("/project/alias" nil ("project" "alias")))))
+      (setq calls nil)
+      (let ((item (pilish--session-enrich-item
+                   (pilish-test--project-item
+                    "/ssh:h:/sessions/remote.jsonl"
+                    "/project/remote" "Remote"))))
+        (should (equal (pilish--session-project-spec item)
+                       '("/ssh:h:/project/remote" "h"
+                         ("project" "remote"))))
+        (should-not calls)))))
+
+(ert-deftest pilish-test-session-browser-all-scope-cwd-windows ()
+  "Windows cwd spellings parse lexically with anchored dot-dot: the
+drive and the UNC server/share never pop, a bare drive is
+drive-relative and rejected while C:/ is the drive root, and ///a
+collapses to the POSIX /a instead of a malformed UNC."
+  (with-temp-buffer
+    (pilish-session-browser-mode)
+    (setq pilish--session-browser-scope 'all
+          pilish--session-browser-items
+          (list (pilish-test--project-item
+                 "/w/a.jsonl" "C:/Users/dan/app" "Drive slash")
+                (pilish-test--project-item
+                 "/w/b.jsonl" "C:\\Users\\dan\\app" "Drive backslash")
+                (pilish-test--project-item
+                 "/w/c.jsonl" "D:\\Users\\dan\\app" "Other drive")
+                (pilish-test--project-item
+                 "/w/d.jsonl" "C:/../x/app" "Anchored drive dotdot")
+                (pilish-test--project-item
+                 "/w/e.jsonl" "//server/share/../app" "Anchored UNC dotdot")
+                (pilish-test--project-item
+                 "/w/f.jsonl" "\\\\server\\share\\app" "UNC backslash")
+                (pilish-test--project-item
+                 "/w/g.jsonl" "//server/share/app" "UNC slash")
+                (pilish-test--project-item
+                 "/w/h.jsonl" "///lookalike" "Triple slash")
+                (pilish-test--project-item
+                 "/w/i.jsonl" "C:" "Bare drive")
+                (pilish-test--project-item
+                 "/w/j.jsonl" "/server/share/app" "POSIX lookalike")))
+    (pilish--session-browser-rerender)
+    (let* ((text (buffer-string))
+           (token-of
+            (lambda (title)
+              (string-trim-right
+               (pilish-test--display-prefix
+                (cl-find title (split-string text "\n")
+                         :test #'string-match-p)
+                pilish-test--token-width)))))
+      ;; C:/... and C:\... are one project sharing one token; the
+      ;; colliding C:/D: basenames disambiguate through their drive
+      ;; components; dot-dot never pops the drive.
+      (should (equal (funcall token-of "Drive slash")
+                     "C:/Users/dan/app"))
+      (should (equal (funcall token-of "Drive backslash")
+                     "C:/Users/dan/app"))
+      (should (equal (funcall token-of "Other drive")
+                     "D:/Users/dan/app"))
+      ;; The shortest distinguishing label: x/app already separates
+      ;; it from dan/app and share/app.
+      (should (equal (funcall token-of "Anchored drive dotdot")
+                     "x/app"))
+      ;; UNC dot-dot never pops server/share: the row shares the
+      ;; plain-UNC identity, generated token included.
+      (should (equal (funcall token-of "Anchored UNC dotdot")
+                     (funcall token-of "UNC backslash")))
+      ;; /// collapses to POSIX /lookalike, whose unique basename
+      ;; needs no parents to distinguish it here.
+      (should (equal (funcall token-of "Triple slash") "lookalike"))
+      ;; A bare drive is drive-relative: placeholder, not a project.
+      (should (string-match-p
+               (regexp-quote (pilish-test--row "?" "Bare drive")) text))
+      ;; UNC and the rooted POSIX lookalike never alias: the whole
+      ;; exhausted collision group — both of them — moves to the
+      ;; generated namespace with distinct ordinals, and neither
+      ;; aliases the other's identity.
+      (let ((unc-b (funcall token-of "UNC backslash"))
+            (unc-s (funcall token-of "UNC slash"))
+            (posix (funcall token-of "POSIX lookalike")))
+        (should (equal unc-b unc-s))
+        (should (= (length (delete-dups (list unc-b posix))) 2))
+        (should (equal 2 (cl-count-if
+                          (lambda (tok)
+                            (string-prefix-p "#" tok))
+                          (list unc-b posix))))))))
+
+(ert-deftest pilish-test-session-browser-all-scope-cwd-unc-anchors ()
+  "UNC anchors distinguish normalization from malformed spellings.
+Repeated separators after the two-separator introducer are an
+accepted alias, while fewer than two nonempty anchors and dot or
+dot-dot anchors are rejected rather than aliased to another share."
+  (should (equal (pilish--session-cwd-parts "//server//share/app")
+                 (pilish--session-cwd-parts "//server/share/app")))
+  (should-not (pilish--session-cwd-parts "//server"))
+  (should-not (pilish--session-cwd-parts "//server/"))
+  (with-temp-buffer
+    (pilish-session-browser-mode)
+    (setq pilish--session-browser-scope 'all
+          pilish--session-browser-items
+          (list (pilish-test--project-item "/u/a.jsonl" "//./share/app"
+                                           "Dot server")
+                (pilish-test--project-item "/u/b.jsonl" "//server/../app"
+                                           "Dotdot share")
+                (pilish-test--project-item "/u/c.jsonl" "//server/./app"
+                                           "Dot share")
+                (pilish-test--project-item "/u/d.jsonl" "//server"
+                                           "Missing share")
+                (pilish-test--project-item "/u/e.jsonl" "//server/share/app"
+                                           "Valid UNC")
+                (pilish-test--project-item "/u/f.jsonl" "//server//share/app"
+                                           "Repeated separator")))
+    (pilish--session-browser-rerender)
+    (let ((text (buffer-string)))
+      (dolist (title '("Dot server" "Dotdot share" "Dot share"
+                       "Missing share"))
+        (should (string-match-p
+                 (regexp-quote (pilish-test--row "?" title)) text)))
+      ;; Repeated separators collapse to the canonical identity, so
+      ;; both accepted rows use the same readable exact field.
+      (should (string-match-p
+               (regexp-quote (pilish-test--row "app" "Valid UNC"))
+               text))
+      (should (string-match-p
+               (regexp-quote
+                (pilish-test--row "app" "Repeated separator"))
+               text))
+      (should (= 2 (cl-count-if
+                    (lambda (line)
+                      (string-prefix-p "app " line))
+                    (split-string text "\n")))))))
+
+(ert-deftest pilish-test-session-browser-all-scope-cwd-unicode-categories ()
+  "Unsafe display characters are rejected by Unicode general category
+— Cc, Cf, Zl, Zp — not by hand-listed ranges: Arabic letter mark,
+bidi isolates, and every previously listed control or format
+character all suppress the token without breaking the row."
+  (dolist (code (list #x00 #x0a #x7f #x061c #x2066 #x2069 #x206e
+                      #x2028 #x2029 #x200b #x202e #x0085 #x009c
+                      #xfeff))
+    (with-temp-buffer
+      (pilish-session-browser-mode)
+      (setq pilish--session-browser-scope 'all
+            pilish--session-browser-items
+            (list (pilish-test--project-item
+                   "/u/x.jsonl" (format "/home/u/p%sq" (string code))
+                   (format "Code %04X" code))))
+      (pilish--session-browser-rerender)
+      ;; Rejected metadata gets the bounded placeholder field — the
+      ;; row stays uniform and single-line, with no unsafe character.
+      (let ((line (substring-no-properties (buffer-string))))
+        (should (equal (pilish-test--row "?" (format "Code %04X" code))
+                       (string-trim-right line "\n")))))))
 
 (ert-deftest pilish-test-session-browser-margin-overlays ()
   "Session entries have right-margin overlays with count and age."
@@ -1961,33 +3096,395 @@ children; ordering follows activity instead of archive order."
             pilish--session-browser-search-tokens nil))))
 
 (ert-deftest pilish-test-session-browser-render-loading ()
-  "Render loading indicator."
+  "Render one loading indicator without resolving unused live paths.
+A loading screen has no rows to mark.  Avoiding live-session identity
+work also removes a file-handler reentrancy point that could let an
+obsolete outer render append after a newer request rendered."
   (with-temp-buffer
     (pilish-session-browser-mode)
     (setq pilish--session-browser-loading t)
-    (pilish--session-browser-rerender)
-    (should (string-match-p "Loading" (buffer-string)))))
+    (cl-letf (((symbol-function 'pilish--browse-live-session-paths)
+               (lambda ()
+                 (ert-fail "loading render resolved live paths"))))
+      (pilish--session-browser-rerender))
+    (should (equal (buffer-string) "Loading sessions...\n"))))
+
+(ert-deftest pilish-test-session-browser-row-render-yields-to-reentrant-fetch ()
+  "A row render never appends after a nested newer fetch rendered status.
+Live-path resolution reentrantly starts request B.  B's loading render
+owns the incremented generation; when the suspended row render resumes,
+it leaves B's single loading line intact rather than duplicating it."
+  (with-temp-buffer
+    (pilish-session-browser-mode)
+    (setq pilish--session-browser-items
+          (list '(:path "/test/a.jsonl" :name "Session A"
+                  :messageCount 1 :modified "2026-03-11T10:00:00Z")))
+    (let ((first t)
+          pending)
+      (cl-letf (((symbol-function 'pilish--browse-live-session-paths)
+                 (lambda ()
+                   (when first
+                     (setq first nil)
+                     (pilish--session-browser-fetch-and-render))
+                   (make-hash-table :test 'equal)))
+                ((symbol-function 'pilish--browse-load-sessions)
+                 (lambda (_scope callback &optional _generation)
+                   (setq pending callback))))
+        (pilish--session-browser-rerender))
+      (should pending)
+      (should pilish--session-browser-loading)
+      (should (equal (buffer-string) "Loading sessions...\n")))))
+
+(ert-deftest pilish-test-session-browser-item-key-reentrancy-keeps-newer-body ()
+  "A hand-built row key cannot insert after its handler starts request B.
+The item deliberately lacks `:canonicalPath', so its one canonical-key
+lookup dispatches a harmless file-name handler.  That handler starts B;
+A must yield without inserting STALE CURRENT above B's loading body."
+  (with-temp-buffer
+    (pilish-session-browser-mode)
+    (setq pilish--session-browser-view 'messages
+          pilish--session-browser-items
+          (list '(:path "/pilish-reentrant-key/session.jsonl"
+                  :name "STALE CURRENT" :messageCount 1
+                  :modified "2026-03-11T10:00:00Z")))
+    (let ((first t)
+          (handler-calls 0)
+          (pending nil)
+          handler)
+      (setq handler
+            (lambda (operation &rest args)
+              (if (eq operation 'file-truename)
+                  (progn
+                    (cl-incf handler-calls)
+                    (when first
+                      (setq first nil)
+                      (pilish--session-browser-fetch-and-render))
+                    (car args))
+                ;; Standard file-handler delegation without recursion.
+                (let ((inhibit-file-name-handlers
+                       (cons handler
+                             (and (eq inhibit-file-name-operation operation)
+                                  inhibit-file-name-handlers)))
+                      (inhibit-file-name-operation operation))
+                  (apply operation args)))))
+      (let ((file-name-handler-alist
+             (cons (cons "\\`/pilish-reentrant-key/" handler)
+                   file-name-handler-alist)))
+        (cl-letf (((symbol-function 'pilish--browse-live-session-paths)
+                   (lambda () (make-hash-table :test 'equal)))
+                  ((symbol-function 'pilish--browse-load-sessions)
+                   (lambda (_scope callback &optional _generation)
+                     (setq pending callback))))
+          (pilish--session-browser-rerender)))
+      (should (= handler-calls 1))
+      (should pending)
+      (should pilish--session-browser-loading)
+      (should (= pilish--session-browser-fetch-token 1))
+      (should-not (string-match-p "STALE CURRENT" (buffer-string)))
+      (should (equal (buffer-string) "Loading sessions...\n")))))
+
+(ert-deftest pilish-test-session-browser-stale-apply-yields-during-keying ()
+  "Generation A cannot publish after item canonicalization starts B.
+A hand-built callback item lacks `:canonicalPath'.  Its key lookup
+reentrantly starts B; A must leave B's loading state and the prior
+snapshot untouched."
+  (with-temp-buffer
+    (pilish-session-browser-mode)
+    (setq pilish--session-browser-fetch-token 1
+          pilish--session-browser-items
+          (list '(:path "/kept.jsonl" :canonicalPath "/kept.jsonl"
+                  :name "Kept snapshot")))
+    (let ((first t)
+          pending)
+      (cl-letf (((symbol-function 'file-truename)
+                 (lambda (path)
+                   (when first
+                     (setq first nil)
+                     (pilish--session-browser-fetch-and-render))
+                   path))
+                ((symbol-function 'pilish--browse-load-sessions)
+                 (lambda (_scope callback &optional _generation)
+                   (setq pending callback))))
+        (pilish--session-browser-apply-scan
+         (current-buffer)
+         (list '(:path "/stale-apply.jsonl" :name "STALE APPLY"))
+         nil nil 'current 1))
+      (should pending)
+      (should (= pilish--session-browser-fetch-token 2))
+      (should pilish--session-browser-loading)
+      (should (equal (plist-get (car pilish--session-browser-items) :name)
+                     "Kept snapshot"))
+      (should-not (string-match-p "STALE APPLY" (buffer-string)))
+      (should (equal (buffer-string) "Loading sessions...\n")))))
+
+(ert-deftest pilish-test-session-thread-preparation-stops-when-stale ()
+  "Thread preparation stops after its first parent lookup supersedes it."
+  (with-temp-buffer
+    (pilish-session-browser-mode)
+    (setq pilish--session-browser-fetch-token 1)
+    (let ((calls nil)
+          (items
+           (list '(:path "/one.jsonl" :canonicalPath "/one.jsonl"
+                   :parentSessionPath "/parent-one.jsonl")
+                 '(:path "/two.jsonl" :canonicalPath "/two.jsonl"
+                   :parentSessionPath "/parent-two.jsonl"))))
+      (cl-letf (((symbol-function 'pilish--thread-parent-identity)
+                 (lambda (parent &rest _)
+                   (push parent calls)
+                   (cl-incf pilish--session-browser-fetch-token)
+                   nil)))
+        (should-not
+         (pilish--session-thread-items items (current-buffer) 1)))
+      (should (equal calls '("/parent-one.jsonl"))))))
+
+(defconst pilish-test--narrow-body-columns 32
+  "Usable text columns of the narrowest supported session browser.
+A 52-column terminal with the mode's 20-column right margin leaves
+32 body columns; empty-state hint lines must fit, since a truncated
+hint hides the recovery key it names.")
+
+(defun pilish-test--empty-lines (text)
+  "Return the nonblank lines of rendered empty-state TEXT."
+  (seq-remove #'string-empty-p (split-string text "\n")))
+
+(defun pilish-test--assert-hints-visible (text)
+  "Assert every empty-state line in TEXT fits the narrow body width."
+  (dolist (line (pilish-test--empty-lines text))
+    (should (<= (length line)
+                pilish-test--narrow-body-columns))))
 
 (ert-deftest pilish-test-session-browser-render-empty ()
-  "Render empty state when no sessions."
+  "Empty scan in this-project scope suggests switching scope.
+Each hint is its own short line so the recovery key survives narrow
+windows."
   (with-temp-buffer
     (pilish-session-browser-mode)
     (setq pilish--session-browser-items nil)
     (pilish--session-browser-rerender)
-    (should (string-match-p "No sessions found" (buffer-string)))))
+    (let ((text (buffer-string)))
+      (should (string-match-p "No sessions in this project" text))
+      (should (string-match-p "\nt to list all projects" text))
+      (pilish-test--assert-hints-visible text))))
+
+(ert-deftest pilish-test-session-browser-render-empty-all-scope ()
+  "Empty scan across all projects is the honest terminal state.
+No widening action exists, so none of the real key hints is offered."
+  (with-temp-buffer
+    (pilish-session-browser-mode)
+    (setq pilish--session-browser-items nil
+          pilish--session-browser-scope 'all)
+    (pilish--session-browser-rerender)
+    (let ((text (buffer-string)))
+      (should (string-match-p "No sessions found" text))
+      (should-not (string-match-p "t to list all projects" text))
+      (should-not (string-match-p "f to show all names" text))
+      (should-not (string-match-p "/ to clear the query" text)))))
+
+(ert-deftest pilish-test-session-browser-render-empty-named-only ()
+  "Named-only emptiness suggests clearing it, plus a scope switch
+only when a wider scope exists."
+  (with-temp-buffer
+    (pilish-session-browser-mode)
+    (setq pilish--session-browser-items
+          '((:path "/test/a.jsonl" :firstMessage "Unnamed work"
+             :messageCount 2 :modified "2026-03-11T10:00:00Z"))
+          pilish--session-browser-named-only t
+          pilish--session-browser-scope 'current)
+    (pilish--session-browser-rerender)
+    (let ((text (buffer-string)))
+      (should (string-match-p "No named sessions" text))
+      (should (string-match-p "\nf to show all names" text))
+      (should (string-match-p "\nt to list all projects" text))
+      (pilish-test--assert-hints-visible text)))
+  (with-temp-buffer
+    (pilish-session-browser-mode)
+    (setq pilish--session-browser-items
+          '((:path "/test/a.jsonl" :firstMessage "Unnamed work"
+             :messageCount 2 :modified "2026-03-11T10:00:00Z"))
+          pilish--session-browser-named-only t
+          pilish--session-browser-scope 'all)
+    (pilish--session-browser-rerender)
+    (let ((text (buffer-string)))
+      (should (string-match-p "No named sessions" text))
+      (should (string-match-p "\nf to show all names" text))
+      (should-not (string-match-p "t to list all projects" text))
+      (pilish-test--assert-hints-visible text))))
+
+(ert-deftest pilish-test-session-browser-render-empty-query ()
+  "Query emptiness suggests clearing the query first, then the next
+widening state: named-only when active, otherwise the scope switch
+when one exists."
+  ;; Query + this project: clear the query or search everywhere.
+  (with-temp-buffer
+    (pilish-session-browser-mode)
+    (setq pilish--session-browser-items
+          '((:path "/test/a.jsonl" :name "Session A"
+             :messageCount 2 :modified "2026-03-11T10:00:00Z"))
+          pilish--session-browser-search-query "zzz-no-match"
+          pilish--session-browser-search-tokens '("zzz-no-match")
+          pilish--session-browser-scope 'current)
+    (pilish--session-browser-rerender)
+    (let ((text (buffer-string)))
+      (should (string-match-p "No matching sessions" text))
+      (should (string-match-p "\n/ to clear the query" text))
+      (should (string-match-p "\nt to search all projects" text))
+      ;; The query hint precedes the scope hint.
+      (should (< (string-match "\n/ to clear the query" text)
+                 (string-match "\nt to search all projects" text)))
+      (pilish-test--assert-hints-visible text)))
+  ;; Query + all projects: only the query can widen.
+  (with-temp-buffer
+    (pilish-session-browser-mode)
+    (setq pilish--session-browser-items
+          '((:path "/test/a.jsonl" :name "Session A"
+             :messageCount 2 :modified "2026-03-11T10:00:00Z"))
+          pilish--session-browser-search-query "zzz-no-match"
+          pilish--session-browser-search-tokens '("zzz-no-match")
+          pilish--session-browser-scope 'all)
+    (pilish--session-browser-rerender)
+    (let ((text (buffer-string)))
+      (should (string-match-p "No matching sessions" text))
+      (should (string-match-p "\n/ to clear the query" text))
+      (should-not (string-match-p "t to list all projects" text))
+      (pilish-test--assert-hints-visible text)))
+  ;; Query + named-only: the query hint comes first, named-only second,
+  ;; and the scope hint yields to the two-hint maximum.
+  (with-temp-buffer
+    (pilish-session-browser-mode)
+    (setq pilish--session-browser-items
+          '((:path "/test/a.jsonl" :name "Session A"
+             :messageCount 2 :modified "2026-03-11T10:00:00Z"))
+          pilish--session-browser-search-query "zzz-no-match"
+          pilish--session-browser-search-tokens '("zzz-no-match")
+          pilish--session-browser-named-only t
+          pilish--session-browser-scope 'current)
+    (pilish--session-browser-rerender)
+    (let ((text (buffer-string)))
+      (should (string-match-p "No matching sessions" text))
+      (should (< (string-match "\n/ to clear the query" text)
+                 (string-match "\nf to show all names" text)))
+      (should-not (string-match-p "t to list all projects" text))
+      (pilish-test--assert-hints-visible text))))
+
+(ert-deftest pilish-test-session-browser-render-recent-future-group-first ()
+  "Future mtimes head the Recent view as one contiguous group.
+Without a Future label, newest-first sorting interleaves a future
+row's This Week heading between Today and Yesterday — the same
+heading appears twice, noncontiguously.  The zone is pinned and the
+tomorrow mtime is constructed on the decoded calendar (adding
+86400 seconds would land on the wrong day across a transition)."
+  (let ((saved (getenv "TZ")))
+    (unwind-protect
+        (progn
+          (set-time-zone-rule "Europe/Berlin")
+          ;; Pin the render clock as well as the zone: the Recent
+          ;; renderer captures `current-time' once per render.
+          (cl-letf (((symbol-function 'current-time)
+                     (lambda ()
+                       (encode-time 30 0 8 11 3 2026))))
+          (let* ((dec (decode-time (current-time)))
+                 (today-early (encode-time 5 0 0
+                                           (decoded-time-day dec)
+                                           (decoded-time-month dec)
+                                           (decoded-time-year dec)))
+                 (yesterday-late (time-subtract today-early 600))
+                 (tomorrow-noon
+                  (encode-time 0 0 12
+                               (1+ (decoded-time-day dec))
+                               (decoded-time-month dec)
+                               (decoded-time-year dec))))
+            (with-temp-buffer
+              (pilish-session-browser-mode)
+              (setq pilish--session-browser-items
+                    (list (list :path "/test/late.jsonl" :name "Late night"
+                                :messageCount 2
+                                :modified (pilish-test--local-time-iso yesterday-late))
+                          (list :path "/test/skew.jsonl" :name "Clock skew"
+                                :messageCount 1
+                                :modified (pilish-test--local-time-iso tomorrow-noon))
+                          (list :path "/test/early.jsonl" :name "Early morning"
+                                :messageCount 3
+                                :modified (pilish-test--local-time-iso today-early))))
+              (setq pilish--session-browser-view 'recent)
+              (pilish--session-browser-rerender)
+              (let ((text (buffer-string)))
+                ;; Headings appear once each, in the honest total order.
+                (dolist (heading '("Future" "Today" "Yesterday"))
+                  (should (equal 1 (cl-count-if
+                                    (lambda (line) (equal line heading))
+                                    (split-string text "\n")))))
+                (should (< (string-match "\\`Future\n" text)
+                           (string-match "Clock skew" text)
+                           (string-match "\nToday\n" text)
+                           (string-match "Early morning" text)
+                           (string-match "\nYesterday\n" text)
+                           (string-match "Late night" text))))))))
+      (if saved
+          (set-time-zone-rule saved)
+        (set-time-zone-rule nil)))))
+
+(ert-deftest pilish-test-session-browser-render-recent-calendar-groups ()
+  "Recent view groups rows under calendar Today/Yesterday headings.
+A late-night session belongs to Yesterday the moment the calendar day
+turns, not twenty-four hours later; rows sort newest-first inside
+and across the groups.  The renderer's production clock is pinned."
+  (let ((fixed-now (encode-time '(0 0 8 11 3 2026 nil nil nil))))
+    (cl-letf (((symbol-function 'current-time) (lambda () fixed-now)))
+      (let* ((dec (decode-time fixed-now))
+             (today-early (encode-time 5 0 0
+                                       (decoded-time-day dec)
+                                       (decoded-time-month dec)
+                                       (decoded-time-year dec)))
+             (yesterday-late (time-subtract today-early 600)))
+        (with-temp-buffer
+          (pilish-session-browser-mode)
+          (setq pilish--session-browser-items
+                (list (list :path "/test/late.jsonl" :name "Late night"
+                            :messageCount 2
+                            :modified
+                            (pilish-test--local-time-iso yesterday-late))
+                      (list :path "/test/early.jsonl" :name "Early morning"
+                            :messageCount 3
+                            :modified
+                            (pilish-test--local-time-iso today-early))))
+          (setq pilish--session-browser-view 'recent)
+          (pilish--session-browser-rerender)
+          (let ((text (buffer-string)))
+            ;; Calendar grouping: yesterday 23:55 is Yesterday even minutes
+            ;; after midnight; today 00:05 is Today.
+            (should (string-match-p "\\`Today
+" text))
+            (should (string-match-p "
+Yesterday
+" text))
+            ;; Newest first within and across groups.
+            (should (< (string-match "Early morning" text)
+                       (string-match "Late night" text)))
+            ;; Each row sits under its own group heading.
+            (should (< (string-match "\\`Today
+" text)
+                       (string-match "Early morning" text)
+                       (string-match "
+Yesterday
+" text)
+                       (string-match "Late night" text)))))))))
 
 (ert-deftest pilish-test-session-browser-header-line ()
-  "Header-line shows scope, view, and named-only state.
-The view label is the full user-facing name; `sort' never appears."
+  "Header-line shows scope, view, named-only state, and an explicit
+total count.  The count is labeled `total' because it counts scanned
+sessions in scope — not the rows surviving the current query and
+named-only filter, so an empty result next to `(2 total)' is not
+mistaken for a contradiction."
   (with-temp-buffer
     (pilish-session-browser-mode)
     (setq pilish--session-browser-scope 'current
+          pilish--session-browser-items-scope 'current
           pilish--session-browser-view 'threaded
           pilish--session-browser-items '((:id "a") (:id "b")))
     (let ((header (pilish--session-browser-header-line)))
       (should (string-match-p "Sessions \\[This project\\]" header))
       (should (string-match-p "view:Threaded (fork families)" header))
-      (should (string-match-p "(2)" header))
+      (should (string-match-p "(2 total)" header))
       (should-not (string-match-p "sort" header))
       ;; A changed view changes the label, not just the raw value.
       (setq pilish--session-browser-view 'messages
@@ -1995,6 +3492,76 @@ The view label is the full user-facing name; `sort' never appears."
       (should (string-match-p "view:Most messages"
                               (pilish--session-browser-header-line)))
       (should (string-match-p "named-only"
+                              (pilish--session-browser-header-line))))))
+
+(ert-deftest pilish-test-session-browser-failed-scan-hides-total ()
+  "An errored or unowned snapshot has no confirmed total to report.
+A successful empty scan may truthfully show `(0 total)', but the same
+empty list accompanied by an error — or no owning scope yet — must not
+claim that zero sessions were confirmed."
+  (with-temp-buffer
+    (pilish-session-browser-mode)
+    (setq pilish--session-browser-scope 'current
+          pilish--session-browser-items nil
+          pilish--session-browser-items-scope 'current
+          pilish--session-browser-loading nil
+          pilish--session-browser-error "Cannot list sessions: denied")
+    (should-not (string-match-p "total"
+                                (pilish--session-browser-header-line)))
+    (pilish--session-browser-rerender)
+    (should (string-match-p "Cannot list sessions: denied"
+                            (buffer-string)))
+    ;; Clearing the error confirms this owned empty snapshot.
+    (setq pilish--session-browser-error nil)
+    (should (string-match-p "(0 total)"
+                            (pilish--session-browser-header-line)))
+    ;; Nil ownership is still unconfirmed rather than a trusted zero.
+    (setq pilish--session-browser-items-scope nil)
+    (should-not (string-match-p "total"
+                                (pilish--session-browser-header-line)))))
+
+(ert-deftest pilish-test-session-browser-scope-transition-hides-stale-total ()
+  "An in-flight scope change never labels the old snapshot as new scope.
+The prior This-project count remains owned by that scope while the
+All-projects scan is pending, so the new header hides it; the completed
+callback publishes the new owner and total."
+  (with-temp-buffer
+    (pilish-session-browser-mode)
+    (setq pilish--session-browser-scope 'current
+          pilish--session-browser-items-scope 'current
+          pilish--session-browser-view 'messages
+          pilish--session-browser-items
+          (list '(:path "/test/a.jsonl" :name "Session A"
+                  :messageCount 2 :modified "2026-03-11T10:00:00Z")
+                '(:path "/test/b.jsonl" :name "Session B"
+                  :messageCount 1 :modified "2026-03-10T10:00:00Z")))
+    (pilish--session-browser-rerender)
+    (should (string-match-p "(2 total)"
+                            (pilish--session-browser-header-line)))
+    (let (pending requested-scope)
+      (cl-letf (((symbol-function 'pilish--browse-load-sessions)
+                 (lambda (scope callback &optional _generation)
+                   (setq requested-scope scope
+                         pending callback)))
+                ((symbol-function 'message) #'ignore))
+        (pilish-session-browser-toggle-scope))
+      (should (eq requested-scope 'all))
+      (should pilish--session-browser-loading)
+      (should (string-match-p
+               (regexp-quote "Sessions [All projects]")
+               (pilish--session-browser-header-line)))
+      (should-not (string-match-p "(2 total)"
+                                  (pilish--session-browser-header-line)))
+      (should-not (string-match-p "total"
+                                  (pilish--session-browser-header-line)))
+      (should (string-match-p "Loading sessions" (buffer-string)))
+      (funcall pending
+               (list '(:path "/test/all.jsonl" :name "All Session"
+                       :messageCount 1 :modified "2026-03-12T10:00:00Z"))
+               nil)
+      (should-not pilish--session-browser-loading)
+      (should (eq pilish--session-browser-items-scope 'all))
+      (should (string-match-p "(1 total)"
                               (pilish--session-browser-header-line))))))
 
 (ert-deftest pilish-test-session-browser-query-keeps-view-order ()
@@ -2389,7 +3956,8 @@ completes in-call."
           (pilish--session-browser-fetch-and-render)))
       (should-not pilish--session-browser-error)
       (should-not pilish--session-browser-loading)
-      (should (string-match-p "No sessions found" (buffer-string))))))
+      (should (string-match-p "No sessions in this project"
+                              (buffer-string))))))
 
 ;;;; Tree Find Label
 
@@ -2716,6 +4284,41 @@ displaying the buffer (same idiom as
       (kill-buffer browser)
       (kill-buffer scratch))))
 
+(ert-deftest pilish-test-session-browser-fetch-claims-generation-before-render ()
+  "A loading render cannot reverse reentrant fetch generation order.
+Request A claims generation 1 before rendering.  Its render starts B,
+which claims generation 2 and queues the only scan; when A resumes, it
+is already stale and performs no directory resolution."
+  (with-temp-buffer
+    (pilish-session-browser-mode)
+    (let ((first-render t)
+          (directory-calls 0)
+          (queue nil))
+      (cl-letf (((symbol-function 'pilish--session-browser-rerender)
+                 (lambda (&optional _fallback)
+                   (when first-render
+                     (setq first-render nil)
+                     (pilish--session-browser-fetch-and-render))))
+                ((symbol-function 'pilish--browse-session-directories)
+                 (lambda (_scope &optional _buf _token)
+                   (cl-incf directory-calls)
+                   nil))
+                ((symbol-function 'pilish--browse-session-files)
+                 (lambda (_dirs &optional _buf _token) nil))
+                ((symbol-function 'run-at-time)
+                 (lambda (_seconds _repeat function &rest args)
+                   (push (cons function args) queue))))
+        (pilish--session-browser-fetch-and-render)
+        (should (= pilish--session-browser-fetch-token 2))
+        (should (= directory-calls 1))
+        (should (= (length queue) 1))
+        (should pilish--session-browser-loading)
+        (let ((job (pop queue)))
+          (apply (car job) (cdr job))))
+      (should-not pilish--session-browser-loading)
+      (should-not pilish--session-browser-error)
+      (should (eq pilish--session-browser-items-scope 'current)))))
+
 (ert-deftest pilish-test-session-browser-fetch-preserves-point ()
   "The full fetch cycle (`g' refresh) keeps point on the same row.
 `--session-browser-fetch-and-render' renders an intermediate loading
@@ -2744,7 +4347,7 @@ lost the captured section ident)."
         (should (equal (oref (magit-current-section) value) "/test/b.jsonl"))
         ;; Refresh: the scan returns the SAME items, synchronously
         (cl-letf (((symbol-function 'pilish--browse-load-sessions)
-                   (lambda (_scope callback)
+                   (lambda (_scope callback &optional _generation)
                      (funcall callback items nil)))
                   ((symbol-function 'run-at-time)
                    (lambda (_secs _repeat fn &rest args)
@@ -2778,7 +4381,7 @@ plain rerender already guarantees."
     ;; Refresh returns a set without session B (the named-only effect,
     ;; via a different item set)
     (cl-letf (((symbol-function 'pilish--browse-load-sessions)
-               (lambda (_scope callback)
+               (lambda (_scope callback &optional _generation)
                  (funcall callback
                           (list '(:path "/test/a.jsonl" :name "Session A"
                                   :messageCount 42 :modified "2026-02-24T10:00:00Z")
@@ -2824,7 +4427,7 @@ issued during another refresh."
         (cl-letf (((symbol-function 'pilish--browse-load-sessions)
                    ;; Fetch A: return control with the scan mid-flight —
                    ;; capture the callback, funcall nothing yet.
-                   (lambda (_scope callback)
+                   (lambda (_scope callback &optional _generation)
                      (setq in-flight-callback callback)))
                   ((symbol-function 'run-at-time)
                    (lambda (_secs _repeat fn &rest args)
@@ -2839,7 +4442,7 @@ issued during another refresh."
           ;; items synchronously (and, as with the real fetch token,
           ;; fetch A's callback never runs — it is dropped, not queued).
           (cl-letf (((symbol-function 'pilish--browse-load-sessions)
-                     (lambda (_scope callback)
+                     (lambda (_scope callback &optional _generation)
                        (funcall callback items nil))))
             (pilish--session-browser-fetch-and-render))
           (should-not pilish--session-browser-loading))
@@ -2860,7 +4463,7 @@ leaving the browser stuck on its loading state)."
         (with-temp-buffer
           (pilish-session-browser-mode)
           (cl-letf (((symbol-function 'pilish--browse-load-sessions)
-                     (lambda (_scope callback)
+                     (lambda (_scope callback &optional _generation)
                        ;; Callback fires with some OTHER buffer current.
                        (with-current-buffer other
                          (funcall callback items nil))))
@@ -2958,7 +4561,8 @@ read) with no linked chat renders its link-error message."
                 (pilish--session-browser-fetch-and-render)))
             (should-not pilish--session-browser-loading)
             (should-not pilish--session-browser-error)
-            (should (string-match-p "No sessions found" (buffer-string))))
+            (should (string-match-p "No sessions in this project"
+                                    (buffer-string))))
           (with-current-buffer tree-buf
             (pilish-tree-browser-mode)
             ;; No process mock and no chat link: the fetch renders the
@@ -3304,6 +4908,179 @@ by the fetch token."
         (should-not items)
         (should (stringp error))
         (should (string-match-p "Cannot list sessions" error))))))
+
+(ert-deftest pilish-test-load-sessions-reentrant-directory-error-is-stale ()
+  "A superseded synchronous directory error cannot finish the newer fetch.
+Request A's directory resolver reentrantly starts request B and then
+signals.  B owns the incremented generation and remains loading until
+its queued scan completes; A must neither clear loading nor publish its
+stale error."
+  (with-temp-buffer
+    (pilish-session-browser-mode)
+    (setq pilish--session-browser-scope 'current
+          pilish--session-browser-items-scope 'current
+          pilish--session-browser-items
+          (list '(:path "/old.jsonl" :name "Old"
+                  :messageCount 1 :modified "2026-03-11T10:00:00Z")))
+    (let ((first t)
+          (queue nil))
+      (cl-letf (((symbol-function 'pilish--browse-session-directories)
+                 (lambda (_scope &optional _buf _token)
+                   (if first
+                       (progn
+                         (setq first nil)
+                         ;; Reentrant request B supersedes A while A is
+                         ;; still inside synchronous directory resolution.
+                         (pilish--session-browser-fetch-and-render)
+                         (error "request A directory failure"))
+                     nil)))
+                ((symbol-function 'pilish--browse-session-files)
+                 (lambda (_dirs &optional _buf _token) nil))
+                ((symbol-function 'run-at-time)
+                 (lambda (_seconds _repeat function &rest args)
+                   (push (cons function args) queue))))
+        (pilish--session-browser-fetch-and-render)
+        (should (= pilish--session-browser-fetch-token 2))
+        (should pilish--session-browser-loading)
+        (should-not pilish--session-browser-error)
+        (should (= (length queue) 1))
+        ;; Complete request B's empty but successful scan.
+        (let ((job (pop queue)))
+          (apply (car job) (cdr job)))))
+      (should-not pilish--session-browser-loading)
+      (should-not pilish--session-browser-error)
+      (should (eq pilish--session-browser-items-scope 'current))
+      (should (string-match-p "(0 total)"
+                              (pilish--session-browser-header-line)))))
+
+(ert-deftest pilish-test-load-sessions-reentrant-directory-success-is-stale ()
+  "A superseded successful directory lookup performs no stale file scan.
+Request A's resolver starts B and then returns normally.  The generation
+is checked again at that synchronous boundary, so only B lists files and
+queues a scan continuation."
+  (with-temp-buffer
+    (pilish-session-browser-mode)
+    (setq pilish--session-browser-scope 'current)
+    (let ((first t)
+          (file-list-calls nil)
+          (queue nil))
+      (cl-letf (((symbol-function 'pilish--browse-session-directories)
+                 (lambda (_scope &optional _buf _token)
+                   (if first
+                       (progn
+                         (setq first nil)
+                         (pilish--session-browser-fetch-and-render)
+                         '("/stale-a"))
+                     nil)))
+                ((symbol-function 'pilish--browse-session-files)
+                 (lambda (dirs &optional _buf _token)
+                   (push dirs file-list-calls)
+                   nil))
+                ((symbol-function 'run-at-time)
+                 (lambda (_seconds _repeat function &rest args)
+                   (push (cons function args) queue))))
+        (pilish--session-browser-fetch-and-render)
+        (should (= pilish--session-browser-fetch-token 2))
+        ;; B's nil directory list is the sole file-list call; A's
+        ;; stale /stale-a result never crosses the next IO boundary.
+        (should (equal file-list-calls '(nil)))
+        (should (= (length queue) 1))
+        (let ((job (pop queue)))
+          (apply (car job) (cdr job))))
+      (should-not pilish--session-browser-loading)
+      (should-not pilish--session-browser-error))))
+
+(ert-deftest pilish-test-load-sessions-cancels-between-directories ()
+  "Cancellation during the first directory listing skips later directories.
+The stale generation publishes no callback and schedules no timer."
+  (with-temp-buffer
+    (pilish-session-browser-mode)
+    (let ((listed nil)
+          (callbacks nil)
+          (timers nil))
+      (cl-letf (((symbol-function 'pilish--browse-session-directories)
+                 (lambda (_scope &optional _buf _token)
+                   '("/scan/one" "/scan/two")))
+                ((symbol-function 'directory-files)
+                 (lambda (directory &rest _)
+                   (push directory listed)
+                   (when (equal directory "/scan/one")
+                     (cl-incf pilish--session-browser-fetch-token))
+                   (list (concat directory "/session.jsonl"))))
+                ((symbol-function 'run-at-time)
+                 (lambda (_seconds _repeat function &rest args)
+                   ;; Ignore unrelated editor timers; only a stale scan
+                   ;; continuation would violate this boundary.
+                   (when (eq function #'pilish--browse-scan-session-files)
+                     (push (cons function args) timers)))))
+        (pilish--browse-load-sessions
+         'all (lambda (&rest args) (push args callbacks))))
+      (should (equal listed '("/scan/one")))
+      (should-not callbacks)
+      (should-not timers))))
+
+(ert-deftest pilish-test-load-sessions-cancels-within-first-file ()
+  "Open/read/enrich cancellation stops the slice at its first file.
+Each phase is callback-capable.  Once it supersedes the generation,
+the current state is closed exactly once, the second file is untouched,
+and no stale callback or continuation timer is emitted."
+  (dolist (phase '(open read enrich))
+    (with-temp-buffer
+      (pilish-session-browser-mode)
+      (setq pilish--session-browser-fetch-token 1)
+      (let ((opened nil)
+            (read nil)
+            (enriched nil)
+            (closed nil)
+            (callbacks nil)
+            (timers nil))
+        (cl-letf (((symbol-function 'float-time)
+                   (lambda (&optional _) 0.0))
+                  ((symbol-function 'pilish-jsonl-open-session-info)
+                   (lambda (file &optional _search)
+                     (push file opened)
+                     (when (eq phase 'open)
+                       (cl-incf pilish--session-browser-fetch-token))
+                     (list :file file)))
+                  ((symbol-function 'pilish-jsonl-step-session-info)
+                   (lambda (state &optional _deadline)
+                     (push (plist-get state :file) read)
+                     (when (eq phase 'read)
+                       (cl-incf pilish--session-browser-fetch-token))
+                     (cons 'done
+                           (list :path (plist-get state :file)
+                                 :name "First"))))
+                  ((symbol-function 'pilish--session-enrich-item)
+                   (lambda (item)
+                     (push (plist-get item :path) enriched)
+                     (when (eq phase 'enrich)
+                       (cl-incf pilish--session-browser-fetch-token))
+                     item))
+                  ((symbol-function 'pilish-jsonl-close-session-info)
+                   (lambda (state)
+                     (when state
+                       (push (plist-get state :file) closed))))
+                  ((symbol-function 'run-at-time)
+                   (lambda (_seconds _repeat function &rest args)
+                     (when (eq function #'pilish--browse-scan-session-files)
+                       (push (cons function args) timers)))))
+          (pilish--browse-scan-session-files
+           (current-buffer) 1 '("/scan/one.jsonl" "/scan/two.jsonl") nil
+           (lambda (&rest args) (push args callbacks))))
+        (should (equal opened '("/scan/one.jsonl")))
+        (pcase phase
+          ('open
+           (should-not read)
+           (should-not enriched))
+          ('read
+           (should (equal read '("/scan/one.jsonl")))
+           (should-not enriched))
+          ('enrich
+           (should (equal read '("/scan/one.jsonl")))
+           (should (equal enriched '("/scan/one.jsonl")))))
+        (should (equal closed '("/scan/one.jsonl")))
+        (should-not callbacks)
+        (should-not timers)))))
 
 (ert-deftest pilish-test-load-sessions-interrupted-by-quit ()
   "A quit during a scan slice reports an error state, not a stuck
@@ -3705,7 +5482,8 @@ gone for the session browser (the tree browser keeps it until Phase 3)."
           (pilish--session-browser-fetch-and-render)))
       (should-not pilish--session-browser-loading)
       (should-not pilish--session-browser-error)
-      (should (string-match-p "No sessions found" (buffer-string))))))
+      (should (string-match-p "No sessions in this project"
+                              (buffer-string))))))
 
 ;;;; Phase 2: Switch
 

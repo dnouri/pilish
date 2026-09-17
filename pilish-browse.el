@@ -62,6 +62,7 @@
 (require 'pilish-ui)
 (require 'pilish-jsonl)
 (require 'cl-lib)
+(require 'ucs-normalize)
 (require 'magit-section)
 (require 'transient)
 
@@ -115,7 +116,536 @@ Newlines and excess whitespace are collapsed to single spaces."
         (pilish--collapse-whitespace raw)
       "[empty session]")))
 
-;;;; Margin Rendering Infrastructure
+(defun pilish--session-unsafe-cwd-p (string)
+  "Return non-nil when STRING has unsafe display characters in it.
+Rejected by Unicode general category — Cc, Cf, Zl, Zp — rather than
+hand-listed ranges: control characters (a NUL can signal file
+operations; a newline would forge a row), format characters (bidi
+overrides and isolates, zero-width marks, the Arabic letter mark,
+the byte-order mark — all of which visually reorder or hide text),
+and the line and paragraph separators.  Ordinary whitespace (Zs)
+and printable text stay allowed."
+  (cl-some (lambda (c)
+             (memq (get-char-code-property c 'general-category)
+                   '(Cc Cf Zl Zp)))
+           string))
+
+(defun pilish--session-cwd-parts (localname)
+  "Return (KIND COMPONENTS) lexically parsing LOCALNAME, or nil.
+KIND is `posix', `windows', or `unc'.  A POSIX localname splits on /
+only — a backslash is an ordinary Unix filename character — and dot
+segments resolve; the root is the empty component list, and leading
+separators beyond one collapse (///a is /a).  Windows drive
+spellings — C:/x, C:\\x, and the drive root C:/ — parse as `windows'
+with the upcased drive as the first component, so slash and
+backslash spellings of one directory share an identity and the drive
+disambiguates colliding basenames; a bare C: is drive-relative, not
+a project directory, and is rejected.  A UNC spelling — exactly two
+leading separators, forward or back, followed by nonempty server and
+share components — parses as `unc' with those components as anchors,
+never aliasing a rooted POSIX path that merely has the same
+components.  Repeated separators after the introducer collapse, so
+//server//share/app is an accepted alias of //server/share/app;
+fewer than two nonempty anchors and dot or dot-dot anchors reject.
+Dot-dot resolves only in tails: the POSIX root, a Windows drive, and
+a UNC server/share are anchors that dot-dot never pops.  Anything
+else yields nil.  Pure string arithmetic, no filesystem access."
+  (let ((resolve
+         ;; Resolve dot components, popping only above ANCHOR-COUNT
+         ;; leading components.
+         (lambda (comps anchor-count)
+           (let ((out nil))
+             (dolist (c comps)
+               (cond ((or (string-empty-p c) (string= c ".")))
+                     ((string= c "..")
+                      (when (> (length out) anchor-count) (pop out)))
+                     (t (push c out))))
+             (nreverse out)))))
+    (cond
+     ((or (string-empty-p localname) (string-prefix-p "~" localname))
+      nil)
+     ;; Windows drive: letter, colon, separator; the bare drive is
+     ;; drive-relative and rejected.
+     ((string-match-p "\\`[A-Za-z]:[\\\\/]" localname)
+      (let* ((comps (funcall resolve (split-string localname "[\\\\/]") 1))
+             (drive (upcase (substring localname 0 2))))
+        (list 'windows (cons drive (cdr comps)))))
+     ;; UNC: exactly two leading separators, either kind, and the
+     ;; third character is not another separator.  Repeated later
+     ;; separators collapse, but server and share must still provide
+     ;; two nonempty, non-dot anchors — malformed anchors are rejected
+     ;; rather than resolved into an alias of another share.
+     ((and (or (string-prefix-p "//" localname)
+               (string-prefix-p "\\\\" localname))
+           (not (string-match-p "\\`[\\\\/]\\{3\\}" localname)))
+      ;; Omit nulls: the two leading separators must not become
+      ;; empty anchor components.
+      (let* ((raw (split-string localname "[\\\\/]" t))
+             (server (nth 0 raw))
+             (share (nth 1 raw)))
+        (if (and server share
+                 (not (member server '("." "..")))
+                 (not (member share '("." ".."))))
+            (list 'unc (funcall resolve raw 2))
+          ;; Malformed or missing anchors reject: this spelling names
+          ;; no trustworthy project and must not alias another share.
+          nil)))
+     ((string-prefix-p "/" localname)
+      (list 'posix (funcall resolve (split-string localname "/") 0)))
+     (t nil))))
+
+(defun pilish--session-zero-width-char-p (char)
+  "Return non-nil when CHAR occupies no display column.
+This conservative display-identity check catches combining and
+Default_Ignorable_Code_Point characters such as the combining
+grapheme joiner without rejecting them from legitimate cwd metadata."
+  (let ((width (char-width char)))
+    (or (null width) (<= width 0))))
+
+(defun pilish--session-route-method-p (string)
+  "Return non-nil when STRING has TRAMP's default method grammar.
+A method is the default marker `-' or at least two alphanumeric
+characters.  This mirrors Emacs 30's `tramp-method-regexp' as plain
+lexical validation without loading or consulting TRAMP."
+  (or (equal string "-")
+      (string-match-p "\\`[[:alnum:]]\\{2,\\}\\'" string)))
+
+(defun pilish--session-route-user-p (string)
+  "Return non-nil when STRING has TRAMP's default user grammar.
+Users are nonempty and exclude slash, colon, pipe, and blank
+characters.  Notably, @ and # are legal inside a user."
+  (string-match-p "\\`[^/:|[:blank:]]+\\'" string))
+
+(defun pilish--session-route-plain-host-p (string)
+  "Return non-nil when STRING has TRAMP's unbracketed host grammar."
+  (string-match-p "\\`[%._[:alnum:]-]+\\'" string))
+
+(defun pilish--session-route-ipv6-host-p (string)
+  "Return non-nil when STRING is a TRAMP-style bracketed IPv6 host.
+TRAMP intentionally uses a lexical, somewhat loose IPv6 spelling:
+one or more colon-terminated alphanumeric groups followed by
+alphanumerics or dots.  Requiring that shape rejects arbitrary text
+inside brackets while retaining IPv4-mapped forms."
+  (and (> (length string) 2)
+       (eq (aref string 0) ?\[)
+       (eq (aref string (1- (length string))) ?\])
+       (string-match-p
+        "\\`\\(?:[[:alnum:]]*:\\)+[.[:alnum:]]*\\'"
+        (substring string 1 -1))))
+
+(defun pilish--session-route-port-p (string)
+  "Return non-nil when STRING is a nonempty numeric TRAMP port."
+  (string-match-p "\\`[[:digit:]]+\\'" string))
+
+(defun pilish--session-route-host (route)
+  "Return ROUTE's effective final-hop host, parsed wholly and lexically.
+Every pipe-separated hop follows Emacs 30's default TRAMP lexical
+method/user/host/port grammar.  User syntax is greedy through the last
+@, allowing names such as user@example.com and user#tag; only a # in
+the remaining host spelling introduces a numeric port.  The first hop
+must name an explicit host.  Each later hostless hop may inherit the
+nearest prior explicit one, as in /ssh:b|sudo:: and
+/ssh:u@b#22|sudo:root@:.  An explicit later host replaces it, and a
+bracketed IPv6 literal remains bracketed.
+
+Malformed hops, a hostless first hop, controls, bidi/format text, and
+zero-width/default-invisible characters reject the entire route.
+Thus /ssh:: never obtains identity from machine-local TRAMP defaults.
+No file-name handler, TRAMP function/configuration, filesystem, or
+remote IO is consulted."
+  (when (and (stringp route)
+             (string-prefix-p "/" route)
+             (string-suffix-p ":" route)
+             (> (length route) 2)
+             (not (pilish--session-unsafe-cwd-p route))
+             (not (cl-some #'pilish--session-zero-width-char-p route)))
+    (let ((hops (split-string (substring route 1 -1) "|" nil))
+          effective-host)
+      (catch 'invalid
+        (when (or (null hops) (member "" hops))
+          (throw 'invalid nil))
+        (dolist (hop hops)
+          (unless (string-match "\\`\\([^:]+\\):\\(.*\\)\\'" hop)
+            (throw 'invalid nil))
+          (let* ((method (match-string 1 hop))
+                 (endpoint (match-string 2 hop))
+                 ;; TRAMP's user regexp admits @, so its greedy match
+                 ;; effectively leaves the last @ as the delimiter.
+                 (at (cl-position ?@ endpoint :from-end t))
+                 (user (and at (substring endpoint 0 at)))
+                 (host-port (if at (substring endpoint (1+ at)) endpoint))
+                 (hash (cl-position ?# host-port))
+                 (host (if hash (substring host-port 0 hash) host-port))
+                 (port (and hash (substring host-port (1+ hash)))))
+            (unless (and (pilish--session-route-method-p method)
+                         (or (null user)
+                             (pilish--session-route-user-p user))
+                         ;; A port belongs to the host suffix, never to
+                         ;; the already-separated user spelling.
+                         (or (null port)
+                             (and (not (string-empty-p host))
+                                  (pilish--session-route-port-p port)))
+                         (or (string-empty-p host)
+                             (pilish--session-route-plain-host-p host)
+                             (pilish--session-route-ipv6-host-p host)))
+              (throw 'invalid nil))
+            (if (string-empty-p host)
+                (unless effective-host
+                  ;; The first host cannot come from ambient TRAMP
+                  ;; defaults, even if a later hop names one.
+                  (throw 'invalid nil))
+              (setq effective-host host))))
+        effective-host))))
+
+(defun pilish--session-syntactic-route (path)
+  "Return PATH's complete TRAMP-looking route using string syntax only.
+The route ends before an absolute/tilde localname or at end of PATH.
+No file-name handler or TRAMP configuration is consulted."
+  (when (and (stringp path)
+             (string-match
+              "\\`\\(/[^/\n]+:\\)\\(?:/\\|~\\|\\'\\)" path))
+    (match-string 1 path)))
+
+(defun pilish--session-project-spec-lexical (session)
+  "Return SESSION's lexical (IDENTITY HOST COMPONENTS), or nil.
+See `pilish--session-project-spec' for the full stored/canonical
+contract.  This helper performs pure string validation only."
+  (let* ((cwd (pilish--normalize-string-or-null (plist-get session :cwd)))
+         (route (pilish--session-syntactic-route
+                 (plist-get session :path)))
+         (cwd-route (and cwd (pilish--session-syntactic-route cwd)))
+         (cwd-route-looking-p
+          (and cwd (string-match-p "\\`/[^/:]+:" cwd)))
+         (host (and route (pilish--session-route-host route))))
+    (when (and cwd
+               (not (pilish--session-unsafe-cwd-p cwd))
+               ;; A cwd carrying its own route must agree with the
+               ;; file's; a malformed TRAMP-looking prefix is not a
+               ;; local POSIX component and must not bypass this check.
+               (or cwd-route (not (and route cwd-route-looking-p)))
+               (or (null cwd-route) (equal cwd-route route))
+               ;; A malformed or context-defaulted route cannot
+               ;; identify a project.
+               (or (null route) host))
+      (let* ((localname (if cwd-route
+                            (substring cwd (length cwd-route))
+                          cwd))
+             (parts (and (not (string-empty-p localname))
+                         (pilish--session-cwd-parts localname))))
+        (when parts
+          (let* ((kind (nth 0 parts))
+                 (components (nth 1 parts))
+                 (joined (mapconcat #'identity components "/"))
+                 (path (pcase kind
+                         ('posix (concat "/" joined))
+                         ('unc (concat "//" joined))
+                         ;; The drive component already carries the
+                         ;; colon; a rooted POSIX spelling of the same
+                         ;; text keeps its leading slash.
+                         (_ joined))))
+            (list (concat route path) host components)))))))
+
+(defun pilish--session-ordinary-local-cwd-p (cwd)
+  "Return non-nil when raw CWD is safe for local canonicalization.
+Only a validated single-slash POSIX spelling qualifies.  UNC names,
+Windows drives, complete remote routes, and ambiguous first components
+such as /ssh:h:relative remain lexical and cannot activate a file-name
+handler."
+  (and (stringp cwd)
+       (not (pilish--session-unsafe-cwd-p cwd))
+       (string-prefix-p "/" cwd)
+       (not (string-prefix-p "//" cwd))
+       (not (string-match-p "\\`/[^/:]+:" cwd))))
+
+(defun pilish--session-local-file-truename (path)
+  "Return local `file-truename' for PATH with all handlers inhibited.
+PATH has already passed `pilish--session-ordinary-local-cwd-p'.
+Binding `file-name-handler-alist' to nil creates the scan-time local
+filesystem boundary: arbitrary handlers cannot perform hidden IO or
+turn a local project identity into a remote spelling."
+  (let ((file-name-handler-alist nil))
+    (file-truename path)))
+
+(defun pilish--session-canonical-project-spec (session)
+  "Return SESSION's project spec with a canonical local POSIX cwd.
+Lexically valid remote routes, UNC names, Windows drives, and
+TRAMP-looking ambiguous local spellings remain pure strings and never
+reach `file-truename'.  For a validated ordinary local raw cwd,
+`file-truename' runs with file-name handlers inhibited *before* lexical
+dot-segment collapse, preserving kernel path-walk semantics across a
+symlink followed by `..'.  The result must itself remain an ordinary
+local POSIX spelling; a failure or nonlocal/route-looking result keeps
+the validated lexical spec."
+  (let* ((cwd (pilish--normalize-string-or-null
+               (plist-get session :cwd)))
+         (session-route (pilish--session-syntactic-route
+                         (plist-get session :path)))
+         (cwd-route (and cwd (pilish--session-syntactic-route cwd)))
+         ;; Resolve the untouched raw cwd first.  The lexical spec is
+         ;; deliberately computed afterward so no prior dot collapse
+         ;; can change symlink/.. path-walk semantics.
+         (canonical
+          (and (null session-route)
+               (null cwd-route)
+               (pilish--session-ordinary-local-cwd-p cwd)
+               (condition-case nil
+                   (pilish--session-local-file-truename cwd)
+                 (error nil))))
+         (spec (pilish--session-project-spec-lexical session)))
+    (when spec
+      (if (not (pilish--session-ordinary-local-cwd-p canonical))
+          spec
+        (pcase (pilish--session-cwd-parts canonical)
+          (`(posix ,components)
+           (list (concat "/" (mapconcat #'identity components "/"))
+                 nil components))
+          (_ spec))))))
+
+(defun pilish--session-project-spec (session)
+  "Return (IDENTITY HOST COMPONENTS) for SESSION's project, or nil.
+An enriched scan item carries `:canonicalProjectSpec': local POSIX
+cwd symlinks were resolved during the scan with lexical fallback,
+while remote routes, UNC names, and Windows drives stayed lexical.
+A direct/un-enriched item is parsed lexically without filesystem or
+TRAMP configuration access.
+
+IDENTITY combines the complete validated TRAMP route, when remote,
+with normalized cwd components.  HOST is the route's effective
+final-hop host (explicit or inherited).  Empty/relative/remote-home
+localnames, route disagreement, a malformed or context-defaulted
+route, and display-unsafe metadata yield nil.  See
+`pilish--session-cwd-parts', `pilish--session-route-host', and
+`pilish--session-canonical-project-spec'."
+  (or (plist-get session :canonicalProjectSpec)
+      (pilish--session-project-spec-lexical session)))
+
+(defconst pilish--session-project-token-width 16
+  "Display width of the project token field on All-projects rows.
+The token and the two-column live field stay inside this bound plus
+two columns, so identity and live status remain visible in a
+32-column body no matter how deep a fork connector, how long a
+common prefix, or how wide a project name is.")
+
+(defconst pilish--session-project-placeholder "?"
+  "Placeholder token for a row with no usable project.
+Shown on All-projects rows whose recorded cwd was rejected or
+absent, so the field stays reserved and truthful rather than
+silently shifting the row's layout.")
+
+(defun pilish--session-project-label (host components depth)
+  "Return the unbounded project label for HOST and COMPONENTS at DEPTH.
+DEPTH trailing components are shown — the whole path when DEPTH
+exhausts COMPONENTS — or `/` for the root; a remote project prefixes
+its effective HOST and a colon."
+  (let ((path (if components
+                  (mapconcat #'identity (last components depth) "/")
+                "/")))
+    (if host (concat host ":" path) path)))
+
+(defun pilish--session-pad-display (string width)
+  "Left-justify STRING with spaces to exactly display WIDTH columns.
+Padding is display-width aware, so tokens containing wide characters
+still align the following field."
+  (concat string (make-string (max 0 (- width (string-width string)))
+                              ?\s)))
+
+(defun pilish--session-project-display-key (label)
+  "Return LABEL's compatibility-normalized exact display-field key.
+NFKC makes canonical and compatibility-equivalent readable labels
+share one allocation group — for example, ASCII SPACE and EN SPACE
+inside otherwise identical text.  Exact fixed-width padding preserves
+established trailing-space collision handling."
+  (pilish--session-pad-display
+   (ucs-normalize-NFKC-string label)
+   pilish--session-project-token-width))
+
+(defun pilish--session-blank-glyph-char-p (char)
+  "Return non-nil when CHAR's Unicode name denotes a blank glyph.
+General category and column width do not identify BRAILLE PATTERN
+BLANK or the Hangul filler family.  A conservative Unicode-name policy
+catches names ending in BLANK or FILLER without maintaining fragile
+code-point ranges or classifying visible symbols merely containing the
+word elsewhere in their name."
+  (when-let ((name (get-char-code-property char 'name)))
+    (and (stringp name)
+         (string-match-p "\\(?:BLANK\\|FILLER\\)\\'" name))))
+
+(defun pilish--session-project-natural-label-unsafe-p (label)
+  "Return non-nil when LABEL must not become a natural token.
+Whitespace-only labels and Unicode BLANK/FILLER glyphs can render as
+an apparently empty field.  Any zero-width character can hide a
+distinct legal cwd spelling.  These labels move to the ordinal-front
+generated namespace instead of having their legal identities rejected."
+  (or (and (not (string-empty-p label))
+           (cl-every
+            (lambda (char)
+              (eq (get-char-code-property char 'general-category) 'Zs))
+            label))
+      (cl-some #'pilish--session-blank-glyph-char-p label)
+      (cl-some #'pilish--session-zero-width-char-p label)))
+
+(defun pilish--session-ordinal36 (n width)
+  "Return N as `#' plus WIDTH base-36 digits, zero-padded.
+The leading `#' reserves the generated namespace: no readable label
+can spell a generated token, so the two never collide.  A number
+too large for WIDTH signals instead of silently truncating."
+  (let ((capacity (expt 36 width)))
+    (cl-assert (< 0 n capacity) t
+               "ordinal %d exceeds width %d" n width))
+  (let ((digits ""))
+    (dotimes (_ width)
+      (setq digits (format "%c%s"
+                           (aref "0123456789abcdefghijklmnopqrstuvwxyz"
+                                 (mod n 36))
+                           digits)
+            n (/ n 36)))
+    (concat "#" digits)))
+
+(defun pilish--session-ordinal-width (count)
+  "Return the base-36 digit width covering COUNT ordinals.
+Integer arithmetic throughout, so exact powers of 36 roll over
+cleanly: 35 needs one digit, the 36th needs two."
+  (let ((width 1) (capacity 36))
+    ;; Ordinals are one-based, so WIDTH digits cover only
+    ;; 1..(36^WIDTH - 1); the exact power needs another digit.
+    (while (>= count capacity)
+      (cl-incf width)
+      (setq capacity (* capacity 36)))
+    width))
+
+(defun pilish--session-project-fields (items)
+  "Return a hash table mapping session key to its All-projects token.
+Tokens are built from every project in ITEMS — the full loaded set,
+not the filtered rows — so a query never silently relabels the rows
+it leaves behind.  Rows whose cwd was rejected map to the
+placeholder instead; the field is always reserved.
+
+Allocation is deterministic and exact.  Identities are deduplicated
+and sorted once, each grows the shortest readable label that
+distinguishes it (see `pilish--session-project-label'), and all
+candidates are grouped by their NFKC-normalized exact padded display
+field (see `pilish--session-project-display-key').  A group yields a
+natural token only when it holds exactly one candidate whose label
+fits the token width, is not blank-looking or zero-width-bearing,
+and spells neither the reserved `#' prefix nor the placeholder's own
+field.  Thus trailing-space, canonical-Unicode, and compatibility-Unicode
+equivalents move together to the generated class; blank/filler and
+zero-width-bearing identities move there even alone; and a project
+literally named `?' cannot impersonate
+the placeholder.  Every other identity — over width, reserved,
+display-unsafe, or field-colliding, with its whole group — gets a
+generated token `#ORD tail': fixed-width
+base-36 ordinals over the sorted class (width scaled to the class
+size by `pilish--session-ordinal-width'), plus the label's basename
+truncated to the remaining columns.  Ordinals lead, so generated
+fields are pairwise unique and never collide with naturals; the
+shape holds for any practical archive (15 ordinal columns cover
+36^15 - 1 positive ordinals)."
+  (let* ((info (make-hash-table :test 'equal))
+         (table (make-hash-table :test 'equal))
+         ;; Session key -> spec, computed once per item.
+         (key-specs
+          (let ((ks nil))
+            (dolist (item items)
+              (let ((spec (pilish--session-project-spec item)))
+                (when spec
+                  ;; Rejected cwds contribute no identity; their rows
+                  ;; map to the placeholder below.
+                  (puthash (nth 0 spec)
+                           (list (nth 1 spec) (nth 2 spec))
+                           info))
+                (push (cons (pilish--session-item-key item) spec) ks)))
+            ks)))
+    (let* ((identities (sort (hash-table-keys info) #'string<))
+           (depth (make-hash-table :test 'equal))
+           (label
+            (lambda (id)
+              (pilish--session-project-label
+               (nth 0 (gethash id info))
+               (nth 1 (gethash id info))
+               (gethash id depth)))))
+      ;; Grow the shortest distinguishing label per identity.
+      (dolist (id identities)
+        (puthash id (min 1 (length (nth 1 (gethash id info))))
+                 depth))
+      (catch 'stable
+        (while t
+          (let ((groups (make-hash-table :test 'equal))
+                (extended nil))
+            (dolist (id identities)
+              (push id (gethash (funcall label id) groups)))
+            (maphash
+             (lambda (_ ids)
+               (when (> (length ids) 1)
+                 (dolist (id ids)
+                   (when (< (gethash id depth)
+                            (length (nth 1 (gethash id info))))
+                     (puthash id (1+ (gethash id depth)) depth)
+                     (setq extended t)))))
+             groups)
+            (unless extended (throw 'stable nil)))))
+      ;; One grouping by normalized exact display field decides
+      ;; natural vs generated, placeholder field included as reserved.
+      (let* ((placeholder-key
+              (pilish--session-project-display-key
+               pilish--session-project-placeholder))
+             (by-field (make-hash-table :test 'equal))
+             (natural (make-hash-table :test 'equal))
+             (generated nil))
+        (dolist (id identities)
+          (let* ((lab (funcall label id))
+                 (key (pilish--session-project-display-key lab)))
+            (push id (gethash key by-field))))
+        (puthash placeholder-key
+                 (cons '(reserved . placeholder)
+                       (gethash placeholder-key by-field))
+                 by-field)
+        (dolist (id identities)
+          (let* ((lab (funcall label id))
+                 (key (pilish--session-project-display-key lab))
+                 (candidates (gethash key by-field)))
+            (if (and (= (length candidates) 1)
+                     (<= (string-width lab)
+                         pilish--session-project-token-width)
+                     (not (pilish--session-project-natural-label-unsafe-p
+                           lab))
+                     ;; Reserve the generated prefix by compatibility
+                     ;; appearance too (for example SMALL NUMBER SIGN).
+                     (not (string-prefix-p
+                           "#" (ucs-normalize-NFKC-string lab))))
+                (puthash id lab natural)
+              (push id generated))))
+        ;; Generated tokens: ordinal width scaled to the class size,
+        ;; tail truncated to the columns the ordinal leaves.
+        (let* ((class (sort (copy-sequence generated) #'string<))
+               (width (pilish--session-ordinal-width (length class)))
+               (tail-width (max 0 (- pilish--session-project-token-width
+                                     width 2)))
+               (ordinal 0))
+          (dolist (id class)
+            (cl-incf ordinal)
+            (puthash id
+                     (concat (pilish--session-ordinal36 ordinal width)
+                             (if (> tail-width 0)
+                                 (concat " "
+                                         (truncate-string-to-width
+                                          (or (car (last
+                                                    (split-string
+                                                     (funcall label id) "/")))
+                                              "/")
+                                          tail-width))
+                               ""))
+                     natural)))
+        ;; Map every item's session key to its project's token, or the
+        ;; placeholder when the recorded cwd was rejected.
+        (dolist (entry key-specs)
+          (puthash (car entry)
+                   (if (cdr entry)
+                       (gethash (nth 0 (cdr entry)) natural
+                                pilish--session-project-placeholder)
+                     pilish--session-project-placeholder)
+                   table))
+        table))))
 
 (defun pilish--propertize-face (string face)
   "Propertize STRING with both `face' and `font-lock-face' set to FACE.
@@ -512,11 +1042,12 @@ non-nil, anchors relative spellings as
 
 (defun pilish--session-item-key (item &optional memo)
   "Return ITEM's canonical identity key.
-A stored `:canonicalPath' (see `pilish--session-enrich-item') wins;
-otherwise the key is computed from `:path' with MEMO, as direct
-callers rendering hand-built items still do."
-  (or (plist-get item :canonicalPath)
-      (pilish--canonical-session-path (plist-get item :path) memo)))
+A present `:canonicalPath' (see `pilish--session-enrich-item') wins,
+even when nil; otherwise the key is computed from `:path' with MEMO,
+as direct callers rendering hand-built items still do."
+  (if (plist-member item :canonicalPath)
+      (plist-get item :canonicalPath)
+    (pilish--canonical-session-path (plist-get item :path) memo)))
 
 (defconst pilish--unresolved-parent-session 'unresolved
   "Sentinel `:canonicalParentSession' for unresolvable fork headers.
@@ -544,22 +1075,32 @@ to its parent.  Nil when neither yields a stable anchor."
 
 (defun pilish--session-enrich-item (item)
   "Return ITEM with its canonical identities resolved for rendering.
-Computes `:canonicalPath' and, for forks, `:canonicalParentSession'
-\(see `pilish--thread-parent-identity'), so family building and
-live-marker lookups on ingested items need no archive-sized or
-remote canonicalization at render time — only the few live-process
-session paths are canonicalized per render.  Runs inside scan slices
-under the scan's cancellation and quit handling; an ordinary
-resolution failure degrades just that relationship — an unresolvable
-fork header keeps `pilish--unresolved-parent-session' and renders as
-an orphan, an unresolvable own path keeps its raw spelling — instead
-of discarding the file or aborting the scan."
+Computes `:canonicalPath', `:canonicalProjectSpec', and, for forks,
+`:canonicalParentSession' (see `pilish--thread-parent-identity').
+Local session paths and POSIX project cwds resolve symlinks with
+lexical fallback; project routes are validated syntactically, and
+remote/UNC/Windows project spellings never reach `file-truename'.
+Thus family, project-token, and live-marker rendering needs no
+archive-sized or remote canonicalization later — only the few live
+process session paths canonicalize locally per render.
+
+Enrichment runs inside scan slices under cancellation and quit
+handling.  An ordinary resolution failure degrades just that
+relationship instead of discarding the file or aborting the scan:
+an unresolvable fork becomes an orphan, while session and project
+paths keep their safe lexical spellings."
   (let* ((key (condition-case nil
-                 (pilish--canonical-session-path (plist-get item :path))
-               (error (plist-get item :path))))
+                  (pilish--canonical-session-path (plist-get item :path))
+                (error (plist-get item :path))))
+         (project-spec
+          (condition-case nil
+              (pilish--session-canonical-project-spec item)
+            (error (pilish--session-project-spec-lexical item))))
          (parent-path (plist-get item :parentSessionPath)))
     (append item
             (list :canonicalPath key)
+            (when project-spec
+              (list :canonicalProjectSpec project-spec))
             (when parent-path
               (list :canonicalParentSession
                     (or (condition-case nil
@@ -572,28 +1113,48 @@ of discarding the file or aborting the scan."
                         ;; recompute against the ambient buffer.
                         pilish--unresolved-parent-session))))))
 
-(defun pilish--session-canonicalize-items (items)
+(defconst pilish--session-canonicalization-stale
+  (make-symbol "pilish-session-canonicalization-stale")
+  "Sentinel returned when generation-guarded item canonicalization is stale.")
+
+(defun pilish--session-canonicalize-items (items &optional buf generation)
   "Return ITEMS deduplicated by canonical identity, one per session.
 Items carrying stored keys (see `pilish--session-enrich-item') dedupe
 by pure hash lookups; hand-built items without keys get
 `:canonicalPath' computed here.  Items with equivalent identities —
 two discovered spellings of one file, such as symlink aliases —
 collapse to the first spelling, so all views render one row per
-session.  Input plists are never mutated."
+session.  Input plists are never mutated.
+
+When BUF and GENERATION are non-nil, check ownership immediately before
+and after each callback-capable key computation.  Return
+`pilish--session-canonicalization-stale' rather than a partial result if
+a newer fetch takes ownership."
   (let ((memo (make-hash-table :test 'equal))
         (seen (make-hash-table :test 'equal))
-        (result nil))
-    (dolist (item items)
-      (let* ((stored (plist-get item :canonicalPath))
-             (key (or stored
+        (result nil)
+        (guarded (and buf generation)))
+    (catch 'stale
+      (dolist (item items)
+        (when (and guarded
+                   (not (pilish--session-browser-generation-current-p
+                         buf generation)))
+          (throw 'stale pilish--session-canonicalization-stale))
+        (let* ((stored-p (plist-member item :canonicalPath))
+               (key (if stored-p
+                        (plist-get item :canonicalPath)
                       (pilish--canonical-session-path
                        (plist-get item :path) memo)))
-             (entry (if stored item
-                      (append item (list :canonicalPath key)))))
-        (unless (gethash key seen)
-          (puthash key t seen)
-          (push entry result))))
-    (nreverse result)))
+               (entry (if stored-p item
+                        (append item (list :canonicalPath key)))))
+          (when (and guarded
+                     (not (pilish--session-browser-generation-current-p
+                           buf generation)))
+            (throw 'stale pilish--session-canonicalization-stale))
+          (unless (gethash key seen)
+            (puthash key t seen)
+            (push entry result))))
+      (nreverse result))))
 
 (defun pilish--thread-parent-identity (parent-path child-key &optional memo anchor)
   "Return PARENT-PATH's canonical identity resolved against CHILD-KEY.
@@ -619,57 +1180,69 @@ MEMO caches local canonicalization."
          (child-prefix (concat child-prefix expanded))
          (t (pilish--canonical-session-path parent-path memo anchor)))))))
 
-(defun pilish--session-thread-items (items)
-  "Arrange ITEMS into fork-family rows for the Threaded view.
-Return a list of (ITEM PREFIX) pairs.  ITEMS are assumed to
-carry one row per canonical identity, as
-`pilish--session-canonicalize-items' ensures for browser state.
-Families are built from `:parentSessionPath' links, and only when
-the parent is part of ITEMS: a fork whose parent is missing,
-filtered out, or out of scope renders as an ordinary root.  Each
-root and sibling subtree is ordered by the latest activity anywhere
-in that subtree — newest first, ties broken by canonical path
-ascending — and each parent renders before its descendants.  PREFIX
-is the row's connector: the empty string for a family root; for
-descendants `├─' with later siblings or `└─' last, preceded by a `│'
-gutter for every ancestor level that continues — its length encodes
-the nesting depth."
-  (let* ((memo (make-hash-table :test 'equal))
-         (nodes (mapcar (lambda (item)
-                          (list :item item
-                                :key (pilish--session-item-key item memo)))
-                        items))
-         (by-key (make-hash-table :test 'equal))
-         (children-of (make-hash-table :test 'equal))
-         (roots nil))
-    (dolist (node nodes)
-      (puthash (plist-get node :key) node by-key))
-    (dolist (node nodes)
-      (let* ((item (plist-get node :item))
-             (parent-key
-              (or (plist-get item :canonicalParentSession)
-                  (pilish--thread-parent-identity
-                   (plist-get item :parentSessionPath)
-                   (plist-get node :key) memo
-                   (pilish--session-parent-anchor item))))
-             (parent (and parent-key (gethash parent-key by-key))))
-        (if (and parent
-                 ;; A self-referential fork header would otherwise
-                 ;; recurse forever; render it as the root it claims.
-                 (not (equal (plist-get parent :key)
-                             (plist-get node :key))))
-            (puthash (plist-get parent :key)
-                     (cons node (gethash (plist-get parent :key) children-of))
-                     children-of)
-          (push node roots))))
-    (dolist (root roots)
-      (pilish--thread-node-activity root children-of))
-    (let ((result nil))
-      (dolist (root (pilish--thread-sorted-nodes roots))
-        (push (list (plist-get root :item) "") result)
-        (setq result (pilish--thread-collect-children
-                      root children-of nil result)))
-      (nreverse result))))
+(defun pilish--session-thread-items (items &optional buf generation)
+  "Arrange ITEMS into fork-family rows while BUF owns GENERATION.
+Return a list of (ITEM PREFIX) pairs.  ITEMS carry one row per
+canonical identity, as `pilish--session-canonicalize-items' ensures.
+Families use `:parentSessionPath' only when the parent is present; a
+missing or filtered parent leaves the fork as a root.  Roots and sibling
+subtrees sort by latest subtree activity, newest first, then canonical
+path.  PREFIX carries the `├─'/`└─' branch and ancestor `│' gutters.
+
+BUF and GENERATION are optional for non-render callers.  When supplied,
+ownership is checked before and immediately after each key or parent
+canonicalization, so reentrant cancellation does not continue through
+later hand-built items."
+  (let ((memo (make-hash-table :test 'equal))
+        (nodes nil)
+        (by-key (make-hash-table :test 'equal))
+        (children-of (make-hash-table :test 'equal))
+        (roots nil)
+        (current-p
+         (lambda ()
+           (or (null generation)
+               (pilish--session-browser-generation-current-p
+                buf generation)))))
+    (catch 'stale
+      ;; Resolve each key once.  Render-prepared items make this a pure
+      ;; lookup, while direct callers retain guarded fallback behavior.
+      (dolist (item items)
+        (unless (funcall current-p) (throw 'stale nil))
+        (let ((key (pilish--session-item-key item memo)))
+          (unless (funcall current-p) (throw 'stale nil))
+          (push (list :item item :key key) nodes)))
+      (setq nodes (nreverse nodes))
+      (dolist (node nodes)
+        (puthash (plist-get node :key) node by-key))
+      (dolist (node nodes)
+        (unless (funcall current-p) (throw 'stale nil))
+        (let* ((item (plist-get node :item))
+               (parent-key
+                (or (plist-get item :canonicalParentSession)
+                    (pilish--thread-parent-identity
+                     (plist-get item :parentSessionPath)
+                     (plist-get node :key) memo
+                     (pilish--session-parent-anchor item)))))
+          (unless (funcall current-p) (throw 'stale nil))
+          (let ((parent (and parent-key (gethash parent-key by-key))))
+            (if (and parent
+                     ;; A self-reference would otherwise recurse forever.
+                     (not (equal (plist-get parent :key)
+                                 (plist-get node :key))))
+                (puthash
+                 (plist-get parent :key)
+                 (cons node
+                       (gethash (plist-get parent :key) children-of))
+                 children-of)
+              (push node roots)))))
+      (dolist (root roots)
+        (pilish--thread-node-activity root children-of))
+      (let ((result nil))
+        (dolist (root (pilish--thread-sorted-nodes roots))
+          (push (list (plist-get root :item) "") result)
+          (setq result (pilish--thread-collect-children
+                        root children-of nil result)))
+        (nreverse result)))))
 
 (defun pilish--thread-node-activity (node children-of)
   "Return and cache in NODE the latest `:modified' in NODE's subtree.
@@ -759,17 +1332,52 @@ Match prepared :searchText, or name/first-message text for metadata items."
 
 ;;;; Time-Based Section Headers
 
-(defun pilish--session-time-group (iso-timestamp)
-  "Return time group label for ISO-TIMESTAMP.
-Groups: \"Today\", \"Yesterday\", \"This Week\", \"Older\"."
+(defun pilish--session-date-minus-one-day (time)
+  "Return TIME's local calendar date one day earlier, as \"YYYY-MM-DD\".
+The day decrements on the decoded local calendar and the result is
+encoded at noon — never inside a daylight-saving transition — so a
+stale numeric offset carried over from TIME cannot shift the target
+date across midnight: encoding 00:30 the night after a spring-forward
+transition with the current offset lands an hour early and turns
+March 29 into March 28."
+  (let ((decoded (decode-time time)))
+    (setf (nth 0 decoded) 0
+          (nth 1 decoded) 0
+          (nth 2 decoded) 12
+          (nth 3 decoded) (1- (nth 3 decoded)))
+    (format-time-string "%Y-%m-%d" (encode-time decoded))))
+
+(defun pilish--session-time-group (iso-timestamp &optional now)
+  "Return the calendar time-group label for ISO-TIMESTAMP.
+Groups: \"Future\", \"Today\", \"Yesterday\", \"This Week\",
+\"Older\" — calendar semantics, not rolling durations.  \"Today\" is
+the current local calendar date and \"Yesterday\" the date before
+it (both via `pilish--session-date-minus-one-day'); \"This Week\" is
+the rest of the current Monday-start week (ISO week and year match); a
+late-night session therefore reads \"Yesterday\" from midnight onward,
+and last week's Friday reads \"Older\" on Monday.  A later calendar
+date — clock skew on the writer — reads \"Future\", which newest-first
+sorting places as one contiguous leading group; without it, future
+rows would repeat the \"This Week\" heading between Today and
+Yesterday.  NOW defaults to the current time; renderers capture it
+once per render and tests pin it.  Invalid timestamps read as
+\"Older\"."
   (condition-case nil
-      (let* ((time (date-to-time iso-timestamp))
-             (now (current-time))
-             (diff-days (/ (float-time (time-subtract now time)) 86400.0)))
+      (let ((time (date-to-time iso-timestamp))
+            (now (or now (current-time))))
         (cond
-         ((< diff-days 1) "Today")
-         ((< diff-days 2) "Yesterday")
-         ((< diff-days 7) "This Week")
+         ((string> (format-time-string "%Y-%m-%d" time)
+                   (format-time-string "%Y-%m-%d" now))
+          "Future")
+         ((equal (format-time-string "%Y-%m-%d" time)
+                 (format-time-string "%Y-%m-%d" now))
+          "Today")
+         ((equal (format-time-string "%Y-%m-%d" time)
+                 (pilish--session-date-minus-one-day now))
+          "Yesterday")
+         ((equal (format-time-string "%G-W%V" time)
+                 (format-time-string "%G-W%V" now))
+          "This Week")
          (t "Older")))
     (error "Older")))
 
@@ -884,6 +1492,11 @@ New browser buffers start from
 (defvar-local pilish--session-browser-items nil
   "Session items from the last `--browse-load-sessions' callback.")
 
+(defvar-local pilish--session-browser-items-scope nil
+  "Scope that owns `pilish--session-browser-items', or nil before a scan.
+During a different-scope load the header suppresses this stale
+snapshot's total instead of relabeling it as the requested scope.")
+
 (defvar-local pilish--session-browser-search-query nil
   "Current search query string, or nil.")
 
@@ -905,9 +1518,10 @@ the cycle's final render runs.")
 
 (defvar-local pilish--session-browser-fetch-token 0
   "Generation counter for session-browser fetches.
-`pilish--browse-load-sessions' bumps it per fetch; callbacks
-from superseded fetches are dropped by comparing their captured token
-against the buffer's current one.")
+The browser fetch cycle claims its generation before rendering and
+passes it to `pilish--browse-load-sessions'.  Direct loader callers that
+omit a generation claim one at the loader seam.  Superseded work is
+dropped by comparing its captured token with the buffer's current one.")
 
 ;;;; Session Browser Dispatch Transient
 
@@ -962,6 +1576,11 @@ browser's state on the real rendering path."
 (defface pilish-session-age
   '((t :inherit shadow))
   "Face for relative age in the session browser margin."
+  :group 'pilish)
+
+(defface pilish-session-cwd
+  '((t :inherit shadow :slant italic))
+  "Face for the project label leading All-projects session rows."
   :group 'pilish)
 
 (defface pilish-session-thread-connector
@@ -1042,102 +1661,258 @@ re-run."
 
 ;;;; Rendering
 
+(defun pilish--session-browser-empty-line (kind)
+  "Return the actionable empty-state lines for KIND, `scan' or `filter'.
+KIND `scan' covers a scope that listed no session files at all;
+`filter' covers rows that existed until named-only filtering or the
+search query removed them all.  Reading the same buffer-local state
+the header line shows, each line names a widening action with its
+real keybinding: \\[pilish-session-browser-toggle-scope] switches
+scope, \\[pilish-session-browser-toggle-named] clears named-only,
+and an empty \\[pilish-session-browser-search] input clears the
+query.  Each hint is its own short line, key first, so the recovery
+action survives the 32 usable columns of a 52-column terminal with
+the 20-column right margin — one long sentence would truncate
+before its first key.  Precedence under `filter' follows recency of
+narrowing — the query first, then named-only, then the scope switch
+— with at most two hints; an empty All-projects scan has no wider
+scope to suggest and stays a single plain line."
+  (pcase kind
+    ('scan
+     (if (eq pilish--session-browser-scope 'all)
+         "No sessions found."
+       (substitute-command-keys
+        "No sessions in this project.\n\\[pilish-session-browser-toggle-scope] to list all projects")))
+    ('filter
+     (cond
+      (pilish--session-browser-search-query
+       (concat
+        (substitute-command-keys
+         "No matching sessions.\n\\[pilish-session-browser-search] to clear the query")
+        (cond
+         (pilish--session-browser-named-only
+          (substitute-command-keys
+           "\n\\[pilish-session-browser-toggle-named] to show all names"))
+         ((eq pilish--session-browser-scope 'current)
+          (substitute-command-keys
+           "\n\\[pilish-session-browser-toggle-scope] to search all projects"))
+         (t ""))))
+      (pilish--session-browser-named-only
+       (concat
+        (substitute-command-keys
+         "No named sessions.\n\\[pilish-session-browser-toggle-named] to show all names")
+        (when (eq pilish--session-browser-scope 'current)
+          (substitute-command-keys
+           "\n\\[pilish-session-browser-toggle-scope] to list all projects"))))
+      (t "No matching sessions.")))))
+
+(defun pilish--session-browser-generation-current-p (buf generation)
+  "Return non-nil when BUF still owns session GENERATION."
+  (and (buffer-live-p buf)
+       (eq generation
+           (buffer-local-value 'pilish--session-browser-fetch-token buf))))
+
+(defun pilish--session-browser-prepare-render-items (items buf generation)
+  "Return `(t . ITEMS)' with one stored key each, or nil when stale.
+Each returned item is a render-only copy whose leading
+`:canonicalPath' is computed exactly once.  Direct hand-built items
+can dispatch a file-name handler during that computation, so BUF's
+ownership of GENERATION is checked immediately before and after every
+key.  Downstream project,
+thread, and row preparation can then reuse the stored key without
+re-running callback-capable canonicalization."
+  (let ((memo (make-hash-table :test 'equal))
+        (prepared nil))
+    (catch 'stale
+      (dolist (item items)
+        (unless (pilish--session-browser-generation-current-p buf generation)
+          (throw 'stale nil))
+        (let ((key (pilish--session-item-key item memo)))
+          (unless (pilish--session-browser-generation-current-p
+                   buf generation)
+            (throw 'stale nil))
+          ;; Put the render key first even when ITEM already carries one;
+          ;; `plist-get' and `pilish--session-item-key' then reuse exactly
+          ;; the value whose callback boundary was checked above.
+          (push (append (list :canonicalPath key) item) prepared)))
+      (cons t (nreverse prepared)))))
+
 (defun pilish--session-browser-render (buf)
   "Render the session browser in BUF from its buffer-local state."
   (with-current-buffer buf
     (let* ((inhibit-read-only t)
-           (items pilish--session-browser-items)
-           ;; Loading/error screens retain the old snapshot but need not
-           ;; search its potentially large corpus just to display status.
+           (generation pilish--session-browser-fetch-token)
+           (raw-items pilish--session-browser-items)
+           ;; Status states render no rows and therefore need no keys.
+           (prepared
+            (if (or pilish--session-browser-loading
+                    pilish--session-browser-error
+                    (null raw-items))
+                (cons t raw-items)
+              (pilish--session-browser-prepare-render-items
+               raw-items buf generation)))
+           (items (cdr prepared))
            (filtered
-            (unless (or pilish--session-browser-loading
-                        pilish--session-browser-error (null items))
-              (pilish--session-filter-search
-               (if pilish--session-browser-named-only
-                   (pilish--session-filter-named items)
-                 items)
-               pilish--session-browser-search-tokens)))
-           ;; Batch the live-process lookup once per render instead of a
-           ;; per-item scan whose file-equal-p fallback would stat per
-           ;; non-matching pair (a remote roundtrip under TRAMP).
-           (live-paths (pilish--browse-live-session-paths)))
-      (magit-insert-section (root)
-        (cond
-         (pilish--session-browser-loading
-          (insert (pilish--propertize-face
-                   "Loading sessions..."
-                   'pilish-activity-phase)
-                  "\n"))
-         (pilish--session-browser-error
-          (insert (pilish--propertize-face
-                   (format "Error: %s\n" pilish--session-browser-error)
-                   'error)))
-         ((null items)
-          (insert "No sessions found.\n"))
-         ((null filtered)
-          (insert "No matching sessions.\n"))
-         ((and (eq pilish--session-browser-view 'threaded)
-               (null pilish--session-browser-search-tokens))
-          (pilish--session-browser-render-threaded filtered live-paths))
-         ((eq pilish--session-browser-view 'recent)
-          (pilish--session-browser-render-recent filtered live-paths))
-         (t
-          (pilish--session-browser-render-flat
-           (pilish--session-sort-items
-            filtered
-            ;; A query flattens Threaded to newest-first rows; a
-            ;; partial match set must not draw family connectors.
-            (if (eq pilish--session-browser-view 'threaded)
-                'recent
-              pilish--session-browser-view))
-           live-paths)))))))
+            (and prepared
+                 (not pilish--session-browser-loading)
+                 (not pilish--session-browser-error)
+                 items
+                 (pilish--session-filter-search
+                  (if pilish--session-browser-named-only
+                      (pilish--session-filter-named items)
+                    items)
+                  pilish--session-browser-search-tokens)))
+           ;; Loading/error/empty states need no live markers.  A live
+           ;; path handler may start a newer fetch, so every later stage
+           ;; is gated by the captured generation.
+           (live-paths
+            (and filtered
+                 (pilish--session-browser-generation-current-p
+                  buf generation)
+                 (pilish--browse-live-session-paths)))
+           (row-kind
+            (cond
+             ((and (eq pilish--session-browser-view 'threaded)
+                   (null pilish--session-browser-search-tokens))
+              'threaded)
+             ((eq pilish--session-browser-view 'recent) 'recent)
+             (t 'flat)))
+           ;; Token allocation uses the full prepared snapshot, not the
+           ;; filtered rows, and reuses each precomputed key.
+           (fields
+            (and filtered
+                 (pilish--session-browser-generation-current-p
+                  buf generation)
+                 (eq pilish--session-browser-scope 'all)
+                 (pilish--session-project-fields items)))
+           ;; Complete callback-capable row preparation before opening a
+           ;; Magit section.  In particular, hand-built fork metadata may
+           ;; canonicalize a parent while threading.
+           (rows
+            (and filtered
+                 (pilish--session-browser-generation-current-p
+                  buf generation)
+                 (pcase row-kind
+                   ('threaded
+                    (pilish--session-thread-items
+                     filtered buf generation))
+                   ('recent (pilish--session-sort-items filtered 'recent))
+                   (_ (pilish--session-sort-items
+                       filtered
+                       ;; A queried Threaded view is a flat newest-first
+                       ;; result set, with no implied family connectors.
+                       (if (eq pilish--session-browser-view 'threaded)
+                           'recent
+                         pilish--session-browser-view)))))))
+      (when (and prepared
+                 (pilish--session-browser-generation-current-p
+                  buf generation))
+        (magit-insert-section (root)
+          (cond
+           (pilish--session-browser-loading
+            (insert (pilish--propertize-face
+                     "Loading sessions..."
+                     'pilish-activity-phase)
+                    "\n"))
+           (pilish--session-browser-error
+            (insert (pilish--propertize-face
+                     (format "Error: %s\n" pilish--session-browser-error)
+                     'error)))
+           ((null items)
+            (insert (pilish--session-browser-empty-line 'scan) "\n"))
+           ((null filtered)
+            (insert (pilish--session-browser-empty-line 'filter) "\n"))
+           ((eq row-kind 'threaded)
+            (pilish--session-browser-render-threaded
+             rows fields live-paths buf generation))
+           ((eq row-kind 'recent)
+            (pilish--session-browser-render-recent
+             rows fields live-paths buf generation))
+           (t
+            (pilish--session-browser-render-flat
+             rows fields live-paths buf generation))))))))
 
-(defun pilish--session-browser-render-flat (items live-paths)
-  "Render ITEMS as a flat list, marking sessions in LIVE-PATHS."
+(defun pilish--session-browser-render-flat
+    (items fields live-paths buf generation)
+  "Render prepared ITEMS as flat rows while BUF owns GENERATION.
+FIELDS maps precomputed session keys to bounded project tokens;
+LIVE-PATHS marks live sessions."
   (dolist (item items)
-    (pilish--session-browser-insert-session item nil live-paths)))
+    (when (pilish--session-browser-generation-current-p buf generation)
+      (pilish--session-browser-insert-session
+       item (plist-get item :canonicalPath) nil fields live-paths
+       buf generation))))
 
-(defun pilish--session-browser-render-threaded (items live-paths)
-  "Render ITEMS in fork-family order with connectors.
-Sessions in LIVE-PATHS get the live-session marker."
-  (dolist (entry (pilish--session-thread-items items))
-    (pilish--session-browser-insert-session
-     (nth 0 entry) (nth 1 entry) live-paths)))
+(defun pilish--session-browser-render-threaded
+    (rows fields live-paths buf generation)
+  "Render prepared threaded ROWS while BUF owns GENERATION.
+Each row is an (ITEM PREFIX) pair already produced before the outer
+Magit section opened.  FIELDS and LIVE-PATHS provide project and live
+context."
+  (dolist (entry rows)
+    (when (pilish--session-browser-generation-current-p buf generation)
+      (let ((item (nth 0 entry)))
+        (pilish--session-browser-insert-session
+         item (plist-get item :canonicalPath) (nth 1 entry)
+         fields live-paths buf generation)))))
 
-(defun pilish--session-browser-render-recent (items live-paths)
-  "Render ITEMS sorted by recency with time-group headers.
-Sessions in LIVE-PATHS get the live-session marker."
-  (let ((sorted (pilish--session-sort-items items 'recent))
+(defun pilish--session-browser-render-recent
+    (items fields live-paths buf generation)
+  "Render prepared, recency-sorted ITEMS while BUF owns GENERATION.
+The current time is captured once, so a render that crosses midnight
+groups every row against the same calendar day.  FIELDS maps session
+keys to project tokens; LIVE-PATHS marks live sessions."
+  (let ((now (current-time))
         (last-group nil))
-    (dolist (item sorted)
-      (let ((group (pilish--session-time-group
-                    (plist-get item :modified))))
-        (unless (equal group last-group)
-          (magit-insert-section (time-group group)
-            (magit-insert-heading
-              (pilish--propertize-face
-               group 'pilish-session-group-header)))
-          (setq last-group group)))
-      (pilish--session-browser-insert-session item nil live-paths))))
+    (dolist (item items)
+      (when (pilish--session-browser-generation-current-p buf generation)
+        (let ((group (pilish--session-time-group
+                      (plist-get item :modified) now)))
+          (unless (equal group last-group)
+            (when (pilish--session-browser-generation-current-p
+                   buf generation)
+              (magit-insert-section (time-group group)
+                (magit-insert-heading
+                  (pilish--propertize-face
+                   group 'pilish-session-group-header)))
+              (setq last-group group)))
+          (pilish--session-browser-insert-session
+           item (plist-get item :canonicalPath) nil fields live-paths
+           buf generation))))))
 
-(defun pilish--session-browser-insert-session (session prefix live-paths)
-  "Insert SESSION as a `magit-section' section, PREFIXED by PREFIX.
-The section's identity is the session's canonical key (see
-`pilish--session-item-key'), so point restoration survives a refresh
-that retains a different alias spelling; actions resolve the raw
-retained spelling through `pilish--session-browser-path-at-point'.
+(defun pilish--session-browser-insert-session
+    (session key prefix fields live-paths buf generation)
+  "Insert prepared SESSION with KEY and PREFIX while BUF owns GENERATION.
+KEY was computed once by
+`pilish--session-browser-prepare-render-items', so insertion never
+repeats callback-capable canonicalization.  It remains the Magit
+section identity, preserving point across alias spelling changes;
+actions resolve the raw retained spelling through
+`pilish--session-browser-path-at-point'.
 PREFIX is the Threaded-view connector — the empty string for a family
 root, gutters and a branch for descendants.  A nil PREFIX renders a
 flat row, where a forked session gets a \"fork:\" prefix instead.
-When SESSION's key is a key of LIVE-PATHS (see
-`pilish--browse-live-session-paths'), prepend a live-session marker.
+In All projects scope the row leads with its bounded project token
+looked up in FIELDS by SESSION's key (see
+`pilish--session-project-fields' — the placeholder token keeps the
+field reserved when the recorded cwd was rejected), padded to the
+fixed token width, followed by a two-column live field, and only
+then the unbounded connector and title — so identity and live
+status survive any connector depth, common prefix, or long title in
+a narrow window.  This-project rows keep the compact connector-first
+shape because the scope already fixes the project.  When SESSION's
+key is a key of LIVE-PATHS (see
+`pilish--browse-live-session-paths' — only Pilish processes in this
+Emacs, never other Emacs instances or system-wide pi processes),
+prepend a live-session marker.
 Message count and age are rendered as a right-margin overlay."
-  (let* ((key (pilish--session-item-key session))
-         (name (pilish--session-display-name session))
+  (when (pilish--session-browser-generation-current-p buf generation)
+    (let* ((name (pilish--session-display-name session))
          (count (or (plist-get session :messageCount) 0))
          (modified (plist-get session :modified))
          (is-fork (plist-get session :parentSessionPath))
          (live-p (gethash key live-paths))
+         (token (and fields (gethash key fields)))
          (display-prefix
           (cond
            (prefix
@@ -1147,12 +1922,29 @@ Message count and age are rendered as a right-margin overlay."
             (pilish--propertize-face
              "fork: " 'pilish-session-thread-connector))
            (t "")))
-         (heading (concat display-prefix
-                          (when live-p
-                            (pilish--propertize-face
-                             "● " 'pilish-session-live))
-                          (pilish--propertize-face
-                           name 'pilish-session-name)))
+         (heading
+          (concat
+           (if token
+               ;; All projects: the bounded token field, the fixed
+               ;; two-column live field, and only then unbounded
+               ;; connector and title — identity and live status
+               ;; survive any depth, prefix, or long title.
+               (concat (pilish--propertize-face
+                        (pilish--session-pad-display
+                         token pilish--session-project-token-width)
+                        'pilish-session-cwd)
+                       (if live-p
+                           (pilish--propertize-face
+                            "\u25cf " 'pilish-session-live)
+                         "  ")
+                       display-prefix)
+             ;; This project: the established compact shape.
+             (concat display-prefix
+                     (when live-p
+                       (pilish--propertize-face
+                        "\u25cf " 'pilish-session-live))))
+           (pilish--propertize-face
+            name 'pilish-session-name)))
          (margin-str (concat
                       (pilish--propertize-face
                        (format "%4d msgs " count)
@@ -1163,21 +1955,32 @@ Message count and age are rendered as a right-margin overlay."
                                            (+ 3 pilish--margin-age-unit-width))
                                    "?"))
                        'pilish-session-age))))
-    (magit-insert-section (session key)
-      (magit-insert-heading heading)
-      (pilish--make-margin-overlay margin-str))))
+      ;; Check immediately before insertion as preparation above may run
+      ;; user-advised display/time code even though the key is already pure.
+      (when (pilish--session-browser-generation-current-p buf generation)
+        (magit-insert-section (session key)
+          (magit-insert-heading heading)
+          (pilish--make-margin-overlay margin-str))))))
 
 ;;;; Header-Line
 
 (defun pilish--session-browser-header-line ()
   "Return header-line string for the session browser.
-Shows the scope, view, named-only, query, and session count — the
-same state `pilish--session-dispatch-heading' formats for the
-transient, using the same user-facing labels."
+Shows the scope, view, named-only, query, and the session count in
+scope — the same state `pilish--session-dispatch-heading' formats
+for the transient, using the same user-facing labels.  The count is
+labeled `total' because it counts scanned sessions in scope, not
+the rows surviving the current query and named-only filter.  A total
+is shown only for an error-free snapshot owned by the displayed scope.
+A different scope's stale snapshot, a failed scan, and initial/unowned
+state are unconfirmed and hide the total."
   (let* ((scope pilish--session-browser-scope)
          (view pilish--session-browser-view)
          (named pilish--session-browser-named-only)
          (query pilish--session-browser-search-query)
+         (count-visible-p
+          (and (not pilish--session-browser-error)
+               (eq pilish--session-browser-items-scope scope)))
          (count (length (or pilish--session-browser-items '()))))
     (mapconcat #'identity
                (append (list (format "Sessions [%s]"
@@ -1186,8 +1989,9 @@ transient, using the same user-facing labels."
                                      (pilish--session-view-label view)))
                        (and named '("named-only"))
                        (and query (list (format "/%s" query)))
-                       (list (format "(%d)" count)
-                             (pilish--propertize-face "?:help" 'shadow)))
+                       (and count-visible-p
+                            (list (format "(%d total)" count)))
+                       (list (pilish--propertize-face "?:help" 'shadow)))
                " │ ")))
 
 ;;;; Session Browser Interactive Commands
@@ -1567,6 +2371,12 @@ restore (E2E defect A4).  A refresh issued while another fetch is
 still loading finds no sections to capture and reuses the in-flight
 cycle's anchor (see `pilish--session-browser-fetch-anchor')."
   (let* ((buf (current-buffer))
+         ;; Claim the generation before rendering: rendering can invoke
+         ;; file-name handlers through live-session identity lookup, and
+         ;; a reentrant newer fetch must remain newer after this one resumes.
+         (token (setq pilish--session-browser-fetch-token
+                      (1+ pilish--session-browser-fetch-token)))
+         (scope pilish--session-browser-scope)
          (anchor (or (pilish--browse-capture-point-anchor)
                      ;; Mid-flight refresh: the loading render already
                      ;; destroyed the sections under point, so carry
@@ -1578,24 +2388,42 @@ cycle's anchor (see `pilish--session-browser-fetch-anchor')."
     ;; Loading-state render: default point behavior (nothing to keep).
     (pilish--session-browser-rerender)
     (pilish--browse-load-sessions
-     pilish--session-browser-scope
+     scope
      (lambda (items error)
        (when (buffer-live-p buf)
-         (pilish--session-browser-apply-scan buf items error anchor))))))
+         (pilish--session-browser-apply-scan
+          buf items error anchor scope token)))
+     token)))
 
-(defun pilish--session-browser-apply-scan (buf items error anchor)
+(defun pilish--session-browser-apply-scan
+    (buf items error anchor &optional scope generation)
   "Store a completed scan's ITEMS and ERROR in BUF, then rerender.
 ITEMS pass through `pilish--session-canonicalize-items' — one keyed
-row per session identity — so every view and query transition
-renders each session once.  ANCHOR is the pre-fetch point anchor
-handed to `pilish--session-browser-rerender'."
+row per session identity — so every view and query transition renders
+each session once.  ANCHOR is the pre-fetch point anchor handed to
+`pilish--session-browser-rerender'.  SCOPE owns this snapshot; direct
+legacy callers may omit it to use BUF's current scope.  When GENERATION
+is non-nil, hand-built item canonicalization and publication occur only
+while BUF still owns it; reentrant newer fetches retain their state."
   (with-current-buffer buf
-    (setq pilish--session-browser-loading nil
-          pilish--session-browser-fetch-anchor nil
-          pilish--session-browser-error error
-          pilish--session-browser-items
-          (pilish--session-canonicalize-items items))
-    (pilish--session-browser-rerender anchor)))
+    (when (or (null generation)
+              (pilish--session-browser-generation-current-p
+               buf generation))
+      (let ((canonical
+             (pilish--session-canonicalize-items
+              items (and generation buf) generation)))
+        (when (and (not (eq canonical
+                            pilish--session-canonicalization-stale))
+                   (or (null generation)
+                       (pilish--session-browser-generation-current-p
+                        buf generation)))
+          (setq pilish--session-browser-loading nil
+                pilish--session-browser-fetch-anchor nil
+                pilish--session-browser-error error
+                pilish--session-browser-items canonical
+                pilish--session-browser-items-scope
+                (or scope pilish--session-browser-scope))
+          (pilish--session-browser-rerender anchor))))))
 
 (defun pilish--session-browser-rerender (&optional fallback)
   "Re-render the session browser from local state, preserving point.
@@ -2214,42 +3042,72 @@ all.  Signals when resolution itself fails."
       (pilish-jsonl-session-dir-for-cwd
        (pilish--session-directory))))
 
-(defun pilish--browse-session-directories (scope)
-  "Return the list of session directories to scan for SCOPE.
-`current' is the single current-project directory (see
-`pilish--browse-current-session-directory').  `all' is
-every root-level munged --…-- directory under the sessions root —
-remote-anchored when a current directory is known — so .subagents
-sidecars and non-munged directories are excluded by construction.
-Missing roots read as empty; signals when resolution itself fails."
-  (if (not (eq scope 'all))
-      (list (pilish--browse-current-session-directory))
-    (let* ((cur (pilish--browse-current-session-directory))
-           (root (if cur
-                     (pilish-jsonl-sessions-root
-                      (file-name-as-directory cur))
-                   (pilish-jsonl-sessions-root))))
-      (delq nil
-            (mapcar (lambda (dir)
-                      (and (file-directory-p dir) dir))
-                    (condition-case nil
-                        (directory-files root t "\\`--")
-                      (error nil)))))))
+(defun pilish--browse-session-directories (scope &optional buf token)
+  "Return the session directories for SCOPE while BUF owns TOKEN.
+`current' resolves one project directory.  `all' lists root-level
+munged --…-- directories under the sessions root, excluding sidecars
+and non-munged directories.  Missing roots read as empty; resolution
+errors signal as before.  BUF and TOKEN are optional for direct callers;
+when present, ownership is checked before and immediately after each
+handler-dispatching directory operation."
+  (let ((current-p
+         (lambda ()
+           (or (null token)
+               (pilish--session-browser-generation-current-p buf token)))))
+    (if (not (eq scope 'all))
+        (when (funcall current-p)
+          (let ((dir (pilish--browse-current-session-directory)))
+            (and (funcall current-p) (list dir))))
+      (when (funcall current-p)
+        (let ((cur (pilish--browse-current-session-directory)))
+          (when (funcall current-p)
+            (let ((root (if cur
+                            (pilish-jsonl-sessions-root
+                             (file-name-as-directory cur))
+                          (pilish-jsonl-sessions-root))))
+              ;; Root construction can itself dispatch a handler; never
+              ;; enter the root listing after it supersedes this token.
+              (when (funcall current-p)
+                (let ((candidates
+                       (condition-case nil
+                           (directory-files root t "\\`--")
+                         (error nil)))
+                      (result nil))
+                  (when (funcall current-p)
+                    (catch 'stale
+                      (dolist (dir candidates)
+                        (unless (funcall current-p) (throw 'stale nil))
+                        (let ((directory-p (file-directory-p dir)))
+                          (unless (funcall current-p) (throw 'stale nil))
+                          (when directory-p (push dir result))))
+                      (nreverse result))))))))))))
 
-(defun pilish--browse-session-files (dirs)
+(defun pilish--browse-session-files (dirs &optional buf token)
   "Return every \\.jsonl file directly inside DIRS, in listing order.
-Unreadable or missing directories are skipped silently (empty)."
-  (apply #'append
-         (mapcar (lambda (dir)
-                   (condition-case nil
-                       (directory-files dir t "\\.jsonl\\'")
-                     (error nil)))
-                 dirs)))
+Unreadable or missing directories are skipped.  When BUF and TOKEN are
+non-nil, check generation ownership immediately before and after each
+`directory-files' call; cancellation during one directory prevents all
+later directory listings and returns nil."
+  (let ((result nil))
+    (catch 'stale
+      (dolist (dir dirs)
+        (when (and token
+                   (not (pilish--session-browser-generation-current-p
+                         buf token)))
+          (throw 'stale nil))
+        (let ((files (condition-case nil
+                         (directory-files dir t "\\.jsonl\\'")
+                       (error nil))))
+          (when (and token
+                     (not (pilish--session-browser-generation-current-p
+                           buf token)))
+            (throw 'stale nil))
+          (setq result (nconc result files))))
+      result)))
 
 (defun pilish--browse-session-scan-current-p (buf token)
   "Return non-nil if BUF still owns the session scan generation TOKEN."
-  (and (buffer-live-p buf)
-       (eq token (buffer-local-value 'pilish--session-browser-fetch-token buf))))
+  (pilish--session-browser-generation-current-p buf token))
 
 (defun pilish--browse-scan-session-files
     (buf token files items callback &optional state)
@@ -2260,51 +3118,96 @@ positive-delay continuation allows a command-loop turn; it is not a
 latency guarantee.  Whole-file IO, individual records, joining, GC, and
 final synchronous filtering/rendering can exceed the budget.
 
-At most one file state is retained by a pending continuation.  Completion,
-errors and quit close it before CALLBACK receives (ITEMS ERROR).  A stale
-or dead owner drops work and closes its state when the continuation next
-runs, without a callback.  Hiding the browser with q does not cancel it."
-  (let (transferred finished failure)
+At most one file state is retained by a pending continuation.  Ownership
+is checked before and immediately after every callback-capable open,
+read, and enrichment operation, and before the next file.  Cancellation
+observed in a running slice closes the current state during unwind,
+then touches no remaining file, schedules no continuation, and invokes
+no callback.  Completion, errors,
+and quit likewise close resources before CALLBACK receives (ITEMS ERROR).
+Hiding the browser with q does not cancel a current generation."
+  (let (transferred finished failure cancelled)
     (unwind-protect
         (when (pilish--browse-session-scan-current-p buf token)
           (condition-case err
               (let ((deadline (+ (float-time) 0.010))
                     yield)
-                (while (and files (not yield) (< (float-time) deadline))
+                (while (and files
+                            (not yield)
+                            (not cancelled)
+                            (pilish--browse-session-scan-current-p buf token)
+                            (< (float-time) deadline))
                   (let (result)
                     (condition-case nil
                         (progn
                           (unless state
-                            (setq state (pilish-jsonl-open-session-info
-                                         (car files) t)))
-                          (when state
-                            (setq result (pilish-jsonl-step-session-info
-                                          state deadline))))
+                            (if (pilish--browse-session-scan-current-p
+                                 buf token)
+                                (setq state
+                                      (pilish-jsonl-open-session-info
+                                       (car files) t))
+                              (setq cancelled t))
+                            (unless (pilish--browse-session-scan-current-p
+                                     buf token)
+                              (setq cancelled t)))
+                          (when (and state (not cancelled))
+                            (if (pilish--browse-session-scan-current-p
+                                 buf token)
+                                (setq result
+                                      (pilish-jsonl-step-session-info
+                                       state deadline))
+                              (setq cancelled t))
+                            (unless (pilish--browse-session-scan-current-p
+                                     buf token)
+                              (setq cancelled t))))
                       ;; Ordinary file failures skip just this file.  Quit
                       ;; instead reaches the scan-level interruption handler.
                       (error (setq result '(done))))
-                    (if (or (null state) result)
-                        (progn
-                          ;; Enrich inside the slice: identity
-                          ;; resolution shares the scan's budget,
-                          ;; cancellation token, and quit handling.
-                          (when (cdr result)
-                            (push (pilish--session-enrich-item (cdr result))
-                                  items))
-                          (pilish-jsonl-close-session-info state)
-                          (setq state nil files (cdr files)))
-                      (setq yield t))))
-                ;; File handlers can run Lisp and supersede/kill the owner.
+                    ;; An error handler itself may have reentered Lisp.
+                    (unless (pilish--browse-session-scan-current-p buf token)
+                      (setq cancelled t))
+                    (unless cancelled
+                      (if (or (null state) result)
+                          (let (enriched)
+                            ;; Identity enrichment can dispatch local file
+                            ;; handlers.  Publish it only if ownership
+                            ;; survives the complete operation.
+                            (when (cdr result)
+                              (if (pilish--browse-session-scan-current-p
+                                   buf token)
+                                  (setq enriched
+                                        (pilish--session-enrich-item
+                                         (cdr result)))
+                                (setq cancelled t))
+                              (unless (pilish--browse-session-scan-current-p
+                                       buf token)
+                                (setq cancelled t)))
+                            (unless cancelled
+                              (when enriched (push enriched items))
+                              ;; Close a completed state before advancing;
+                              ;; stale in-progress state is closed by unwind.
+                              (if (pilish--browse-session-scan-current-p
+                                   buf token)
+                                  (progn
+                                    (pilish-jsonl-close-session-info state)
+                                    (setq state nil)
+                                    (if (pilish--browse-session-scan-current-p
+                                         buf token)
+                                        (setq files (cdr files))
+                                      (setq cancelled t)))
+                                (setq cancelled t))))
+                        (setq yield t)))))
                 (when (pilish--browse-session-scan-current-p buf token)
                   (if files
                       (progn
-                        (run-at-time 0.001 nil #'pilish--browse-scan-session-files
+                        (run-at-time 0.001 nil
+                                     #'pilish--browse-scan-session-files
                                      buf token files items callback state)
                         (setq transferred t))
                     (setq finished t))))
             (quit (setq failure "Session scan was interrupted"))
             (error (setq failure (format "Session scan failed: %s"
-                                        (error-message-string err))))))
+                                         (error-message-string err))))))
       (unless transferred (pilish-jsonl-close-session-info state)))
     ;; Outside handlers and after resource cleanup: a signaling consumer
     ;; must not be called again as an error callback.
@@ -2312,41 +3215,58 @@ runs, without a callback.  Hiding the browser with q does not cancel it."
       (cond (failure (funcall callback nil failure))
             (finished (funcall callback (nreverse items) nil))))))
 
-(defun pilish--browse-load-sessions (scope callback)
+(defun pilish--browse-load-sessions (scope callback &optional generation)
   "Load session items for SCOPE, then call CALLBACK with (ITEMS ERROR).
 ITEMS is a list of session plists in the browse session dialect:
 \(:path :id :cwd :name? :parentSessionPath? :created :modified
 :messageCount :firstMessage :searchText) — the optional search-corpus
 output of `pilish-jsonl-read-session-info' — each enriched during the
-scan with `:canonicalPath' and, for forks, `:canonicalParentSession'
-\(see `pilish--session-enrich-item'), so downstream renders need no
-archive-sized or remote canonicalization — only the few live-process
-session paths canonicalize locally per render.  ERROR is an error
+scan with `:canonicalPath', `:canonicalProjectSpec', and, for forks,
+`:canonicalParentSession' (see `pilish--session-enrich-item'), so
+downstream renders need no archive-sized or remote canonicalization —
+only the few live-process session paths canonicalize locally per
+render.  ERROR is an error
 string or nil.  SCOPE is `current' (one project directory) or `all'
 \(every munged directory under the sessions root).  The scan is
-chunked (see `pilish--browse-scan-session-files'), shows a
-loading state throughout, and reports exactly once; a superseded
-fetch's callback is dropped by the fetch token — a superseding fetch
-cancels an older one before any slice runs.  Directory resolution
+chunked (see `pilish--browse-scan-session-files') and shows a loading
+state throughout.  A request that remains current reports exactly
+once; a superseded request stops at the next guarded directory/file
+boundary and is dropped without a callback.  Directory resolution
 failures surface synchronously as the ERROR string \"Cannot list
-sessions: …\"."
-  (let ((buf (current-buffer)))
-    (setq pilish--session-browser-fetch-token
-          (1+ pilish--session-browser-fetch-token))
-    (let ((token pilish--session-browser-fetch-token))
+sessions: …\", but only while that request still owns its generation;
+a resolver that reentrantly starts another fetch cannot publish its
+now-stale failure.  GENERATION, when supplied by the browser fetch
+cycle, was claimed before its loading render so render-time reentrancy
+cannot reverse request order.  Direct seam callers omit it and claim a
+new generation here."
+  (let* ((buf (current-buffer))
+         (token
+          (or generation
+              (setq pilish--session-browser-fetch-token
+                    (1+ pilish--session-browser-fetch-token)))))
+    ;; A fetch can be superseded before it even reaches this seam when
+    ;; its loading render reenters Lisp.  Do no directory IO in that case.
+    (when (pilish--browse-session-scan-current-p buf token)
       (let ((dirs nil)
             (failure nil))
         (condition-case err
-            (setq dirs (pilish--browse-session-directories scope))
+            (setq dirs (pilish--browse-session-directories
+                        scope buf token))
           (error
            (setq failure (format "Cannot list sessions: %s"
-                                (error-message-string err)))))
-        (if failure
-            (funcall callback nil failure)
-          (run-at-time 0 nil #'pilish--browse-scan-session-files
-                       buf token
-                       (pilish--browse-session-files dirs)
-                       nil callback))))))
+                                 (error-message-string err)))))
+        ;; Directory/file handlers can reenter and start a newer fetch.
+        ;; Check after each synchronous boundary before doing more IO or
+        ;; publishing/scheduling anything for this generation.
+        (cond
+         ((not (pilish--browse-session-scan-current-p buf token)))
+         (failure
+          (funcall callback nil failure))
+         (t
+          (let ((files (pilish--browse-session-files dirs buf token)))
+            (when (pilish--browse-session-scan-current-p buf token)
+              (run-at-time 0 nil #'pilish--browse-scan-session-files
+                           buf token files nil callback)))))))))
 
 (defun pilish--tree-browser-chat-session-file ()
   "Return the linked chat buffer's current session file, or nil.
