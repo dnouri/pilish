@@ -489,9 +489,8 @@ generated namespace instead of having their legal identities rejected."
 The leading `#' reserves the generated namespace: no readable label
 can spell a generated token, so the two never collide.  A number
 too large for WIDTH signals instead of silently truncating."
-  (let ((capacity (expt 36 width)))
-    (cl-assert (< 0 n capacity) t
-               "ordinal %d exceeds width %d" n width))
+  (unless (< 0 n (expt 36 width))
+    (error "Ordinal %d exceeds width %d" n width))
   (let ((digits ""))
     (dotimes (_ width)
       (setq digits (format "%c%s"
