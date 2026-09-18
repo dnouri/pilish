@@ -910,17 +910,25 @@ JSON-formatted call preview is excluded as well."
 ;;;; Tree Flattening for Display
 
 (defun pilish--flatten-tree-for-display
-    (tree leaf-id filter-mode &optional search-tokens)
-  "Return TREE's visible nodes as (NODE INDENT PREFIX) rows.
+    (tree leaf-id filter-mode &optional search-tokens published-values)
+  "Return TREE's visible nodes as (NODE DEPTH PREFIX) rows.
 LEAF-ID identifies the current leaf for active-branch-first ordering.
 FILTER-MODE controls browser filtering, and SEARCH-TOKENS are the
 all-regexp-token query applied to each node's semantic text.
 
+DEPTH is ancestry depth in the final displayed topology.  It deliberately
+is not inferred from PREFIX: a one-child chain has no connector glyphs but
+still has parent/child structure.  When PUBLISHED-VALUES is a hash table,
+record every addressable, unambiguous, universally displayable string id,
+including ids hidden by the current filter or search.  The browser uses that
+set to prune fold state only when nodes leave the published tree, not when
+they temporarily leave the display.
+
 Filtering and search happen before topology is derived.  Hidden nodes'
 children attach to their nearest visible ancestor; visible roots,
-sibling connectors, indentation, and ancestor gutters therefore
-represent only the final visible set.  Both passes use explicit stacks
-so deeply nested conversations remain safe."
+sibling connectors, depth, and ancestor gutters therefore represent
+only the final visible set.  Both passes use explicit stacks so deeply
+nested conversations remain safe."
   (let ((active-ids (pilish--active-path-ids tree leaf-id))
         (visible-children (make-hash-table :test 'eq))
         (stack nil))
@@ -930,6 +938,14 @@ so deeply nested conversations remain safe."
       (push (list root nil) stack))
     (while stack
       (pcase-let ((`(,node ,visible-parent) (pop stack)))
+        (when (and published-values
+                   (not (plist-get node :ambiguousId))
+                   ;; Universal pre-filter exclusions are not published
+                   ;; browser ids under any view.
+                   (pilish--browse-node-visible-p node 'all))
+          (when-let* ((id (pilish--normalize-string-or-null
+                           (plist-get node :id))))
+            (puthash id t published-values)))
         (let* ((visible-p
                 (and (pilish--browse-node-visible-p node filter-mode)
                      (or (null search-tokens)
@@ -978,7 +994,10 @@ rows without consulting any hidden node."
                (children (gethash node visible-children))
                (child-count (length children))
                (children-branch-p (> child-count 1))
-               (child-indent (if children-branch-p (1+ indent) indent))
+               ;; Logical ancestry always advances, including a
+               ;; connector-free one-child chain.  PREFIX remains a
+               ;; separate visual concern.
+               (child-indent (1+ indent))
                (child-gutters
                 (if branch-child-p
                     (append gutters (list (if last-p "   " "│  ")))
@@ -1258,8 +1277,10 @@ MEMO caches local canonicalization."
 
 (defun pilish--session-thread-items (items &optional buf generation)
   "Arrange ITEMS into fork-family rows while BUF owns GENERATION.
-Return a list of (ITEM PREFIX) pairs.  ITEMS carry one row per
-canonical identity, as `pilish--session-canonicalize-items' ensures.
+Return a list of (ITEM PREFIX DEPTH) rows.  DEPTH is fork-family
+ancestry depth; it stays structural even when connector glyphs change.
+ITEMS carry one row per canonical identity, as
+`pilish--session-canonicalize-items' ensures.
 Families use `:parentSessionPath' only when the parent is present; a
 missing or filtered parent leaves the fork as a root.  Roots and sibling
 subtrees sort by latest subtree activity, newest first, then canonical
@@ -1315,9 +1336,9 @@ later hand-built items."
         (pilish--thread-node-activity root children-of))
       (let ((result nil))
         (dolist (root (pilish--thread-sorted-nodes roots))
-          (push (list (plist-get root :item) "") result)
+          (push (list (plist-get root :item) "" 0) result)
           (setq result (pilish--thread-collect-children
-                        root children-of nil result)))
+                        root children-of nil result 0)))
         (nreverse result)))))
 
 (defun pilish--thread-node-activity (node children-of)
@@ -1325,16 +1346,34 @@ later hand-built items."
 CHILDREN-OF maps a canonical parent key to its child nodes.  Activity
 is the newest modification anywhere under the family, not the
 parent's own mtime, so a recently used fork promotes its whole
-family.  Fork parents always predate their children, so subtrees are
-finite."
+family.  The explicit postorder stack keeps deeply forked families
+safe; malformed parent cycles are bounded by an eq seen set."
   (or (plist-get node :activity)
-      (let ((latest (or (plist-get (plist-get node :item) :modified) "")))
-        (dolist (child (gethash (plist-get node :key) children-of))
-          (let ((child-latest (pilish--thread-node-activity child children-of)))
-            (when (string> child-latest latest)
-              (setq latest child-latest))))
-        (plist-put node :activity latest)
-        latest)))
+      (let ((stack (list (list node nil)))
+            (seen (make-hash-table :test #'eq)))
+        (puthash node t seen)
+        (while stack
+          (pcase-let ((`(,current ,finish-p) (pop stack)))
+            (if finish-p
+                (let ((latest (or (plist-get (plist-get current :item)
+                                              :modified)
+                                  "")))
+                  (dolist (child (gethash (plist-get current :key)
+                                          children-of))
+                    (let ((child-latest
+                           (or (plist-get child :activity)
+                               (plist-get (plist-get child :item) :modified)
+                               "")))
+                      (when (string> child-latest latest)
+                        (setq latest child-latest))))
+                  (plist-put current :activity latest))
+              (push (list current t) stack)
+              (dolist (child (gethash (plist-get current :key) children-of))
+                (unless (or (plist-get child :activity)
+                            (gethash child seen))
+                  (puthash child t seen)
+                  (push (list child nil) stack))))))
+        (or (plist-get node :activity) ""))))
 
 (defun pilish--thread-sorted-nodes (nodes)
   "Return NODES ordered by subtree activity descending.
@@ -1349,30 +1388,44 @@ order never depends on scan order."
               (string< (or (plist-get a :key) "")
                        (or (plist-get b :key) "")))))))
 
-(defun pilish--thread-collect-children (node children-of ancestors result)
+(defun pilish--thread-collect-children
+    (node children-of ancestors result &optional depth)
   "Collect NODE's sorted children and their descendants onto RESULT.
 CHILDREN-OF maps a canonical parent key to its child nodes.
 ANCESTORS lists, oldest level first, whether each ancestor level
-above the children continues below them.  Children sort by
+above the children continues below them.  DEPTH is NODE's structural
+fork-family depth and defaults to zero.  Children sort by
 `pilish--thread-sorted-nodes' and render after their parent with
-connectors from `pilish--thread-prefix'."
-  (let* ((kids (pilish--thread-sorted-nodes
-                (gethash (plist-get node :key) children-of)))
-         (count (length kids))
-         (index 0))
-    (dolist (kid kids)
-      (cl-incf index)
-      (let* ((last-p (= index count))
-             (prefix (pilish--thread-prefix ancestors last-p)))
-        (push (list (plist-get kid :item) prefix) result)
-        (setq result
-              (pilish--thread-collect-children
-               kid children-of
-               ;; KID's descendants grow one more gutter slot: a bar
-               ;; while KID's own subtree is not the last of its
-               ;; siblings, blank once it is.
-               (append ancestors (list (not last-p)))
-               result))))
+connectors from `pilish--thread-prefix'.  An explicit preorder stack
+keeps arbitrarily deep families off the Lisp call stack."
+  (let (stack)
+    (cl-labels
+        ((queue-children
+          (parent gutters parent-depth)
+          (let* ((kids (pilish--thread-sorted-nodes
+                        (gethash (plist-get parent :key) children-of)))
+                 (count (length kids))
+                 (index 0)
+                 tasks)
+            ;; TASKS is built backwards, then pushed backwards onto STACK,
+            ;; leaving the first sorted child at the top.
+            (dolist (kid kids)
+              (setq index (1+ index))
+              (let ((last-p (= index count)))
+                (push (list kid
+                            (pilish--thread-prefix gutters last-p)
+                            (append gutters (list (not last-p)))
+                            (1+ parent-depth))
+                      tasks)))
+            (dolist (task tasks)
+              (push task stack)))))
+      (queue-children node ancestors (or depth 0))
+      (while stack
+        (pcase-let ((`(,current ,prefix ,gutters ,current-depth)
+                     (pop stack)))
+          (push (list (plist-get current :item) prefix current-depth)
+                result)
+          (queue-children current gutters current-depth))))
     result))
 
 (defun pilish--thread-prefix (ancestors last-p)
@@ -1463,11 +1516,333 @@ once per render and tests pin it.  Invalid timestamps read as
   ((keymap :initform 'pilish-session-section-map))
   "Section class for a session entry in the session browser.")
 
+;;;; Flat-Row Folding
+
+(defvar-local pilish--browse-fold-state nil
+  "Fold state keyed by the canonical value of a rendered section.
+Only folded values are present.  Session paths, Recent group labels,
+and unambiguous string tree-node ids are canonical fold targets;
+legacy and ambiguous tree rows are deliberately excluded.")
+
+(defvar-local pilish--browse-fold-published-values nil
+  "Canonical values in the latest successfully published snapshot.
+This includes values temporarily hidden by a browser filter or query,
+so those transitions do not discard their fold state.")
+
+(defvar-local pilish--browse-fold-rows nil
+  "Preorder flat-row metadata for the current completed render.")
+
+(defvar-local pilish--browse-fold-row-by-section nil
+  "Eq hash table from current Magit section objects to flat-row metadata.")
+
+(defvar-local pilish--browse-fold-extents nil
+  "Equal hash table from canonical fold values to current row metadata.
+A foldable row records `:body-start' and `:end' as its current flat
+subtree extent.  The table is rebuilt from existing renderer rows on
+every render; persistent state lives only in `pilish--browse-fold-state'.")
+
+(defvar-local pilish--browse-fold-overlays nil
+  "Invisible overlays implementing folds in the current render.")
+
+(defun pilish--browse-fold-state-table ()
+  "Return the current buffer's persistent fold-state table."
+  (or pilish--browse-fold-state
+      (setq pilish--browse-fold-state
+            (make-hash-table :test #'equal))))
+
+(defun pilish--browse-folded-p (value)
+  "Return non-nil when canonical section VALUE is folded."
+  (and (stringp value)
+       (gethash value (pilish--browse-fold-state-table))))
+
+(defun pilish--browse-publish-fold-values (values)
+  "Publish canonical VALUES and prune fold state absent from them.
+VALUES is an equal hash table built from the complete successful source
+snapshot, not merely its current filter/search result.  Consequently a
+value can disappear from the display and return with its fold intact,
+while a value removed from the published data is forgotten."
+  (setq pilish--browse-fold-published-values values)
+  (let ((state (pilish--browse-fold-state-table)) stale)
+    (maphash (lambda (value _folded)
+               (unless (gethash value values)
+                 (push value stale)))
+             state)
+    (dolist (value stale)
+      (remhash value state))))
+
+(defun pilish--browse-delete-fold-overlays ()
+  "Delete only the flat-fold overlays owned by the current buffer."
+  (mapc #'delete-overlay pilish--browse-fold-overlays)
+  (setq pilish--browse-fold-overlays nil))
+
+(defun pilish--browse-begin-fold-render ()
+  "Reset transaction-local flat-row folding metadata before insertion."
+  (pilish--browse-delete-fold-overlays)
+  (setq pilish--browse-fold-rows nil
+        pilish--browse-fold-row-by-section (make-hash-table :test #'eq)
+        pilish--browse-fold-extents (make-hash-table :test #'equal)))
+
+(defun pilish--browse-register-fold-row
+    (section value depth surface foldable &optional indicator-offset)
+  "Register one flat renderer row for post-insert folding.
+SECTION is its flat Magit section, VALUE its existing canonical section
+value, and DEPTH its ancestry depth in the displayed topology.  SURFACE
+is one of `tree', `threaded', `recent', or `flat'.  FOLDABLE says the
+already-computed next row is a descendant.  INDICATOR-OFFSET is its
+character offset after any connector prefix.  A non-string VALUE remains
+visible and participates in topology, but is never a fold target."
+  (push (list :section section
+              :value value
+              :depth depth
+              :surface surface
+              :foldable (and foldable (stringp value))
+              :indicator-offset (or indicator-offset 0)
+              :index nil
+              :end-index nil
+              :parent nil
+              :fold-parent nil
+              :unit-root nil
+              :body-start nil
+              :end nil)
+        pilish--browse-fold-rows))
+
+(defun pilish--browse-fold-indicator (value)
+  "Return a non-color fold indicator for canonical section VALUE."
+  (propertize (if (pilish--browse-folded-p value) "▸ " "▾ ")
+              'pilish-browse-fold-indicator value))
+
+(defun pilish--browse-finish-fold-render ()
+  "Derive flat extents and apply folds after all row insertion.
+The stack pass is linear.  It uses the depth already carried by the
+conversation-tree and threaded render rows, or the explicit Recent
+heading/child depths; it never scans a source subtree."
+  (setq pilish--browse-fold-rows (nreverse pilish--browse-fold-rows))
+  (let ((stack nil)
+        (index 0)
+        (count (length pilish--browse-fold-rows)))
+    (dolist (row pilish--browse-fold-rows)
+      (let ((depth (plist-get row :depth)))
+        (while (and stack
+                    (>= (plist-get (car stack) :depth) depth))
+          (setf (plist-get (car stack) :end-index) index)
+          (pop stack))
+        (let ((parent (car stack)))
+          (setf (plist-get row :index) index
+                (plist-get row :parent) parent
+                (plist-get row :fold-parent)
+                (cond
+                 ((null parent) nil)
+                 ((plist-get parent :foldable) parent)
+                 (t (plist-get parent :fold-parent)))
+                (plist-get row :unit-root)
+                (and (> depth 0)
+                     (memq (plist-get row :surface)
+                           '(threaded recent))
+                     (or (plist-get parent :unit-root) parent))))
+        (puthash (plist-get row :section) row
+                 pilish--browse-fold-row-by-section)
+        (push row stack)
+        (setq index (1+ index))))
+    (dolist (row stack)
+      (setf (plist-get row :end-index) count))
+    ;; Convert once so extent endpoints stay O(1) even for a deep chain.
+    (let ((rows (vconcat pilish--browse-fold-rows)))
+      (dolist (row pilish--browse-fold-rows)
+        (when (plist-get row :foldable)
+          (let* ((row-index (plist-get row :index))
+                 (end-index (plist-get row :end-index))
+                 (body-start
+                  (oref (plist-get (aref rows (1+ row-index)) :section)
+                        start))
+                 (end (if (< end-index count)
+                          (oref (plist-get (aref rows end-index) :section)
+                                start)
+                        (point-max))))
+            (setf (plist-get row :body-start) body-start
+                  (plist-get row :end) end)
+            (puthash (plist-get row :value) row
+                     pilish--browse-fold-extents)))))
+  (pilish--browse-apply-folds)))
+
+(defun pilish--browse-apply-folds ()
+  "Rebuild invisible overlays and truthful indicators from fold state.
+Only maximal effective folds get overlays.  Nested folded state remains
+recorded, so expanding an outer row reveals a still-folded child header,
+but deep fold-all renders do not accumulate overlapping overlays."
+  (pilish--browse-delete-fold-overlays)
+  (let ((inhibit-read-only t)
+        (covered-until 0))
+    (dolist (row pilish--browse-fold-rows)
+      (when (plist-get row :foldable)
+        (let* ((value (plist-get row :value))
+               (folded (pilish--browse-folded-p value))
+               (start (+ (oref (plist-get row :section) start)
+                         (plist-get row :indicator-offset))))
+          ;; `subst-char-in-region' changes one glyph in place: positions,
+          ;; Magit's section properties, and its insertion-type markers stay
+          ;; unchanged, while `buffer-string' and redisplay both tell the
+          ;; truth about the current state.
+          (when (equal (get-text-property
+                        start 'pilish-browse-fold-indicator)
+                       value)
+            (remove-text-properties start (1+ start) '(display nil))
+            (let ((glyph (string-to-char (if folded "▸" "▾"))))
+              (unless (= (char-after start) glyph)
+                (subst-char-in-region start (1+ start)
+                                      (char-after start) glyph t))))
+          (when (and folded
+                     (>= (plist-get row :index) covered-until))
+            (let ((beg (plist-get row :body-start))
+                  (end (plist-get row :end)))
+              (when (< beg end)
+                (let ((overlay (make-overlay beg end nil nil t)))
+                  (overlay-put overlay 'evaporate t)
+                  (overlay-put overlay 'invisible 'pilish-browse-fold)
+                  (overlay-put overlay 'cursor-intangible t)
+                  (overlay-put overlay 'pilish-browse-fold-header row)
+                  (push overlay pilish--browse-fold-overlays)))
+              (setq covered-until (plist-get row :end-index)))))))
+    (setq pilish--browse-fold-overlays
+          (nreverse pilish--browse-fold-overlays))))
+
+(defun pilish--browse-fold-overlay-at (position)
+  "Return the effective Pilish fold overlay hiding POSITION, or nil."
+  (let (best)
+    (dolist (overlay (overlays-at position))
+      (when (overlay-get overlay 'pilish-browse-fold-header)
+        (when (or (null best)
+                  (< (overlay-start overlay) (overlay-start best))
+                  (and (= (overlay-start overlay) (overlay-start best))
+                       (> (overlay-end overlay) (overlay-end best))))
+          (setq best overlay))))
+    best))
+
+(defun pilish--browse-repair-folded-position (position)
+  "Return a visible position for POSITION under current folds.
+A hidden descendant is promoted to the header whose effective overlay
+hides it.  Other kinds of invisibility are left untouched."
+  (if-let* ((overlay (pilish--browse-fold-overlay-at position))
+            (row (overlay-get overlay 'pilish-browse-fold-header)))
+      (oref (plist-get row :section) start)
+    position))
+
+(defun pilish--browse-repair-folded-points ()
+  "Move buffer and window points out of folded row extents."
+  (goto-char (pilish--browse-repair-folded-position (point)))
+  (dolist (window (get-buffer-window-list (current-buffer) nil t))
+    (set-window-point
+     window
+     (pilish--browse-repair-folded-position (window-point window)))))
+
+(defun pilish--browse-current-fold-row ()
+  "Return current flat-row metadata, or nil outside a browser row."
+  (and pilish--browse-fold-row-by-section
+       (gethash (magit-current-section)
+                pilish--browse-fold-row-by-section)))
+
+(defun pilish--browse-fold-target-at-point ()
+  "Return the foldable row selected by the documented point rule.
+A row with displayed descendants selects itself.  A leaf selects its
+nearest displayed foldable ancestor or containing unit."
+  (when-let* ((row (pilish--browse-current-fold-row)))
+    (if (plist-get row :foldable)
+        row
+      (plist-get row :fold-parent))))
+
+(defun pilish--browse-refresh-fold-display ()
+  "Apply current fold state and keep all displayed points visible."
+  (pilish--browse-apply-folds)
+  (pilish--browse-repair-folded-points)
+  (force-mode-line-update))
+
+(defun pilish-browse-toggle-fold ()
+  "Toggle the foldable row at point without changing section nesting.
+A row that has currently displayed descendants folds itself.  On a
+leaf row, toggle its nearest displayed foldable ancestor or containing
+unit.  Flat query and Most-messages rows have no such target."
+  (interactive)
+  (if-let* ((row (pilish--browse-fold-target-at-point)))
+      (let* ((value (plist-get row :value))
+             (state (pilish--browse-fold-state-table)))
+        (if (gethash value state)
+            (remhash value state)
+          (puthash value t state))
+        (pilish--browse-refresh-fold-display))
+    (user-error "No foldable row at point")))
+
+(defun pilish-browse-fold-all (&optional unfold)
+  "Fold every displayed top-level unit, or UNFOLD every saved fold.
+Without a prefix argument, collapse each outermost currently foldable
+conversation root, fork family, or Recent group in one overlay pass.
+With a prefix argument, clear all fold state, including temporarily
+filtered values."
+  (interactive "P")
+  (let ((state (pilish--browse-fold-state-table)))
+    (if unfold
+        (clrhash state)
+      (dolist (row pilish--browse-fold-rows)
+        (when (and (plist-get row :foldable)
+                   (null (plist-get row :fold-parent)))
+          (puthash (plist-get row :value) t state))))
+    (pilish--browse-refresh-fold-display)))
+
+(defun pilish-browse-goto-parent-row ()
+  "Go to the current row's visible parent or containing unit.
+Conversation-tree rows use their nearest displayed parent.  Threaded
+session rows go to their family root, and Recent rows go to their time
+group heading.  Flat session/query rows have no parent."
+  (interactive)
+  (let* ((row (pilish--browse-current-fold-row))
+         (surface (and row (plist-get row :surface)))
+         (target
+          (pcase surface
+            ('tree (plist-get row :parent))
+            ((or 'threaded 'recent) (plist-get row :unit-root))
+            (_ nil))))
+    (if target
+        (magit-section-goto (plist-get target :section))
+      (user-error "No parent row"))))
+
+(defun pilish--browse-skip-folded-section (_section)
+  "Keep Magit's section motions out of invisible flat rows.
+Installed buffer-locally on `magit-section-movement-hook'.  Native
+Magit section commands and bindings remain unchanged; after one lands
+inside an effective fold, jump directly across its overlay rather than
+walking every hidden row."
+  (when-let* ((overlay (pilish--browse-fold-overlay-at (point)))
+              (row (overlay-get overlay 'pilish-browse-fold-header)))
+    (cond
+     ((memq this-command
+            '(magit-section-forward magit-section-forward-sibling))
+      (let ((end (overlay-end overlay)))
+        (if (< end (point-max))
+            (goto-char end)
+          (goto-char (oref (plist-get row :section) start))
+          (user-error "No next visible section"))))
+     (t
+      ;; Backward motions, and any future Magit motion that reaches an
+      ;; invisible row, repair to the visible owning header.
+      (goto-char (oref (plist-get row :section) start))))))
+
 ;;;; Keymaps
 
 (defvar pilish-browse-mode-map
-  (let ((map (make-sparse-keymap)))
-    (set-keymap-parent map magit-section-mode-map)
+  (let ((map (copy-keymap magit-section-mode-map)))
+    ;; These commands describe recursive Magit section bodies.  Pilish's
+    ;; identity sections stay deliberately flat, so retaining them would be
+    ;; inert or misleading.  Copying (rather than parenting) lets nil remove
+    ;; the inherited bindings completely.
+    (dolist (key '("C-c TAB" "C-<tab>" "M-<tab>"
+                   "1" "2" "3" "4"
+                   "M-1" "M-2" "M-3" "M-4"
+                   "<left-fringe> <mouse-1>"
+                   "<left-fringe> <mouse-2>"))
+      (define-key map (kbd key) nil))
+    (define-key map (kbd "TAB") #'pilish-browse-toggle-fold)
+    (define-key map [tab] #'pilish-browse-toggle-fold)
+    (define-key map (kbd "<backtab>") #'pilish-browse-fold-all)
+    (define-key map [backtab] #'pilish-browse-fold-all)
+    (define-key map (kbd "^") #'pilish-browse-goto-parent-row)
     (define-key map (kbd "g") #'pilish-browse-refresh)
     (define-key map (kbd "q") #'quit-window)
     map)
@@ -1599,6 +1974,18 @@ passes it to `pilish--browse-load-sessions'.  Direct loader callers that
 omit a generation claim one at the loader seam.  Superseded work is
 dropped by comparing its captured token with the buffer's current one.")
 
+(defvar-local pilish--session-browser-rendering-p nil
+  "Non-nil while a session rerender owns the buffer transaction.")
+
+(defvar-local pilish--session-browser-pending-rerender nil
+  "Newest session rerender deferred by an active render transaction.
+The value is an argument list for `pilish--session-browser-rerender'.")
+
+(defun pilish--session-browser-ensure-render-current (buf generation)
+  "Abort session insertion unless BUF still owns GENERATION."
+  (unless (pilish--session-browser-generation-current-p buf generation)
+    (throw 'pilish--session-browser-stale-render nil)))
+
 ;;;; Session Browser Dispatch Transient
 
 (defun pilish--session-dispatch-heading ()
@@ -1635,7 +2022,11 @@ browser's state on the real rendering path."
     ("s" "cycle view" pilish-session-browser-cycle-view)
     ("f" "named only" pilish-session-browser-toggle-named)
     ("t" "toggle scope" pilish-session-browser-toggle-scope)
-    ("/" "search" pilish-session-browser-search)]])
+    ("/" "search" pilish-session-browser-search)]
+   ["Navigate & Fold"
+    ("TAB" "toggle row/nearest containing fold" pilish-browse-toggle-fold)
+    ("<backtab>" "fold all (prefix: unfold)" pilish-browse-fold-all)
+    ("^" "family root/group heading" pilish-browse-goto-parent-row)]])
 
 ;;;; Faces
 
@@ -1679,8 +2070,17 @@ browser's state on the real rendering path."
 (define-derived-mode pilish-browse-mode magit-section-mode
   "Pi-Browse"
   "Base mode for Pilish browse buffers.
-Inherits section navigation from `magit-section-mode'."
-  :group 'pilish)
+Uses Magit's flat section navigation plus Pilish's explicit row folding."
+  :group 'pilish
+  (setq pilish--browse-fold-state (make-hash-table :test #'equal)
+        pilish--browse-fold-published-values nil
+        pilish--browse-fold-rows nil
+        pilish--browse-fold-row-by-section (make-hash-table :test #'eq)
+        pilish--browse-fold-extents (make-hash-table :test #'equal)
+        pilish--browse-fold-overlays nil)
+  (add-to-invisibility-spec 'pilish-browse-fold)
+  (add-hook 'magit-section-movement-hook
+            #'pilish--browse-skip-folded-section nil t))
 
 (define-derived-mode pilish-session-browser-mode
   pilish-browse-mode "Pi-Sessions"
@@ -1813,6 +2213,20 @@ re-running callback-capable canonicalization."
           (push (append (list :canonicalPath key) item) prepared)))
       (cons t (nreverse prepared)))))
 
+(defun pilish--session-fold-published-values (items now)
+  "Return fold-value set for the complete prepared session ITEMS at NOW.
+Session keys and every Recent time-group label represented by the source
+snapshot are included, regardless of the current view, filter, or query."
+  (let ((values (make-hash-table :test #'equal)))
+    (dolist (item items)
+      (when-let* ((key (plist-get item :canonicalPath))
+                  ((stringp key)))
+        (puthash key t values))
+      (puthash (pilish--session-time-group
+                (plist-get item :modified) now)
+               t values))
+    values))
+
 (defun pilish--session-browser-render (buf)
   "Render the session browser in BUF from its buffer-local state."
   (with-current-buffer buf
@@ -1879,11 +2293,27 @@ re-running callback-capable canonicalization."
                        ;; result set, with no implied family connectors.
                        (if (eq pilish--session-browser-view 'threaded)
                            'recent
-                         pilish--session-browser-view)))))))
+                         pilish--session-browser-view))))))
+           ;; Capture the calendar clock once for both the persistent
+           ;; Recent-group universe and the rendered Recent boundaries.
+           (render-now
+            (and prepared
+                 (not pilish--session-browser-loading)
+                 (not pilish--session-browser-error)
+                 (current-time)))
+           (published-values
+            (and render-now
+                 (pilish--session-fold-published-values items render-now))))
+      (pilish--session-browser-ensure-render-current buf generation)
+      (pilish--browse-begin-fold-render)
       (when (and prepared
                  (pilish--session-browser-generation-current-p
                   buf generation))
         (magit-insert-section (root)
+          ;; A visibility hook can request a newer fetch.  Its render is
+          ;; queued until this transaction unwinds; stop before inserting
+          ;; any row owned by the superseded generation.
+          (pilish--session-browser-ensure-render-current buf generation)
           (cond
            (pilish--session-browser-loading
             (insert (pilish--propertize-face
@@ -1903,10 +2333,18 @@ re-running callback-capable canonicalization."
              rows fields live-paths buf generation))
            ((eq row-kind 'recent)
             (pilish--session-browser-render-recent
-             rows fields live-paths buf generation))
+             rows fields live-paths buf generation render-now))
            (t
             (pilish--session-browser-render-flat
-             rows fields live-paths buf generation))))))))
+             rows fields live-paths buf generation)))))
+        (pilish--session-browser-ensure-render-current buf generation)
+        ;; Publish only after insertion still owns its generation.  A
+        ;; reentrant newer fetch must not let this obsolete render prune
+        ;; persistent fold state before it stops.
+        (when published-values
+          (pilish--browse-publish-fold-values published-values))
+        (pilish--browse-finish-fold-render)
+        (pilish--session-browser-ensure-render-current buf generation))))
 
 (defun pilish--session-browser-render-flat
     (items fields live-paths buf generation)
@@ -1917,29 +2355,35 @@ LIVE-PATHS marks live sessions."
     (when (pilish--session-browser-generation-current-p buf generation)
       (pilish--session-browser-insert-session
        item (plist-get item :canonicalPath) nil fields live-paths
-       buf generation))))
+       buf generation 0 'flat nil))))
 
 (defun pilish--session-browser-render-threaded
     (rows fields live-paths buf generation)
   "Render prepared threaded ROWS while BUF owns GENERATION.
-Each row is an (ITEM PREFIX) pair already produced before the outer
-Magit section opened.  FIELDS and LIVE-PATHS provide project and live
-context."
-  (dolist (entry rows)
-    (when (pilish--session-browser-generation-current-p buf generation)
-      (let ((item (nth 0 entry)))
-        (pilish--session-browser-insert-session
-         item (plist-get item :canonicalPath) (nth 1 entry)
-         fields live-paths buf generation)))))
+Each row is an (ITEM PREFIX DEPTH) entry already produced before the
+outer Magit section opened.  FIELDS and LIVE-PATHS provide project and
+live context."
+  (cl-loop for tail on rows
+           for entry = (car tail)
+           for next = (cadr tail)
+           while (pilish--session-browser-generation-current-p
+                  buf generation)
+           do
+           (let* ((item (nth 0 entry))
+                  (depth (nth 2 entry))
+                  (foldable (and next (> (nth 2 next) depth))))
+             (pilish--session-browser-insert-session
+              item (plist-get item :canonicalPath) (nth 1 entry)
+              fields live-paths buf generation
+              depth 'threaded foldable))))
 
 (defun pilish--session-browser-render-recent
-    (items fields live-paths buf generation)
-  "Render prepared, recency-sorted ITEMS while BUF owns GENERATION.
-The current time is captured once, so a render that crosses midnight
-groups every row against the same calendar day.  FIELDS maps session
-keys to project tokens; LIVE-PATHS marks live sessions."
-  (let ((now (current-time))
-        (last-group nil))
+    (items fields live-paths buf generation now)
+  "Render prepared, recency-sorted ITEMS at NOW while BUF owns GENERATION.
+NOW is captured once by the outer render, so a render that crosses
+midnight groups every row against the same calendar day.  FIELDS maps
+session keys to project tokens; LIVE-PATHS marks live sessions."
+  (let ((last-group nil))
     (dolist (item items)
       (when (pilish--session-browser-generation-current-p buf generation)
         (let ((group (pilish--session-time-group
@@ -1947,17 +2391,24 @@ keys to project tokens; LIVE-PATHS marks live sessions."
           (unless (equal group last-group)
             (when (pilish--session-browser-generation-current-p
                    buf generation)
-              (magit-insert-section (time-group group)
+              (magit-insert-section group-section (time-group group)
+                (pilish--session-browser-ensure-render-current
+                 buf generation)
+                (pilish--browse-register-fold-row
+                 group-section group 0 'recent t)
                 (magit-insert-heading
-                  (pilish--propertize-face
-                   group 'pilish-session-group-header)))
+                  (concat
+                   (pilish--browse-fold-indicator group)
+                   (pilish--propertize-face
+                    group 'pilish-session-group-header))))
               (setq last-group group)))
           (pilish--session-browser-insert-session
            item (plist-get item :canonicalPath) nil fields live-paths
-           buf generation))))))
+           buf generation 1 'recent nil))))))
 
 (defun pilish--session-browser-insert-session
-    (session key prefix fields live-paths buf generation)
+    (session key prefix fields live-paths buf generation
+             &optional depth surface foldable)
   "Insert prepared SESSION with KEY and PREFIX while BUF owns GENERATION.
 KEY was computed once by
 `pilish--session-browser-prepare-render-items', so insertion never
@@ -1981,7 +2432,8 @@ key is a key of LIVE-PATHS (see
 `pilish--browse-live-session-paths' — only Pilish processes in this
 Emacs, never other Emacs instances or system-wide pi processes),
 prepend a live-session marker.
-Message count and age are rendered as a right-margin overlay."
+DEPTH, SURFACE, and FOLDABLE carry the already prepared flat folding
+shape.  Message count and age are rendered as a right-margin overlay."
   (when (pilish--session-browser-generation-current-p buf generation)
     (let* ((name (pilish--session-display-name session))
          (count (or (plist-get session :messageCount) 0))
@@ -1989,11 +2441,18 @@ Message count and age are rendered as a right-margin overlay."
          (is-fork (plist-get session :parentSessionPath))
          (live-p (gethash key live-paths))
          (token (and fields (gethash key fields)))
+         (fold-indicator
+          (and foldable (pilish--browse-fold-indicator key)))
          (display-prefix
           (cond
            (prefix
-            (pilish--propertize-face
-             prefix 'pilish-session-thread-connector))
+            ;; Keep every connector in its original column.  A fold glyph
+            ;; follows this row's complete connector instead of shifting
+            ;; descendant gutters to the right.
+            (concat
+             (pilish--propertize-face
+              prefix 'pilish-session-thread-connector)
+             fold-indicator))
            (is-fork
             (pilish--propertize-face
              "fork: " 'pilish-session-thread-connector))
@@ -2034,7 +2493,14 @@ Message count and age are rendered as a right-margin overlay."
       ;; Check immediately before insertion as preparation above may run
       ;; user-advised display/time code even though the key is already pure.
       (when (pilish--session-browser-generation-current-p buf generation)
-        (magit-insert-section (session key)
+        (magit-insert-section session-section (session key)
+          (pilish--session-browser-ensure-render-current buf generation)
+          (pilish--browse-register-fold-row
+           session-section key (or depth 0) (or surface 'flat) foldable
+           (and foldable
+                (text-property-any
+                 0 (length heading)
+                 'pilish-browse-fold-indicator key heading)))
           (magit-insert-heading heading)
           (pilish--make-margin-overlay margin-str))))))
 
@@ -2649,6 +3115,11 @@ paths."
                   (forward-char
                    (min offset (1- (- (or end (point-max)) start))))))
             (goto-char (point-min)))
+          ;; Restoration by identity must not reveal a user's fold.  If
+          ;; the exact or fallback section is inside an invisible extent,
+          ;; promote point to the visible fold header before any window is
+          ;; synchronized.
+          (goto-char (pilish--browse-repair-folded-position (point)))
           ;; `erase-buffer' clamped every displaying window's point to
           ;; bob; the `goto-char' above moved only the buffer's own
           ;; point.  Sync all live windows displaying BUF — the list
@@ -2656,8 +3127,6 @@ paths."
           ;; idiom as `pilish--with-scroll-preservation').
           (dolist (w (get-buffer-window-list buf nil t))
             (set-window-point w (point)))
-          (when-let* ((cur (magit-current-section)))
-            (magit-section-show cur))
           (force-mode-line-update))))))
 
 ;;;; Fetch and Render
@@ -2730,10 +3199,30 @@ while BUF still owns it; reentrant newer fetches retain their state."
 (defun pilish--session-browser-rerender (&optional fallback)
   "Re-render the session browser from local state, preserving point.
 FALLBACK is a pre-fetch `(IDENT . OFFSET)' anchor handed to
-`pilish--browse-rerender-preserving-point' for the fetch
-cycle's final render."
-  (pilish--browse-rerender-preserving-point
-   (current-buffer) #'pilish--session-browser-render fallback))
+`pilish--browse-rerender-preserving-point' for the fetch cycle's final
+render.
+
+Only one render transaction runs in the buffer.  A reentrant request from
+Magit's callback-capable visibility hook replaces the pending request;
+the active generation aborts immediately after that hook, unwinds its
+dynamic section parent, and only then paints the newest request cleanly."
+  (if pilish--session-browser-rendering-p
+      ;; A one-element list remains non-nil when FALLBACK itself is nil.
+      (setq pilish--session-browser-pending-rerender (list fallback))
+    (setq pilish--session-browser-rendering-p t)
+    (unwind-protect
+        (let ((generation pilish--session-browser-fetch-token))
+          (catch 'pilish--session-browser-stale-render
+            (pilish--session-browser-ensure-render-current
+             (current-buffer) generation)
+            (pilish--browse-rerender-preserving-point
+             (current-buffer) #'pilish--session-browser-render fallback)
+            (pilish--session-browser-ensure-render-current
+             (current-buffer) generation)))
+      (setq pilish--session-browser-rendering-p nil)
+      (when-let* ((pending pilish--session-browser-pending-rerender))
+        (setq pilish--session-browser-pending-rerender nil)
+        (apply #'pilish--session-browser-rerender pending)))))
 
 ;;;; Tree Browser Section Classes and Keymaps
 
@@ -2974,6 +3463,10 @@ rendering path."
     ("l" "label" pilish-tree-browser-set-label)
     ("g" "refresh" pilish-browse-refresh)
     ("q" "quit" quit-window)]
+   ["Navigate & Fold"
+    ("TAB" "toggle row/nearest ancestor fold" pilish-browse-toggle-fold)
+    ("<backtab>" "fold all (prefix: unfold)" pilish-browse-fold-all)
+    ("^" "visible parent row" pilish-browse-goto-parent-row)]
    ["Filter"
     ("f" "cycle filter" pilish-tree-browser-cycle-filter)
     ("d" "default: hide model/thinking changes"
@@ -3313,13 +3806,15 @@ checks before and immediately after Magit's visibility-hook seam abort
 obsolete insertion when a newer load lands reentrantly."
   (with-current-buffer buf
     (pilish--tree-browser-ensure-render-current)
+    (pilish--browse-begin-fold-render)
     (let* ((inhibit-read-only t)
            (tree pilish--tree-browser-tree)
            (leaf-id (pilish--normalize-string-or-null
                      pilish--tree-browser-leaf-id))
            (filter pilish--tree-browser-filter)
            (diagnostic pilish--tree-browser-diagnostic)
-           (unique-ids-p (pilish-jsonl-tree-ids-unique-p tree)))
+           (unique-ids-p (pilish-jsonl-tree-ids-unique-p tree))
+           (published-values nil))
       (magit-insert-section (root)
         ;; `magit-insert-section' ran its visibility hook before entering
         ;; this body.  That hook can yield and complete a newer fetch.
@@ -3349,21 +3844,29 @@ obsolete insertion when a newer load lands reentrantly."
           (setq pilish--tree-browser-visible-count 0)
           (insert "Malformed conversation tree: duplicate entry ids.\n"))
          ((or (null tree) (= (length tree) 0))
-          (setq pilish--tree-browser-visible-count 0)
+          (setq pilish--tree-browser-visible-count 0
+                published-values (make-hash-table :test #'equal))
           (insert "No conversation tree.\n"))
          (t
-          (let* ((flat (pilish--flatten-tree-for-display
+          (let* ((source-values (make-hash-table :test #'equal))
+                 (flat (pilish--flatten-tree-for-display
                         tree leaf-id filter
-                        pilish--tree-browser-search-tokens))
+                        pilish--tree-browser-search-tokens
+                        source-values))
                  (active-ids (pilish--active-path-ids tree leaf-id))
                  (visible flat))
+            (setq published-values source-values)
             (setq pilish--tree-browser-visible-count
                   (length visible))
             (if (null visible)
                 (insert "No matching entries.\n")
-              (dolist (entry visible)
+              (cl-loop for tail on visible
+                       for entry = (car tail)
+                       for next = (cadr tail)
+                       do
                 (pilish--tree-browser-ensure-render-current)
                 (let* ((node (nth 0 entry))
+                       (depth (nth 1 entry))
                        (prefix (nth 2 entry))
                        (node-id (pilish--normalize-string-or-null
                                  (plist-get node :id)))
@@ -3375,6 +3878,9 @@ obsolete insertion when a newer load lands reentrantly."
                         (if ambiguous-p
                             (cons 'ambiguous-id node-id)
                           node-id))
+                       (foldable
+                        (and next (> (nth 1 next) depth)
+                             (stringp section-value)))
                        ;; Legacy or ambiguous rows have no truthful
                        ;; occurrence identity and never receive @ or *.
                        (is-active (and node-id
@@ -3386,14 +3892,35 @@ obsolete insertion when a newer load lands reentrantly."
                        (prefix-str (pilish--propertize-face
                                     prefix
                                     'pilish-tree-connector))
+                       ;; Marker (two characters), the padded type, then one
+                       ;; separator.  %-7s is a minimum width, so use the
+                       ;; actual string length for custom tool/type names.
+                       (indicator-index
+                        (+ 3
+                           (length
+                            (format "%-7s"
+                                    (pilish--tree-node-type-label node)))))
                        (line (pilish--tree-format-node-line
                               node is-active is-current)))
-                  (magit-insert-section (tree-node section-value)
+                  (magit-insert-section node-section
+                      (tree-node section-value)
                     ;; Fence the exact seam from the adversarial repro:
                     ;; the section visibility hook has just returned.
                     (pilish--tree-browser-ensure-render-current)
+                    (pilish--browse-register-fold-row
+                     node-section section-value depth 'tree foldable
+                     (+ (length prefix) indicator-index))
                     (magit-insert-heading
-                      (concat prefix-str line))
+                      ;; Preserve the established connector, @/* marker, and
+                      ;; seven-column type label.  The fold glyph follows
+                      ;; those discovery columns and precedes the preview.
+                      (if foldable
+                          (concat prefix-str
+                                  (substring line 0 indicator-index)
+                                  (pilish--browse-fold-indicator
+                                   section-value)
+                                  (substring line indicator-index))
+                        (concat prefix-str line)))
                     (when-let* ((label (plist-get node :label)))
                       ;; 3 = "[" + "]" + 1 char padding
                       (let ((truncated
@@ -3404,6 +3931,13 @@ obsolete insertion when a newer load lands reentrantly."
                          (pilish--propertize-face
                           (format "[%s]" truncated)
                           'pilish-tree-label))))))))))))
+      (pilish--tree-browser-ensure-render-current)
+      ;; Commit both source membership and visibility only after every flat
+      ;; section finished insertion and this render still owns its fenced
+      ;; generation.  Generic point restoration runs after this function.
+      (when published-values
+        (pilish--browse-publish-fold-values published-values))
+      (pilish--browse-finish-fold-render)
       (pilish--tree-browser-ensure-render-current))))
 
 ;;;; Tree Browser Header-Line
@@ -4688,7 +5222,12 @@ to redisplay between its slices; one timer hop never does)."
                  pilish--tree-browser-fetch-lineage)
                 (t pilish--tree-browser-point-lineage)))))
     (when new-owner-p
-      (setq pilish--tree-browser-point-oriented-p nil
+      ;; Node ids are canonical only within one session file.  A reused
+      ;; browser must not transfer folds to coincidentally equal ids owned
+      ;; by another file.
+      (setq pilish--browse-fold-state (make-hash-table :test #'equal)
+            pilish--browse-fold-published-values nil
+            pilish--tree-browser-point-oriented-p nil
             pilish--tree-browser-point-anchor nil
             pilish--tree-browser-point-lineage nil
             pilish--tree-browser-fetch-anchor nil

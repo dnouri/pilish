@@ -377,6 +377,19 @@ the project.  =s= cycles the view:
 - Most messages — flat rows ordered by the number of persisted
   message records, tool results included, highest first.
 
+Threaded families and Recent time groups can be folded without turning
+these flat rows into nested Magit sections.  =TAB= toggles the row itself
+when it has displayed descendants; on a leaf it toggles the nearest
+containing foldable row (a fork ancestor or Recent group).  =S-TAB= folds
+all outer families/groups, and =C-u S-TAB= unfolds everything.  =^= goes
+to the family root in Threaded or the group heading in Recent.  Most
+messages and queried Threaded results have no fold target or parent unit;
+Recent queries keep their time groups.  Folds survive rerenders and a
+filter/search round trip; they are forgotten
+when the corresponding session or group leaves the published snapshot.
+=n= / =p= (and =M-n= / =M-p=) keep Magit's flat section motion and skip
+rows hidden by a fold.
+
 Search results are always flat — a query never draws family
 connectors.  A queried Threaded (fork families) view orders the
 rows newest-first; Most messages keeps its count ordering under a
@@ -410,7 +423,15 @@ row survives.  =@= marks the actual current entry and =*= marks its active
 ancestors, so a filter that hides the current entry never mislabels an
 ancestor as current.  Moving point yourself wins on later refreshes;
 when a selected row disappears, point first tries its nearest visible
-ancestor from the old snapshot, then the new active path.  Switching
+ancestor from the old snapshot, then the new active path.  =TAB= folds a
+row with displayed descendants; on a leaf it folds the nearest displayed
+ancestor that has descendants.  =S-TAB= folds all outer roots and
+=C-u S-TAB= unfolds everything; =^= moves to the nearest visible parent.
+Fold state survives rerenders and filter/search round trips, including
+when an id temporarily disappears and returns, and is pruned when that id
+leaves the published tree.  Point restoration never opens a user fold or
+leaves point on an invisible row, and Magit's =n= / =p= and sibling motions
+skip folded rows.  Switching
 the linked chat to another session file resets this orientation even
 when a fork shares node IDs with the old file.
 
@@ -463,7 +484,7 @@ repeats of the same nonempty-ID entry display that entry once.  If the
 same ID instead names different entries, the later entry is the one
 shown, unrelated unique history remains usable, and the browser shows a
 duplicate-ID warning.  That ambiguous row has no =@= or =*= marker and
-cannot be labeled or used as a continuation target.
+cannot be labeled, used as a continuation target, or made a fold target.
 
 Tree filtering runs after display projection.  Projection first removes
 raw =label=, =session_info=, and =custom= bookkeeping entries and
@@ -560,6 +581,10 @@ The browsers:
 |-----------+----------------+-------------------------------------------------------------------------|
 | =RET=     | sessions       | Switch to selected session                                              |
 | =RET=     | tree           | Continue from selected turn                                             |
+| =TAB=     | sessions, tree | Toggle this row's fold, or its nearest containing fold                  |
+| =S-TAB=   | sessions, tree | Fold all outer units (=C-u S-TAB= unfolds all)                           |
+| =^=       | sessions, tree | Family root / group heading / nearest visible tree parent               |
+| =n= / =p= | sessions, tree | Next / previous visible flat section (skips folded rows)                 |
 | =/=       | sessions, tree | Search with regexp tokens                                               |
 | =s=       | sessions       | Cycle view: Threaded (fork families), Recent activity, or Most messages |
 | =t=       | sessions       | Toggle This project / All projects scope                                |
@@ -569,6 +594,10 @@ The browsers:
 | =l=       | tree           | Set or clear a label on a node                                          |
 | =g=       | sessions, tree | Refresh                                                                 |
 | =?=       | sessions, tree | Browser menu                                                            |
+
+The browser rows stay flat, so Magit's recursive cycle bindings
+(=C-c TAB=, =C-<tab>=, =M-<tab>=) and level keys (=1= through =4= and
+their Meta variants) are intentionally unbound.
 
 The transient menu (=C-c C-p=) collects the full command set — new
 session, reload, name, export, quit, compact, fork, tree, model,
@@ -904,12 +933,14 @@ Input buffer (normal state):
 | =q=   | close input window |
 | =?=   | transient menu     |
 
-Session and tree browser buffers start in motion state as well.
-Magit's own =j= / =k= section navigation works unmodified.  In the
-session browser =RET= switches to the selected session; in the tree
-browser it continues from the selected turn.  Every documented browser
-key — views, filters, search, scope, rename, delete, refresh, dispatch,
-=RET= — is rebound in motion state so the Evil and evil-collection
+Session and tree browser buffers start in motion state as well.  Evil's
+=j= / =k= move line-wise; Magit's section motions remain on =n= / =p=
+(and =M-n= / =M-p=) and skip folded rows.  =TAB= / =S-TAB= and =^= use
+the browser folding and parent commands described above.  In the session
+browser =RET= switches to the selected session; in the tree browser it
+continues from the selected turn.  Every documented browser key — views,
+filters, folding, parent motion, search, scope, rename, delete, refresh,
+dispatch, =RET= — is rebound in motion state so the Evil and evil-collection
 keymap stack never swallows them (evil's
 motion state owns =/=, =?= and the =g= prefix; evil-snipe's =f= / =t=
 are disabled in these buffers, mirroring the chat buffer's =f= fork

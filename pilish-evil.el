@@ -60,11 +60,16 @@
 ;;
 ;; Session and tree browser buffers (motion state):
 ;;
-;;   j / k   section navigation (Magit's own, unmodified)
+;;   j / k   Evil's line-wise next / previous motions
+;;   n / p   Magit's next / previous visible section motions
+;;   TAB     toggle the row's fold (or its nearest containing fold)
+;;   S-TAB   fold all; with a prefix argument, unfold all
+;;   ^       visible parent, family root, or Recent group heading
 ;;   RET     switch to the selected session, or in the tree browser
 ;;           continue from the selected turn
-;;   Every   documented browser key — views, filters, search, scope,
-;;          rename, delete, refresh, dispatch, RET — is also rebound
+;;   Every   documented browser key — section motion, folding, parent,
+;;          views, filters, search, scope, rename, delete, refresh,
+;;          dispatch, RET — is also rebound
 ;;          in motion state, because the Evil and evil-collection
 ;;          keymap stack would otherwise swallow the letters:
 ;;          evil-snipe owns f/t, evil's motion state owns /, ?, and
@@ -105,7 +110,14 @@
 (declare-function pilish-copy-file-path "pilish-render")
 (declare-function pilish-visit-file "pilish-render")
 (declare-function pilish-toggle-tool-section "pilish-render")
+(declare-function magit-section-backward "magit-section")
+(declare-function magit-section-backward-sibling "magit-section")
+(declare-function magit-section-forward "magit-section")
+(declare-function magit-section-forward-sibling "magit-section")
 (declare-function pilish-browse-refresh "pilish-browse")
+(declare-function pilish-browse-toggle-fold "pilish-browse")
+(declare-function pilish-browse-fold-all "pilish-browse")
+(declare-function pilish-browse-goto-parent-row "pilish-browse")
 (declare-function pilish-session-browser-cycle-view "pilish-browse")
 (declare-function pilish-session-browser-toggle-named "pilish-browse")
 (declare-function pilish-session-browser-toggle-scope "pilish-browse")
@@ -153,7 +165,7 @@ buffer with `pilish-evil-insert-input' or
 
 (defcustom pilish-evil-browse-state 'motion
   "Initial Evil state for Pilish browser buffers.
-Motion state keeps j/k and other navigation keys working while unbound
+Motion state keeps Evil's line-wise j/k motions working while unbound
 keys fall through to the browser's own keymap; `pilish-evil-setup'
 additionally rebinds the documented browser letters in motion state
 so the Evil keymap stack (search keys, the g prefix, evil-snipe's
@@ -290,7 +302,7 @@ options `pilish-evil-chat-state',
     (kbd "RET") #'pilish-visit-file
     (kbd "TAB") #'pilish-toggle-tool-section
     [tab] #'pilish-toggle-tool-section)
-  ;; Browsers: reclaim every documented letter in motion state.  The
+  ;; Browsers: reclaim every documented browser key in motion state.  The
   ;; Evil and evil-collection keymap stack otherwise wins — evil's
   ;; motion state owns `/', `?', and the `g' prefix; evil-snipe owns
   ;; `f' and `t' (see `pilish-evil--maybe-disable-snipe'); and setups
@@ -298,6 +310,15 @@ options `pilish-evil-chat-state',
   ;; waiting on more keys.  The major-mode bindings stay authoritative
   ;; for every state, so `emacs' state users lose nothing.
   (evil-define-key* 'motion pilish-session-browser-mode-map
+    "n" #'magit-section-forward
+    "p" #'magit-section-backward
+    (kbd "M-n") #'magit-section-forward-sibling
+    (kbd "M-p") #'magit-section-backward-sibling
+    (kbd "TAB") #'pilish-browse-toggle-fold
+    [tab] #'pilish-browse-toggle-fold
+    (kbd "<backtab>") #'pilish-browse-fold-all
+    [backtab] #'pilish-browse-fold-all
+    "^" #'pilish-browse-goto-parent-row
     "s" #'pilish-session-browser-cycle-view
     "f" #'pilish-session-browser-toggle-named
     "t" #'pilish-session-browser-toggle-scope
@@ -310,6 +331,15 @@ options `pilish-evil-chat-state',
     "q" #'quit-window
     (kbd "RET") #'pilish-session-browser-switch)
   (evil-define-key* 'motion pilish-tree-browser-mode-map
+    "n" #'magit-section-forward
+    "p" #'magit-section-backward
+    (kbd "M-n") #'magit-section-forward-sibling
+    (kbd "M-p") #'magit-section-backward-sibling
+    (kbd "TAB") #'pilish-browse-toggle-fold
+    [tab] #'pilish-browse-toggle-fold
+    (kbd "<backtab>") #'pilish-browse-fold-all
+    [backtab] #'pilish-browse-fold-all
+    "^" #'pilish-browse-goto-parent-row
     "f" #'pilish-tree-browser-cycle-filter
     "l" #'pilish-tree-browser-set-label
     "/" #'pilish-tree-browser-search

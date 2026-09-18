@@ -3352,6 +3352,60 @@ it leaves B's single loading line intact rather than duplicating it."
       (should pilish--session-browser-loading)
       (should (equal (buffer-string) "Loading sessions...\n")))))
 
+(ert-deftest pilish-test-session-browser-visibility-hook-render-is-fenced ()
+  "A newer session fetch cannot nest inside an old Magit section parent.
+The second stale row's visibility hook requests B after A already inserted
+one row.  A must unwind, paint B's loading state cleanly, and later publish
+only B's final row and fold metadata."
+  (with-temp-buffer
+    (pilish-session-browser-mode)
+    (let* ((parent "/test/stale-parent.jsonl")
+           (child "/test/stale-child.jsonl")
+           (pending nil)
+           (session-hooks 0)
+           (armed t)
+           (magit-section-set-visibility-hook
+            (list
+             (lambda (section)
+               (when (eq (oref section type) 'session)
+                 (setq session-hooks (1+ session-hooks))
+                 (when (and armed (= session-hooks 2))
+                   (setq armed nil)
+                   (pilish--session-browser-fetch-and-render)))
+               nil))))
+      (setq pilish--session-browser-fetch-token 1
+            pilish--session-browser-view 'threaded
+            pilish--session-browser-items
+            (list (list :path parent :canonicalPath parent :name "STALE A"
+                        :modified "2026-01-01T00:00:00Z")
+                  (list :path child :canonicalPath child :name "STALE child"
+                        :parentSessionPath parent
+                        :canonicalParentSession parent
+                        :modified "2026-01-02T00:00:00Z")))
+      (puthash parent t pilish--browse-fold-state)
+      (cl-letf (((symbol-function 'pilish--browse-live-session-paths)
+                 (lambda () (make-hash-table :test #'equal)))
+                ((symbol-function 'pilish--browse-load-sessions)
+                 (lambda (_scope callback &optional _generation)
+                   (setq pending callback))))
+        (pilish--session-browser-rerender))
+      (should-not armed)
+      (should pending)
+      (should pilish--session-browser-loading)
+      (should (equal (buffer-string) "Loading sessions...\n"))
+      (should-not pilish--browse-fold-rows)
+      (funcall pending
+               (list '(:path "/test/final-b.jsonl" :name "FINAL B"
+                       :modified "2026-01-03T00:00:00Z"))
+               nil)
+      (should-not pilish--session-browser-loading)
+      (should (string-match-p "FINAL B" (buffer-string)))
+      (should-not (string-match-p "STALE" (buffer-string)))
+      (should (equal (mapcar (lambda (row) (plist-get row :value))
+                             pilish--browse-fold-rows)
+                     '("/test/final-b.jsonl")))
+      (should-not (gethash parent pilish--browse-fold-state)))))
+
 (ert-deftest pilish-test-session-browser-item-key-reentrancy-keeps-newer-body ()
   "A hand-built row key cannot insert after its handler starts request B.
 The item deliberately lacks `:canonicalPath', so its one canonical-key
@@ -3628,13 +3682,14 @@ tomorrow mtime is constructed on the decoded calendar (adding
                 ;; Headings appear once each, in the honest total order.
                 (dolist (heading '("Future" "Today" "Yesterday"))
                   (should (equal 1 (cl-count-if
-                                    (lambda (line) (equal line heading))
+                                    (lambda (line)
+                                      (equal line (concat "▾ " heading)))
                                     (split-string text "\n")))))
-                (should (< (string-match "\\`Future\n" text)
+                (should (< (string-match "\\`▾ Future\n" text)
                            (string-match "Clock skew" text)
-                           (string-match "\nToday\n" text)
+                           (string-match "\n▾ Today\n" text)
                            (string-match "Early morning" text)
-                           (string-match "\nYesterday\n" text)
+                           (string-match "\n▾ Yesterday\n" text)
                            (string-match "Late night" text))))))))
       (if saved
           (set-time-zone-rule saved)
@@ -3669,20 +3724,20 @@ and across the groups.  The renderer's production clock is pinned."
           (let ((text (buffer-string)))
             ;; Calendar grouping: yesterday 23:55 is Yesterday even minutes
             ;; after midnight; today 00:05 is Today.
-            (should (string-match-p "\\`Today
+            (should (string-match-p "\\`▾ Today
 " text))
             (should (string-match-p "
-Yesterday
+▾ Yesterday
 " text))
             ;; Newest first within and across groups.
             (should (< (string-match "Early morning" text)
                        (string-match "Late night" text)))
             ;; Each row sits under its own group heading.
-            (should (< (string-match "\\`Today
+            (should (< (string-match "\\`▾ Today
 " text)
                        (string-match "Early morning" text)
                        (string-match "
-Yesterday
+▾ Yesterday
 " text)
                        (string-match "Late night" text)))))))))
 
@@ -4016,6 +4071,31 @@ The type label already shows `sh', so brackets are redundant."
         (should (string-match-p "│  @" text))
         ;; Last branch child: connector plus a blank marker (inactive).
         (should (string-match-p "└─   " text))))))
+
+(ert-deftest pilish-test-tree-browser-fold-indicator-follows-long-type-label ()
+  "A fold indicator does not split a type label wider than seven columns."
+  (with-temp-buffer
+    (pilish-tree-browser-mode)
+    (let* ((tool-name "LongCustomToolName")
+           (child (list :id "child" :type "message" :role "assistant"
+                        :preview "child" :children (vector)))
+           (parent (list :id "parent" :type "tool_result"
+                         :toolName tool-name :preview "parent"
+                         :children (vector child))))
+      (setq pilish--tree-browser-tree (vector parent)
+            pilish--tree-browser-leaf-id "child"
+            pilish--tree-browser-filter 'default)
+      (pilish--tree-browser-rerender)
+      (let* ((row (pilish-test--browse-fold-row "parent"))
+             (section (plist-get row :section))
+             (indicator (+ (oref section start)
+                           (plist-get row :indicator-offset))))
+        (should (string-match-p
+                 (concat (regexp-quote tool-name) " ▾")
+                 (buffer-string)))
+        (should (= (char-after indicator) (string-to-char "▾")))
+        (should (= (plist-get row :indicator-offset)
+                   (+ 3 (length tool-name))))))))
 
 (ert-deftest pilish-test-tree-browser-filtered-current-marker-is-truthful ()
   "A hidden current leaf does not turn its visible ancestor into current."
@@ -7527,9 +7607,10 @@ hook and repaint after A aborts.  A's now-stale loader seam is harmless."
 (ert-deftest pilish-test-tree-file-switch-resets-shared-id-anchor ()
   "A different session file owns a fresh orientation even with shared ids.
 The two same-project files share root id `shared'.  Point is moved to
-that root in file A; switching the chat to file B must ignore the
-still-valid old section identity and select B's projected active leaf.
-An ordinary same-file refresh then preserves a manual selection."
+and folded at that root in file A; switching the chat to file B must
+ignore the still-valid old section identity and fold state, then select
+B's projected active leaf.  An ordinary same-file refresh then preserves
+a manual selection."
   (let* ((dir (pilish-test--make-temp-directory "pi-tree-owner"))
          (path-a (expand-file-name "a.jsonl" dir))
          (path-b (expand-file-name "b.jsonl" dir))
@@ -7560,11 +7641,14 @@ An ordinary same-file refresh then preserves a manual selection."
             (goto-char (point-min))
             (search-forward "shared root A")
             (should (equal (oref (magit-current-section) value) "shared"))
+            (pilish-browse-toggle-fold)
+            (should (gethash "shared" pilish--browse-fold-state))
             (with-current-buffer chat-buf
               (setq pilish--state (list :session-file path-b)))
             (pilish-test--sync-timers
               (lambda () (pilish--tree-browser-fetch-and-render)))
             (should (equal pilish--tree-browser-loaded-file path-b))
+            (should-not (gethash "shared" pilish--browse-fold-state))
             (should (equal (oref (magit-current-section) value) "b-leaf"))
             ;; Same-file refresh still honors a subsequent manual move.
             (goto-char (point-min))
@@ -9153,6 +9237,333 @@ just the session browser (V14)."
       (set-window-buffer win orig-buf)
       (kill-buffer browser-buf)
       (when (buffer-live-p chat-buf) (kill-buffer chat-buf)))))
+
+;;;; Flat-row folding
+
+(defun pilish-test--browse-fold-row (value)
+  "Return current fold-row metadata whose canonical VALUE matches."
+  (cl-find value pilish--browse-fold-rows
+           :key (lambda (row) (plist-get row :value))
+           :test #'equal))
+
+(defun pilish-test--browse-fold-row-start (value)
+  "Return the current rendered row start for canonical VALUE."
+  (oref (plist-get (pilish-test--browse-fold-row value) :section) start))
+
+(ert-deftest pilish-test-tree-fold-promoted-extents-persist-and-prune ()
+  "Tree folds follow filtered topology, survive search, and prune on publish."
+  (with-temp-buffer
+    (pilish-tree-browser-mode)
+    (setq pilish--tree-browser-tree
+          [(:id "root" :type "message" :role "user" :preview "root"
+            :children
+            [(:id "middle" :parentId "root" :type "message"
+              :role "assistant" :preview "middle"
+              :children
+              [(:id "target" :parentId "middle" :type "message"
+                :role "user" :preview "needle target" :children [])])])
+           (:id "other" :type "message" :role "user"
+            :preview "other root" :children [])]
+          pilish--tree-browser-leaf-id "target"
+          pilish--tree-browser-filter 'user-only)
+    (pilish--tree-browser-rerender)
+    ;; user-only promotes TARGET through the hidden assistant directly
+    ;; under ROOT, and ROOT's extent stops before the second root.
+    (let ((root (pilish-test--browse-fold-row "root"))
+          (target (pilish-test--browse-fold-row "target"))
+          (other (pilish-test--browse-fold-row "other")))
+      (should (eq (plist-get target :parent) root))
+      (should (= (plist-get root :end)
+                 (oref (plist-get other :section) start))))
+    (goto-char (pilish-test--browse-fold-row-start "target"))
+    (pilish-browse-goto-parent-row)
+    (should (= (point) (pilish-test--browse-fold-row-start "root")))
+    ;; The leaf rule folds its nearest containing ancestor and repairs point.
+    (goto-char (pilish-test--browse-fold-row-start "target"))
+    (pilish-browse-toggle-fold)
+    (should (gethash "root" pilish--browse-fold-state))
+    (should (= (point) (pilish-test--browse-fold-row-start "root")))
+    (should (invisible-p (pilish-test--browse-fold-row-start "target")))
+    ;; Search hides ROOT and promotes TARGET to a visible root.  ROOT's state
+    ;; remains because it still belongs to the published source tree.
+    (setq pilish--tree-browser-search-query "needle"
+          pilish--tree-browser-search-tokens '("needle"))
+    (pilish--tree-browser-rerender)
+    (should (gethash "root" pilish--browse-fold-state))
+    (let ((target (pilish-test--browse-fold-row "target")))
+      (should-not (plist-get target :parent))
+      (should-not (invisible-p (oref (plist-get target :section) start))))
+    ;; Clearing search recomputes the old extent and reapplies the fold.
+    (setq pilish--tree-browser-search-query nil
+          pilish--tree-browser-search-tokens nil)
+    (pilish--tree-browser-rerender)
+    (should (invisible-p (pilish-test--browse-fold-row-start "target")))
+    (should (= (point) (pilish-test--browse-fold-row-start "root")))
+    ;; Replacing the published snapshot finally prunes ROOT.
+    (setq pilish--tree-browser-tree
+          [(:id "replacement" :type "message" :role "user"
+            :preview "replacement" :children [])]
+          pilish--tree-browser-leaf-id "replacement")
+    (pilish--tree-browser-rerender)
+    (should-not (gethash "root" pilish--browse-fold-state))))
+
+(ert-deftest pilish-test-tree-fold-restoration-and-visible-section-motion ()
+  "Refresh repairs hidden point, while native n/p skip folded rows."
+  (with-temp-buffer
+    (pilish-tree-browser-mode)
+    (setq pilish--tree-browser-tree
+          [(:id "root" :type "message" :role "user" :preview "root"
+            :children
+            [(:id "child" :parentId "root" :type "message"
+              :role "assistant" :preview "child" :children [])])
+           (:id "other" :type "message" :role "user"
+            :preview "other" :children [])]
+          pilish--tree-browser-leaf-id "child"
+          pilish--tree-browser-filter 'default)
+    (pilish--tree-browser-rerender)
+    ;; Arrange the adversarial refresh case directly: identity restoration
+    ;; finds CHILD after the overlay pass, then must repair to ROOT without
+    ;; calling `magit-section-show'.
+    (goto-char (pilish-test--browse-fold-row-start "child"))
+    (puthash "root" t pilish--browse-fold-state)
+    (pilish--tree-browser-rerender)
+    (should (= (point) (pilish-test--browse-fold-row-start "root")))
+    (should (invisible-p (pilish-test--browse-fold-row-start "child")))
+    ;; Keep the inherited Magit commands unchanged; their movement hook jumps
+    ;; across the one flat invisible extent in either direction.
+    (let ((this-command 'magit-section-forward))
+      (magit-section-forward))
+    (should (= (point) (pilish-test--browse-fold-row-start "other")))
+    (let ((this-command 'magit-section-backward))
+      (magit-section-backward))
+    (should (= (point) (pilish-test--browse-fold-row-start "root")))))
+
+(ert-deftest pilish-test-tree-fold-ambiguous-row-is-never-target ()
+  "A canonical ambiguous-id display row has no fold action or state."
+  (with-temp-buffer
+    (pilish-tree-browser-mode)
+    (setq pilish--tree-browser-tree
+          [(:id "dup" :ambiguousId t :type "message" :role "user"
+            :preview "ambiguous" :children
+            [(:id "child" :parentId "dup" :ambiguousParent t
+              :type "message" :role "assistant" :preview "child"
+              :children [])])]
+          pilish--tree-browser-leaf-id "dup"
+          pilish--tree-browser-filter 'default)
+    (pilish--tree-browser-rerender)
+    (let ((row (car pilish--browse-fold-rows)))
+      (should (equal (plist-get row :value) '(ambiguous-id . "dup")))
+      (should-not (plist-get row :foldable))
+      (goto-char (oref (plist-get row :section) start))
+      (should-error (pilish-browse-toggle-fold) :type 'user-error)
+      (should-not (gethash "dup" pilish--browse-fold-state))
+      (should-not (get-text-property
+                   (point) 'pilish-browse-fold-indicator)))))
+
+(ert-deftest pilish-test-session-fold-threaded-query-round-trip-and-parent ()
+  "Threaded family folds persist through flat query results; ^ finds root."
+  (with-temp-buffer
+    (pilish-session-browser-mode)
+    (setq pilish--session-browser-items
+          '((:path "/tmp/pilish-fold-parent.jsonl" :name "Parent"
+             :modified "2026-01-01T00:00:00Z")
+            (:path "/tmp/pilish-fold-child.jsonl" :name "Needle child"
+             :parentSessionPath "/tmp/pilish-fold-parent.jsonl"
+             :modified "2026-01-02T00:00:00Z"))
+          pilish--session-browser-view 'threaded
+          pilish--session-browser-scope 'all)
+    (pilish--session-browser-rerender)
+    (let ((parent (pilish-test--browse-fold-row
+                   "/tmp/pilish-fold-parent.jsonl"))
+          (child (pilish-test--browse-fold-row
+                  "/tmp/pilish-fold-child.jsonl")))
+      (should (eq (plist-get child :parent) parent))
+      (goto-char (oref (plist-get child :section) start))
+      (pilish-browse-goto-parent-row)
+      (should (= (point) (oref (plist-get parent :section) start)))
+      (goto-char (oref (plist-get child :section) start))
+      (pilish-browse-toggle-fold))
+    (should (gethash "/tmp/pilish-fold-parent.jsonl"
+                     pilish--browse-fold-state))
+    ;; In All-projects layout the fixed project/live fields precede the
+    ;; connector; indicator updates still target the marked glyph itself.
+    (let* ((row (pilish-test--browse-fold-row
+                 "/tmp/pilish-fold-parent.jsonl"))
+           (section (plist-get row :section))
+           (indicator (+ (oref section start)
+                         (plist-get row :indicator-offset))))
+      (should (equal (get-text-property
+                      indicator 'pilish-browse-fold-indicator)
+                     "/tmp/pilish-fold-parent.jsonl"))
+      (should (= (char-after indicator) (string-to-char "▸"))))
+    (should (invisible-p
+             (pilish-test--browse-fold-row-start
+              "/tmp/pilish-fold-child.jsonl")))
+    ;; A query deliberately flattens Threaded.  It removes the parent row but
+    ;; not its published identity, so clearing it restores the same fold.
+    (setq pilish--session-browser-search-query "Needle"
+          pilish--session-browser-search-tokens '("Needle"))
+    (pilish--session-browser-rerender)
+    (should (gethash "/tmp/pilish-fold-parent.jsonl"
+                     pilish--browse-fold-state))
+    (should-not (invisible-p
+                 (pilish-test--browse-fold-row-start
+                  "/tmp/pilish-fold-child.jsonl")))
+    (setq pilish--session-browser-search-query nil
+          pilish--session-browser-search-tokens nil)
+    (pilish--session-browser-rerender)
+    (should (invisible-p
+             (pilish-test--browse-fold-row-start
+              "/tmp/pilish-fold-child.jsonl")))))
+
+(ert-deftest pilish-test-session-fold-recent-group-and-flat-exclusion ()
+  "Recent rows fold their group; Most-messages rows have no false target."
+  (let ((now (encode-time '(0 0 12 18 9 2026 nil nil nil))))
+    (cl-letf (((symbol-function 'current-time) (lambda () now)))
+      (with-temp-buffer
+        (pilish-session-browser-mode)
+        (setq pilish--session-browser-items
+              '((:path "/tmp/pilish-recent-a.jsonl" :name "A"
+                 :modified "2026-09-18T10:00:00+02:00")
+                (:path "/tmp/pilish-recent-b.jsonl" :name "B"
+                 :modified "2026-09-18T09:00:00+02:00")
+                (:path "/tmp/pilish-recent-old.jsonl" :name "Old"
+                 :modified "2026-09-17T09:00:00+02:00"))
+              pilish--session-browser-view 'recent)
+        (pilish--session-browser-rerender)
+        (let ((session (pilish-test--browse-fold-row
+                        "/tmp/pilish-recent-a.jsonl"))
+              (today (pilish-test--browse-fold-row "Today"))
+              (yesterday (pilish-test--browse-fold-row "Yesterday")))
+          (should (= (plist-get today :end)
+                     (oref (plist-get yesterday :section) start)))
+          (goto-char (oref (plist-get session :section) start))
+          (pilish-browse-goto-parent-row)
+          (should (equal (plist-get (pilish--browse-current-fold-row) :value)
+                         "Today"))
+          (goto-char (oref (plist-get session :section) start))
+          (pilish-browse-toggle-fold))
+        (should (= (point) (pilish-test--browse-fold-row-start "Today")))
+        (should (invisible-p
+                 (pilish-test--browse-fold-row-start
+                  "/tmp/pilish-recent-a.jsonl")))
+        (should-not (invisible-p
+                     (pilish-test--browse-fold-row-start "Yesterday")))
+        (should-not (invisible-p
+                     (pilish-test--browse-fold-row-start
+                      "/tmp/pilish-recent-old.jsonl")))
+        (setq pilish--session-browser-view 'messages)
+        (pilish--session-browser-rerender)
+        (goto-char (point-min))
+        (should-error (pilish-browse-toggle-fold) :type 'user-error)))))
+
+(ert-deftest pilish-test-fold-deep-and-broad-extents-stack-safe ()
+  "Deep and broad flat extents are structurally complete and stack safe."
+  ;; A 501-node chain has one extent per non-leaf and fold-all needs only
+  ;; one maximal overlay, avoiding both recursive Magit sections and an
+  ;; overlap stack.
+  (with-temp-buffer
+    (pilish-tree-browser-mode)
+    (setq pilish--tree-browser-tree (pilish-test--make-deep-tree 501)
+          pilish--tree-browser-leaf-id "node-501"
+          pilish--tree-browser-filter 'default)
+    (pilish--tree-browser-rerender)
+    (should (= (length pilish--browse-fold-rows) 501))
+    (should (= (hash-table-count pilish--browse-fold-extents) 500))
+    (pilish-browse-fold-all)
+    (should (= (length pilish--browse-fold-overlays) 1))
+    (let ((root-row (pilish-test--browse-fold-row "node-1")))
+      (should (= (char-after
+                  (+ (oref (plist-get root-row :section) start)
+                     (plist-get root-row :indicator-offset)))
+                 (string-to-char "▸"))))
+    (should (invisible-p (pilish-test--browse-fold-row-start "node-501")))
+    (pilish-browse-fold-all t)
+    (should-not pilish--browse-fold-overlays)
+    (should-not (invisible-p
+                 (pilish-test--browse-fold-row-start "node-501"))))
+  ;; Thirty roots with nine children each exercise 300 rows and 30 disjoint
+  ;; family-sized extents without timing assertions.
+  (with-temp-buffer
+    (pilish-tree-browser-mode)
+    (let (roots)
+      (dotimes (root-index 30)
+        (let (children)
+          (dotimes (child-index 9)
+            (push (list :id (format "r%d-c%d" root-index child-index)
+                        :parentId (format "r%d" root-index)
+                        :type "message" :role "assistant"
+                        :preview "child" :children [])
+                  children))
+          (push (list :id (format "r%d" root-index)
+                      :type "message" :role "user" :preview "root"
+                      :children (vconcat (nreverse children)))
+                roots)))
+      (setq pilish--tree-browser-tree (vconcat (nreverse roots))
+            pilish--tree-browser-leaf-id "r0-c0"
+            pilish--tree-browser-filter 'default))
+    (pilish--tree-browser-rerender)
+    (should (= (length pilish--browse-fold-rows) 300))
+    (should (= (hash-table-count pilish--browse-fold-extents) 30))
+    (pilish-browse-fold-all)
+    (should (= (length pilish--browse-fold-overlays) 30))
+    (dotimes (root-index 30)
+      (should-not (invisible-p
+                   (pilish-test--browse-fold-row-start
+                    (format "r%d" root-index))))
+      (should (invisible-p
+               (pilish-test--browse-fold-row-start
+                (format "r%d-c0" root-index)))))))
+
+(ert-deftest pilish-test-session-fold-deep-threaded-family-stack-safe ()
+  "A 600-session fork chain renders and folds without Lisp recursion."
+  (with-temp-buffer
+    (pilish-session-browser-mode)
+    (let (items)
+      (dotimes (index 600)
+        (let ((path (format "/test/deep-thread-%03d.jsonl" index))
+              (parent (and (> index 0)
+                           (format "/test/deep-thread-%03d.jsonl"
+                                   (1- index)))))
+          (push (append
+                 (list :path path :canonicalPath path
+                       :name (format "Thread %d" index)
+                       :modified "2026-01-01T00:00:00Z")
+                 (and parent
+                      (list :parentSessionPath parent
+                            :canonicalParentSession parent)))
+                items)))
+      (setq pilish--session-browser-items (nreverse items)
+            pilish--session-browser-view 'threaded))
+    (pilish--session-browser-rerender)
+    (should (= (length pilish--browse-fold-rows) 600))
+    (should (= (hash-table-count pilish--browse-fold-extents) 599))
+    (pilish-browse-fold-all)
+    (should (= (length pilish--browse-fold-overlays) 1))
+    (should (invisible-p
+             (pilish-test--browse-fold-row-start
+              "/test/deep-thread-599.jsonl")))))
+
+(ert-deftest pilish-test-browse-fold-keymaps-remove-false-affordances ()
+  "Browser maps expose flat folds and remove recursive Magit controls."
+  (dolist (map (list pilish-browse-mode-map
+                     pilish-session-browser-mode-map
+                     pilish-tree-browser-mode-map))
+    (should (eq (lookup-key map (kbd "TAB"))
+                #'pilish-browse-toggle-fold))
+    (should (eq (lookup-key map [tab])
+                #'pilish-browse-toggle-fold))
+    (should (eq (lookup-key map (kbd "<backtab>"))
+                #'pilish-browse-fold-all))
+    (should (eq (lookup-key map (kbd "^"))
+                #'pilish-browse-goto-parent-row))
+    (should (eq (lookup-key map (kbd "n")) #'magit-section-forward))
+    (should (eq (lookup-key map (kbd "p")) #'magit-section-backward))
+    (dolist (key '("C-c TAB" "C-<tab>" "M-<tab>"
+                   "1" "2" "3" "4" "M-1" "M-2" "M-3" "M-4"
+                   "<left-fringe> <mouse-1>"
+                   "<left-fringe> <mouse-2>"))
+      (should-not (lookup-key map (kbd key))))))
 
 (provide 'pilish-browse-test)
 ;;; pilish-browse-test.el ends here
