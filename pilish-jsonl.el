@@ -931,9 +931,18 @@ BRANCH-CALLS and GLOBAL-CALLS feed tool-result resolution."
      ((equal role "assistant")
       (pilish--jsonl-project-assistant base message))
      (t
-      (let ((preview (pilish--jsonl-normalize-preview
-                      (pilish--jsonl-extract-text
-                       (plist-get message :content) 200))))
+      (let* ((content (plist-get message :content))
+             (summary-role-p
+              (member role '("branchSummary" "compactionSummary")))
+             (summary
+              (when summary-role-p
+                (or (pilish--normalize-string-or-null
+                     (plist-get message :summary))
+                    (pilish--normalize-string-or-null
+                     (pilish--jsonl-extract-text content)))))
+             (preview (pilish--jsonl-normalize-preview
+                       (pilish--jsonl-extract-text
+                        (if summary-role-p summary content) 200))))
         (append base
                 (list :type "message")
                 (pcase role
@@ -941,15 +950,19 @@ BRANCH-CALLS and GLOBAL-CALLS feed tool-result resolution."
                    (list :role role))
                   (_ (append (list :role "unknown")
                              (when role (list :rawRole role)))))
-                (list :preview preview)))))))
+                (list :preview preview)
+                (when summary (list :summary summary))))))))
 
 (defun pilish--jsonl-project-entry (base entry)
   "Return the projected node for BASE and the non-message ENTRY."
   (pcase (plist-get entry :type)
     ("compaction"
-     (let ((tokens (plist-get entry :tokensBefore)))
+     (let ((summary (pilish--normalize-string-or-null
+                     (plist-get entry :summary)))
+           (tokens (plist-get entry :tokensBefore)))
        (append base
                (list :type "compaction")
+               (when summary (list :summary summary))
                (when (numberp tokens)
                  (list :tokensBefore tokens)))))
     ("model_change"

@@ -390,6 +390,18 @@ section identities; RET cannot take the cached-id fast no-op."
                 tree leaf-id 'default)))
     (should (= (length flat) n))))
 
+(ert-deftest pilish-test-tree-search-deep-chain ()
+  "Search topology stays iterative when all hidden ancestors are bypassed."
+  (let* ((n 2000)
+         (tree (pilish-test--make-deep-tree n))
+         (leaf-id (format "node-%d" n))
+         (flat (pilish--flatten-tree-for-display
+                tree leaf-id 'default
+                (list (format "message %d" n)))))
+    (should (= (length flat) 1))
+    (should (equal (plist-get (caar flat) :id) leaf-id))
+    (should (equal (nth 2 (car flat)) ""))))
+
 (ert-deftest pilish-test-subtree-contains-active-deep ()
   "Subtree-contains-active-p works on chains deeper than max-lisp-eval-depth."
   (let* ((n 2000)
@@ -535,6 +547,78 @@ section identities; RET cannot take the cached-id fast no-op."
     (should (equal (alist-get "c2" prefix-alist nil nil #'equal) "├─ "))
     (should (equal (alist-get "c3" prefix-alist nil nil #'equal) "└─ "))))
 
+(ert-deftest pilish-test-tree-search-recomputes-last-sibling ()
+  "Search makes the final matching sibling terminate with └─."
+  (with-temp-buffer
+    (pilish-tree-browser-mode)
+    (setq pilish--tree-browser-tree
+          [(:id "root" :type "message" :role "user" :preview "keep root"
+            :children
+            [(:id "c1" :parentId "root" :type "message" :role "assistant"
+              :preview "keep one" :children [])
+             (:id "c2" :parentId "root" :type "message" :role "assistant"
+              :preview "keep two" :children [])
+             (:id "c3" :parentId "root" :type "message" :role "assistant"
+              :preview "discard three" :children [])])]
+          pilish--tree-browser-leaf-id "c1"
+          pilish--tree-browser-filter 'default
+          pilish--tree-browser-search-query "keep"
+          pilish--tree-browser-search-tokens '("keep"))
+    (pilish--tree-browser-rerender)
+    (let ((text (buffer-string)))
+      (should (string-match-p "^├─ .*keep one" text))
+      (should (string-match-p "^└─ .*keep two" text))
+      (should-not (string-match-p "discard three" text)))))
+
+(ert-deftest pilish-test-tree-search-removes-orphaned-gutter ()
+  "A lone search result is a visible root with no inherited gutter."
+  (with-temp-buffer
+    (pilish-tree-browser-mode)
+    (setq pilish--tree-browser-tree
+          [(:id "root" :type "message" :role "user" :preview "root"
+            :children
+            [(:id "branch" :parentId "root" :type "message"
+              :role "assistant" :preview "branch"
+              :children
+              [(:id "target" :parentId "branch" :type "message"
+                :role "user" :preview "needle target" :children [])])
+             (:id "sibling" :parentId "root" :type "message"
+              :role "assistant" :preview "sibling" :children [])])]
+          pilish--tree-browser-leaf-id "target"
+          pilish--tree-browser-filter 'default
+          pilish--tree-browser-search-query "needle"
+          pilish--tree-browser-search-tokens '("needle"))
+    (pilish--tree-browser-rerender)
+    (should (string-match-p "needle target" (buffer-string)))
+    (should-not (string-match-p "[│├└]" (buffer-string)))))
+
+(ert-deftest pilish-test-tree-filter-and-search-promote-visible-siblings ()
+  "Filter and query jointly derive one coherent visible sibling set."
+  (with-temp-buffer
+    (pilish-tree-browser-mode)
+    (setq pilish--tree-browser-tree
+          [(:id "root" :type "message" :role "user" :preview "keep root"
+            :children
+            [(:id "direct" :parentId "root" :type "message"
+              :role "assistant" :preview "keep direct" :children [])
+             (:id "tool" :parentId "root" :type "tool_result"
+              :toolName "read" :preview "keep hidden tool"
+              :children
+              [(:id "promoted-1" :parentId "tool" :type "message"
+                :role "assistant" :preview "keep promoted one" :children [])
+               (:id "promoted-2" :parentId "tool" :type "message"
+                :role "assistant" :preview "keep promoted two" :children [])])])]
+          pilish--tree-browser-leaf-id "direct"
+          pilish--tree-browser-filter 'no-tools
+          pilish--tree-browser-search-query "keep"
+          pilish--tree-browser-search-tokens '("keep"))
+    (pilish--tree-browser-rerender)
+    (let ((text (buffer-string)))
+      (should-not (string-match-p "hidden tool" text))
+      (should (string-match-p "^├─ .*keep direct" text))
+      (should (string-match-p "^├─ .*keep promoted one" text))
+      (should (string-match-p "^└─ .*keep promoted two" text)))))
+
 ;;;; Filter Predicates
 
 (ert-deftest pilish-test-filter-default ()
@@ -632,6 +716,63 @@ empty assistants are a universal pre-filter, not mode-specific."
   (should (pilish--matches-filter-p "Fix the login bug" '("log.*bug")))
   ;; Empty tokens list matches everything
   (should (pilish--matches-filter-p "anything" nil)))
+
+(ert-deftest pilish-test-tree-node-searchable-text-semantic-fields ()
+  "Tree search uses projected semantic fields, not arbitrary tool JSON."
+  (let ((message (pilish--tree-node-searchable-text
+                  '(:type "message" :role "assistant"
+                    :label "release-candidate" :preview "fixed parser"))))
+    (dolist (needle '("message" "assistant"
+                      "release-candidate" "fixed parser"))
+      (should (string-match-p (regexp-quote needle) message))))
+  (let ((summary (pilish--tree-node-searchable-text
+                  '(:type "branch_summary"
+                    :summary "First line\nsecond-line-needle"))))
+    (should (string-match-p "second-line-needle" summary)))
+  (let ((compaction (pilish--tree-node-searchable-text
+                     '(:type "compaction"
+                       :summary "compact-summary-needle"
+                       :tokensBefore 42000))))
+    (should (string-match-p "compact-summary-needle" compaction))
+    (should (string-match-p "compacted (42k tokens)" compaction)))
+  ;; Built-in recognition follows the formatter's case-sensitive names:
+  ;; a custom tool called "Read" still uses the arbitrary-JSON fallback.
+  (dolist (name '("custom_tool" "Read"))
+    (let ((tool (pilish--tree-node-searchable-text
+                 (list :type "tool_result" :toolName name
+                       :toolArgs '(:secret "hidden-json-needle")
+                       :formattedToolCall
+                       (format "[%s: hidden-json-needle]" name)
+                       :preview
+                       (format "[%s: hidden-json-needle]" name)))))
+      (should (string-match-p (regexp-quote name) tool))
+      (should-not (string-match-p "hidden-json-needle" tool))))
+  (let ((model (pilish--tree-node-searchable-text
+                '(:type "model_change" :provider "anthropic"
+                  :modelId "claude-searchable")))
+        (thinking (pilish--tree-node-searchable-text
+                   '(:type "thinking_level_change"
+                     :thinkingLevel "xhigh-searchable"))))
+    (should (string-match-p "anthropic" model))
+    (should (string-match-p "claude-searchable" model))
+    (should (string-match-p "anthropic/claude-searchable" model))
+    (should (string-match-p "xhigh-searchable" thinking))))
+
+(ert-deftest pilish-test-tree-search-finds-and-shows-label ()
+  "A label is both searchable and present in keyboard-readable text."
+  (with-temp-buffer
+    (pilish-tree-browser-mode)
+    (setq pilish--tree-browser-tree
+          [(:id "labeled" :type "message" :role "user"
+            :label "release-candidate" :preview "ordinary text"
+            :children [])]
+          pilish--tree-browser-leaf-id "labeled"
+          pilish--tree-browser-filter 'default
+          pilish--tree-browser-search-query "release-candidate"
+          pilish--tree-browser-search-tokens '("release-candidate"))
+    (pilish--tree-browser-rerender)
+    (should (= pilish--tree-browser-visible-count 1))
+    (should (string-match-p "\\[release-candidate\\]" (buffer-string)))))
 
 ;;;; Session Views
 
@@ -3825,14 +3966,12 @@ The type label already shows `sh', so brackets are redundant."
     (should (string-match-p "hello" line))))
 
 (ert-deftest pilish-test-tree-format-node-with-label ()
-  "Labeled nodes do NOT include label in the line text (labels go in margin)."
+  "Labeled nodes include their label in keyboard-readable line text."
   (let ((line (pilish--tree-format-node-line
                '(:type "message" :role "user" :preview "hello"
                  :label "checkpoint")
                nil)))
-    ;; Label should not be in the main text
-    (should-not (string-match-p "\\[checkpoint\\]" line))
-    ;; But preview should still appear
+    (should (string-match-p "\\[checkpoint\\]" line))
     (should (string-match-p "hello" line))))
 
 ;;;; Tree Browser Rendering
@@ -3852,8 +3991,9 @@ The type label already shows `sh', so brackets are redundant."
       ;; The current leaf and its active ancestors have distinct text markers.
       (should (string-match-p "@ ast" (buffer-string)))
       (should (string-match-p "\\* you" (buffer-string)))
-      ;; Label should NOT be in buffer text (it's in margin overlay)
-      (should-not (string-match-p "\\[checkpoint\\]" (buffer-string))))))
+      ;; Labels stay in buffer text as well as the right margin, so
+      ;; keyboard users can discover and search what the row displays.
+      (should (string-match-p "\\[checkpoint\\]" (buffer-string))))))
 
 (ert-deftest pilish-test-tree-browser-render-connectors ()
   "Tree connectors appear in rendered buffer at branch points."
@@ -3896,7 +4036,7 @@ The type label already shows `sh', so brackets are redundant."
       (should (looking-at-p "\\* you")))))
 
 (ert-deftest pilish-test-tree-browser-label-in-margin ()
-  "Labels appear as right-margin overlays, not inline text."
+  "Labels remain in right-margin overlays in addition to inline text."
   (with-temp-buffer
     (pilish-tree-browser-mode)
     (let* ((response (pilish-test--read-json-fixture "browse-tree.json"))
@@ -4139,13 +4279,18 @@ completes in-call."
   (should (get 'pilish-tree-browser-dispatch 'transient--prefix)))
 
 (ert-deftest pilish-test-tree-browser-dispatch-suffixes ()
-  "Tree browser dispatch wires all keys to the correct commands.
+  "Tree browser dispatch wires actions and all direct filter choices.
 The summarize (`S') and abort (`C-c C-k') suffixes were dropped with
 the summarize feature (needs navigate_tree RPC)."
   (let ((expected
          '(("RET" . pilish-tree-browser-navigate)
            ("l"   . pilish-tree-browser-set-label)
            ("f"   . pilish-tree-browser-cycle-filter)
+           ("d"   . pilish--tree-browser-filter-default)
+           ("n"   . pilish--tree-browser-filter-no-tools)
+           ("u"   . pilish--tree-browser-filter-user-only)
+           ("L"   . pilish--tree-browser-filter-labeled-only)
+           ("a"   . pilish--tree-browser-filter-all)
            ("/"   . pilish-tree-browser-search)
            ("g"   . pilish-browse-refresh)
            ("q"   . quit-window))))

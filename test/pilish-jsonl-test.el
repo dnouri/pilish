@@ -599,6 +599,36 @@ reordering."
       (should (equal (plist-get weird :rawRole) "weird"))
       (should (equal (plist-get weird :preview) "odd text")))))
 
+(ert-deftest pilish-test-jsonl-summary-message-roles-retain-full-text ()
+  "Legacy summary-message projection keeps text beyond its preview."
+  (let* ((text (concat (make-string 220 ?x) " full-summary-needle"))
+         (result (pilish-test--jsonl-project-lines
+                  (list pilish-test--jsonl-header
+                        (pilish-test--jsonl-msg
+                         "b1" nil 0
+                         (list :role "branchSummary" :summary text))
+                        (pilish-test--jsonl-msg
+                         "c1" "b1" 1
+                         (list :role "compactionSummary" :summary text)))))
+         (tree (plist-get result :tree)))
+    (dolist (id '("b1" "c1"))
+      (let ((node (pilish-test--jsonl-find tree id)))
+        (should (= (length (plist-get node :preview)) 200))
+        (should (equal (plist-get node :summary) text))))))
+
+(ert-deftest pilish-test-jsonl-compaction-projects-summary ()
+  "Compaction projection retains its semantic summary for tree search."
+  (let* ((result (pilish-test--jsonl-project-lines
+                  (list pilish-test--jsonl-header
+                        (pilish-test--jsonl-entry
+                         "compaction" "c1" nil 0
+                         :summary "Retained compaction summary"
+                         :tokensBefore 4096))))
+         (node (pilish-test--jsonl-find (plist-get result :tree) "c1")))
+    (should (equal (plist-get node :summary)
+                   "Retained compaction summary"))
+    (should (= (plist-get node :tokensBefore) 4096))))
+
 (ert-deftest pilish-test-jsonl-malformed-payloads-degrade ()
   "Null messages, null content, and null blocks degrade, never crash.
 pi parses session files without validation; old or hand-edited files

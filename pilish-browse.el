@@ -831,7 +831,8 @@ NODE is a tree node plist.
 
 Filtering is two-phase (matching TUI tree-selector.ts:282-311):
   Phase 1 — universal pre-filter: empty assistant messages are always
-            hidden regardless of mode (unless aborted or errored).
+            hidden regardless of mode (unless aborted or carrying an
+            error message).
   Phase 2 — mode-specific filter: each mode defines additional rules."
   (if (pilish--browse-node-empty-assistant-p node)
       ;; Phase 1: universal pre-filter — empty assistants always hidden
@@ -851,92 +852,148 @@ Filtering is two-phase (matching TUI tree-selector.ts:282-311):
         (_ ;; `default'
          (not (member type '("model_change" "thinking_level_change"))))))))
 
+;;;; Client-Side Search/Filter
+
+(defun pilish--matches-filter-p (text tokens)
+  "Return non-nil if TEXT matches all regexp TOKENS.
+Each whitespace-separated token is a regexp.
+All tokens must match for the entry to be included."
+  (or (null tokens)
+      (cl-every (lambda (tok) (string-match-p tok text)) tokens)))
+
+(defconst pilish--tree-semantic-tool-preview-names
+  '("read" "write" "edit" "bash" "grep" "find" "ls")
+  "Tool names whose projected previews contain selected semantic fields.
+Other tool previews can contain arbitrary JSON arguments, which tree
+search deliberately excludes.")
+
+(defun pilish--tree-node-searchable-text (node)
+  "Return the searchable semantic text of projected tree NODE.
+The corpus includes the known display text, label, type and role,
+summary, tool name, and model/thinking metadata.  Projected message
+previews contain text blocks only, so image and thinking payloads never
+enter the corpus.  Raw `:toolArgs' are never serialized; a custom tool's
+JSON-formatted call preview is excluded as well."
+  (let* ((type (plist-get node :type))
+         (role (plist-get node :role))
+         (tool-name (plist-get node :toolName))
+         (tool-preview-safe-p
+          (or (not (equal type "tool_result"))
+              (not (plist-member node :toolArgs))
+              (member tool-name pilish--tree-semantic-tool-preview-names)))
+         (parts nil))
+    (dolist (value
+             (append
+              (list (plist-get node :label)
+                    type
+                    (and (stringp type)
+                         (replace-regexp-in-string "_" " " type))
+                    role
+                    (and (stringp role)
+                         (replace-regexp-in-string "_" " " role))
+                    (plist-get node :rawRole)
+                    (plist-get node :customType)
+                    tool-name
+                    (plist-get node :summary)
+                    (plist-get node :errorMessage)
+                    (plist-get node :stopReason)
+                    (plist-get node :provider)
+                    (plist-get node :modelId)
+                    (plist-get node :thinkingLevel))
+              (when tool-preview-safe-p
+                (list (plist-get node :preview)
+                      (pilish--tree-node-preview node)))))
+      (when (stringp value)
+        (push value parts)))
+    (mapconcat #'identity (nreverse parts) " ")))
+
 ;;;; Tree Flattening for Display
 
-(defun pilish--flatten-tree-for-display (tree leaf-id filter-mode)
-  "Flatten TREE into a display-ordered list of (NODE INDENT PREFIX) lists.
+(defun pilish--flatten-tree-for-display
+    (tree leaf-id filter-mode &optional search-tokens)
+  "Return TREE's visible nodes as (NODE INDENT PREFIX) rows.
 LEAF-ID identifies the current leaf for active-branch-first ordering.
-FILTER-MODE (`no-tools', `default', ...) controls which nodes are visible.
-Each entry is (NODE INDENT-LEVEL PREFIX-STRING) where PREFIX-STRING
-contains tree connectors and gutter characters for visual structure."
-  (let ((active-ids (pilish--active-path-ids tree leaf-id))
-        (result nil))
-    (pilish--flatten-tree-walk
-     (append tree nil) 0 active-ids filter-mode
-     nil nil
-     (lambda (node indent prefix) (push (list node indent prefix) result)))
-    (nreverse result)))
+FILTER-MODE controls browser filtering, and SEARCH-TOKENS are the
+all-regexp-token query applied to each node's semantic text.
 
-(defun pilish--flatten-tree-walk (nodes indent active-ids filter-mode
-                                                 gutter-stack is-branch-children
-                                                 emit)
-  "Walk NODES at INDENT level, calling EMIT for visible nodes.
-ACTIVE-IDS is the active path hash table.
-FILTER-MODE controls visibility.
-GUTTER-STACK is a list of strings (\"│  \" or \"   \") for ancestor levels.
-IS-BRANCH-CHILDREN is non-nil if NODES are siblings at a branch point.
-EMIT is called with (node indent prefix) for each visible node.
-Active-branch children are shown first at branch points.
-Uses an explicit stack to avoid overflow on deep trees."
-  ;; Each stack frame: [siblings vis-count vis-index indent gutter is-branch]
-  (let* ((vis-count (cl-count-if
-                     (lambda (n)
-                       (pilish--browse-node-visible-p n filter-mode))
-                     nodes))
-         (stack (list (vector nodes vis-count 0
-                              indent gutter-stack is-branch-children))))
+Filtering and search happen before topology is derived.  Hidden nodes'
+children attach to their nearest visible ancestor; visible roots,
+sibling connectors, indentation, and ancestor gutters therefore
+represent only the final visible set.  Both passes use explicit stacks
+so deeply nested conversations remain safe."
+  (let ((active-ids (pilish--active-path-ids tree leaf-id))
+        (visible-children (make-hash-table :test 'eq))
+        (stack nil))
+    ;; First pass: retain visible nodes and group them under the nearest
+    ;; visible ancestor.  Stack items are (NODE NEAREST-VISIBLE-PARENT).
+    (dolist (root (reverse (append tree nil)))
+      (push (list root nil) stack))
     (while stack
-      (let* ((frame (pop stack))
-             (siblings (aref frame 0))
-             (v-count  (aref frame 1))
-             (v-index  (aref frame 2))
-             (cur-indent (aref frame 3))
-             (gutter   (aref frame 4))
-             (is-branch-ch (aref frame 5)))
-        (when siblings
-          (let* ((node (car siblings))
-                 (rest (cdr siblings))
-                 (is-visible (pilish--browse-node-visible-p
-                              node filter-mode))
-                 (children (plist-get node :children))
-                 (child-list (and (vectorp children) (append children nil)))
-                 (is-branch (> (length child-list) 1))
-                 (child-indent (if is-branch (1+ cur-indent) cur-indent))
-                 ;; Compute gutter and child frame for this node
-                 (child-gutter gutter)
-                 (next-v-index v-index))
-            ;; Push continuation for remaining siblings (goes UNDER children)
-            (when is-visible
-              (let* ((last-visible-p (= v-index (1- v-count)))
-                     (connector (when is-branch-ch
-                                  (if last-visible-p "└─ " "├─ ")))
-                     (prefix (concat (apply #'concat gutter)
-                                     (or connector "")))
-                     (new-gutter (when is-branch-ch
-                                   (if last-visible-p "   " "│  "))))
-                (funcall emit node cur-indent prefix)
-                (when new-gutter
-                  (setq child-gutter (append gutter (list new-gutter))))
-                (setq next-v-index (1+ v-index))))
-            ;; Push remaining siblings (continuation)
-            (when rest
-              (push (vector rest v-count next-v-index
-                            cur-indent gutter is-branch-ch)
-                    stack))
-            ;; Push children ON TOP (processed before remaining siblings)
-            (when child-list
-              (let* ((sorted (if is-branch
-                                 (pilish--sort-active-first
-                                  child-list active-ids)
-                               child-list))
-                     (child-v-count
-                      (cl-count-if
-                       (lambda (n)
-                         (pilish--browse-node-visible-p n filter-mode))
-                       sorted)))
-                (push (vector sorted child-v-count 0
-                              child-indent child-gutter is-branch)
-                      stack)))))))))
+      (pcase-let ((`(,node ,visible-parent) (pop stack)))
+        (let* ((visible-p
+                (and (pilish--browse-node-visible-p node filter-mode)
+                     (or (null search-tokens)
+                         (pilish--matches-filter-p
+                          (pilish--tree-node-searchable-text node)
+                          search-tokens))))
+               (next-parent (if visible-p node visible-parent))
+               (children (plist-get node :children))
+               (child-list (and (vectorp children)
+                                (append children nil)))
+               (ordered-children
+                (if (> (length child-list) 1)
+                    (pilish--sort-active-first child-list active-ids)
+                  child-list)))
+          (when visible-p
+            (puthash visible-parent
+                     (cons node (gethash visible-parent visible-children))
+                     visible-children))
+          (dolist (child (reverse ordered-children))
+            (push (list child next-parent) stack)))))
+    ;; Consing during pre-order built every sibling list backwards.
+    (maphash (lambda (parent children)
+               (puthash parent (nreverse children) visible-children))
+             visible-children)
+    (pilish--flatten-visible-tree visible-children)))
+
+(defun pilish--flatten-visible-tree (visible-children)
+  "Flatten VISIBLE-CHILDREN with freshly derived visual topology.
+VISIBLE-CHILDREN maps each visible parent node (or nil for a visible
+root) to its ordered visible children.  Return (NODE INDENT PREFIX)
+rows without consulting any hidden node."
+  (let ((stack nil)
+        (result nil))
+    ;; Multiple visible roots are independent roots, not siblings under
+    ;; an implied displayed parent, so they never receive connectors.
+    (dolist (root (reverse (gethash nil visible-children)))
+      (push (list root 0 nil nil t) stack))
+    ;; Stack items: (NODE INDENT GUTTERS BRANCH-CHILD-P LAST-P).
+    (while stack
+      (pcase-let ((`(,node ,indent ,gutters ,branch-child-p ,last-p)
+                   (pop stack)))
+        (let* ((connector
+                (when branch-child-p (if last-p "└─ " "├─ ")))
+               (prefix (concat (apply #'concat gutters)
+                               (or connector "")))
+               (children (gethash node visible-children))
+               (child-count (length children))
+               (children-branch-p (> child-count 1))
+               (child-indent (if children-branch-p (1+ indent) indent))
+               (child-gutters
+                (if branch-child-p
+                    (append gutters (list (if last-p "   " "│  ")))
+                  gutters))
+               (index (1- child-count)))
+          (push (list node indent prefix) result)
+          ;; Reverse push preserves each visible sibling's active-first
+          ;; order when the LIFO stack is consumed.
+          (dolist (child (reverse children))
+            (push (list child child-indent child-gutters
+                        children-branch-p
+                        (= index (1- child-count)))
+                  stack)
+            (setq index (1- index))))))
+    (nreverse result)))
 
 (defun pilish--sort-active-first (children active-ids)
   "Sort CHILDREN so the subtree containing an active node comes first.
@@ -963,15 +1020,6 @@ Uses iterative DFS to avoid stack overflow on deep trees."
             (dotimes (i (length children))
               (push (aref children i) stack)))))
       nil)))
-
-;;;; Client-Side Search/Filter
-
-(defun pilish--matches-filter-p (text tokens)
-  "Return non-nil if TEXT matches all regexp TOKENS.
-Each whitespace-separated token is a regexp.
-All tokens must match for the entry to be included."
-  (or (null tokens)
-      (cl-every (lambda (tok) (string-match-p tok text)) tokens)))
 
 ;;;; Session View/Filter/Threading
 
@@ -2730,16 +2778,20 @@ that is fine for display-only sections."
 
 (defcustom pilish-tree-browser-default-filter 'no-tools
   "Initial filter of a newly created tree browser buffer.
-Filters select which persisted entries the projected tree shows:
+Filters select which entries the projected tree shows:
 
-- `default'       all entries except model/thinking bookkeeping;
+- `default'       projected entries except model/thinking changes;
 - `no-tools'      `default' without tool results;
 - `user-only'     user messages only;
 - `labeled-only'  labeled nodes only;
-- `all'           every displayable entry.
+- `all'           all projected/displayable content.
 
-In every filter, empty tool-dispatch assistant messages stay hidden
-\(see `pilish--browse-node-visible-p').
+Projection removes raw label, session_info, and custom bookkeeping
+entries before these filters run, promoting their children to the
+nearest displayable ancestor.  Thus `all' does not restore raw
+bookkeeping.  In every filter, empty tool-dispatch assistant messages
+stay hidden unless aborted or carrying an error message (see
+`pilish--browse-node-visible-p').
 
 The value initializes browser buffers when they are created, and
 again whenever the browser major mode is explicitly re-run.  An
@@ -2750,7 +2802,7 @@ state, so cycling filters with `f' stays local to that buffer."
                  (const :tag "Default" default)
                  (const :tag "User messages only" user-only)
                  (const :tag "Labeled nodes only" labeled-only)
-                 (const :tag "All entries" all))
+                 (const :tag "All projected/displayable content" all))
   :group 'pilish)
 
 ;;;; Tree Browser State
@@ -2923,8 +2975,18 @@ rendering path."
     ("g" "refresh" pilish-browse-refresh)
     ("q" "quit" quit-window)]
    ["Filter"
-    ("f" "filter" pilish-tree-browser-cycle-filter)
-    ("/" "search" pilish-tree-browser-search)]])
+    ("f" "cycle filter" pilish-tree-browser-cycle-filter)
+    ("d" "default: hide model/thinking changes"
+     pilish--tree-browser-filter-default)
+    ("n" "no-tools: default without tool results"
+     pilish--tree-browser-filter-no-tools)
+    ("u" "user-only: user messages"
+     pilish--tree-browser-filter-user-only)
+    ("L" "labeled-only: labeled nodes"
+     pilish--tree-browser-filter-labeled-only)
+    ("a" "all projected/displayable content"
+     pilish--tree-browser-filter-all)
+    ("/" "search semantic text" pilish-tree-browser-search)]])
 
 ;;;; Tree Browser Faces
 
@@ -3101,11 +3163,12 @@ IS-ACTIVE is non-nil if the node is on the active path.  IS-CURRENT
 marks the actual projected leaf, rather than merely its nearest
 visible ancestor.  The ASCII marker column is separate from tree
 connectors: `@' means current, `*' means an active ancestor, and a
-blank means inactive.  Labels render separately as right-margin
-overlays."
+blank means inactive.  A label remains in the right margin and also
+appears inline so keyboard navigation and search expose the same text."
   (let* ((face (pilish--tree-node-face node))
          (type-label (pilish--tree-node-type-label node))
          (preview (pilish--tree-node-preview node))
+         (label (plist-get node :label))
          (marker (cond
                   (is-current
                    (pilish--propertize-face "@ " 'pilish-tree-active))
@@ -3114,8 +3177,18 @@ overlays."
                   (t "  ")))
          (type-str (pilish--propertize-face
                     (format "%-7s" type-label) face))
+         (label-str
+          (if label
+              (concat
+               (pilish--propertize-face
+                (format "[%s]"
+                        (replace-regexp-in-string
+                         "[\n\t]" " " (format "%s" label)))
+                'pilish-tree-label)
+               " ")
+            ""))
          (preview-str (pilish--propertize-face preview face)))
-    (concat marker type-str " " preview-str)))
+    (concat marker type-str " " label-str preview-str)))
 
 ;;;; Tree Browser Point Orientation
 
@@ -3280,18 +3353,10 @@ obsolete insertion when a newer load lands reentrantly."
           (insert "No conversation tree.\n"))
          (t
           (let* ((flat (pilish--flatten-tree-for-display
-                        tree leaf-id filter))
+                        tree leaf-id filter
+                        pilish--tree-browser-search-tokens))
                  (active-ids (pilish--active-path-ids tree leaf-id))
-                 ;; Apply search filter if active
-                 (visible (if pilish--tree-browser-search-tokens
-                              (cl-remove-if-not
-                               (lambda (entry)
-                                 (pilish--matches-filter-p
-                                  (pilish--tree-node-preview
-                                   (nth 0 entry))
-                                  pilish--tree-browser-search-tokens))
-                               flat)
-                            flat)))
+                 (visible flat))
             (setq pilish--tree-browser-visible-count
                   (length visible))
             (if (null visible)
@@ -3361,18 +3426,58 @@ tree flattening on every redisplay cycle."
 
 ;;;; Tree Browser Interactive Commands
 
+(defun pilish-tree-browser-set-filter (filter)
+  "Set the tree browser to FILTER and re-render it.
+FILTER is one of the five symbols in `pilish--tree-filter-modes'."
+  (interactive
+   (list
+    (intern
+     (completing-read
+      "Tree filter: "
+      (mapcar #'symbol-name pilish--tree-filter-modes)
+      nil t nil nil (symbol-name pilish--tree-browser-filter)))))
+  (unless (memq filter pilish--tree-filter-modes)
+    (user-error "Unknown tree filter: %s" filter))
+  (setq pilish--tree-browser-filter filter)
+  (pilish--tree-browser-rerender)
+  (message "Pi: Filter: %s" filter))
+
+(defun pilish--tree-browser-filter-default ()
+  "Select the tree browser's `default' filter."
+  (interactive)
+  (pilish-tree-browser-set-filter 'default))
+
+(defun pilish--tree-browser-filter-no-tools ()
+  "Select the tree browser's `no-tools' filter."
+  (interactive)
+  (pilish-tree-browser-set-filter 'no-tools))
+
+(defun pilish--tree-browser-filter-user-only ()
+  "Select the tree browser's `user-only' filter."
+  (interactive)
+  (pilish-tree-browser-set-filter 'user-only))
+
+(defun pilish--tree-browser-filter-labeled-only ()
+  "Select the tree browser's `labeled-only' filter."
+  (interactive)
+  (pilish-tree-browser-set-filter 'labeled-only))
+
+(defun pilish--tree-browser-filter-all ()
+  "Select the tree browser's `all' filter."
+  (interactive)
+  (pilish-tree-browser-set-filter 'all))
+
 (defun pilish-tree-browser-cycle-filter ()
   "Cycle the tree browser filter mode."
   (interactive)
   (let* ((modes pilish--tree-filter-modes)
          (current pilish--tree-browser-filter)
          (next (or (cadr (member current modes)) (car modes))))
-    (setq pilish--tree-browser-filter next)
-    (pilish--tree-browser-rerender)
-    (message "Pi: Filter: %s" next)))
+    (pilish-tree-browser-set-filter next)))
 
 (defun pilish-tree-browser-search ()
-  "Set or clear search filter in the tree browser."
+  "Set or clear the semantic-text search in the tree browser.
+Whitespace-separated regexp tokens must all match one projected node."
   (interactive)
   (let ((query (read-string "Filter (regexp tokens): "
                             pilish--tree-browser-search-query))

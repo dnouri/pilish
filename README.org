@@ -431,13 +431,43 @@ shown, unrelated unique history remains usable, and the browser shows a
 duplicate-ID warning.  That ambiguous row has no =@= or =*= marker and
 cannot be labeled or used as a continuation target.
 
-=f= cycles filters
-(starting from the =no-tools= default; see
-=pilish-tree-browser-default-filter=), =/= searches, and =l= sets or
-clears a label on a node.  Press =?= for its menu and =g= to refresh
-the last persisted state.  Display and refresh read the JSONL file from
-disk and still work offline; changing position by continuing from a
-historical turn requires the linked live, idle Pilish process.
+Tree filtering runs after display projection.  Projection first removes
+raw =label=, =session_info=, and =custom= bookkeeping entries and
+promotes their children to the nearest displayable ancestor.  The five
+filter contracts are:
+- =default= — projected entries except model and thinking-level changes;
+- =no-tools= — =default= without tool results;
+- =user-only= — user messages only;
+- =labeled-only= — labeled nodes only;
+- =all= — all /projected, displayable/ content.  It does not restore the
+  raw bookkeeping records removed by projection.
+
+Every filter also hides empty tool-dispatch assistant messages unless
+aborted or carrying an error message.  The shipped value of
+=pilish-tree-browser-default-filter= is =no-tools=; changing that option
+changes the initial filter for new (or explicitly reinitialized) tree
+browser buffers.  =f= cycles the filters.  The =?= transient lists all
+five as direct choices (=d=, =n=, =u=, =L=, and =a= inside the menu), so
+they do not depend on discovering the cycle order.
+
+=/= searches the semantic text of each projected node.  Query tokens are
+whitespace-separated Emacs regexps and every token must match the same
+node.  The corpus includes preview/message text, the label, role and
+type, full branch and compaction summaries, tool name (plus selected
+fields in built-in tool previews), and provider/model or thinking-level
+metadata.  It never serializes raw tool arguments or custom-tool JSON,
+and binary/image and hidden thinking payloads never enter the projected
+preview.  The final filter-and-query result gets a newly derived visible
+tree: hidden intermediates are bypassed and roots, nearest visible
+parents, sibling connectors, indentation, and gutters all describe only
+the rows on screen.
+
+=l= sets or clears a label on a node.  Labels appear in the node line for
+keyboard discovery and search, and remain duplicated in the right
+margin for quick scanning.  Press =g= to refresh the last persisted
+state.  Display and refresh read the JSONL file from disk and still work
+offline; changing position by continuing from a historical turn requires
+the linked live, idle Pilish process.
 
 The tree browser and forking answer different questions.  Example:
 after two turns you want to try a second approach.  The tree browser
@@ -500,6 +530,7 @@ The browsers:
 | =s=       | sessions       | Cycle view: Threaded (fork families), Recent activity, or Most messages |
 | =t=       | sessions       | Toggle This project / All projects scope                                |
 | =f=       | sessions       | Named sessions only                                                     |
+| =f=       | tree           | Cycle filters; =?= offers all five directly                             |
 | =r= / =d= | sessions       | Rename a session / delete a closed one                                  |
 | =l=       | tree           | Set or clear a label on a node                                          |
 | =g=       | sessions, tree | Refresh                                                                 |
