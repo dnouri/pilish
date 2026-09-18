@@ -130,6 +130,15 @@ Run all unit tests:
 make test
 ```
 
+The unit suite runs in batch only; running the full unit suite inside an
+interactive (tty) Emacs is not supported.  Some table tests rely on the
+batch visibility exemption in `pilish--chat-buffer-hidden-p`, and native
+kill-buffer prompts on modified fixtures block unattended runs.  For
+windowed behavior, use the GUI lane:
+```bash
+make test-gui
+```
+
 Run tests for a single module:
 ```bash
 make test-core
