@@ -127,6 +127,20 @@
     (should (pilish-gui-test-input-window))
     (should (pilish-gui-test-verify-layout))))
 
+(ert-deftest pilish-gui-test-send-waits-for-turn-start ()
+  "Regression for issue #303: send waits until the submitted turn starts.
+With a pre-start delay between the prompt ack and `agent_start', the
+helpers previously returned while the status was still `sending', so
+the next `pilish-send' queued its prompt as a follow-up and assertions
+raced a turn that was never submitted."
+  (pilish-gui-test-with-fresh-session
+    (:backend fake :fake-scenario "prompt-lifecycle"
+              :fake-extra-args ("--pre-start-delay-ms=100"))
+    (pilish-gui-test-send "first turn")
+    (pilish-gui-test-send "second turn")
+    (should (pilish-gui-test-chat-contains "Fake reply for: second turn"))
+    (should (pilish-gui-test-idle-p))))
+
 ;;;; Scroll Preservation Tests
 
 (ert-deftest pilish-gui-test-scroll-preserved-streaming ()
@@ -539,7 +553,7 @@ rear-advance overlay before assistant text continues after the tool block."
 ;;;; Extension Command Tests
 
 (ert-deftest pilish-gui-test-extension-command-returns-to-idle ()
-  "Fake extension command without a visible turn returns to idle immediately."
+  "Fake extension command without a visible turn returns to idle."
   (pilish-gui-test-with-fresh-session
     (:backend fake :fake-scenario "extension-noop")
     (pilish-gui-test-send "/test-noop" t)

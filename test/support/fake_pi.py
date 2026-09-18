@@ -313,11 +313,13 @@ class FakePiHarness:
         session_dir: str | None,
         log_file: str | None,
         extension_timeout_ms: int | None,
+        pre_start_delay_ms: int,
         split_responses: dict[str, int],
     ) -> None:
         self.scenario = scenario
         self.log_file = Path(log_file) if log_file else None
         self.extension_timeout_ms = extension_timeout_ms
+        self.pre_start_delay_ms = pre_start_delay_ms
         self.split_responses = split_responses
         self._write_lock = threading.Lock()
         self._session_lock = threading.RLock()
@@ -1010,6 +1012,9 @@ class FakePiHarness:
 
         def runner() -> None:
             try:
+                # Image the ack->agent_start window so tests can deterministically
+                # exercise submission that has not started its run yet.
+                self._sleep_ms(self.pre_start_delay_ms, abortable=False)
                 target()
             finally:
                 if self._run_thread is thread:
@@ -1829,6 +1834,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Override dialog timeout in milliseconds; 0 disables timeout",
     )
     parser.add_argument(
+        "--pre-start-delay-ms",
+        type=int,
+        default=0,
+        help="Sleep before the first agent_start of each run, in milliseconds",
+    )
+    parser.add_argument(
         "--split-response",
         action="append",
         default=[],
@@ -1877,6 +1888,7 @@ def main(argv: list[str] | None = None) -> int:
         session_dir=args.session_dir,
         log_file=args.log_file,
         extension_timeout_ms=args.extension_timeout_ms,
+        pre_start_delay_ms=args.pre_start_delay_ms,
         split_responses=split_responses,
     )
     return harness.run()
