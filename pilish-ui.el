@@ -1558,6 +1558,23 @@ Used to avoid duplicate headers during retry sequences.")
         :data (pilish--prompt-image-data image)
         :mimeType (pilish--prompt-image-mime-type image)))
 
+(defun pilish--input-draft-nonempty-snapshot (input-buffer)
+  "Return a snapshot when INPUT-BUFFER has text or a prompt image.
+Whitespace-only text is blank.  Inspect the whole buffer despite any
+narrowing, and return nil for a dead buffer or blank image-free draft.
+The snapshot is ephemeral: it references the existing materialized
+image and neither copies nor consumes draft state."
+  (when (buffer-live-p input-buffer)
+    (with-current-buffer input-buffer
+      (save-restriction
+        (widen)
+        (let ((text (buffer-substring-no-properties
+                     (point-min) (point-max)))
+              (image (pilish--get-prompt-image input-buffer)))
+          (when (or image
+                    (not (string-empty-p (string-trim text))))
+            (list input-buffer text image)))))))
+
 (defun pilish--replace-input-draft (input-buffer text)
   "Replace INPUT-BUFFER's draft with TEXT and clear its prompt image."
   (when (buffer-live-p input-buffer)

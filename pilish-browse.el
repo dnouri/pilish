@@ -4158,6 +4158,44 @@ replaced it."
   (pilish--browse-poll-settled
    chat-buf win path (time-add (current-time) 30)))
 
+(defun pilish--browse-confirm-draft-replacement
+    (input-buf &optional approved-draft)
+  "Decide whether navigation may replace INPUT-BUF's current draft.
+APPROVED-DRAFT is a nonempty snapshot accepted before a fresh guarded
+navigation pass.  Return `(ready . SNAPSHOT)' when replacement may run
+without yielding, `(revalidate . SNAPSHOT)' after an accepted prompt,
+or nil on refusal.  SNAPSHOT is nil for a blank image-free draft.
+When the draft changes while `y-or-n-p' is active, ask about a new
+nonempty draft; becoming blank still returns `revalidate' so stale
+navigation state observed before the prompt is never committed."
+  (let ((draft (pilish--input-draft-nonempty-snapshot input-buf)))
+    (cond
+     ((null draft)
+      (cons 'ready nil))
+     ((equal draft approved-draft)
+      (cons 'ready approved-draft))
+     ((not (y-or-n-p
+            "Replace the unsent draft and continue from selected turn? "))
+      nil)
+     (t
+      (let ((replacement
+             (pilish--input-draft-nonempty-snapshot input-buf)))
+        (cond
+         ((equal draft replacement)
+          (cons 'revalidate draft))
+         ((null replacement)
+          (cons 'revalidate nil))
+         (t
+          (pilish--browse-confirm-draft-replacement input-buf))))))))
+
+(defun pilish--browse-draft-replacement-still-safe-p (input-buf approval)
+  "Return non-nil if APPROVAL still permits replacing INPUT-BUF's draft.
+A now-blank draft is always safe to replace.  A nonempty draft must be
+the exact text/image value previously approved."
+  (let ((draft (pilish--input-draft-nonempty-snapshot input-buf)))
+    (or (null draft)
+        (equal draft approval))))
+
 (defun pilish--browse-navigate (node-id)
   "Continue the live conversation from projected tree node NODE-ID.
 An addressable id identical to `pilish--tree-browser-leaf-id' is the
@@ -4187,10 +4225,54 @@ flow in `pilish--browse-navigate-noncurrent'."
         (message "Pi: Already at current position")
       (pilish--browse-navigate-noncurrent node-id))))
 
-(defun pilish--browse-navigate-noncurrent (node-id)
+(defun pilish--browse-navigation-owner-current-p (owner)
+  "Return non-nil when OWNER still names this browser, chat, and file."
+  (let ((browser-buf (plist-get owner :browser-buffer))
+        (chat-buf (plist-get owner :chat-buffer))
+        (path (plist-get owner :session-file)))
+    (and (eq (current-buffer) browser-buf)
+         (derived-mode-p 'pilish-tree-browser-mode)
+         (eq pilish--chat-buffer chat-buf)
+         (buffer-live-p chat-buf)
+         (equal pilish--tree-browser-loaded-file path)
+         (equal (pilish--tree-browser-chat-session-file) path))))
+
+(defun pilish--browse-navigation-owner-changed ()
+  "Report that draft confirmation outlived its navigation owner."
+  (message
+   (concat
+    "Pi: Cannot continue from selected turn: tree changed "
+    "during draft confirmation")))
+
+(defun pilish--browse-navigate-noncurrent
+    (node-id &optional approved-draft navigation-owner)
   "Continue from non-current tree node NODE-ID.
+APPROVED-DRAFT and NAVIGATION-OWNER are internal state carried only
+across the post-confirmation revalidation pass.  Initial callers omit
+them.  Revalidation always returns to the original browser buffer and
+aborts if that buffer, its linked chat, or its session file changed."
+  (if (null navigation-owner)
+      (pilish--browse-navigate-noncurrent-owned node-id approved-draft)
+    (let ((browser-buf (plist-get navigation-owner :browser-buffer)))
+      (if (not (buffer-live-p browser-buf))
+          (pilish--browse-navigation-owner-changed)
+        (with-current-buffer browser-buf
+          (if (pilish--browse-navigation-owner-current-p navigation-owner)
+              (pilish--browse-navigate-noncurrent-owned
+               node-id approved-draft navigation-owner)
+            (pilish--browse-navigation-owner-changed)))))))
+
+(defun pilish--browse-navigate-noncurrent-owned
+    (node-id &optional approved-draft navigation-owner)
+  "Continue from non-current tree node NODE-ID under NAVIGATION-OWNER.
+APPROVED-DRAFT is an ephemeral text/image snapshot accepted before a
+recursive revalidation pass.  NAVIGATION-OWNER is captured before the
+first prompt and normally starts nil.
 Guard → rewrite → switch → reload → prefill, mirroring pi's
-navigateTree without a navigate RPC:
+navigateTree without a navigate RPC.  An interactive draft answer is
+bound to the browser buffer, linked chat buffer, and session file
+captured before the prompt.  Revalidation aborts if any owner changed
+or died instead of resolving NODE-ID in a newly current tree:
 
  1. a live linked chat buffer, else `user-error' \"No pi session to
     continue from selected turn\";
@@ -4222,44 +4304,60 @@ navigateTree without a navigate RPC:
 10. a nil :leaf-id on a HISTORICAL root user message refuses with the
     fork hint — the chat's fork command does that job;
 11. navigation target :current-p handles the distinct historical-user
-    re-edit case where its parent is already the current position: its
-    :prefill is restored, success is messaged, and settle is scheduled,
-    but no write or switch occurs.  A target without :prefill only
-    reports that it is already at the current position;
+    re-edit case where its parent is already the current position: a
+    nonempty text/image draft first gets a targeted replacement prompt;
+    acceptance recursively re-runs every guard and disk/target lookup,
+    then restores :prefill, messages success, and schedules settle, but
+    performs no write or switch.  A target without :prefill only reports
+    that it is already at the current position and cannot prompt because
+    it replaces no draft;
 12. the resume cwd pre-flight (`--session-file-cwd-or-error') runs
     BEFORE any write so its `user-error's surface before the file
     changes;
-13. the local atomic rewrite (`--browse-rewrite-session-file') — the
+13. `pilish-jsonl-navigation-lines' resolves the rewrite bytes; an
+    unreadable result stops without prompting or replacing the draft;
+14. when the rewrite path would replace a nonempty text/image draft,
+    its targeted confirmation runs before the file rewrite or resume;
+    acceptance recursively re-runs steps 1–13, so bytes and guards
+    observed before the interactive prompt are never committed;
+15. the local atomic rewrite (`--browse-rewrite-session-file') — the
     closing rename is the ONLY call that touches the session file;
     pre-commit local failure messages and stops byte-identically;
-14. `pilish--resume-selected-session' (PROC CHAT-BUF PATH) —
+16. `pilish--resume-selected-session' (PROC CHAT-BUF PATH) —
     a same-path switch is legal, so the switch rides the normal
     choreography including the transition latch and history reload;
-15. the input prefill runs immediately after the resume RPC is
+17. the input prefill runs immediately after the resume RPC is
     scheduled (the latch blocks sending until the switch settles),
-    against the input buffer captured from the chat BEFORE the RPC;
-16. \"Pi: Continued from selected turn: PREVIEW\" from the cached tree
+    against the input buffer captured from the chat BEFORE the RPC.
+    If yielding rewrite/resume work exposed a newer nonempty draft,
+    preserve it and skip the prefill;
+18. \"Pi: Continued from selected turn: PREVIEW\" from the cached tree
     (`--tree-find-node', `--tree-node-preview', truncated to 60;
     \"Pi: Continued from selected turn\" without a preview), then
     `pilish--browse-quit-when-settled';
-17. no auto-reopen of the browser — refresh with `g'.
+19. no auto-reopen of the browser — refresh with `g'.
 
-On ordinary local files this guard/read/rewrite path is synchronous and
-does not yield back to Emacs, so only an independent writer can stale
-the file between checks.  The ready guard idles the linked pi process
-but cannot exclude another pi instance or external writer; such a
-writer between the authoritative line read and rename can lose its
-change.  TRAMP file handlers may yield, and their rename need not be
-atomic.  These residual risks are accepted here rather than inventing
-cross-module writer coordination."
+On ordinary local files this guard/read/rewrite path is synchronous
+apart from the optional draft confirmation; an accepted answer starts a
+fresh guarded pass.  The ready guard idles the linked pi process but
+cannot exclude another pi instance or external writer; a writer between
+the final authoritative line read and rename can lose its change.  TRAMP
+file handlers may yield, and their rename need not be atomic.  These
+residual risks are accepted here rather than inventing cross-module
+writer coordination."
   (let ((chat-buf pilish--chat-buffer))
     (unless (and chat-buf (buffer-live-p chat-buf))
       (user-error "No pi session to continue from selected turn"))
     ;; The input buffer is captured BEFORE the RPC: the chat may retarget
-    ;; buffers during the switch (step 14).
-    (let ((input-buf (buffer-local-value 'pilish--input-buffer
-                                         chat-buf))
-          (path (pilish--tree-browser-chat-session-file)))
+    ;; buffers during the switch (step 16).
+    (let* ((input-buf (buffer-local-value 'pilish--input-buffer
+                                          chat-buf))
+           (path (pilish--tree-browser-chat-session-file))
+           (navigation-owner
+            (or navigation-owner
+                (list :browser-buffer (current-buffer)
+                      :chat-buffer chat-buf
+                      :session-file path))))
       (cond
        ((null path)
         (message "Pi: Cannot continue from selected turn: no session file"))
@@ -4311,11 +4409,21 @@ cross-module writer coordination."
                    ((plist-get target :current-p)
                     (if (not (plist-get target :prefill))
                         (message "Pi: Already at current position")
-                      (pilish--browse-prefill-input
-                       input-buf (plist-get target :prefill))
-                      (pilish--browse-navigate-message node-id)
-                      (pilish--browse-quit-when-settled
-                       chat-buf (selected-window) path)))
+                      (let ((decision
+                             (pilish--browse-confirm-draft-replacement
+                              input-buf approved-draft)))
+                        (pcase (car-safe decision)
+                          ('revalidate
+                           ;; `y-or-n-p' yields.  Re-run every live/file/target
+                           ;; guard before acting on the accepted snapshot.
+                           (pilish--browse-navigate-noncurrent
+                            node-id (cdr decision) navigation-owner))
+                          ('ready
+                           (pilish--browse-prefill-input
+                            input-buf (plist-get target :prefill))
+                           (pilish--browse-navigate-message node-id)
+                           (pilish--browse-quit-when-settled
+                            chat-buf (selected-window) path))))))
                    (t
                     (condition-case err
                         (pilish--session-file-cwd-or-error path)
@@ -4330,15 +4438,34 @@ cross-module writer coordination."
                             "Pi: Cannot continue from selected turn: session file "
                             "is unreadable or not a pi session file: %s")
                            path)
-                        (when (pilish--browse-rewrite-session-file
-                               path lines)
-                          (pilish--resume-selected-session
-                           proc chat-buf path)
-                          (pilish--browse-prefill-input
-                           input-buf (plist-get target :prefill))
-                          (pilish--browse-navigate-message node-id)
-                          (pilish--browse-quit-when-settled
-                           chat-buf (selected-window) path))))))))))))))))))
+                        (let ((decision
+                               (pilish--browse-confirm-draft-replacement
+                                input-buf approved-draft)))
+                          (pcase (car-safe decision)
+                            ('revalidate
+                             ;; Revalidate after the interactive answer; never
+                             ;; commit lines computed before the prompt.
+                             (pilish--browse-navigate-noncurrent
+                              node-id (cdr decision) navigation-owner))
+                            ('ready
+                             (when (pilish--browse-rewrite-session-file
+                                    path lines)
+                               (pilish--resume-selected-session
+                                proc chat-buf path)
+                               (let ((replace-draft-p
+                                      (pilish--browse-draft-replacement-still-safe-p
+                                       input-buf (cdr decision))))
+                                 (when replace-draft-p
+                                   (pilish--browse-prefill-input
+                                    input-buf (plist-get target :prefill)))
+                                 (pilish--browse-navigate-message node-id)
+                                 (unless replace-draft-p
+                                   (message
+                                    (concat
+                                     "Pi: Continued from selected turn; kept newer "
+                                     "input draft (prefill skipped)"))))
+                               (pilish--browse-quit-when-settled
+                                chat-buf (selected-window) path)))))))))))))))))))))
 
 (defun pilish--browse-navigate-message (node-id)
   "Message successful continuation from NODE-ID using the cached tree.
@@ -4407,11 +4534,11 @@ propagate after cleanup.  Success returns non-nil."
 
 (defun pilish--browse-prefill-input (input-buf text)
   "Replace INPUT-BUF's draft with TEXT; nil TEXT still erases.
-Erasing unsent input is deliberate (the fork command's precedent):
-continuing from the selected turn replaces whatever draft was in flight.  Runs
-immediately after the resume RPC is scheduled — the transition latch
-blocks sending until the switch settles, so the text cannot leak into
-the outgoing session.  Failures are non-fatal."
+Navigation confirms first when that replacement would discard nonempty
+text or an attached prompt image.  This function runs immediately after
+the resume RPC is scheduled — the transition latch blocks sending until
+the switch settles, so the text cannot leak into the outgoing session.
+Failures are non-fatal."
   (when (buffer-live-p input-buf)
     (condition-case err
         (pilish--replace-input-draft input-buf text)

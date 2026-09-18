@@ -414,15 +414,49 @@ ancestor from the old snapshot, then the new active path.  Switching
 the linked chat to another session file resets this orientation even
 when a fork shares node IDs with the old file.
 
-Press =RET= to continue from the selected turn.  Selecting the =@=
-entry is a strict no-op before live-process and busy/transition checks,
-including offline or streaming sessions and a current user prompt
-followed only by projected-away bookkeeping records; it neither reads
-or rewrites the session nor replaces the input draft.  A historical
-user prompt or =custom_message= is user-like: it continues from its
-parent and prefills its text when available for editing.  If that
-parent does not exist, Pilish points you to the chat's fork command.
-An assistant or any other historical entry continues from itself.
+Press =RET= to continue from the selected turn.  Its behavior depends
+on the selected projected node:
+
+| Selected node | What =RET= does |
+|---------------+-----------------|
+| The =@= current projected position | Strict no-op before live-process, busy/transition, disk, or draft checks.  Trailing projected-away bookkeeping does not change its identity. |
+| Historical user prompt or user-like =custom_message= with a parent | Continues from the parent and prefills the selected prompt text when available.  If that parent is already current, this is prefill-only; otherwise Pilish rewrites the active path and resumes the same session file. |
+| Historical root user prompt or root user-like =custom_message= | Has no parent to continue from, so Pilish refuses and points to the chat's fork command.  A root prompt that is itself =@= remains the strict no-op above. |
+| Non-current assistant, tool result, branch or compaction summary, model/thinking change, or other node | Continues from that node itself by rewriting the active path and resuming the same session file.  Its prefill is applied when the navigation target provides one; most such nodes provide none. |
+
+A continuation that would replace the input draft first checks the
+existing input-buffer draft state: either nonblank text or an attached
+prompt image triggers =Replace the unsent draft ...?=.  Declining keeps
+both text and image and occurs before any session-file rewrite or resume
+is scheduled.  Acceptance stays bound to the browser, linked chat, and
+session file that opened the question, then re-runs the live-session and
+disk/target checks.  If that browser dies or its chat/file changes,
+navigation is cancelled rather than reinterpreting the node ID in a new
+tree; a same-file refresh remains valid.  If the draft changes while the
+question is open, Pilish asks about the newer draft instead.  If a newer
+nonempty draft appears during later yielding file-handler work, Pilish
+keeps it and skips the prefill.  Blank text with no image proceeds
+without a prompt, and the =@= no-op never prompts.  This is a targeted
+loss-prevention check, not a blanket confirmation on every =RET=.
+
+For a path-changing continuation, Pilish preserves complete raw JSONL
+lines, writes the new order to a sibling temporary file, and replaces an
+ordinary local session file with one atomic rename before asking the
+normal resume flow to reload it.  This is not cross-process locking: an
+independent Pi instance or external writer can still race the final
+validated read and rename.  A TRAMP handler may yield and may implement
+rename as copy-and-delete, so remote replacement is not guaranteed to be
+atomic.
+
+Pi's TUI can optionally ask the model for a branch summary while its
+own tree-navigation API changes branches.  Pilish deliberately cannot
+offer that option over Pi's current RPC surface: RPC has observation
+commands such as =get_tree= and =get_entries=, but no in-place
+=navigate= command; its =fork= command creates a different session file.
+Pilish fully displays =branch_summary= entries already persisted in the
+session file, but invents neither an LLM call nor a hidden summary
+workflow during navigation.
+
 Legacy rows without IDs are visible but cannot be continuation targets;
 open the file with Pi once to migrate it.  Historical files with exact
 repeats of the same nonempty-ID entry display that entry once.  If the

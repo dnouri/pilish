@@ -8141,6 +8141,11 @@ overrides any spy."
                  (cl-letf* (((symbol-function 'message)
                              (lambda (fmt &rest args)
                                (push (apply #'format fmt args) ,messages)))
+                            ;; Existing navigation tests exercise the accepted
+                            ;; path.  Draft-protection tests below override this
+                            ;; default to inspect both answers and prompt order.
+                            ((symbol-function 'y-or-n-p)
+                             (lambda (&rest _) t))
                             ((symbol-function
                               'pilish--resume-selected-session)
                              (lambda (&rest args) (push args ,resume-calls)))
@@ -8382,7 +8387,9 @@ The raw leaf is a trailing projected-away label resolving to a1."
                 ((symbol-function 'pilish--browse-quit-when-settled)
                  (lambda (&rest _) (push :settle forbidden)))
                 ((symbol-function 'pilish--session-file-cwd-or-error)
-                 (lambda (&rest _) (push :cwd forbidden))))
+                 (lambda (&rest _) (push :cwd forbidden)))
+                ((symbol-function 'y-or-n-p)
+                 (lambda (&rest _) (push :draft-prompt forbidden) t)))
         (pilish-tree-browser-navigate))
       (should-not forbidden)
       (should (member "Pi: Already at current position" messages))
@@ -8499,6 +8506,408 @@ settle — but writes nothing and switches nothing."
                      (list (list chat-buf (selected-window) path))))
       (should (equal (pilish-test--file-contents path) before))
       (should-not resume-calls))))
+
+(ert-deftest pilish-test-navigate-protects-text-draft-before-rewrite ()
+  "A declined draft prompt precedes and cancels rewrite and resume.
+Accepting the same non-current assistant target then runs the normal
+nil-prefill path, including clearing the draft."
+  (pilish-test--with-navigate-fixture
+      (pilish-test--navigable-session-lines)
+      path chat-buf input-buf proc messages resume-calls quit-calls
+      ready-calls
+    (let ((before (pilish-test--file-contents path))
+          (prompts nil))
+      (cl-letf (((symbol-function 'y-or-n-p)
+                 (lambda (prompt)
+                   (push prompt prompts)
+                   (should (equal (pilish-test--file-contents path) before))
+                   (should-not resume-calls)
+                   nil)))
+        (pilish--browse-navigate "b1"))
+      (should (= (length prompts) 1))
+      (should (string-match-p "unsent draft" (car prompts)))
+      (should (equal (pilish-test--file-contents path) before))
+      (should-not resume-calls)
+      (should-not quit-calls)
+      (should (equal (with-current-buffer input-buf (buffer-string))
+                     "stale draft"))
+      (setq prompts nil)
+      (cl-letf (((symbol-function 'y-or-n-p)
+                 (lambda (prompt)
+                   (push prompt prompts)
+                   (should (equal (pilish-test--file-contents path) before))
+                   (should-not resume-calls)
+                   t)))
+        (pilish--browse-navigate "b1"))
+      (should (= (length prompts) 1))
+      (should (equal resume-calls (list (list proc chat-buf path))))
+      (should (equal (with-current-buffer input-buf (buffer-string)) ""))
+      (should (equal (plist-get (pilish-jsonl-read-file path) :leafId)
+                     "b1")))))
+
+(ert-deftest pilish-test-navigate-protects-text-draft-before-prefill ()
+  "A historical-user prefill asks before replacing an unsent draft.
+Declining keeps the draft and performs no continuation side effect;
+accepting replaces it without rewriting or resuming the session."
+  (pilish-test--with-navigate-fixture
+      (list (pilish-test--make-session-header "sid-prefill-guard")
+            (pilish-test--user-line "u2" "u1" "try the other way")
+            (pilish-test--user-line "u1" nil "fix the parser"))
+      path chat-buf input-buf proc messages resume-calls quit-calls
+      ready-calls
+    (let ((before (pilish-test--file-contents path))
+          (prompts nil))
+      (cl-letf (((symbol-function 'y-or-n-p)
+                 (lambda (prompt)
+                   (push prompt prompts)
+                   (should (equal (pilish-test--file-contents path) before))
+                   (should-not resume-calls)
+                   nil)))
+        (pilish--browse-navigate "u2"))
+      (should (= (length prompts) 1))
+      (should (equal (with-current-buffer input-buf (buffer-string))
+                     "stale draft"))
+      (should (equal (pilish-test--file-contents path) before))
+      (should-not resume-calls)
+      (should-not quit-calls)
+      (setq prompts nil)
+      (cl-letf (((symbol-function 'y-or-n-p)
+                 (lambda (prompt)
+                   (push prompt prompts)
+                   (should (equal (pilish-test--file-contents path) before))
+                   t)))
+        (pilish--browse-navigate "u2"))
+      (should (= (length prompts) 1))
+      (should (equal (with-current-buffer input-buf (buffer-string))
+                     "try the other way"))
+      (should (equal (pilish-test--file-contents path) before))
+      (should-not resume-calls)
+      (should (= (length quit-calls) 1)))))
+
+(ert-deftest pilish-test-navigate-protects-image-draft-on-both-paths ()
+  "An attached image alone protects rewrite and prefill navigation.
+Declining either prompt retains the image and causes no file, resume,
+prefill, or settle side effect."
+  (let ((image (pilish--make-prompt-image
+                :name "draft.png" :mime-type "image/png"
+                :byte-size 1 :data "AA==")))
+    ;; Rewrite-and-resume path with a nil prefill.
+    (pilish-test--with-navigate-fixture
+        (pilish-test--navigable-session-lines)
+        path chat-buf input-buf proc messages resume-calls quit-calls
+        ready-calls
+      (with-current-buffer input-buf
+        (erase-buffer)
+        (pilish--set-prompt-image image))
+      (let ((before (pilish-test--file-contents path))
+            (prompts 0))
+        (cl-letf (((symbol-function 'y-or-n-p)
+                   (lambda (_prompt) (cl-incf prompts) nil)))
+          (pilish--browse-navigate "b1"))
+        (should (= prompts 1))
+        (should (equal (pilish-test--file-contents path) before))
+        (should-not resume-calls)
+        (should-not quit-calls)
+        (should (eq (pilish--get-prompt-image input-buf) image))))
+    ;; Historical-user prefill-only path.
+    (pilish-test--with-navigate-fixture
+        (list (pilish-test--make-session-header "sid-image-prefill")
+              (pilish-test--user-line "u2" "u1" "try the other way")
+              (pilish-test--user-line "u1" nil "fix the parser"))
+        path chat-buf input-buf proc messages resume-calls quit-calls
+        ready-calls
+      (with-current-buffer input-buf
+        (erase-buffer)
+        (pilish--set-prompt-image image))
+      (let ((before (pilish-test--file-contents path))
+            (prompts 0))
+        (cl-letf (((symbol-function 'y-or-n-p)
+                   (lambda (_prompt) (cl-incf prompts) nil)))
+          (pilish--browse-navigate "u2"))
+        (should (= prompts 1))
+        (should (equal (pilish-test--file-contents path) before))
+        (should-not resume-calls)
+        (should-not quit-calls)
+        (should (eq (pilish--get-prompt-image input-buf) image))))))
+
+(ert-deftest pilish-test-navigate-blank-draft-does-not-prompt ()
+  "Whitespace without an image is blank and navigation proceeds directly."
+  (pilish-test--with-navigate-fixture
+      (pilish-test--navigable-session-lines)
+      path chat-buf input-buf proc messages resume-calls quit-calls
+      ready-calls
+    (with-current-buffer input-buf
+      (erase-buffer)
+      (insert " \n\t")
+      (pilish--clear-prompt-image))
+    (cl-letf (((symbol-function 'y-or-n-p)
+               (lambda (&rest _)
+                 (ert-fail "Blank draft triggered replacement prompt"))))
+      (pilish--browse-navigate "b1"))
+    (should (equal resume-calls (list (list proc chat-buf path))))
+    (should (equal (with-current-buffer input-buf (buffer-string)) ""))))
+
+(ert-deftest pilish-test-navigate-protects-draft-outside-narrowing ()
+  "Draft detection widens before deciding that visible whitespace is blank."
+  (pilish-test--with-navigate-fixture
+      (pilish-test--navigable-session-lines)
+      path chat-buf input-buf proc messages resume-calls quit-calls
+      ready-calls
+    (let ((contents "hidden draft\n   ")
+          (prompts 0)
+          (before (pilish-test--file-contents path)))
+      (with-current-buffer input-buf
+        (erase-buffer)
+        (insert contents)
+        (narrow-to-region (- (point-max) 2) (point-max))
+        (should (string-empty-p (string-trim (buffer-string)))))
+      (cl-letf (((symbol-function 'y-or-n-p)
+                 (lambda (_prompt) (cl-incf prompts) nil)))
+        (pilish--browse-navigate "b1"))
+      (should (= prompts 1))
+      (should (equal (pilish-test--file-contents path) before))
+      (should-not resume-calls)
+      (with-current-buffer input-buf
+        (save-restriction
+          (widen)
+          (should (equal (buffer-string) contents)))))))
+
+(ert-deftest pilish-test-navigate-rechecks-draft-changed-during-prompt ()
+  "An accepted answer cannot authorize a draft changed by the prompt.
+The replacement draft gets its own question; declining that question
+keeps it and prevents rewrite and resume."
+  (pilish-test--with-navigate-fixture
+      (pilish-test--navigable-session-lines)
+      path chat-buf input-buf proc messages resume-calls quit-calls
+      ready-calls
+    (let ((before (pilish-test--file-contents path))
+          (prompts 0))
+      (cl-letf (((symbol-function 'y-or-n-p)
+                 (lambda (_prompt)
+                   (cl-incf prompts)
+                   (if (= prompts 1)
+                       (progn
+                         (with-current-buffer input-buf
+                           (erase-buffer)
+                           (insert "newer draft"))
+                         t)
+                     nil))))
+        (pilish--browse-navigate "b1"))
+      (should (= prompts 2))
+      (should (equal (with-current-buffer input-buf (buffer-string))
+                     "newer draft"))
+      (should (equal (pilish-test--file-contents path) before))
+      (should-not resume-calls)
+      (should-not quit-calls))))
+
+(ert-deftest pilish-test-navigate-revalidates-session-after-draft-prompt ()
+  "An accepted answer reruns guards even when the draft became blank."
+  (pilish-test--with-navigate-fixture
+      (pilish-test--navigable-session-lines)
+      path chat-buf input-buf proc messages resume-calls quit-calls
+      ready-calls
+    (let ((before (pilish-test--file-contents path))
+          (prompts 0))
+      (cl-letf (((symbol-function 'y-or-n-p)
+                 (lambda (_prompt)
+                   (cl-incf prompts)
+                   (with-current-buffer input-buf
+                     (erase-buffer))
+                   (with-current-buffer chat-buf
+                     (setq pilish--session-transition-active t))
+                   t)))
+        (pilish--browse-navigate "b1"))
+      (should (= prompts 1))
+      (should (member
+               "Pi: Cannot continue from selected turn while switching sessions"
+               messages))
+      (should (equal (pilish-test--file-contents path) before))
+      (should-not resume-calls)
+      (should-not quit-calls)
+      (should (equal (with-current-buffer input-buf (buffer-string)) "")))))
+
+(ert-deftest pilish-test-navigate-confirmation-rejects-session-owner-switch ()
+  "An accepted prompt cannot retarget navigation onto an ID-sharing fork.
+Switching the linked chat and refreshing this browser during the prompt
+invalidates the original owner: neither file changes, no resume runs,
+and the original draft remains intact."
+  (pilish-test--with-navigate-fixture
+      (pilish-test--navigable-session-lines)
+      path chat-buf input-buf proc messages resume-calls quit-calls
+      ready-calls
+    (let* ((fork (expand-file-name "fork.jsonl" (file-name-directory path)))
+           (original-before (pilish-test--file-contents path))
+           (prompts 0))
+      (pilish-test--write-session-lines
+       fork (pilish-test--navigable-session-lines))
+      (let ((fork-before (pilish-test--file-contents fork)))
+        (cl-letf (((symbol-function 'y-or-n-p)
+                   (lambda (_prompt)
+                     (cl-incf prompts)
+                     (with-current-buffer chat-buf
+                       (setq pilish--state (list :session-file fork)))
+                     (pilish-test--sync-timers
+                       (lambda ()
+                         (pilish--tree-browser-fetch-and-render)))
+                     (should (equal pilish--tree-browser-loaded-file fork))
+                     t)))
+          (pilish--browse-navigate "b1"))
+        (should (= prompts 1))
+        (should (member
+                 (concat
+                  "Pi: Cannot continue from selected turn: tree changed "
+                  "during draft confirmation")
+                 messages))
+        (should (equal (pilish-test--file-contents path) original-before))
+        (should (equal (pilish-test--file-contents fork) fork-before))
+        (should-not resume-calls)
+        (should-not quit-calls)
+        (should (equal (with-current-buffer input-buf (buffer-string))
+                       "stale draft"))))))
+
+(ert-deftest pilish-test-navigate-confirmation-binds-prefill-owner ()
+  "Historical-user prefill revalidation stays with its original tree owner."
+  (pilish-test--with-navigate-fixture
+      (list (pilish-test--make-session-header "sid-prefill-owner")
+            (pilish-test--user-line "u2" "u1" "try the other way")
+            (pilish-test--user-line "u1" nil "fix the parser"))
+      path chat-buf input-buf proc messages resume-calls quit-calls
+      ready-calls
+    (let* ((fork (expand-file-name "prefill-fork.jsonl"
+                                   (file-name-directory path)))
+           (lines (list (pilish-test--make-session-header "sid-prefill-fork")
+                        (pilish-test--user-line
+                         "u2" "u1" "fork prompt with the same id")
+                        (pilish-test--user-line "u1" nil "fork root")))
+           (original-before (pilish-test--file-contents path)))
+      (pilish-test--write-session-lines fork lines)
+      (let ((fork-before (pilish-test--file-contents fork)))
+        (cl-letf (((symbol-function 'y-or-n-p)
+                   (lambda (_prompt)
+                     (with-current-buffer chat-buf
+                       (setq pilish--state (list :session-file fork)))
+                     (pilish-test--sync-timers
+                       (lambda ()
+                         (pilish--tree-browser-fetch-and-render)))
+                     t)))
+          (pilish--browse-navigate "u2"))
+        (should (member
+                 (concat
+                  "Pi: Cannot continue from selected turn: tree changed "
+                  "during draft confirmation")
+                 messages))
+        (should (equal (pilish-test--file-contents path) original-before))
+        (should (equal (pilish-test--file-contents fork) fork-before))
+        (should-not resume-calls)
+        (should-not quit-calls)
+        (should (equal (with-current-buffer input-buf (buffer-string))
+                       "stale draft"))))))
+
+(ert-deftest pilish-test-navigate-confirmation-rejects-dead-browser-owner ()
+  "Killing the originating browser cannot redirect accepted navigation.
+Even when another live browser owns an ID-sharing tree, the original
+file and the other tree stay unchanged and no resume or prefill runs."
+  (pilish-test--with-navigate-fixture
+      (pilish-test--navigable-session-lines)
+      path chat-buf input-buf proc messages resume-calls quit-calls
+      ready-calls
+    (let* ((original-browser (current-buffer))
+           (fork (expand-file-name "other-tree.jsonl"
+                                   (file-name-directory path)))
+           (other-chat (generate-new-buffer " *test-nav-other-chat*"))
+           (other-browser (generate-new-buffer " *test-nav-other-tree*"))
+           (original-before (pilish-test--file-contents path))
+           (prompts 0))
+      (unwind-protect
+          (progn
+            (pilish-test--write-session-lines
+             fork (pilish-test--navigable-session-lines))
+            (with-current-buffer other-chat
+              (setq pilish--state (list :session-file fork)
+                    pilish--process proc
+                    pilish--input-buffer input-buf))
+            (with-current-buffer other-browser
+              (pilish-tree-browser-mode)
+              (setq pilish--chat-buffer other-chat)
+              (pilish-test--sync-timers
+                (lambda ()
+                  (pilish--tree-browser-fetch-and-render)))
+              (should (equal pilish--tree-browser-loaded-file fork)))
+            (let ((fork-before (pilish-test--file-contents fork)))
+              (cl-letf (((symbol-function 'y-or-n-p)
+                         (lambda (_prompt)
+                           (cl-incf prompts)
+                           (kill-buffer original-browser)
+                           (set-buffer other-browser)
+                           t)))
+                (pilish--browse-navigate "b1"))
+              (should (= prompts 1))
+              (should (member
+                       (concat
+                        "Pi: Cannot continue from selected turn: tree changed "
+                        "during draft confirmation")
+                       messages))
+              (should (equal (pilish-test--file-contents path)
+                             original-before))
+              (should (equal (pilish-test--file-contents fork) fork-before))
+              (should-not resume-calls)
+              (should-not quit-calls)
+              (should (equal (with-current-buffer input-buf (buffer-string))
+                             "stale draft"))))
+        (pilish-test--kill-live-buffers other-browser other-chat)))))
+
+(ert-deftest pilish-test-navigate-confirmation-allows-same-owner-refresh ()
+  "A same-file browser refresh during confirmation remains a valid owner."
+  (pilish-test--with-navigate-fixture
+      (pilish-test--navigable-session-lines)
+      path chat-buf input-buf proc messages resume-calls quit-calls
+      ready-calls
+    (let ((prompts 0))
+      (cl-letf (((symbol-function 'y-or-n-p)
+                 (lambda (_prompt)
+                   (cl-incf prompts)
+                   (pilish-test--sync-timers
+                     (lambda ()
+                       (pilish--tree-browser-fetch-and-render)))
+                   (should (equal pilish--tree-browser-loaded-file path))
+                   t)))
+        (pilish--browse-navigate "b1"))
+      (should (= prompts 1))
+      (should (equal (plist-get (pilish-jsonl-read-file path) :leafId)
+                     "b1"))
+      (should (equal resume-calls (list (list proc chat-buf path))))
+      (should (equal (with-current-buffer input-buf (buffer-string)) "")))))
+
+(ert-deftest pilish-test-navigate-keeps-draft-changed-during-rewrite ()
+  "A newer draft exposed by yielding rewrite work is never erased.
+Navigation still resumes the already rewritten path, but skips prefill
+and reports that it retained the newer input."
+  (pilish-test--with-navigate-fixture
+      (pilish-test--navigable-session-lines)
+      path chat-buf input-buf proc messages resume-calls quit-calls
+      ready-calls
+    (let ((prompts 0)
+          (rewrites 0))
+      (cl-letf (((symbol-function 'y-or-n-p)
+                 (lambda (_prompt) (cl-incf prompts) t))
+                ((symbol-function 'pilish--browse-rewrite-session-file)
+                 (lambda (&rest _)
+                   (cl-incf rewrites)
+                   (with-current-buffer input-buf
+                     (erase-buffer)
+                     (insert "newer draft"))
+                   t)))
+        (pilish--browse-navigate "b1"))
+      (should (= prompts 1))
+      (should (= rewrites 1))
+      (should (equal resume-calls (list (list proc chat-buf path))))
+      (should (equal (with-current-buffer input-buf (buffer-string))
+                     "newer draft"))
+      (should (member
+               (concat
+                "Pi: Continued from selected turn; kept newer input draft "
+                "(prefill skipped)")
+               messages)))))
 
 (ert-deftest pilish-test-navigate-rewrites-and-switches ()
   "The full navigate atomically moves the chain last and switches.
