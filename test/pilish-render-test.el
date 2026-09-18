@@ -9835,6 +9835,71 @@ When ASYNC is non-nil, include native terminal asynchronous syntax."
                :markdown-code-span))
       (should-not (pilish--file-target-at-point)))))
 
+(ert-deftest pilish-test-file-target-text-bold-code-span ()
+  "A code span nested in bold or italic emphasis is a real wrapper."
+  (with-temp-buffer
+    (pilish-chat-mode)
+    (let ((inhibit-read-only t))
+      (insert "**`interviews/report.pdf`** — nine pages, bundled"))
+    (font-lock-ensure)
+    (goto-char (point-min))
+    (search-forward "interviews/report.pdf")
+    (let ((target (pilish--file-target-at-point)))
+      (should (equal "interviews/report.pdf"
+                     (plist-get target :raw)))
+      (should (eq :text (plist-get target :source)))))
+  (with-temp-buffer
+    (pilish-chat-mode)
+    (let ((inhibit-read-only t))
+      (insert "_`interviews/x.pdf`_ tail"))
+    (font-lock-ensure)
+    (goto-char (point-min))
+    (search-forward "interviews/x.pdf")
+    (should (equal "interviews/x.pdf"
+                   (plist-get (pilish--file-target-at-point) :raw)))))
+
+(ert-deftest pilish-test-file-target-text-bold-code-span-keeps-command-fail-closed ()
+  "A bold-wrapped command code span stays authoritative-invalid."
+  (with-temp-buffer
+    (pilish-chat-mode)
+    (let ((inhibit-read-only t))
+      (insert "**`cat src/foo.el --flag`** tail"))
+    (font-lock-ensure)
+    (goto-char (point-min))
+    (search-forward "src/foo.el")
+    (should (plist-get
+             (pilish--semantic-link-file-target-at-point)
+             :markdown-code-span))
+    (should-not (pilish--file-target-at-point))))
+
+(ert-deftest pilish-test-file-target-text-emphasis-neighbors-do-not-cross-spans ()
+  "Emphasis run characters never glue separate code spans into one wrapper."
+  (with-temp-buffer
+    (pilish-chat-mode)
+    (let ((inhibit-read-only t))
+      (insert "`old`*x*`src/new.el` `other`"))
+    (font-lock-ensure)
+    (goto-char (point-min))
+    (search-forward "src/new.el")
+    (should (equal "src/new.el"
+                   (plist-get (pilish--file-target-at-point) :raw)))
+    (goto-char (point-min))
+    (search-forward "old")
+    (should-not (pilish--file-target-at-point))
+    (goto-char (point-min))
+    (search-forward "other")
+    (should-not (pilish--file-target-at-point)))
+  (with-temp-buffer
+    (pilish-chat-mode)
+    (let ((inhibit-read-only t))
+      (insert "`old` **`other`** more"))
+    (font-lock-ensure)
+    (goto-char (point-min))
+    (search-forward "old")
+    (should-not (pilish--file-target-at-point))
+    (search-forward "other")
+    (should-not (pilish--file-target-at-point))))
+
 (ert-deftest pilish-test-file-target-text-location-suffix-is-case-sensitive ()
   "The documented `#L' range syntax does not depend on case-folding state."
   (dolist (fold '(nil t))

@@ -4998,14 +4998,15 @@ Callers place FOLLOWING-INDEX after any authoritative quote wrapper."
 (defun pilish--single-quote-boundary-p (text index opening)
   "Return non-nil when the quote at INDEX in TEXT is a wrapper boundary.
 When OPENING is non-nil, accept line start, whitespace, or an opening Markdown
-wrapper before the quote.  Otherwise accept line end, whitespace, trailing
-punctuation, or a closing Markdown wrapper after it."
+wrapper, emphasis runs included, before the quote.  Otherwise accept line end,
+whitespace, trailing punctuation, or a closing Markdown wrapper, emphasis runs
+included, after it."
   (let ((neighbor-index (if opening (1- index) (1+ index))))
     (or (< neighbor-index 0)
         (>= neighbor-index (length text))
         (memq (aref text neighbor-index)
               (string-to-list
-               (if opening " \t([{<" " \t.,;!?)]}>"))))))
+               (if opening " \t([{<_*" " \t.,;!?)]}>_*"))))))
 
 (defun pilish--escaped-text-quote-p (text index)
   "Return non-nil when the quote at INDEX in TEXT is backslash-escaped.
