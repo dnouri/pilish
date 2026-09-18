@@ -5176,6 +5176,130 @@ end-of-line conversion; otherwise return decoded text."
      (setq pilish--chat-buffer ,chat-buf)
      ,@body))
 
+(ert-deftest pilish-test-session-browser-mode-reinit-scan-generation-monotonic ()
+  "A mode reset cannot revive an older same-number session scan.
+A scans the current-project directory and queues its real JSONL reader.
+The mode is re-run, then B scans both directories for All projects.
+Timers run B before A, reproducing the collision in which both requests
+used generation 1: only B may publish, and the displayed snapshot must
+remain owned by its requested All-projects scope."
+  (let* ((root (pilish-test--make-temp-directory "pi-reinit-scan-"))
+         (current-dir (expand-file-name "--current--" root))
+         (other-dir (expand-file-name "--other--" root))
+         (current-path (expand-file-name "current.jsonl" current-dir))
+         (other-path (expand-file-name "other.jsonl" other-dir))
+         (queue nil)
+         (requested-scopes nil)
+         generation-a
+         generation-after-reset
+         generation-b)
+    (make-directory current-dir t)
+    (make-directory other-dir t)
+    (pilish-test--write-session-lines
+     current-path
+     (list (pilish-test--make-session-header "sid-reinit-current")
+           (pilish-test--user-line "current" nil "CURRENT SCAN A")))
+    (pilish-test--write-session-lines
+     other-path
+     (list (pilish-test--make-session-header "sid-reinit-other")
+           (pilish-test--user-line "other" nil "ALL SCAN B ONLY")))
+    (unwind-protect
+        (with-temp-buffer
+          (let ((pilish-session-browser-default-scope 'current)
+                (pilish-session-browser-default-view 'messages)
+                (pilish-session-browser-default-named-only nil)
+                (real-float-time (symbol-function 'float-time)))
+            (pilish-session-browser-mode)
+            (cl-letf (((symbol-function 'pilish--browse-session-directories)
+                       (lambda (scope &optional _buf _token)
+                         (push scope requested-scopes)
+                         (if (eq scope 'all)
+                             (list current-dir other-dir)
+                           (list current-dir))))
+                      ((symbol-function 'pilish--browse-live-session-paths)
+                       (lambda () (make-hash-table :test #'equal)))
+                      ((symbol-function 'float-time)
+                       (lambda (&optional time)
+                         ;; Keep each real scanner invocation in one slice;
+                         ;; preserve normal age calculations that pass TIME.
+                         (if time (funcall real-float-time time) 0.0)))
+                      ((symbol-function 'run-at-time)
+                       (lambda (_seconds _repeat function &rest args)
+                         (when (eq function
+                                   #'pilish--browse-scan-session-files)
+                           (push (cons function args) queue)))))
+              (pilish--session-browser-fetch-and-render)
+              (setq generation-a pilish--session-browser-fetch-token)
+              (should (= (length queue) 1))
+
+              ;; The documented reset flow reapplies defaults.  Request B
+              ;; then deliberately chooses the other scope.
+              (pilish-session-browser-mode)
+              (setq generation-after-reset
+                    pilish--session-browser-fetch-token
+                    pilish--session-browser-scope 'all)
+              (pilish--session-browser-fetch-and-render)
+              (setq generation-b pilish--session-browser-fetch-token)
+              (should (= (length queue) 2))
+
+              ;; `push' puts B first.  B publishes its two rows, then A's
+              ;; obsolete timer gets its chance to overwrite them.
+              (while queue
+                (let ((job (pop queue)))
+                  (apply (car job) (cdr job))))
+
+              (should-not pilish--session-browser-loading)
+              (should-not pilish--session-browser-error)
+              (should (eq pilish--session-browser-scope 'all))
+              (should (eq pilish--session-browser-items-scope 'all))
+              (should (= (length pilish--session-browser-items) 2))
+              (should (string-match-p "ALL SCAN B ONLY" (buffer-string)))
+              (should (equal (reverse requested-scopes) '(current all)))
+              (should (> generation-after-reset generation-a))
+              (should (> generation-b generation-after-reset)))))
+      (delete-directory root t))))
+
+(ert-deftest pilish-test-session-browser-mode-reinit-without-scan-still-fetches ()
+  "A plain mode reset reapplies defaults and permits a fresh fetch.
+No request is in flight at reset time; this protects the documented
+restore-defaults flow from generation-lifetime bookkeeping changes."
+  (with-temp-buffer
+    (let ((pilish-session-browser-default-scope 'all)
+          (pilish-session-browser-default-view 'messages)
+          (pilish-session-browser-default-named-only t)
+          requested)
+      (pilish-session-browser-mode)
+      (setq pilish--session-browser-scope 'current
+            pilish--session-browser-view 'threaded
+            pilish--session-browser-named-only nil
+            pilish--session-browser-search-query "old query"
+            pilish--session-browser-search-tokens '("old"))
+      (pilish-session-browser-mode)
+      (should (eq pilish--session-browser-scope 'all))
+      (should (eq pilish--session-browser-view 'messages))
+      (should pilish--session-browser-named-only)
+      (should-not pilish--session-browser-search-query)
+      (should-not pilish--session-browser-search-tokens)
+      (cl-letf (((symbol-function 'pilish--browse-load-sessions)
+                 (lambda (scope callback &optional generation)
+                   (setq requested (list scope generation))
+                   (funcall callback
+                            (list '(:path "/tmp/fresh-reset.jsonl"
+                                    :cwd "/tmp/fresh-project"
+                                    :name "Fresh after reset"
+                                    :messageCount 1
+                                    :modified "2026-03-12T10:00:00Z"))
+                            nil)))
+                ((symbol-function 'pilish--browse-live-session-paths)
+                 (lambda () (make-hash-table :test #'equal))))
+        (pilish--session-browser-fetch-and-render))
+      (should (eq (car requested) 'all))
+      (should (eq (cadr requested)
+                  pilish--session-browser-fetch-token))
+      (should-not pilish--session-browser-loading)
+      (should (eq pilish--session-browser-items-scope 'all))
+      (should (string-match-p "Fresh after reset" (buffer-string))))))
+
 ;;;; Phase 2: Disk Scan and Chunked Loading
 
 (ert-deftest pilish-test-browse-current-session-directory-without-menu ()
@@ -7155,6 +7279,90 @@ Traversal is iterative."
                 (apply fn args))))
      (funcall ,body)))
 
+(ert-deftest pilish-test-tree-browser-mode-reinit-generation-and-owner ()
+  "A mode reset invalidates an older tree fetch across file owners.
+A queues a real deferred read for file A.  After the reset, B claims
+file B; A's timer runs first and must not read or publish, then B alone
+installs its tree.  The generations must differ even though the file
+owner check independently rejects A."
+  (let* ((dir (pilish-test--make-temp-directory "pi-tree-reinit-"))
+         (path-a (expand-file-name "a.jsonl" dir))
+         (path-b (expand-file-name "b.jsonl" dir))
+         (chat-buf (generate-new-buffer " *test-tree-reinit-chat*"))
+         (queue nil)
+         (reads nil)
+         generation-a
+         generation-after-reset
+         generation-b)
+    (pilish-test--write-session-lines
+     path-a
+     (list (pilish-test--make-session-header "sid-tree-reinit-a")
+           (pilish-test--user-line "a-root" nil "STALE TREE A")))
+    (pilish-test--write-session-lines
+     path-b
+     (list (pilish-test--make-session-header "sid-tree-reinit-b")
+           (pilish-test--user-line "b-root" nil "FRESH TREE B")))
+    (unwind-protect
+        (progn
+          (with-current-buffer chat-buf
+            (setq pilish--state (list :session-file path-a)))
+          (with-temp-buffer
+            (pilish-tree-browser-mode)
+            (setq pilish--chat-buffer chat-buf)
+            (let ((project-file
+                   (symbol-function 'pilish-jsonl-project-session-file)))
+              (cl-letf (((symbol-function 'redisplay) #'ignore)
+                        ((symbol-function 'run-at-time)
+                         (lambda (_seconds _repeat function &rest args)
+                           ;; The deferred tree read is a closure; ignore
+                           ;; unrelated symbolic editor maintenance timers.
+                           (unless (symbolp function)
+                             (push (cons function args) queue))))
+                        ((symbol-function 'pilish-jsonl-project-session-file)
+                         (lambda (path)
+                           (push path reads)
+                           (funcall project-file path))))
+                (pilish--tree-browser-fetch-and-render)
+                (setq generation-a pilish--tree-browser-fetch-token)
+                (should (= (length queue) 1))
+
+                (pilish-tree-browser-mode)
+                (setq generation-after-reset
+                      pilish--tree-browser-fetch-token)
+                ;; Major-mode initialization clears ordinary linkage;
+                ;; the browser entry point likewise restores it before
+                ;; starting a post-reset fetch.
+                (setq pilish--chat-buffer chat-buf)
+                (with-current-buffer chat-buf
+                  (setq pilish--state (list :session-file path-b)))
+                (pilish--tree-browser-fetch-and-render)
+                (setq generation-b pilish--tree-browser-fetch-token)
+                (should (= (length queue) 2))
+
+                ;; B was pushed last.  Give A the first opportunity to
+                ;; publish after B has claimed generation and owner.
+                (let* ((job-b (pop queue))
+                       (job-a (pop queue)))
+                  (apply (car job-a) (cdr job-a))
+                  (should pilish--tree-browser-loading)
+                  (should-not pilish--tree-browser-loaded-file)
+                  (should-not reads)
+                  (apply (car job-b) (cdr job-b)))
+
+                (should-not pilish--tree-browser-loading)
+                (should-not pilish--tree-browser-error)
+                (should (equal reads (list path-b)))
+                (should (equal pilish--tree-browser-state-file path-b))
+                (should (equal pilish--tree-browser-loaded-file path-b))
+                (should (equal pilish--tree-browser-leaf-id "b-root"))
+                (should (string-match-p "FRESH TREE B" (buffer-string)))
+                (should-not (string-match-p "STALE TREE A"
+                                            (buffer-string)))
+                (should (> generation-after-reset generation-a))
+                (should (> generation-b generation-after-reset))))))
+      (kill-buffer chat-buf)
+      (delete-directory dir t))))
+
 (ert-deftest pilish-test-load-tree-reads-and-projects-session-file ()
   "--browse-load-tree reads and projects the linked chat's session file.
 The seam callback receives (TREE LEAF-ID MESSAGE): TREE and LEAF-ID are
@@ -8553,6 +8761,39 @@ prefill, settle wait, or draft loss."
       (should (equal (with-current-buffer input-buf (buffer-string))
                      "stale draft")))))
 
+(ert-deftest pilish-test-navigate-ambiguous-current-does-not-false-no-op ()
+  "Two unresolved positions never suppress a requested branch change.
+The unique user `u' rewinds to root bookkeeping `meta', which has no
+visible resolution.  The current raw leaf `dup' is a differing duplicate
+and is unresolved for a separate reason.  RET must rewrite/resume to
+`meta' and prefill `u', not take the :current-p prefill-only path."
+  (pilish-test--with-navigate-fixture
+      (list (pilish-test--make-session-header "sid-unresolved-current")
+            (pilish-test--jsonl-line
+             "custom" "meta" nil :customType "root-meta")
+            (pilish-test--user-line "u" "meta" "safe prompt")
+            (pilish-test--jsonl-line
+             "message" "dup" nil
+             :message '(:role "assistant" :content "first"
+                        :stopReason "end_turn"))
+            (pilish-test--jsonl-line
+             "message" "dup" nil
+             :message '(:role "assistant" :content "later"
+                        :stopReason "end_turn")))
+      path chat-buf input-buf proc messages resume-calls quit-calls
+      ready-calls
+    (let ((before (pilish-test--file-contents path)))
+      (should-not pilish--tree-browser-leaf-id)
+      (pilish--browse-navigate "u")
+      (should-not (member "Pi: Already at current position" messages))
+      (should (equal resume-calls (list (list proc chat-buf path))))
+      (should (= (length quit-calls) 1))
+      (should-not (equal (pilish-test--file-contents path) before))
+      (should (equal (plist-get (pilish-jsonl-read-file path) :leafId)
+                     "meta"))
+      (should (equal (with-current-buffer input-buf (buffer-string))
+                     "safe prompt")))))
+
 (ert-deftest pilish-test-navigate-current-root-user-is-no-op ()
   "A current root user is a no-op, while historical root still refuses."
   (pilish-test--with-navigate-fixture
@@ -9469,7 +9710,12 @@ just the session browser (V14)."
           pilish--tree-browser-filter 'default)
     (pilish--tree-browser-rerender)
     (should (= (length pilish--browse-fold-rows) 501))
-    (should (= (hash-table-count pilish--browse-fold-extents) 500))
+    (should (= (cl-count-if
+                (lambda (row)
+                  (and (plist-get row :body-start)
+                       (plist-get row :end)))
+                pilish--browse-fold-rows)
+               500))
     (pilish-browse-fold-all)
     (should (= (length pilish--browse-fold-overlays) 1))
     (let ((root-row (pilish-test--browse-fold-row "node-1")))
@@ -9504,7 +9750,12 @@ just the session browser (V14)."
             pilish--tree-browser-filter 'default))
     (pilish--tree-browser-rerender)
     (should (= (length pilish--browse-fold-rows) 300))
-    (should (= (hash-table-count pilish--browse-fold-extents) 30))
+    (should (= (cl-count-if
+                (lambda (row)
+                  (and (plist-get row :body-start)
+                       (plist-get row :end)))
+                pilish--browse-fold-rows)
+               30))
     (pilish-browse-fold-all)
     (should (= (length pilish--browse-fold-overlays) 30))
     (dotimes (root-index 30)
@@ -9537,7 +9788,12 @@ just the session browser (V14)."
             pilish--session-browser-view 'threaded))
     (pilish--session-browser-rerender)
     (should (= (length pilish--browse-fold-rows) 600))
-    (should (= (hash-table-count pilish--browse-fold-extents) 599))
+    (should (= (cl-count-if
+                (lambda (row)
+                  (and (plist-get row :body-start)
+                       (plist-get row :end)))
+                pilish--browse-fold-rows)
+               599))
     (pilish-browse-fold-all)
     (should (= (length pilish--browse-fold-overlays) 1))
     (should (invisible-p

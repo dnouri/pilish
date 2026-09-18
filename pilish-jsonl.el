@@ -97,8 +97,9 @@
 ;;   versus a per-line compare).  Append-only files agree, and the
 ;;   Navigation rewrites arguably make mtime more correct.
 ;; - `pilish-jsonl-navigation-target's :current-p describes whether its
-;;   COMPUTED target position is already current, including the useful
-;;   historical-user re-edit case where the prompt's parent is current.
+;;   COMPUTED target position is already current, but only when both
+;;   positions resolve positively.  This includes the useful historical-
+;;   user re-edit case where the prompt's parent is current.
 ;;   `pilish-jsonl-current-projected-id' separately preserves pi's
 ;;   selected-entry identity check: a current user prompt is a no-op
 ;;   before the user-message rewind rule, and trailing projection-away
@@ -1282,12 +1283,14 @@ through an ambiguous id.  Otherwise return the plist
     unbounded (the preview dialect's space join and 200-char cap do not
     apply); image-only or empty content omits the key entirely.
   - :current-p reports that the file already sits on the computed
-    leaf position: the RESOLVED target position equals the resolved
-    raw leaf (`pilish--jsonl-resolve-visible' on both sides,
-    nil equal to nil).  Thus a literal self-target leaf remains pi's
-    raw-id no-op, a trailing bookkeeping leaf folds up onto the entry
-    it sits on, and a rewind target is current when its parent is the
-    current resolved position.  This is deliberately different from
+    leaf position only when the resolved target position and resolved
+    raw leaf (`pilish--jsonl-resolve-visible' on both sides) are BOTH
+    non-nil and equal.  An ambiguous, unknown, or all-filtered nil
+    resolution is not evidence of equality.  Thus a literal self-target
+    leaf remains pi's raw-id no-op, a trailing bookkeeping leaf folds up
+    onto the entry it sits on, and a rewind target is current when its
+    parent is the positively resolved current position.  This is
+    deliberately different from
     selected-entry identity: callers implementing pi's initial no-op
     must first compare TARGET-ID with
     `pilish-jsonl-current-projected-id', so a current user entry is not
@@ -1333,16 +1336,23 @@ later-wins canonical index."
           (unless (or (member leaf-id ambiguous-ids)
                       (pilish--jsonl-chain-touches-ambiguous-p
                        index leaf-id ambiguous-ids))
-            (append
-             (list :leaf-id leaf-id)
-             (when (and text (not (string-empty-p text)))
-               (list :prefill text))
-             (list :current-p
-                   (equal
-                    (pilish--jsonl-resolve-visible-canonical
-                     entries leaf-id ambiguous-ids)
-                    (pilish--jsonl-resolve-visible-canonical
-                     entries raw-leaf ambiguous-ids)))))))))
+            (let ((resolved-target
+                   (pilish--jsonl-resolve-visible-canonical
+                    entries leaf-id ambiguous-ids))
+                  (resolved-current
+                   (pilish--jsonl-resolve-visible-canonical
+                    entries raw-leaf ambiguous-ids)))
+              (append
+               (list :leaf-id leaf-id)
+               (when (and text (not (string-empty-p text)))
+                 (list :prefill text))
+               ;; Equality is proven only between two actual positions;
+               ;; two unrelated resolution failures are never current.
+               (list :current-p
+                     (and resolved-target
+                          resolved-current
+                          (equal resolved-target
+                                 resolved-current))))))))))
 
 (defun pilish-jsonl-navigation-lines (path leaf-id)
   "Return PATH's raw lines reordered so the LEAF-ID chain ends the file.

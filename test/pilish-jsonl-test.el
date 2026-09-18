@@ -1818,12 +1818,12 @@ browser filter later hides it."
     (should (equal (pilish-jsonl-current-projected-id settings) "h1"))))
 
 (ert-deftest pilish-test-jsonl-navigation-target-current-position ()
-  ":current-p compares the RESOLVED positions: a trailing filtered
-leaf (label here) resolves up, so targeting the visible entry it sits
-on is current; a target on another branch is not; a file already
-rewound makes the same user message current again AND still prefills
-(re-edit the same prompt); and nil equals nil when an all-filtered
-chain resolves both sides to nothing."
+  ":current-p compares positively RESOLVED positions.
+A trailing filtered leaf (label here) resolves up, so targeting the
+visible entry it sits on is current; a target on another branch is not;
+a file already rewound makes the same user message current again AND
+still prefills (re-edit the same prompt).  Two unresolved nil positions
+are not proof of equality."
   ;; Trailing label child: targeting the entry it resolves to is current.
   (let ((session (pilish-test--jsonl-session-at
                   (list pilish-test--jsonl-header
@@ -1861,13 +1861,56 @@ chain resolves both sides to nothing."
     (should (equal (pilish-jsonl-navigation-target session "u2")
                    (list :leaf-id "u1" :prefill "try the other way"
                          :current-p t))))
-  ;; nil == nil: an all-filtered chain resolves both sides to nil.
+  ;; nil is unresolved, not a position: nil == nil cannot prove current.
   (let ((session (pilish-test--jsonl-session-at
                   (list pilish-test--jsonl-header
                         (pilish-test--jsonl-entry
                          "label" "l1" nil 0 :targetId "l1" :label "only")))))
     (should (equal (pilish-jsonl-navigation-target session "l1")
-                   (list :leaf-id "l1" :current-p t)))))
+                   (list :leaf-id "l1" :current-p nil)))))
+
+(ert-deftest pilish-test-jsonl-navigation-current-needs-proven-equality ()
+  "Ambiguous or unresolved positions cannot manufacture :current-p.
+A unique user target rewinds to a root bookkeeping parent that has no
+visible resolution, while the raw current leaf is a differing duplicate
+and therefore also unresolved.  These distinct nil resolutions must not
+compare current.  Conversely, a unique current leaf does not make a
+request whose target ancestry is ambiguous safe: that target fails
+closed instead of claiming equality."
+  ;; Astra's exact false-no-op shape: both resolvers return nil for
+  ;; different reasons, but the unique user target remains navigable.
+  (let* ((session
+          (pilish-test--jsonl-session-at
+           (list pilish-test--jsonl-header
+                 (pilish-test--jsonl-entry
+                  "custom" "meta" nil 0 :customType "root-meta")
+                 (pilish-test--jsonl-msg
+                  "u" "meta" 1 '(:role "user" :content "safe prompt"))
+                 (pilish-test--jsonl-msg
+                  "dup" nil 2 '(:role "assistant" :content "first"))
+                 (pilish-test--jsonl-msg
+                  "dup" nil 3 '(:role "assistant" :content "later")))))
+         (target (pilish-jsonl-navigation-target session "u")))
+    (should-not (pilish-jsonl-current-projected-id session))
+    (should (equal target
+                   (list :leaf-id "meta" :prefill "safe prompt"
+                         :current-p nil))))
+  ;; The current position is provably unique, but the selected user would
+  ;; rewind through a differing duplicate parent and must fail closed.
+  (let ((session
+         (pilish-test--jsonl-session-at
+          (list pilish-test--jsonl-header
+                (pilish-test--jsonl-entry
+                 "custom" "dup-parent" nil 0 :customType "first")
+                (pilish-test--jsonl-entry
+                 "custom" "dup-parent" nil 1 :customType "later")
+                (pilish-test--jsonl-msg
+                 "u" "dup-parent" 2 '(:role "user" :content "unsafe"))
+                (pilish-test--jsonl-msg
+                 "current" nil 3
+                 '(:role "assistant" :content "current"))))))
+    (should (equal (pilish-jsonl-current-projected-id session) "current"))
+    (should-not (pilish-jsonl-navigation-target session "u"))))
 
 (ert-deftest pilish-test-jsonl-navigation-lines-chain-to-end ()
   "navigation-lines reorders for a rewrite: the header line stays

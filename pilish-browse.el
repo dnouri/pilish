@@ -1524,22 +1524,11 @@ Only folded values are present.  Session paths, Recent group labels,
 and unambiguous string tree-node ids are canonical fold targets;
 legacy and ambiguous tree rows are deliberately excluded.")
 
-(defvar-local pilish--browse-fold-published-values nil
-  "Canonical values in the latest successfully published snapshot.
-This includes values temporarily hidden by a browser filter or query,
-so those transitions do not discard their fold state.")
-
 (defvar-local pilish--browse-fold-rows nil
   "Preorder flat-row metadata for the current completed render.")
 
 (defvar-local pilish--browse-fold-row-by-section nil
   "Eq hash table from current Magit section objects to flat-row metadata.")
-
-(defvar-local pilish--browse-fold-extents nil
-  "Equal hash table from canonical fold values to current row metadata.
-A foldable row records `:body-start' and `:end' as its current flat
-subtree extent.  The table is rebuilt from existing renderer rows on
-every render; persistent state lives only in `pilish--browse-fold-state'.")
 
 (defvar-local pilish--browse-fold-overlays nil
   "Invisible overlays implementing folds in the current render.")
@@ -1561,7 +1550,6 @@ VALUES is an equal hash table built from the complete successful source
 snapshot, not merely its current filter/search result.  Consequently a
 value can disappear from the display and return with its fold intact,
 while a value removed from the published data is forgotten."
-  (setq pilish--browse-fold-published-values values)
   (let ((state (pilish--browse-fold-state-table)) stale)
     (maphash (lambda (value _folded)
                (unless (gethash value values)
@@ -1579,8 +1567,7 @@ while a value removed from the published data is forgotten."
   "Reset transaction-local flat-row folding metadata before insertion."
   (pilish--browse-delete-fold-overlays)
   (setq pilish--browse-fold-rows nil
-        pilish--browse-fold-row-by-section (make-hash-table :test #'eq)
-        pilish--browse-fold-extents (make-hash-table :test #'equal)))
+        pilish--browse-fold-row-by-section (make-hash-table :test #'eq)))
 
 (defun pilish--browse-register-fold-row
     (section value depth surface foldable &optional indicator-offset)
@@ -1659,9 +1646,7 @@ heading/child depths; it never scans a source subtree."
                                 start)
                         (point-max))))
             (setf (plist-get row :body-start) body-start
-                  (plist-get row :end) end)
-            (puthash (plist-get row :value) row
-                     pilish--browse-fold-extents)))))
+                  (plist-get row :end) end)))))
   (pilish--browse-apply-folds)))
 
 (defun pilish--browse-apply-folds ()
@@ -1972,7 +1957,11 @@ the cycle's final render runs.")
 The browser fetch cycle claims its generation before rendering and
 passes it to `pilish--browse-load-sessions'.  Direct loader callers that
 omit a generation claim one at the loader seam.  Superseded work is
-dropped by comparing its captured token with the buffer's current one.")
+dropped by comparing its captured token with the buffer's current one.
+The permanent local binding lets mode reinitialization advance rather
+than reset the counter, so an older callback can never regain ownership.")
+
+(put 'pilish--session-browser-fetch-token 'permanent-local t)
 
 (defvar-local pilish--session-browser-rendering-p nil
   "Non-nil while a session rerender owns the buffer transaction.")
@@ -2073,10 +2062,8 @@ browser's state on the real rendering path."
 Uses Magit's flat section navigation plus Pilish's explicit row folding."
   :group 'pilish
   (setq pilish--browse-fold-state (make-hash-table :test #'equal)
-        pilish--browse-fold-published-values nil
         pilish--browse-fold-rows nil
         pilish--browse-fold-row-by-section (make-hash-table :test #'eq)
-        pilish--browse-fold-extents (make-hash-table :test #'equal)
         pilish--browse-fold-overlays nil)
   (add-to-invisibility-spec 'pilish-browse-fold)
   (add-hook 'magit-section-movement-hook
@@ -2091,6 +2078,13 @@ Buffers start from the `pilish-session-browser-default-scope',
 its toggled state when hidden and reopened, and re-running this mode
 re-initializes from the current defaults."
   :group 'pilish
+  ;; `kill-all-local-variables' preserves permanent locals.  Establish
+  ;; generation zero on first entry; on every later mode entry, advance
+  ;; the surviving counter before hooks or new work can run.  Thus a
+  ;; callback captured before reinitialization is immediately obsolete.
+  (if (local-variable-p 'pilish--session-browser-fetch-token)
+      (cl-incf pilish--session-browser-fetch-token)
+    (setq-local pilish--session-browser-fetch-token 0))
   ;; Initial state from the default options, set in the mode body so
   ;; mode hooks observe the configured values and their overrides
   ;; survive (idiomatic major-mode initialization).  Entry points reuse
@@ -2183,10 +2177,14 @@ scope to suggest and stays a single plain line."
       (t "No matching sessions.")))))
 
 (defun pilish--session-browser-generation-current-p (buf generation)
-  "Return non-nil when BUF still owns session GENERATION."
+  "Return non-nil when BUF still owns session GENERATION.
+BUF must still be a session browser: the permanent generation binding
+also survives a switch to another major mode, where no old browser work
+may publish."
   (and (buffer-live-p buf)
-       (eq generation
-           (buffer-local-value 'pilish--session-browser-fetch-token buf))))
+       (with-current-buffer buf
+         (and (derived-mode-p 'pilish-session-browser-mode)
+              (eq generation pilish--session-browser-fetch-token)))))
 
 (defun pilish--session-browser-prepare-render-items (items buf generation)
   "Return `(t . ITEMS)' with one stored key each, or nil when stale.
@@ -3393,22 +3391,25 @@ passes it to `pilish--browse-load-tree', exactly like the session-side
 cycle.  Direct loader callers that omit a generation claim one at the
 loader seam.  Deferred or yielding reads validate both their captured
 generation and, for browser-owned fetches, session-file owner before
-publishing.")
+publishing.  The permanent local binding lets mode reinitialization
+advance rather than reset the counter, independently of owner state.")
+
+(put 'pilish--tree-browser-fetch-token 'permanent-local t)
 
 (defun pilish--tree-browser-generation-current-p
     (buf generation &optional owner check-owner-p)
   "Return non-nil when BUF still owns tree GENERATION and OWNER.
-When CHECK-OWNER-P is non-nil, OWNER must also equal BUF's
-`pilish--tree-browser-state-file'.  Direct loader callers use generation
-ownership alone; full browser fetches pass the session-file owner they
-claimed before their loading render."
+BUF must still be a tree browser because its permanent generation also
+survives unrelated major modes.  When CHECK-OWNER-P is non-nil, OWNER
+must also equal BUF's `pilish--tree-browser-state-file'.  Direct loader
+callers use generation ownership alone; full browser fetches pass the
+session-file owner they claimed before their loading render."
   (and (buffer-live-p buf)
-       (eq generation
-           (buffer-local-value 'pilish--tree-browser-fetch-token buf))
-       (or (not check-owner-p)
-           (equal owner
-                  (buffer-local-value 'pilish--tree-browser-state-file
-                                      buf)))))
+       (with-current-buffer buf
+         (and (derived-mode-p 'pilish-tree-browser-mode)
+              (eq generation pilish--tree-browser-fetch-token)
+              (or (not check-owner-p)
+                  (equal owner pilish--tree-browser-state-file))))))
 
 (defun pilish--tree-browser-render-current-p ()
   "Return non-nil when the dynamically fenced render still owns state."
@@ -3533,6 +3534,12 @@ Buffers start from `pilish-tree-browser-default-filter'; an existing
 browser buffer keeps its chosen filter when hidden and reopened, and
 re-running this mode re-initializes from the current default."
   :group 'pilish
+  ;; Preserve and advance the generation across the parent's
+  ;; `kill-all-local-variables', invalidating every pre-reset callback.
+  ;; Other tree state, including its file owner, still resets normally.
+  (if (local-variable-p 'pilish--tree-browser-fetch-token)
+      (cl-incf pilish--tree-browser-fetch-token)
+    (setq-local pilish--tree-browser-fetch-token 0))
   ;; Initial filter from the default option, before hooks run (see
   ;; `pilish-session-browser-mode' for the timing rationale).
   (setq pilish--tree-browser-filter
@@ -4838,8 +4845,9 @@ or died instead of resolving NODE-ID in a newly current tree:
 10. a nil :leaf-id on a HISTORICAL root user message refuses with the
     fork hint — the chat's fork command does that job;
 11. navigation target :current-p handles the distinct historical-user
-    re-edit case where its parent is already the current position: a
-    nonempty text/image draft first gets a targeted replacement prompt;
+    re-edit case where its parent and the current leaf positively resolve
+    to the same position (two unresolved nils never qualify): a nonempty
+    text/image draft first gets a targeted replacement prompt;
     acceptance recursively re-runs every guard and disk/target lookup,
     then restores :prefill, messages success, and schedules settle, but
     performs no write or switch.  A target without :prefill only reports
@@ -5226,7 +5234,6 @@ to redisplay between its slices; one timer hop never does)."
       ;; browser must not transfer folds to coincidentally equal ids owned
       ;; by another file.
       (setq pilish--browse-fold-state (make-hash-table :test #'equal)
-            pilish--browse-fold-published-values nil
             pilish--tree-browser-point-oriented-p nil
             pilish--tree-browser-point-anchor nil
             pilish--tree-browser-point-lineage nil
