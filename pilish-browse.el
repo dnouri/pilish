@@ -466,7 +466,7 @@ BLANK or the Hangul filler family.  A conservative Unicode-name policy
 catches names ending in BLANK or FILLER without maintaining fragile
 code-point ranges or classifying visible symbols merely containing the
 word elsewhere in their name."
-  (when-let ((name (get-char-code-property char 'name)))
+  (when-let* ((name (get-char-code-property char 'name)))
     (and (stringp name)
          (string-match-p "\\(?:BLANK\\|FILLER\\)\\'" name))))
 
