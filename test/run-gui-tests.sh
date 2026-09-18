@@ -119,6 +119,9 @@ cat >> "$RUNNER_FILE" << EOF
     (insert "=== GUI Test Results ===\n\n")
     (let ((n 0))
       (dolist (test test-list)
+        ;; Reset per test so a later failure cannot print a stale earlier
+        ;; snapshot; sessionless tests never capture one.
+        (setq pilish-gui-test--failure-snapshot nil)
         (let* ((name (ert-test-name test))
                (start (float-time))
                (result (ert-run-test test))
@@ -164,7 +167,15 @@ cat >> "$RUNNER_FILE" << EOF
                 (when (buffer-live-p chat-buf)
                   (pilish-gui-test--log "  --- Chat buffer content ---")
                   (pilish-gui-test--log "%s" (with-current-buffer chat-buf (buffer-string)))
-                  (pilish-gui-test--log "  --- End chat buffer ---")))))))))
+                  (pilish-gui-test--log "  --- End chat buffer ---"))))
+            ;; Fresh-session failures unwind the session before the live
+            ;; diagnostics above can run; print the pre-teardown snapshot.
+            (when (and (boundp 'pilish-gui-test--failure-snapshot)
+                       pilish-gui-test--failure-snapshot
+                       (not (and (boundp 'pilish-gui-test--session)
+                                 (pilish-gui-test-session-active-p))))
+              (pilish-gui-test--log "  --- Pre-teardown snapshot ---")
+              (pilish-gui-test--log "%s" pilish-gui-test--failure-snapshot)))))))
     (insert (format "\n=== %d tests: %d passed, %d skipped, %d failed ===\n"
                     total passed skipped failed))
     (write-region (point-min) (point-max) pilish-gui-test--output-file))

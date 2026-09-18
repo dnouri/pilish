@@ -41,6 +41,36 @@
 (defvar pilish-gui-test--session nil
   "Current test session plist with :chat-buffer, :input-buffer, :process.")
 
+(defvar pilish-gui-test--failure-snapshot nil
+  "Diagnostics captured before the fresh-session teardown.
+The fresh-session macro fills this while the session still exists, so
+the runner can show chat buffer and process state for failures whose
+session is otherwise unwound away before diagnostics run.")
+
+(defun pilish-gui-test--capture-failure-snapshot ()
+  "Record session diagnostics before the fresh-session teardown."
+  (setq pilish-gui-test--failure-snapshot nil)
+  (when-let ((session pilish-gui-test--session))
+    (let ((chat-buf (plist-get session :chat-buffer))
+          (proc (plist-get session :process))
+          (parts nil))
+      (when (buffer-live-p chat-buf)
+        (with-current-buffer chat-buf
+          (push (format "status: %S" pilish--status) parts)
+          (push (concat "--- chat buffer ---\n"
+                        (buffer-substring-no-properties (point-min) (point-max))
+                        "--- end chat buffer ---")
+                parts)))
+      (when (and proc (process-live-p proc))
+        (push (format "process: %s exit=%s events=%s last=%S"
+                      (process-status proc)
+                      (process-exit-status proc)
+                      (or (process-get proc 'pilish-gui-test-event-count) 0)
+                      (process-get proc 'pilish-gui-test-last-event))
+              parts))
+      (setq pilish-gui-test--failure-snapshot
+            (and parts (mapconcat #'identity (nreverse parts) "\n"))))))
+
 (defun pilish-gui-test-session-active-p ()
   "Return t if a test session is active and healthy."
   (and pilish-gui-test--session
@@ -239,6 +269,7 @@ FORMS must start with a literal session options plist containing an explicit
                 (pilish-gui-test--macro-session-forms
                  'pilish-gui-test-with-fresh-session forms)))
     `(progn
+       (setq pilish-gui-test--failure-snapshot nil)
        (pilish-gui-test-end-session)
        (pilish-gui-test-start-session nil ',options)
        (unwind-protect
@@ -246,6 +277,7 @@ FORMS must start with a literal session options plist containing an explicit
                               (plist-get (plist-get pilish-gui-test--session :backend)
                                          :label)))
              (progn ,@body))
+         (pilish-gui-test--capture-failure-snapshot)
          (pilish-gui-test-end-session)))))
 
 ;;;; Waiting
