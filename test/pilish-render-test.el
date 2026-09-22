@@ -3537,6 +3537,57 @@ since we don't display them locally. Let pi's message_start handle it."
         (should (equal (plist-get response-sent :id) "req-4"))
         (should (equal (plist-get response-sent :value) "Option A"))))))
 
+(ert-deftest pilish-test-extension-ui-select-shows-and-types-options ()
+  "Extension select shows choices and accepts spaces and question marks."
+  (let ((minibuffer-setup-hook nil)
+        (icomplete-mode nil)
+        (shared-space-binding
+         (lookup-key minibuffer-local-must-match-map (kbd "SPC")))
+        (shared-question-binding
+         (lookup-key minibuffer-local-must-match-map (kbd "?")))
+        eager-display-requested
+        native-help-shown
+        response-sent)
+    (cl-letf (((symbol-function 'minibuffer-completion-help)
+               (lambda (&rest _)
+                 (setq native-help-shown t)))
+              ((symbol-function 'completing-read)
+               (lambda (_prompt _options &rest _args)
+                 (setq eager-display-requested
+                       (plist-get completion-extra-properties
+                                  :eager-display))
+                 (with-temp-buffer
+                   (use-local-map minibuffer-local-must-match-map)
+                   (run-hooks 'minibuffer-setup-hook)
+                   (dolist (event (string-to-list "Option ? literal"))
+                     (let ((last-command-event event))
+                       (call-interactively (key-binding (vector event)))))
+                   (should (eq (key-binding (kbd "RET"))
+                               #'minibuffer-complete-and-exit))
+                   (buffer-string))))
+              ((symbol-function 'pilish--send-extension-ui-response)
+               (lambda (_proc msg)
+                 (setq response-sent msg))))
+      (with-temp-buffer
+        (pilish-chat-mode)
+        (let ((pilish--process t))
+          (pilish--handle-extension-ui-request
+           '(:type "extension_ui_request"
+             :id "req-literal-choice"
+             :method "select"
+             :title "Pick one:"
+             :options ["Option ? literal" "Option ! literal"])))))
+    (should eager-display-requested)
+    (if (boundp 'completion-eager-display)
+        (should-not native-help-shown)
+      (should native-help-shown))
+    (should (equal (plist-get response-sent :value)
+                   "Option ? literal"))
+    (should (eq (lookup-key minibuffer-local-must-match-map (kbd "SPC"))
+                shared-space-binding))
+    (should (eq (lookup-key minibuffer-local-must-match-map (kbd "?"))
+                shared-question-binding))))
+
 (ert-deftest pilish-test-extension-ui-input ()
   "extension_ui_request input method uses read-string and sends response."
   (let ((response-sent nil))

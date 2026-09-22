@@ -1169,12 +1169,40 @@ Include optional STDERR in a text fence and optional DETAIL before it."
                            :id id
                            :confirmed (if confirmed t :json-false))))))
 
+(defun pilish--extension-ui-select-minibuffer-setup ()
+  "Set up the minibuffer for an extension UI selection."
+  (let ((show-native-completions
+         (and (not (boundp 'completion-eager-display))
+              (eq completing-read-function #'completing-read-default)
+              (not (bound-and-true-p icomplete-mode))
+              (eq (key-binding (kbd "RET"))
+                  #'minibuffer-complete-and-exit)))
+        (literal-keys (make-sparse-keymap)))
+    ;; Icomplete owns candidate display, but normally hides an empty match set.
+    (when (bound-and-true-p icomplete-mode)
+      (set (make-local-variable 'icomplete-show-matches-on-no-input) t)
+      ;; Emacs 31's native eager display would duplicate Icomplete's display.
+      (when (boundp 'completion-eager-display)
+        (set (make-local-variable 'completion-eager-display) nil)))
+    (define-key literal-keys (kbd "SPC") #'self-insert-command)
+    (define-key literal-keys (kbd "?") #'self-insert-command)
+    (use-local-map
+     (make-composed-keymap literal-keys (current-local-map)))
+    ;; Before Emacs 31 there is no eager-display completion metadata.
+    (when show-native-completions
+      (minibuffer-completion-help))))
+
 (defun pilish--extension-ui-select (event proc)
   "Handle select method from EVENT, responding via PROC."
   (let* ((id (plist-get event :id))
          (title (plist-get event :title))
          (options (append (plist-get event :options) nil))
-         (selected (completing-read (concat title " ") options nil t)))
+         (completion-extra-properties
+          (cons :eager-display (cons t completion-extra-properties)))
+         (selected
+          (minibuffer-with-setup-hook
+              (:append #'pilish--extension-ui-select-minibuffer-setup)
+            (completing-read (concat title " ") options nil t))))
     (when proc
       (pilish--send-extension-ui-response proc
                      (list :type "extension_ui_response"
