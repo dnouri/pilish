@@ -3513,22 +3513,57 @@ LANG is passed to `pilish--wrap-in-src-block' for fence construction."
   (when-let* ((block block)
               (header-end (pilish--tool-block-header-end block))
               (end-marker (pilish--tool-block-end-marker block)))
-    (let ((inhibit-read-only t))
-      (pilish--with-scroll-preservation
-        (save-excursion
-          (goto-char (marker-position header-end))
-          (delete-region (marker-position header-end)
-                         (marker-position end-marker))
-          (when show-hidden-indicator
-            (insert (propertize "... (earlier output)\n"
-                                'face
-                                'pilish-collapsed-indicator)))
-          (unless (string-empty-p display-content)
-            (insert (pilish--wrap-in-src-block
-                     display-content lang)
-                    "\n"))
-          (set-marker end-marker (point))
-          (pilish--tool-block-refresh-overlay block))))))
+    (let* ((body-start (marker-position header-end))
+           (old-body (buffer-substring-no-properties
+                      body-start (marker-position end-marker)))
+           (new-body (concat
+                      (when show-hidden-indicator
+                        (propertize "... (earlier output)\n"
+                                    'face 'pilish-collapsed-indicator))
+                      (unless (string-empty-p display-content)
+                        (concat (pilish--wrap-in-src-block
+                                 display-content lang) "\n"))))
+           (old-length (length old-body))
+           (new-length (length new-body))
+           (common-prefix 0)
+           (common-suffix 0)
+           (shorter-length (min old-length new-length))
+           (inhibit-read-only t))
+      ;; Keep unchanged fence lines in place: deleting and reinserting them
+      ;; flushes font-lock across the whole Markdown buffer on every update.
+      (while (and (< common-prefix shorter-length)
+                  (eq (aref old-body common-prefix)
+                      (aref new-body common-prefix)))
+        (cl-incf common-prefix))
+      (while (and (< common-suffix (- shorter-length common-prefix))
+                  (eq (aref old-body (- old-length common-suffix 1))
+                      (aref new-body (- new-length common-suffix 1))))
+        (cl-incf common-suffix))
+      (unless (and (= common-prefix old-length)
+                   (= common-prefix new-length))
+        (pilish--with-scroll-preservation
+          (save-excursion
+            (let* ((edit-start (+ body-start common-prefix))
+                   (edit-end (- (+ body-start old-length) common-suffix))
+                   (old-text (substring old-body common-prefix
+                                        (- old-length common-suffix)))
+                   (new-text (substring new-body common-prefix
+                                        (- new-length common-suffix))))
+              (goto-char edit-start)
+              (save-match-data
+                (cond
+                 ((= edit-start edit-end) (insert new-text))
+                 ((string-empty-p new-text) (delete-region edit-start edit-end))
+                 (t
+                  (unless (and (search-forward old-text edit-end t)
+                               (= (point) edit-end))
+                    (error "Tool preview changed during redraw"))
+                  (replace-match new-text t t))))
+            ;; Insertion at the body boundary can move HEADER-END as well as
+            ;; END-MARKER.  Restore both before updating the block overlay.
+            (set-marker header-end body-start)
+            (set-marker end-marker (+ body-start new-length))
+            (pilish--tool-block-refresh-overlay block))))))))
 
 (defun pilish--display-tool-streaming-text
     (raw-text max-lines &optional lang block source-truncated)
