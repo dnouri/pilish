@@ -13610,6 +13610,93 @@ Regression test: streaming output with no newlines should still be capped."
       ;; Should contain truncation indicator
       (should (string-match-p "earlier output\\|truncated" buffer-content)))))
 
+(ert-deftest pilish-test-subagent-status-keeps-fences-out-of-change-hooks ()
+  "Changing subagent activity must not flush distant Markdown links again."
+  (with-temp-buffer
+    (pilish-chat-mode)
+    (should (memq #'md-ts--after-change-flush-link-reference-links
+                  after-change-functions))
+    (pilish--handle-display-event
+     '(:type "tool_execution_start" :toolName "subagent" :toolCallId "child"
+       :args (:model "kimi-coding/k3" :task "Build the feature"
+              :thinkingLevel "max")))
+    (let ((header (buffer-string))
+          (flushes 0)
+          (flush (symbol-function 'md-ts--flush-all-font-lock)))
+      (cl-letf (((symbol-function 'md-ts--flush-all-font-lock)
+                 (lambda ()
+                   (cl-incf flushes)
+                   (funcall flush))))
+        (pilish-test--send-tool-execution-update
+         "child" "Log: ~/child.jsonl.subagents.md\n- subagent (9% ctx, 18 turns): thinking")
+        (pilish-test--flush-tool-updates)
+        (should (> flushes 0))
+        (setq flushes 0)
+        (dotimes (n 8)
+          (pilish-test--send-tool-execution-update
+           "child" (format "Log: ~/child.jsonl.subagents.md\n- subagent (9%% ctx, 18 turns): using read %d" n))
+          (pilish-test--flush-tool-updates))
+        (should (= 0 flushes))
+        ;; A real fence change still needs the non-local Markdown flush.
+        (pilish-test--send-tool-execution-update
+         "child" "Log: ~/child.jsonl.subagents.md\n- subagent (9% ctx, 18 turns): ```inside```")
+        (pilish-test--flush-tool-updates)
+        (should (> flushes 0)))
+      (should (string-prefix-p header (buffer-string)))
+      (should (equal (pilish-test--tool-stream-body-by-id "child")
+                     "~~~\nLog: ~/child.jsonl.subagents.md\n- subagent (9% ctx, 18 turns): ```inside```\n~~~\n")))))
+
+(ert-deftest pilish-test-tool-body-minimal-replacement-preserves-blocks ()
+  "Structural changes keep the exact fenced body, hint, and block boundaries."
+  (with-temp-buffer
+    (pilish-chat-mode)
+    (let* ((first (pilish--display-tool-start "subagent" '(:task "first") "first"))
+           (second (pilish--display-tool-start "subagent" '(:task "second") "second"))
+           (first-header (buffer-substring-no-properties
+                          (overlay-start (pilish--tool-block-overlay first))
+                          (marker-position (pilish--tool-block-header-end first))))
+           (second-header (buffer-substring-no-properties
+                           (overlay-start (pilish--tool-block-overlay second))
+                           (marker-position (pilish--tool-block-header-end second)))))
+      (dolist (spec '(("thinking" nil nil)
+                      ("using read 1" nil nil)
+                      ("line one\nline two" nil nil)
+                      ("```inside```" t nil)
+                      ("~~~\n```\n~~~" t nil)
+                      ("done" nil "elisp")
+                      ("" nil nil)
+                      ("again" nil nil)))
+        (pcase-let ((`(,content ,hidden ,lang) spec))
+          (pilish--tool-block-replace-body first content hidden lang)
+          (let* ((hint (if hidden "... (earlier output)\n" ""))
+                 (expected (concat hint
+                                   (unless (string-empty-p content)
+                                     (concat (pilish--wrap-in-src-block content lang)
+                                             "\n"))))
+                 (body-start (marker-position
+                              (pilish--tool-block-header-end first)))
+                 (body-end (marker-position
+                            (pilish--tool-block-end-marker first))))
+            (should (equal expected (buffer-substring-no-properties
+                                     body-start body-end)))
+            (should (= (- body-end body-start) (length expected)))
+            (should (= (overlay-end (pilish--tool-block-overlay first)) body-end))
+            (should (equal first-header (buffer-substring-no-properties
+                                         (overlay-start (pilish--tool-block-overlay first))
+                                         body-start)))
+            (should (equal second-header (buffer-substring-no-properties
+                                          (overlay-start (pilish--tool-block-overlay second))
+                                          (marker-position
+                                           (pilish--tool-block-header-end second)))))
+            (should (= (overlay-end (pilish--tool-block-overlay second))
+                       (marker-position (pilish--tool-block-end-marker second))))
+            (when hidden
+              (should (eq (get-text-property body-start 'face)
+                          'pilish-collapsed-indicator))))))
+      (let ((tick (buffer-modified-tick)))
+        (pilish--tool-block-replace-body first "again" nil nil)
+        (should (= tick (buffer-modified-tick)))))))
+
 (ert-deftest pilish-test-parallel-tool-execution-keeps-output-with-own-header ()
   "Interleaved execution updates stay attached to their matching headers."
   (with-temp-buffer
