@@ -5439,6 +5439,63 @@ and non-munged directories.  scope=current scans one directory."
                                #'string<)
                          (sort (list root-path fork-path) #'string<))))))))
 
+(ert-deftest pilish-test-scan-discovers-flat-custom-session-dir ()
+  "Custom sessionDir scans flat JSONL and scopes by the header cwd."
+  (let* ((sandbox (pilish-test--make-temp-directory "pi-flat-scan-"))
+         (dir (expand-file-name "custom-sessions" sandbox))
+         (project-a (expand-file-name "project-a" sandbox))
+         (project-b (expand-file-name "project-b" sandbox))
+         (path-a (expand-file-name "a.jsonl" dir))
+         (path-b (expand-file-name "b.jsonl" dir))
+         (broken (expand-file-name "broken.jsonl" dir))
+         (nested (expand-file-name "--old-project--" dir))
+         (calls nil))
+    (make-directory dir t)
+    (make-directory project-a)
+    (make-directory project-b)
+    (make-directory nested)
+    (pilish-test--write-session-lines
+     path-a (list (json-encode (list :type "session" :version 3 :id "sid-a"
+                                     :timestamp pilish-test--browse-timestamp
+                                     :cwd project-a))
+                  (pilish-test--user-line "a1" nil "Project A")))
+    (pilish-test--write-session-lines
+     path-b (list (json-encode (list :type "session" :version 3 :id "sid-b"
+                                     :timestamp pilish-test--browse-timestamp
+                                     :cwd project-b))
+                  (pilish-test--user-line "b1" nil "Project B")))
+    (pilish-test--write-session-lines
+     broken (list (pilish-test--user-line "not-a-header" nil "decoy")))
+    (pilish-test--write-session-lines
+     (expand-file-name "old.jsonl" nested)
+     (list (json-encode (list :type "session" :version 3 :id "sid-old"
+                              :timestamp pilish-test--browse-timestamp
+                              :cwd project-a))))
+    (with-temp-buffer
+      (pilish-session-browser-mode)
+      (let ((default-directory (file-name-as-directory project-a)))
+        (should (equal (pilish--session-directory)
+                       (file-name-as-directory project-a)))
+        (cl-letf (((symbol-function 'pilish--session-list-directory)
+                   (lambda (&optional _chat-buf) dir))
+                  ((symbol-function 'run-at-time)
+                   (lambda (_secs _repeat fn &rest args) (apply fn args))))
+          (pilish--browse-load-sessions
+           'current (lambda (items error) (push (list items error) calls)))
+          (pcase-let ((`(,items ,error) (car calls)))
+            (should-not error)
+            (should (equal (mapcar (lambda (item) (plist-get item :path)) items)
+                           (list path-a))))
+          (setq calls nil)
+          (pilish--browse-load-sessions
+           'all (lambda (items error) (push (list items error) calls)))
+          (pcase-let ((`(,items ,error) (car calls)))
+            (should-not error)
+            (should (equal (sort (mapcar (lambda (item) (plist-get item :path))
+                                         items)
+                                 #'string<)
+                           (list path-a path-b)))))))))
+
 (ert-deftest pilish-test-load-sessions-chunked ()
   "--browse-load-sessions chunks long scans and reports once.
 The resumable reader is slowed so the scan spans several slices.

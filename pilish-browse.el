@@ -4216,9 +4216,17 @@ all.  Signals when resolution itself fails."
       (pilish-jsonl-session-dir-for-cwd
        (pilish--session-directory))))
 
+(defun pilish--browse-flat-session-directory-p (dir)
+  "Return non-nil when DIR is a flat custom session directory.
+Default pi storage uses a munged --…-- directory per project; an
+explicit sessionDir stores all projects' JSONL files directly in DIR."
+  (not (string-match-p "\\`--.*--\\'"
+                       (file-name-nondirectory (directory-file-name dir)))))
+
 (defun pilish--browse-session-directories (scope &optional buf token)
   "Return the session directories for SCOPE while BUF owns TOKEN.
-`current' resolves one project directory.  `all' lists root-level
+`current' resolves the session file's directory.  For flat custom
+storage, `all' scans that same directory; otherwise it lists root-level
 munged --…-- directories under the sessions root, excluding sidecars
 and non-munged directories.  Missing roots read as empty; resolution
 errors signal as before.  BUF and TOKEN are optional for direct callers;
@@ -4235,26 +4243,28 @@ handler-dispatching directory operation."
       (when (funcall current-p)
         (let ((cur (pilish--browse-current-session-directory)))
           (when (funcall current-p)
-            (let ((root (if cur
-                            (pilish-jsonl-sessions-root
-                             (file-name-as-directory cur))
-                          (pilish-jsonl-sessions-root))))
-              ;; Root construction can itself dispatch a handler; never
-              ;; enter the root listing after it supersedes this token.
-              (when (funcall current-p)
-                (let ((candidates
-                       (condition-case nil
-                           (directory-files root t "\\`--")
-                         (error nil)))
-                      (result nil))
-                  (when (funcall current-p)
-                    (catch 'stale
-                      (dolist (dir candidates)
-                        (unless (funcall current-p) (throw 'stale nil))
-                        (let ((directory-p (file-directory-p dir)))
+            (if (and cur (pilish--browse-flat-session-directory-p cur))
+                (list cur)
+              (let ((root (if cur
+                              (pilish-jsonl-sessions-root
+                               (file-name-as-directory cur))
+                            (pilish-jsonl-sessions-root))))
+                ;; Root construction can itself dispatch a handler; never
+                ;; enter the root listing after it supersedes this token.
+                (when (funcall current-p)
+                  (let ((candidates
+                         (condition-case nil
+                             (directory-files root t "\\`--")
+                           (error nil)))
+                        (result nil))
+                    (when (funcall current-p)
+                      (catch 'stale
+                        (dolist (dir candidates)
                           (unless (funcall current-p) (throw 'stale nil))
-                          (when directory-p (push dir result))))
-                      (nreverse result))))))))))))
+                          (let ((directory-p (file-directory-p dir)))
+                            (unless (funcall current-p) (throw 'stale nil))
+                            (when directory-p (push dir result))))
+                        (nreverse result)))))))))))))
 
 (defun pilish--browse-session-files (dirs &optional buf token)
   "Return every \\.jsonl file directly inside DIRS, in listing order.
@@ -4400,8 +4410,10 @@ scan with `:canonicalPath', `:canonicalProjectSpec', and, for forks,
 downstream renders need no archive-sized or remote canonicalization —
 only the few live-process session paths canonicalize locally per
 render.  ERROR is an error
-string or nil.  SCOPE is `current' (one project directory) or `all'
-\(every munged directory under the sessions root).  The scan is
+string or nil.  SCOPE is `current' (one project directory or the
+current project's sessions in flat custom storage) or `all' (every
+munged directory under the default sessions root, or the flat custom
+directory).  The scan is
 chunked (see `pilish--browse-scan-session-files') and shows a loading
 state throughout.  A request that remains current reports exactly
 once; a superseded request stops at the next guarded directory/file
@@ -4437,10 +4449,31 @@ new generation here."
          (failure
           (funcall callback nil failure))
          (t
-          (let ((files (pilish--browse-session-files dirs buf token)))
+          (let* ((files (pilish--browse-session-files dirs buf token))
+                 (flat-current (and (eq scope 'current) (car dirs)
+                                    (pilish--browse-flat-session-directory-p
+                                     (car dirs))))
+                 (project-id
+                  (when flat-current
+                    (car (pilish--session-canonical-project-spec
+                          (list :cwd (pilish--session-directory)
+                                :path (expand-file-name "session.jsonl"
+                                                        (car dirs))))))))
             (when (pilish--browse-session-scan-current-p buf token)
-              (run-at-time 0 nil #'pilish--browse-scan-session-files
-                           buf token files nil callback)))))))))
+              (run-at-time
+               0 nil #'pilish--browse-scan-session-files buf token files nil
+               (if flat-current
+                   (lambda (items error)
+                     (funcall callback
+                              (cl-remove-if-not
+                               (lambda (item)
+                                 (and project-id
+                                      (equal project-id
+                                             (car (pilish--session-project-spec
+                                                   item)))))
+                               items)
+                              error))
+                 callback))))))))))
 
 (defun pilish--tree-browser-chat-session-file ()
   "Return the linked chat buffer's current session file, or nil.
