@@ -1405,6 +1405,53 @@ the five-message parse budget).  label and custom entries are ignored."
                          :messageCount 3
                          :firstMessage "hello world")))))
 
+(ert-deftest pilish-test-jsonl-read-session-header-prefix ()
+  "The header probe avoids full reads except for unusually long headers."
+  (let* ((dir (pilish-test--make-temp-directory "pi-jsonl-header-prefix"))
+         (short (expand-file-name "short.jsonl" dir))
+         (long (expand-file-name "long.jsonl" dir))
+         (blank (expand-file-name "blank.jsonl" dir))
+         (invalid (expand-file-name "invalid.jsonl" dir))
+         (original (symbol-function 'insert-file-contents))
+         (reads nil))
+    (unwind-protect
+        (progn
+          (with-temp-file short
+            (insert (json-encode '(:type "session" :cwd "/tmp/a"))
+                    "\n" (make-string 10000 ?x)))
+          (with-temp-file long
+            (insert (json-encode
+                     (list :type "session" :cwd "/tmp/b"
+                           :id (make-string 4500 ?x))) "\n"))
+          (with-temp-file blank
+            (insert (make-string 4300 ?\s) "\n"
+                    (json-encode '(:type "session" :cwd "/tmp/c")) "\n"))
+          (with-temp-file invalid
+            (insert "not json\n"
+                    (json-encode '(:type "session" :cwd "/tmp/a")) "\n"))
+          (cl-letf (((symbol-function 'insert-file-contents)
+                     (lambda (path &rest args)
+                       (push (cons path args) reads)
+                       (apply original path args))))
+            (should (equal (plist-get (pilish-jsonl-read-session-header short)
+                                      :cwd)
+                           "/tmp/a"))
+            (should (equal reads (list (list short nil 0 4096))))
+            (setq reads nil)
+            (should (equal (plist-get (pilish-jsonl-read-session-header long)
+                                      :cwd)
+                           "/tmp/b"))
+            (should (= (length reads) 2))
+            (setq reads nil)
+            (should (equal (plist-get (pilish-jsonl-read-session-header blank)
+                                      :cwd)
+                           "/tmp/c"))
+            (should (= (length reads) 2))
+            (should-not (pilish-jsonl-read-session-header invalid))
+            (should-not (pilish-jsonl-read-session-header
+                         (expand-file-name "missing.jsonl" dir)))))
+      (delete-directory dir t))))
+
 (ert-deftest pilish-test-jsonl-read-session-info-keeps-name-before-malformed-tail ()
   "A malformed session_info tail does not clear the latest parseable name."
   (let* ((dir (pilish-test--make-temp-directory "pi-jsonl-name-tail"))

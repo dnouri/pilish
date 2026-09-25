@@ -4294,9 +4294,10 @@ later directory listings and returns nil."
   (pilish--session-browser-generation-current-p buf token))
 
 (defun pilish--browse-scan-session-files
-    (buf token files items callback &optional state)
+    (buf token files items callback &optional state include-file)
   "Advance FILES and accumulated ITEMS for BUF's generation TOKEN.
-STATE is the optional in-progress JSONL scan for the first file.  Each
+STATE is the optional in-progress JSONL scan for the first file.
+INCLUDE-FILE, when non-nil, tests each file before its full scan.  Each
 slice shares a 10 ms deadline across opens and line processing.  A
 positive-delay continuation allows a command-loop turn; it is not a
 latency guarantee.  Whole-file IO, individual records, joining, GC, and
@@ -4304,11 +4305,11 @@ final synchronous filtering/rendering can exceed the budget.
 
 At most one file state is retained by a pending continuation.  Ownership
 is checked before and immediately after every callback-capable open,
-read, and enrichment operation, and before the next file.  Cancellation
-observed in a running slice closes the current state during unwind,
-then touches no remaining file, schedules no continuation, and invokes
-no callback.  Completion, errors,
-and quit likewise close resources before CALLBACK receives (ITEMS ERROR).
+read, and enrichment operation, including INCLUDE-FILE, and before the
+next file.  Cancellation observed in a running slice closes the current
+state during unwind, then touches no remaining file, schedules no
+continuation, and invokes no callback.  Completion, errors, and quit
+likewise close resources before CALLBACK receives (ITEMS ERROR).
 Hiding the browser with q does not cancel a current generation."
   (let (transferred finished failure cancelled)
     (unwind-protect
@@ -4325,15 +4326,22 @@ Hiding the browser with q does not cancel a current generation."
                     (condition-case nil
                         (progn
                           (unless state
-                            (if (pilish--browse-session-scan-current-p
-                                 buf token)
+                            (let ((include
+                                   (or (null include-file)
+                                       (and (pilish--browse-session-scan-current-p
+                                             buf token)
+                                            (funcall include-file
+                                                     (car files))))))
+                              (unless (pilish--browse-session-scan-current-p
+                                       buf token)
+                                (setq cancelled t))
+                              (when (and include (not cancelled))
                                 (setq state
                                       (pilish-jsonl-open-session-info
                                        (car files) t))
-                              (setq cancelled t))
-                            (unless (pilish--browse-session-scan-current-p
-                                     buf token)
-                              (setq cancelled t)))
+                                (unless (pilish--browse-session-scan-current-p
+                                         buf token)
+                                  (setq cancelled t)))))
                           (when (and state (not cancelled))
                             (if (pilish--browse-session-scan-current-p
                                  buf token)
@@ -4386,7 +4394,8 @@ Hiding the browser with q does not cancel a current generation."
                       (progn
                         (run-at-time 0.001 nil
                                      #'pilish--browse-scan-session-files
-                                     buf token files items callback state)
+                                     buf token files items callback state
+                                     include-file)
                         (setq transferred t))
                     (setq finished t))))
             (quit (setq failure "Session scan was interrupted"))
@@ -4473,7 +4482,16 @@ new generation here."
                                                    item)))))
                                items)
                               error))
-                 callback))))))))))
+                 callback)
+               nil
+               (when flat-current
+                 (lambda (file)
+                   (when-let* ((header (pilish-jsonl-read-session-header file))
+                               (cwd (plist-get header :cwd)))
+                     (and project-id
+                          (equal project-id
+                                 (car (pilish--session-canonical-project-spec
+                                       (list :path file :cwd cwd)))))))))))))))))
 
 (defun pilish--tree-browser-chat-session-file ()
   "Return the linked chat buffer's current session file, or nil.

@@ -276,6 +276,31 @@ check only."
                (equal (plist-get data :type) "session"))
       data)))
 
+(defun pilish-jsonl-read-session-header (path)
+  "Read only the first session header from PATH, or return nil.
+Read a small prefix so callers can reject unrelated sessions without
+loading their histories.  Fall back to the whole file only when leading
+blank lines or an unusually long header exceed that prefix.  The first
+nonblank line follows the same validation as `pilish-jsonl-read-file'."
+  (condition-case nil
+      (with-temp-buffer
+        (insert-file-contents path nil 0 4096)
+        (goto-char (point-min))
+        (while (and (not (eobp)) (looking-at-p "[ \t\r]*$"))
+          (forward-line 1))
+        (when (and (>= (buffer-size) 4096)
+                   (or (eobp)
+                       (not (save-excursion (search-forward "\n" nil t)))))
+          (erase-buffer)
+          (insert-file-contents path)
+          (goto-char (point-min))
+          (while (and (not (eobp)) (looking-at-p "[ \t\r]*$"))
+            (forward-line 1)))
+        (unless (eobp)
+          (pilish--jsonl-parse-session-header
+           (buffer-substring-no-properties (point) (line-end-position)))))
+    (error nil)))
+
 (defun pilish-jsonl-read-file (path)
   "Read the session file at PATH.
 Return a plist with :path, :header, :entries, :leafId, and :name, or
