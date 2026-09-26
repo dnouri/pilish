@@ -836,9 +836,16 @@ Filtering is two-phase (matching TUI tree-selector.ts:282-311):
   (if (pilish--browse-node-empty-assistant-p node)
       ;; Phase 1: universal pre-filter — empty assistants always hidden
       nil
-    ;; Phase 2: mode-specific filter
-    (let ((type (plist-get node :type))
-          (role (plist-get node :role)))
+    ;; Phase 2: mode-specific filter.  Settings-like rows — model and
+    ;; thinking changes, plus the leading system prompt (projected so
+    ;; parent chains resolve onto it, but hidden like settings noise;
+    ;; the TUI shows the system row even under its default filter) —
+    ;; share one predicate, mirroring pi's isSettingsEntry structure.
+    (let* ((type (plist-get node :type))
+           (role (plist-get node :role))
+           (settings-like-p
+            (or (member type '("model_change" "thinking_level_change"))
+                (and (equal type "message") (equal role "system")))))
       (pcase filter-mode
         ('all t)
         ('labeled-only
@@ -846,10 +853,10 @@ Filtering is two-phase (matching TUI tree-selector.ts:282-311):
         ('user-only
          (and (equal type "message") (equal role "user")))
         ('no-tools
-         (and (not (member type '("model_change" "thinking_level_change")))
+         (and (not settings-like-p)
               (not (equal type "tool_result"))))
         (_ ;; `default'
-         (not (member type '("model_change" "thinking_level_change"))))))))
+         (not settings-like-p))))))
 
 ;;;; Client-Side Search/Filter
 
@@ -3266,18 +3273,19 @@ that is fine for display-only sections."
   "Initial filter of a newly created tree browser buffer.
 Filters select which entries the projected tree shows:
 
-- `default'       projected entries except model/thinking changes;
+- `default'       projected entries except model/thinking changes and
+                  the system prompt;
 - `no-tools'      `default' without tool results;
 - `user-only'     user messages only;
 - `labeled-only'  labeled nodes only;
 - `all'           all projected/displayable content.
 
-Projection removes raw label, session_info, and custom bookkeeping
-entries before these filters run, promoting their children to the
-nearest displayable ancestor.  Thus `all' does not restore raw
-bookkeeping.  In every filter, empty tool-dispatch assistant messages
-stay hidden unless aborted or carrying an error message (see
-`pilish--browse-node-visible-p').
+Projection removes raw label, session_info, custom, usage, and
+context_edit bookkeeping entries before these filters run, promoting
+their children to the nearest displayable ancestor.  Thus `all' does
+not restore raw bookkeeping.  In every filter, empty tool-dispatch
+assistant messages stay hidden unless aborted or carrying an error
+message (see `pilish--browse-node-visible-p').
 
 The value initializes browser buffers when they are created, and
 again whenever the browser major mode is explicitly re-run.  An

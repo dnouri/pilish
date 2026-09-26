@@ -105,6 +105,13 @@
 ;;   before the user-message rewind rule, and trailing projection-away
 ;;   bookkeeping resolves back to that prompt.
 ;;
+;; pi 0.86+ (still format version 3) writes additional record kinds —
+;; usage and context_edit — and a leading system-role message.
+;; Pilish tolerates them by design: usage and context_edit are
+;; projection-filtered like the other bookkeeping kinds, and the
+;; system message projects (parent chains resolve onto it) while the
+;; tree browsers hide it under their default filters.
+;;
 ;; All tree traversals are iterative (explicit stacks, reversed
 ;; pre-order bottom-up builds); real session trees reach thousands of
 ;; entries deep.  The single recursion is
@@ -127,9 +134,18 @@ JSON null, absent, and non-string values all read as nil."
 
 (defun pilish--jsonl-filtered-entry-p (type)
   "Return non-nil when an entry of TYPE is filtered from projection.
-Label, session_info, and custom entries are bookkeeping: they vanish and
-their children are promoted to the nearest visible ancestor."
-  (member type '("label" "session_info" "custom")))
+Label, session_info, custom, usage, and context_edit entries are
+bookkeeping: they vanish and their children are promoted to the
+nearest visible ancestor.  Deliberate divergence from pi's TUI, which
+still shows context_edit under its \"all\" filter: nothing in Pilish
+consumes context_edit semantics (append-only edits of an earlier
+message's model-visible content), so it follows the
+label/session_info/custom precedent and is filtered outright.  A
+second deliberate divergence: the projected system-role message —
+pi's TUI tree shows that row even under its default filter, while
+Pilish's tree browsers hide it under default/no-tools (it is visible
+under `all'); parent chains still resolve onto it."
+  (member type '("label" "session_info" "custom" "usage" "context_edit")))
 
 (defun pilish--jsonl-canonicalize-entries (entries)
   "Canonicalize duplicate addressable ids in ENTRIES.
@@ -931,6 +947,13 @@ BRANCH-CALLS and GLOBAL-CALLS feed tool-result resolution."
                               (list :command (plist-get message :command))))))
      ((equal role "assistant")
       (pilish--jsonl-project-assistant base message))
+     ((equal role "system")
+      ;; The leading system prompt: content is the empty string (the
+      ;; payload lives in :sections), so generic text extraction would
+      ;; be empty.  Fixed preview, no section parsing.
+      (append base
+              (list :type "message" :role "system"
+                    :preview "system prompt")))
      (t
       (let* ((content (plist-get message :content))
              (summary-role-p
@@ -1047,7 +1070,8 @@ TREE is a vector of raw nodes (:entry :children :label
 :labelTimestamp), the output of `pilish-jsonl-build-tree' or
 pi's get_tree.  Return (:tree :leafId), plus :diagnostic and
 :ambiguousIds when differing duplicate ids were canonicalized.
-Bookkeeping entries (label, session_info, custom) are dropped with
+Bookkeeping entries (label, session_info, custom, usage, and
+context_edit) are dropped with
 their children promoted to the nearest visible ancestor, toolResult
 messages resolve their toolCallId branch-locally first, and :parentId
 points at the nearest visible ancestor.  LEAF-ID, when non-nil, is a
@@ -1240,7 +1264,8 @@ nil."
   "Return SESSION's actual current projected entry id, or nil.
 SESSION is a `pilish-jsonl-read-file' result.  Resolve its raw leaf up
 past only the bookkeeping records omitted by
-`pilish-jsonl-project-tree' (label, session_info, and custom).  Entries
+`pilish-jsonl-project-tree' (label, session_info, custom, usage, and
+context_edit).  Entries
 that a browser filter may hide later — tools, model changes, and
 thinking-level changes — remain projected and therefore remain the
 actual current entry."
