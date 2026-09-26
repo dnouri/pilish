@@ -670,6 +670,19 @@ section identities; RET cannot take the cached-id fast no-op."
   (should (pilish--browse-node-visible-p
            '(:type "thinking_level_change") 'all)))
 
+(ert-deftest pilish-test-filter-system-message-role ()
+  "System-role message nodes hide like settings under default/no-tools.
+Visible under `all', mirroring the model_change treatment."
+  (should-not (pilish--browse-node-visible-p
+               '(:type "message" :role "system" :preview "system prompt")
+               'default))
+  (should-not (pilish--browse-node-visible-p
+               '(:type "message" :role "system" :preview "system prompt")
+               'no-tools))
+  (should (pilish--browse-node-visible-p
+           '(:type "message" :role "system" :preview "system prompt")
+           'all)))
+
 (ert-deftest pilish-test-filter-empty-assistant ()
   "Empty assistant messages are hidden (unless they are the leaf)."
   ;; Empty assistant with no useful content
@@ -4071,6 +4084,49 @@ The type label already shows `sh', so brackets are redundant."
         (should (string-match-p "│  @" text))
         ;; Last branch child: connector plus a blank marker (inactive).
         (should (string-match-p "└─   " text))))))
+
+(ert-deftest pilish-test-tree-browser-render-v087-session-visibility ()
+  "The pi 0.87 fixture renders with the new shapes kept out of sight.
+The projected tree never contains the `usage'/`context_edit' records,
+so no mode can render them as sections or text.  The leading system
+message hides under `default'/`no-tools' like settings noise and shows
+under `all'; ordinary turns stay visible everywhere.
+
+Fixture: test/fixtures/browse-session-v087.jsonl (ids: system
+3c4d5e6f, usage 8b92c5d6, context_edit 9ca3d7e8)."
+  (dolist (mode '(default no-tools all))
+    (with-temp-buffer
+      (pilish-tree-browser-mode)
+      (let* ((projected (pilish-jsonl-project-session-file
+                         (expand-file-name "browse-session-v087.jsonl"
+                                           pilish-test--fixture-dir)))
+             (tree (plist-get projected :tree)))
+        (should projected)
+        ;; Projection-filtered records cannot become nodes at all.
+        (should-not (pilish-test--tree-find-node tree "8b92c5d6"))
+        (should-not (pilish-test--tree-find-node tree "9ca3d7e8"))
+        (setq pilish--tree-browser-tree tree
+              pilish--tree-browser-leaf-id (plist-get projected :leafId)
+              pilish--tree-browser-filter mode)
+        (pilish--tree-browser-rerender)
+        (let* ((sections (car (pilish--tree-rendered-section-index)))
+               (text (buffer-string)))
+          ;; The system prompt row follows the settings treatment.
+          (if (eq mode 'all)
+              (should (gethash "3c4d5e6f" sections))
+            (should-not (gethash "3c4d5e6f" sections)))
+          ;; usage/context_edit never own sections in any mode...
+          (should-not (gethash "8b92c5d6" sections))
+          (should-not (gethash "9ca3d7e8" sections))
+          ;; ...and their payload never reaches rendered text.
+          (should-not (string-match-p "cache_warm\\|warming" text))
+          ;; The system prompt text appears only where the row does.
+          (if (eq mode 'all)
+              (should (string-match-p "system prompt" text))
+            (should-not (string-match-p "system prompt" text)))
+          ;; Ordinary turns survive every filter.
+          (should (string-match-p "hello" text))
+          (should (string-match-p "continue from the summary" text)))))))
 
 (ert-deftest pilish-test-tree-browser-fold-indicator-follows-long-type-label ()
   "A fold indicator does not split a type label wider than seven columns."

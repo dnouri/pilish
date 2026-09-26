@@ -62,6 +62,22 @@
   (expand-file-name pilish-test--jsonl-session-file
                     pilish-test--fixture-dir))
 
+(defconst pilish-test--jsonl-v087-session-file "browse-session-v087.jsonl"
+  "Golden pi 0.87-shaped session fixture for the jsonl module.
+
+A linear session written by pi 0.86/0.87 (still version 3): a leading
+system-role message with sections/toolsAdded, an assistant tool
+call round-trip whose toolResult carries `content' (0.85 files use
+`output'), and the new `usage' and `context_edit' record kinds around
+a self-referential (retain-none) compaction with a systemMessage blob.
+Unlike the 0.85 golden above it has no derived projection goldens;
+the tests below pin its projection directly.")
+
+(defun pilish-test--jsonl-v087-session-path ()
+  "Return the absolute path of the pi 0.87-shaped session fixture."
+  (expand-file-name pilish-test--jsonl-v087-session-file
+                    pilish-test--fixture-dir))
+
 (defun pilish-test--write-jsonl (path lines)
   "Write LINES (entry plists, header first) to PATH, one JSON per line.
 Nil plist values encode as JSON null, as in real session files.  The
@@ -246,6 +262,119 @@ PAYLOAD is the plist tail (:message, :targetId, ...)."
     (should-not (pilish-jsonl-project-session-file headerless))
     (should-not (pilish-jsonl-project-session-file
                  (expand-file-name "missing.jsonl" dir)))))
+
+;;;; pi 0.87 session shape (browse-session-v087.jsonl)
+
+(ert-deftest pilish-test-jsonl-v087-fixture-projection ()
+  "Projecting the pi 0.87 fixture tolerates the new record kinds.
+`usage' and `context_edit' entries vanish from the projection with
+their children promoted to the nearest visible ancestor, so the
+compaction lands directly on the final assistant.  A trailing usage
+leaf folds the same way: the raw leaf id is the usage entry, but the
+projected leaf and `pilish-jsonl-current-projected-id' both stay on
+the final user message.  The leading system-role message projects
+with its fixed preview — never via the unknown-role escape hatch —
+and remains a real parent in the chain.  A thinking-only assistant
+keeps the empty-content sentinel preview, and the 0.87-style
+toolResult (`content' rather than `output') still resolves its
+toolCallId."
+  (let* ((result (pilish-jsonl-project-session-file
+                  (pilish-test--jsonl-v087-session-path)))
+         (tree (plist-get result :tree))
+         (session (pilish-jsonl-read-file
+                   (pilish-test--jsonl-v087-session-path))))
+    (should result)
+    (should-not (plist-get result :diagnostic))
+    ;; Bookkeeping kinds vanish entirely; their ids are unaddressable,
+    ;; trailing usage leaf included.
+    (should-not (pilish-test--jsonl-find tree "8b92c5d6"))
+    (should-not (pilish-test--jsonl-find tree "9ca3d7e8"))
+    (should-not (pilish-test--jsonl-find tree "c7d8e1f3"))
+    ;; The system prompt projects with its fixed role and preview.
+    (let ((system (pilish-test--jsonl-find tree "3c4d5e6f")))
+      (should system)
+      (should (equal (plist-get system :type) "message"))
+      (should (equal (plist-get system :role) "system"))
+      (should (equal (plist-get system :preview) "system prompt"))
+      (should (equal (plist-get system :parentId) "2b3c4d5e"))
+      ;; The explicit system clause, not the unknown-role escape hatch.
+      (should-not (plist-member system :rawRole)))
+    ;; The system node is a real parent in the chain.
+    (should (equal (plist-get (pilish-test--jsonl-find tree "4d5e6f70")
+                              :parentId)
+                   "3c4d5e6f"))
+    ;; Children of the filtered chain promote past both records.
+    (let ((compaction (pilish-test--jsonl-find tree "a1b4e9f2")))
+      (should compaction)
+      (should (equal (plist-get compaction :parentId) "7a81b3c4")))
+    ;; Thinking blocks never reach previews; the tool round-trip
+    ;; resolves exactly like the 0.85 shapes.
+    (should (equal (plist-get (pilish-test--jsonl-find tree "5e6f7081")
+                              :preview)
+                   "(no content)"))
+    (should (equal (plist-get (pilish-test--jsonl-find tree "6f708192")
+                              :preview)
+                   "[bash: echo ok]"))
+    ;; A trailing usage leaf folds onto the last projected entry.
+    (should (equal (plist-get session :leafId) "c7d8e1f3"))
+    (should (equal (plist-get result :leafId) "b5c6f083"))
+    (should (equal (pilish-jsonl-current-projected-id session)
+                   "b5c6f083"))))
+
+(ert-deftest pilish-test-jsonl-v087-compaction-tolerance ()
+  "The 0.87 compaction record projects through summary/tokensBefore only.
+A self-referential firstKeptEntryId (retain-none) and the systemMessage
+blob are new payload Pilish does not consume: neither breaks the
+projection nor leaks into the projected node."
+  (let* ((result (pilish-jsonl-project-session-file
+                  (pilish-test--jsonl-v087-session-path)))
+         (compaction (pilish-test--jsonl-find
+                      (plist-get result :tree) "a1b4e9f2")))
+    (should compaction)
+    (should (equal (plist-get compaction :type) "compaction"))
+    (should (equal (plist-get compaction :summary)
+                   "Summary of earlier turns"))
+    (should (equal (plist-get compaction :tokensBefore) 1234))
+    ;; The self-reference and the system blob stay out of the dialect.
+    (should-not (plist-get compaction :firstKeptEntryId))
+    (should-not (plist-get compaction :systemMessage))
+    ;; No error surfaced as a diagnostic either.
+    (should-not (plist-get result :diagnostic))))
+
+(ert-deftest pilish-test-jsonl-v087-read-session-info ()
+  "Session metadata over the 0.87 fixture counts and resolves sanely.
+:messageCount counts message lines by regex with the leading system
+message included and the new record kinds ignored; :firstMessage is
+the first USER text, so the empty system content cannot win."
+  (let ((info (pilish-jsonl-read-session-info
+               (pilish-test--jsonl-v087-session-path))))
+    (should info)
+    (should (equal (plist-get info :id)
+                   "6d4c2f18-9a3b-4e57-8c21-2f5a9d0b7e64"))
+    (should (equal (plist-get info :cwd) "/home/daniel/co/pilish"))
+    (should (equal (plist-get info :created) "2026-09-25T22:28:55.488Z"))
+    ;; system, user, assistant, toolResult, assistant, user.
+    (should (equal (plist-get info :messageCount) 6))
+    (should (equal (plist-get info :firstMessage) "hello"))))
+
+(ert-deftest pilish-test-jsonl-v087-navigation ()
+  "Navigation over the 0.87 fixture rewinds across the compaction.
+The final user message targets its parentId — the compaction entry,
+which under the existing self-target rule would keep its own id — and
+current-projected-id resolves to the unfiltered final user message,
+not the usage/context_edit records that precede it."
+  (let* ((session (pilish-jsonl-read-file
+                   (pilish-test--jsonl-v087-session-path))))
+    (should (equal (pilish-jsonl-navigation-target session "b5c6f083")
+                   (list :leaf-id "a1b4e9f2"
+                         :prefill "continue from the summary"
+                         :current-p nil)))
+    ;; Non-user entries target themselves; the compaction is no
+    ;; exception even with its self-referential firstKeptEntryId.
+    (should (equal (pilish-jsonl-navigation-target session "a1b4e9f2")
+                   (list :leaf-id "a1b4e9f2" :current-p nil)))
+    (should (equal (pilish-jsonl-current-projected-id session)
+                   "b5c6f083"))))
 
 ;;;; read-file
 
@@ -1816,6 +1945,27 @@ browser filter later hides it."
                  :thinkingLevel "high")))))
     (should (equal (pilish-jsonl-current-projected-id bookkeeping) "u1"))
     (should (equal (pilish-jsonl-current-projected-id settings) "h1"))))
+
+(ert-deftest pilish-test-jsonl-navigation-rewinds-onto-system-parent ()
+  "A rewound file whose leaf is the system entry stays addressable.
+Re-editing the first user message targets its system parent (the
+rewind rule), and that position is CURRENT: the system entry is
+projected — not projection-filtered — so
+`pilish-jsonl-current-projected-id' resolves the file's raw leaf to it
+instead of nil, keeping the :current-p equality check honest."
+  (let ((session (pilish-test--jsonl-session-at
+                  (list pilish-test--jsonl-header
+                        ;; Post-rewrite order: the user/assistant chain
+                        ;; leads, the targeted system leaf ends the file.
+                        (pilish-test--jsonl-msg
+                         "u1" "sys1" 1 '(:role "user" :content "hello"))
+                        (pilish-test--jsonl-msg
+                         "a1" "u1" 2 '(:role "assistant" :content "reply"))
+                        (pilish-test--jsonl-msg
+                         "sys1" nil 0 '(:role "system" :content ""))))))
+    (should (equal (pilish-jsonl-current-projected-id session) "sys1"))
+    (should (equal (pilish-jsonl-navigation-target session "u1")
+                   (list :leaf-id "sys1" :prefill "hello" :current-p t)))))
 
 (ert-deftest pilish-test-jsonl-navigation-target-current-position ()
   ":current-p compares positively RESOLVED positions.

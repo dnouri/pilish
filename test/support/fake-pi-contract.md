@@ -4,6 +4,9 @@ This note defines the supported fake-pi surface used by deterministic tests.
 The fake is a protocol double for the RPC subprocess boundary, not a mock
 of internal Emacs functions. It targets Pi 0.85.0 and later; references to
 older releases below are historical comparisons, not compatibility guarantees.
+The fake's persisted sessions deliberately omit the record kinds pi 0.86+
+added (usage, context_edit, leading system message); tolerance for those
+shapes is covered by the JSONL golden fixture tests.
 
 ## Scope and seam
 

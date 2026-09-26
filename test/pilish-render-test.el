@@ -1578,6 +1578,35 @@ agent_end + next section's leading newline must not create triple newlines."
     (should (string-match-p "```\n\nread file\\.txt" (buffer-string)))
     (should-not (string-match-p "\n\n\n" (buffer-string)))))
 
+(ert-deftest pilish-test-system-role-live-events-are-silent-no-ops ()
+  "Live message_start/message_end with role \"system\" render nothing.
+pi 0.86+ can emit system-role messages on the wire, a role Pilish
+never saw when written.  Tolerance is fall-through: no block, no row,
+and no disturbance to a following assistant turn."
+  (with-temp-buffer
+    (pilish-chat-mode)
+    (pilish--handle-display-event '(:type "agent_start"))
+    (let ((before (buffer-string)))
+      (pilish--handle-display-event
+       '(:type "message_start"
+         :message (:role "system" :content "" :timestamp 1784817120000)))
+      (pilish--handle-display-event
+       '(:type "message_end"
+         :message (:role "system" :content "" :timestamp 1784817120000)))
+      (should (equal (buffer-string) before)))
+    ;; The no-op must not break its neighbors: a normal assistant turn
+    ;; afterwards still streams and finalizes as usual.
+    (pilish--handle-display-event
+     '(:type "message_start" :message (:role "assistant")))
+    (pilish-test--send-text-delta "Still streaming fine.")
+    (pilish--handle-display-event
+     '(:type "message_end"
+       :message (:role "assistant" :stopReason "stop"
+                 :content [(:type "text" :text "Still streaming fine.")])))
+    (let ((text (buffer-string)))
+      (should (string-match-p "Assistant\n===" text))
+      (should (string-match-p "Still streaming fine\." text)))))
+
 ;;; History Display
 
 (ert-deftest pilish-test-history-renders-user-string-content ()
@@ -2928,6 +2957,35 @@ and DISPLAY controls how completed thinking is rendered."
         (should (string-match-p "42" text))
         (should (string-match-p "84" text))
         (should-not (string-match-p "\\_<nil\\_>\\|#<" text))))))
+
+(ert-deftest pilish-test-history-skips-system-role-messages ()
+  "History replay renders nothing for system-role messages.
+pi 0.86+ can include system messages in history and agent_end
+messages.  Replay output with the system message present must equal
+replay output without it, byte for byte."
+  (let ((system `(:role "system" :content "" :timestamp 1704067200000))
+        (user `(:role "user" :content "hello" :timestamp 1704067200500))
+        (assistant `(:role "assistant" :content "hi there"
+                    :timestamp 1704067201000)))
+    (should
+     (equal
+      (with-temp-buffer
+        (pilish-chat-mode)
+        (pilish--display-history-messages (vector system user assistant))
+        (buffer-string))
+      (with-temp-buffer
+        (pilish-chat-mode)
+        (pilish--display-history-messages (vector user assistant))
+        (buffer-string))))
+    ;; The pair itself renders normally: user and assistant text only.
+    (with-temp-buffer
+      (pilish-chat-mode)
+      (pilish--display-history-messages (vector system user assistant))
+      (let ((text (buffer-string)))
+        (should (string-match-p "hello" text))
+        (should (string-match-p "hi there" text))
+        (should (= 1 (pilish-test--count-matches "^You" text)))
+        (should (= 1 (pilish-test--count-matches "^Assistant\n=+\n" text)))))))
 
 ;;; Streaming Marker
 
