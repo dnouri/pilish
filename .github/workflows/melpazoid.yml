@@ -12,20 +12,21 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v4
-    - name: Set up Python
-      uses: actions/setup-python@v5
-      with:
-        python-version: '3.12'
-    - name: Install
-      run: |
-        sudo apt-get update && sudo apt-get install -y emacs
-        emacs --version
-        git clone https://github.com/riscy/melpazoid.git ~/melpazoid
-    - name: Run
-      env:
-        LOCAL_REPO: ${{ github.workspace }}
-        RECIPE: (pilish :fetcher github :repo "dnouri/pilish" :old-names (pi-coding-agent) :files (:defaults ("assets" "assets/pilish-logo.svg")))
-        WARN_IS_ERROR: false
-        EXIST_OK: false
-      run: make -C ~/melpazoid
+      - uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install
+        run: |
+          sudo apt-get update && sudo apt-get install -y emacs
+          emacs --version
+          git clone https://github.com/riscy/melpazoid.git ~/melpazoid
+      - name: Run
+        env:
+          LOCAL_REPO: ${{ github.workspace }}
+          RECIPE: (pilish :fetcher github :repo "dnouri/pilish" :old-names (pi-coding-agent) :files (:defaults ("assets" "assets/pilish-logo.svg")))  # yamllint disable-line rule:line-length
+          WARN_IS_ERROR: false
+          # Package exists on MELPA (and is mirrored in emacsmirror)
+          EXIST_OK: true
+        run: make -C ~/melpazoid
