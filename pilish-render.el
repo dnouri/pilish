@@ -2169,19 +2169,21 @@ SAVED-P makes unmatched running metadata unfinished rather than live work."
 (defun pilish--nested-call-summary (call history-p)
   "Return CALL's compact, propertized summary.
 HISTORY-P distinguishes saved unfinished work from a stopped live process."
-  (let* ((arguments (pilish--nested-call-arguments call))
+  (let* ((tool-name (pilish--nested-call-name call))
+         (arguments (pilish--nested-call-arguments call))
          ;; Native JSON serialization returns UTF-8 bytes, not display characters.
          (preview (if arguments
                       (decode-coding-string (json-serialize arguments) 'utf-8)
                     (pilish--nested-call-args-preview call)))
          (status (pilish--nested-call-status call))
          (duration (pilish--nested-call-duration-ms call))
+         (prefix (concat "  " (pcase status
+                               ('running "…") ('ok "✓") ('error "✗")
+                               ('cancelled "⊘") (_ "?"))
+                         " "))
          (summary
           (propertize
-           (concat "  " (pcase status
-                           ('running "…") ('ok "✓") ('error "✗")
-                           ('cancelled "⊘") (_ "?"))
-                   " " (pilish--tool-display-value-string (pilish--nested-call-name call))
+           (concat prefix (pilish--tool-display-value-string tool-name)
                    (when (and preview (not (string-empty-p preview)))
                      (concat " " (pilish--truncate-string
                                   (pilish--tool-display-value-string preview) 80)))
@@ -2202,15 +2204,15 @@ HISTORY-P distinguishes saved unfinished work from a stopped live process."
                          (concat " — " (pilish--truncate-string
                                         (pilish--tool-display-value-string error-text) 80))))))
            'pilish-nested-summary t 'pilish-nested-call-id (pilish--nested-call-id call)
-           'pilish-no-fontify t))
-         (json-start (and (member (pilish--nested-call-name call) '("subagent" "subagent_resume"))
-                          (string-search "{" summary))))
-    (if json-start
+           'pilish-no-fontify t)))
+    (if (not (member tool-name '("subagent" "subagent_resume")))
+        summary
+      (let* ((run (plist-get (plist-get (pilish--nested-call-result call) :details) :run))
+             (json-start (string-search "{" summary))
+             (spans (and json-start (pilish--subagent-json-names summary json-start 'arguments run))))
         (pilish--subagent-spans
-         summary (pilish--subagent-json-names
-                  summary json-start 'arguments
-                  (plist-get (plist-get (pilish--nested-call-result call) :details) :run)))
-      summary)))
+         summary (or spans (list (list (length prefix) (+ (length prefix) (length tool-name))
+                                      (pilish--subagent-name-target run)))))))))
 
 (defun pilish--insert-compound-tool-button (label section)
   "Insert a fold button with LABEL for compound SECTION."

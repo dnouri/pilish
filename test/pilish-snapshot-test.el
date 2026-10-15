@@ -721,7 +721,6 @@
           (pilish-test--kill-live-buffers first second))))))
 
 (defun pilish-test--snapshot-check-native-summary-opener (tool arguments episode)
-  "Open TOOL's observed saved child from ARGUMENTS and EPISODE using keys."
   (pilish-test--with-snapshot-files
     (pilish-test--snapshot-write
      manifest (list start (list :type "resume_started" :sessionId "child-id"
@@ -798,6 +797,44 @@
       (search-forward "alias")
       (should (equal (get-text-property (1- (point)) 'pilish-subagent-name)
                      "This saved name has no child session identity")))))
+
+(ert-deftest pilish-test-snapshot-native-summary-fallback-keeps-unavailable-identities-inert ()
+  (dolist (tool '("subagent" "subagent_resume"))
+    (with-temp-buffer
+      (pilish-chat-mode)
+      (setq pilish--state '(:session-file "/saved/root.jsonl"))
+      (let* ((call (pilish--make-nested-call
+                    :id "native-tool-call-not-a-session" :name tool :status 'ok
+                    :arguments '(:sessionId "argument-child")
+                    :result '(:details (:run (:sessionId "observed-child" :episodeId "observed-episode")))))
+             (inhibit-read-only t))
+        (insert (pilish--nested-call-summary call nil))
+        (should (equal (buffer-substring-no-properties (point-min) (point-max))
+                       (concat "  ✓ " tool " {\"sessionId\":\"argument-child\"}")))
+        (goto-char (point-min))
+        (call-interactively (key-binding (kbd "C-c ]")))
+        (should (looking-at (regexp-quote tool)))
+        (should (equal (pilish-test--snapshot-name-rows)
+                       (list (list tool "observed-child" "/saved/root.jsonl"))))
+        (dolist (case '((nil "This saved name has no child session identity")
+                        ((:sessionId "observed-child" :episodeId 42)
+                         "This name has an invalid child episode identity")))
+          (pcase-let ((`(,run ,reason) case))
+            (erase-buffer)
+            (setf (pilish--nested-call-result call) (list :details (list :run run)))
+            (insert (pilish--nested-call-summary call nil))
+            (should (equal (buffer-substring-no-properties (point-min) (point-max))
+                           (concat "  ✓ " tool " {\"sessionId\":\"argument-child\"}")))
+            (goto-char (point-min))
+            (search-forward tool)
+            (backward-char (length tool))
+            (should (equal (get-text-property (point) 'pilish-subagent-name) reason))
+            (should-not (button-at (point)))
+            (let ((failure (should-error (call-interactively #'pilish-visit-file) :type 'user-error)))
+              (should (equal (error-message-string failure) (concat "Saved snapshot unavailable: " reason))))
+            (goto-char (point-min))
+            (let ((failure (should-error (call-interactively (key-binding (kbd "C-c ]"))) :type 'user-error)))
+              (should (equal (error-message-string failure) "No next visible subagent name")))))))))
 
 (ert-deftest pilish-test-snapshot-json-escaped-agent-and-unrelated-fields ()
   (with-temp-buffer
