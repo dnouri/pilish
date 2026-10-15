@@ -464,7 +464,7 @@
       (should (stringp (get-text-property (1- (point)) 'pilish-subagent-name)))
       (should-error (call-interactively #'pilish-visit-file) :type 'user-error))))
 
-(ert-deftest pilish-test-snapshot-name-ret-and-mouse-use-actual-opener ()
+(ert-deftest pilish-test-snapshot-name-command-and-button-action-use-actual-opener ()
   (pilish-test--with-snapshot-files
     (pilish-test--snapshot-write child (list header (pilish-test--snapshot-message "leaf" nil "Actual name action saved child")))
     (save-window-excursion
@@ -719,6 +719,63 @@
                         (and (string-match-p "First saved text" (buffer-string))
                              (not (string-match-p "New saved text" (buffer-string)))))))
           (pilish-test--kill-live-buffers first second))))))
+
+(defun pilish-test--snapshot-check-native-summary-opener (tool arguments episode)
+  "Open TOOL's observed saved child from ARGUMENTS and EPISODE using keys."
+  (pilish-test--with-snapshot-files
+    (pilish-test--snapshot-write
+     manifest (list start (list :type "resume_started" :sessionId "child-id"
+                               :episodeId "episode-2" :sessionFile child)))
+    (pilish-test--snapshot-write
+     child (list header '(:type "message" :id "leaf" :parentId :null
+                                :message (:role "user" :content "Saved native nested child"))))
+    (save-window-excursion
+      (let ((parent (generate-new-buffer " *snapshot-native-summary-parent*")) snapshot)
+        (unwind-protect
+            (progn
+              (switch-to-buffer parent)
+              (pilish-chat-mode)
+              (setq pilish--state (list :session-file anchor))
+              (pilish--handle-display-event
+               '(:type "tool_execution_start" :toolCallId "compound-owner"
+                       :toolName "codemode" :args (:code "await child();")))
+              (pilish--handle-display-event
+               (append (list :type "tool_execution_start" :toolCallId "native-tool-call-not-a-session"
+                             :parentToolCallId "compound-owner" :toolName tool)
+                       (when arguments (list :args arguments))))
+              (pilish--handle-display-event
+               (list :type "tool_execution_end" :toolCallId "native-tool-call-not-a-session"
+                     :parentToolCallId "compound-owner" :toolName tool :isError nil
+                     :result (list :content []
+                                   :details (list :run (list :sessionId "child-id" :episodeId episode
+                                                             :agent "subagent" :children [])))))
+              (pilish--handle-display-event
+               '(:type "tool_execution_end" :toolCallId "compound-owner"
+                       :toolName "codemode" :isError nil :result (:content [])))
+              (goto-char (point-min))
+              (execute-kbd-macro (kbd "C-c ]"))
+              (should (looking-at (regexp-quote tool)))
+              (execute-kbd-macro (kbd "RET"))
+              (setq snapshot (current-buffer))
+              (should (derived-mode-p 'pilish-snapshot-mode))
+              (should (equal (buffer-substring-no-properties (point-min) (point-max))
+                             "Saved snapshot, not live.\n\nYou\n===\n\nSaved native nested child\n"))
+              (should (equal pilish--snapshot-source-file child)))
+          (pilish-test--kill-live-buffers snapshot parent))))))
+
+(ert-deftest pilish-test-snapshot-native-default-summary-keyboard-open ()
+  (pilish-test--snapshot-check-native-summary-opener
+   "subagent" '(:task "Read saved file") "episode-1"))
+
+(ert-deftest pilish-test-snapshot-native-resume-summary-keyboard-open ()
+  (pilish-test--snapshot-check-native-summary-opener
+   "subagent_resume" '(:sessionId "argument-child" :message "Continue") "episode-2"))
+
+(ert-deftest pilish-test-snapshot-native-default-summary-no-arguments-keyboard-open ()
+  (pilish-test--snapshot-check-native-summary-opener "subagent" nil "episode-1"))
+
+(ert-deftest pilish-test-snapshot-native-resume-summary-no-arguments-keyboard-open ()
+  (pilish-test--snapshot-check-native-summary-opener "subagent_resume" nil "episode-2"))
 
 (ert-deftest pilish-test-snapshot-native-summary-exact-result-not-call-id ()
   (with-temp-buffer
