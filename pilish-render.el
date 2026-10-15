@@ -3721,16 +3721,17 @@ DETAILS-JSON is the unchanged generic serializer output when present."
       (pilish--subagent-spans text spans))))
 
 (defun pilish--annotate-subagent-header (block run)
-  "Bind BLOCK's existing argument label to the RUN actually being painted."
-  (when (and block (member (overlay-get (pilish--tool-block-overlay block) 'pilish-tool-name)
-                          '("subagent" "subagent_resume")))
-    (let* ((start (overlay-start (pilish--tool-block-overlay block)))
+  "Bind BLOCK's argument label, or tool-name prefix, to the painted RUN."
+  (when-let* ((overlay (and block (pilish--tool-block-overlay block)))
+              (tool-name (overlay-get overlay 'pilish-tool-name))
+              ((member tool-name '("subagent" "subagent_resume"))))
+    (let* ((start (overlay-start overlay))
            (end (1- (marker-position (pilish--tool-block-header-end block))))
            (text (buffer-substring-no-properties start end))
-           (json-start (string-search "{" text)))
-      (when json-start
-        (setq text (pilish--subagent-spans
-                    text (pilish--subagent-json-names text json-start 'arguments run))))
+           (json-start (string-search "{" text))
+           (spans (and json-start (pilish--subagent-json-names text json-start 'arguments run))))
+      (setq text (pilish--subagent-spans
+                  text (or spans (list (list 0 (length tool-name) (pilish--subagent-name-target run))))))
       (pilish--rebind-subagent-names text start end))))
 
 (defun pilish--move-subagent-name (backward)
