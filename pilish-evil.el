@@ -110,6 +110,9 @@
 (declare-function pilish-copy-file-path "pilish-render")
 (declare-function pilish-visit-file "pilish-render")
 (declare-function pilish-toggle-tool-section "pilish-render")
+(declare-function pilish-next-subagent-name "pilish-render")
+(declare-function pilish-previous-subagent-name "pilish-render")
+(declare-function pilish-snapshot-quit "pilish-snapshot")
 (declare-function magit-section-backward "magit-section")
 (declare-function magit-section-backward-sibling "magit-section")
 (declare-function magit-section-forward "magit-section")
@@ -207,13 +210,13 @@ Added to `pilish-chat-mode-hook' by
   (setq-local pilish-copy-raw-markdown t))
 
 (defun pilish-evil--maybe-disable-snipe ()
-  "Disable the `evil-snipe' minor modes in pi chat and browser buffers.
+  "Disable the `evil-snipe' minor modes in pi transcripts and browsers.
 Added to `evil-snipe-local-mode-hook' and
 `evil-snipe-override-local-mode-hook' by
 `pilish-evil-setup' when `pilish-evil-disable-snipe'
 is non-nil.  Mode hooks run on disable as well as enable, so guard
 on the modes being active to avoid recursing."
-  (when (derived-mode-p 'pilish-chat-mode 'pilish-browse-mode)
+  (when (derived-mode-p 'pilish-transcript-mode 'pilish-browse-mode)
     (when (bound-and-true-p evil-snipe-local-mode)
       (evil-snipe-local-mode -1))
     (when (bound-and-true-p evil-snipe-override-local-mode)
@@ -280,6 +283,7 @@ options `pilish-evil-chat-state',
                           pilish-evil-chat-state)
   (evil-set-initial-state 'pilish-input-mode
                           pilish-evil-input-state)
+  (evil-set-initial-state 'pilish-snapshot-mode 'motion)
   ;; Explicit per-mode entries rather than one entry on the shared
   ;; base mode: `evil-initial-state' walks derived-mode parents, but
   ;; listing each concrete browse mode keeps the registration obvious
@@ -300,6 +304,17 @@ options `pilish-evil-chat-state',
     "i" #'pilish-evil-insert-input
     "a" #'pilish-evil-append-input
     (kbd "RET") #'pilish-visit-file
+    (kbd "C-c ]") #'pilish-next-subagent-name
+    (kbd "C-c [") #'pilish-previous-subagent-name
+    (kbd "TAB") #'pilish-toggle-tool-section
+    [tab] #'pilish-toggle-tool-section)
+  (evil-define-key* 'motion pilish-snapshot-mode-map
+    "n" #'pilish-next-message
+    "p" #'pilish-previous-message
+    "q" #'pilish-snapshot-quit
+    (kbd "RET") #'pilish-visit-file
+    (kbd "C-c ]") #'pilish-next-subagent-name
+    (kbd "C-c [") #'pilish-previous-subagent-name
     (kbd "TAB") #'pilish-toggle-tool-section
     [tab] #'pilish-toggle-tool-section)
   ;; Browsers: reclaim every documented browser key in motion state.  The

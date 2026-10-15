@@ -109,6 +109,7 @@
 (require 'pilish-menu)
 (require 'pilish-input)
 (require 'pilish-browse)
+(require 'pilish-snapshot)
 
 (declare-function dired-get-filename "dired" (&optional localp no-error-if-not-filep))
 

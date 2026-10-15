@@ -43,6 +43,24 @@ Returns nil if LINE is not valid JSON."
       (json-parse-string line :object-type 'plist)
     (json-error nil)))
 
+(cl-defstruct (pilish--snapshot-target
+               (:constructor pilish--make-snapshot-target))
+  (anchor-file nil :read-only t)
+  (session-id nil :read-only t)
+  (episode-id nil :read-only t))
+
+(defun pilish--snapshot-target (anchor-file session-id &optional episode-id)
+  "Return copied saved identity for ANCHOR-FILE, SESSION-ID and EPISODE-ID.
+Return nil when the anchor or child identity is unavailable."
+  (when (and (stringp anchor-file) (not (string-empty-p anchor-file))
+             (stringp session-id) (not (string-empty-p session-id))
+             (or (null episode-id)
+                 (and (stringp episode-id) (not (string-empty-p episode-id)))))
+    (pilish--make-snapshot-target
+     :anchor-file (substring-no-properties anchor-file)
+     :session-id (substring-no-properties session-id)
+     :episode-id (and episode-id (substring-no-properties episode-id)))))
+
 ;;;; Line Accumulation
 
 (defun pilish--line-chunks-string (chunks)

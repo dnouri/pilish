@@ -141,6 +141,55 @@ raced a turn that was never submitted."
     (should (pilish-gui-test-chat-contains "Fake reply for: second turn"))
     (should (pilish-gui-test-idle-p))))
 
+(ert-deftest pilish-gui-test-snapshot-keyboard-other-window ()
+  (pilish-gui-test-with-fresh-session
+    (:backend fake :fake-scenario "prompt-lifecycle")
+    (pilish-test--with-snapshot-files
+      (pilish-test--snapshot-write
+       child (list header (pilish-test--snapshot-message "leaf" nil "GUI saved child answer")))
+      (let* ((parent (plist-get pilish-gui-test--session :chat-buffer))
+             (input (plist-get pilish-gui-test--session :input-buffer))
+             (process (plist-get pilish-gui-test--session :process))
+             (parent-window (get-buffer-window parent))
+             snapshot)
+        (unwind-protect
+            (progn
+              (with-current-buffer input (insert "Unsent GUI draft"))
+              (select-window parent-window)
+              (setq pilish--state (plist-put pilish--state :session-file anchor))
+              (let ((block (pilish--display-tool-start "subagent" '(:agent "alias") "snapshot-call")))
+                (pilish--display-tool-end
+                 "subagent" '(:agent "alias") [(:type "text" :text "## Subagent resolved result\nSaved")]
+                 '(:run (:sessionId "child-id" :episodeId "episode-1" :agent "resolved" :children []))
+                 nil block))
+              (goto-char (point-min))
+              (redisplay t)
+              (execute-kbd-macro (kbd "C-c ]"))
+              (redisplay t)
+              (should (looking-at "alias"))
+              (should (pos-visible-in-window-p (point) parent-window))
+              (execute-kbd-macro (kbd "RET"))
+              (setq snapshot (current-buffer))
+              (redisplay t)
+              (should (derived-mode-p 'pilish-snapshot-mode))
+              (should buffer-read-only)
+              (should (equal pilish--snapshot-source-file child))
+              (should-not (eq (selected-window) parent-window))
+              (should (eq (window-buffer parent-window) parent))
+              (search-forward "GUI saved child answer")
+              (redisplay t)
+              (should (pos-visible-in-window-p (match-beginning 0) (selected-window)))
+              (should-not (pilish--get-process))
+              (should (process-live-p process))
+              (should (eq (buffer-local-value 'pilish--process parent) process))
+              (should (equal (with-current-buffer input (buffer-string)) "Unsent GUI draft"))
+              (execute-kbd-macro "q")
+              (should-not (buffer-live-p snapshot))
+              (should (process-live-p process))
+              (should (buffer-live-p parent))
+              (should (buffer-live-p input)))
+          (when (buffer-live-p snapshot) (kill-buffer snapshot)))))))
+
 ;;;; Scroll Preservation Tests
 
 (ert-deftest pilish-gui-test-scroll-preserved-streaming ()

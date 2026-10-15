@@ -50,6 +50,7 @@
 
 ;; Forward references for functions in other modules
 (declare-function pilish-compact "pilish-menu" (&optional custom-instructions))
+(declare-function pilish-open-subagent-snapshot "pilish-snapshot" (&optional target))
 ;; Declare the Emacs 29 minimum API.  Adding Emacs 30's optional TAG here makes
 ;; its byte compiler pad three-argument calls, producing incompatible bytecode.
 (declare-function treesit-parser-create "treesit.c"
@@ -249,7 +250,7 @@ on receipt and the table is cleared at agent/session/process teardown.")
   "Display user message TEXT and optional image CONTENT in the chat buffer.
 If TIMESTAMP (Emacs time value) is provided, display it in the header.  When
 TRACK-REGION is non-nil, return a marker pair bounding the inserted turn."
-  (let* ((chat-buffer (pilish--get-chat-buffer))
+  (let* ((chat-buffer (pilish--get-render-buffer))
          (start (with-current-buffer chat-buffer (point-max)))
          (previews (pilish--content-image-previews content)))
     (pilish--append-to-chat
@@ -1407,6 +1408,12 @@ Shown when the session starts without a configured model/API key."
                        'face 'pilish-retry-notice)
            "\n")))
 
+(defun pilish--cleanup-transcript-on-kill ()
+  "Release only the current transcript's display resources."
+  (pilish--clear-render-artifacts)
+  (pilish--remove-table-overlays (point-min) (point-max))
+  (pilish--cleanup-visible-string-buffer))
+
 (defun pilish--cleanup-on-kill ()
   "Clean up resources when chat buffer is killed.
 Also kills the linked input buffer and fontification cache buffers.
@@ -1875,7 +1882,8 @@ Returns a plist with:
                                  (aref line-map-vec (1- (length line-map-vec)))
                                0))
              (hidden (- total-raw-lines last-displayed)))
-        (list :content (string-join kept-lines "\n")
+        (list :content (pilish--remove-clipped-subagent-names
+                        content (string-join kept-lines "\n"))
               :visual-lines visual-count
               ;; Report hidden lines; truncated first line means there's hidden content even with 1 line
               :hidden-lines (if (and truncated-first-line (= hidden 0)) 1 hidden)
@@ -2167,33 +2175,42 @@ HISTORY-P distinguishes saved unfinished work from a stopped live process."
                       (decode-coding-string (json-serialize arguments) 'utf-8)
                     (pilish--nested-call-args-preview call)))
          (status (pilish--nested-call-status call))
-         (duration (pilish--nested-call-duration-ms call)))
-    (propertize
-     (concat "  " (pcase status
-                     ('running "…") ('ok "✓") ('error "✗")
-                     ('cancelled "⊘") (_ "?"))
-             " " (pilish--tool-display-value-string (pilish--nested-call-name call))
-             (when (and preview (not (string-empty-p preview)))
-               (concat " " (pilish--truncate-string
-                            (pilish--tool-display-value-string preview) 80)))
-             (when duration
-               (propertize (if (< duration 1000)
-                               (format " %.0fms" duration)
-                             (format " %.1fs" (/ duration 1000.0)))
-                           'pilish-nested-duration t))
-             (when-let* ((cost (pilish--nested-call-cost call)))
-               (format " $%.2g" cost))
-             (when (eq status 'unfinished)
-               (if history-p " unfinished when saved" " unfinished"))
-             (when (memq status '(error cancelled))
-               (let ((error-text (or (pilish--nested-call-error call)
-                                     (pilish--extract-text-from-content
-                                      (plist-get (pilish--nested-call-result call) :content)))))
-                 (unless (string-empty-p error-text)
-                   (concat " — " (pilish--truncate-string
-                                  (pilish--tool-display-value-string error-text) 80))))))
-     'pilish-nested-summary t 'pilish-nested-call-id (pilish--nested-call-id call)
-     'pilish-no-fontify t)))
+         (duration (pilish--nested-call-duration-ms call))
+         (summary
+          (propertize
+           (concat "  " (pcase status
+                           ('running "…") ('ok "✓") ('error "✗")
+                           ('cancelled "⊘") (_ "?"))
+                   " " (pilish--tool-display-value-string (pilish--nested-call-name call))
+                   (when (and preview (not (string-empty-p preview)))
+                     (concat " " (pilish--truncate-string
+                                  (pilish--tool-display-value-string preview) 80)))
+                   (when duration
+                     (propertize (if (< duration 1000)
+                                     (format " %.0fms" duration)
+                                   (format " %.1fs" (/ duration 1000.0)))
+                                 'pilish-nested-duration t))
+                   (when-let* ((cost (pilish--nested-call-cost call)))
+                     (format " $%.2g" cost))
+                   (when (eq status 'unfinished)
+                     (if history-p " unfinished when saved" " unfinished"))
+                   (when (memq status '(error cancelled))
+                     (let ((error-text (or (pilish--nested-call-error call)
+                                          (pilish--extract-text-from-content
+                                           (plist-get (pilish--nested-call-result call) :content)))))
+                       (unless (string-empty-p error-text)
+                         (concat " — " (pilish--truncate-string
+                                        (pilish--tool-display-value-string error-text) 80))))))
+           'pilish-nested-summary t 'pilish-nested-call-id (pilish--nested-call-id call)
+           'pilish-no-fontify t))
+         (json-start (and (member (pilish--nested-call-name call) '("subagent" "subagent_resume"))
+                          (string-search "{" summary))))
+    (if json-start
+        (pilish--subagent-spans
+         summary (pilish--subagent-json-names
+                  summary json-start 'arguments
+                  (plist-get (plist-get (pilish--nested-call-result call) :details) :run)))
+      summary)))
 
 (defun pilish--insert-compound-tool-button (label section)
   "Insert a fold button with LABEL for compound SECTION."
@@ -3442,6 +3459,308 @@ can safely skip this region."
               'font-lock-face 'pilish-tool-output
               'pilish-no-fontify t))
 
+(defun pilish--subagent-name-target (run)
+  "Return copied saved identity for RUN, or a precise unavailable reason."
+  (let* ((anchor (or pilish--snapshot-source-file (plist-get pilish--state :session-file)))
+         (run (and (listp run) run))
+         (episode (plist-get run :episodeId)))
+    (or (pilish--snapshot-target anchor (plist-get run :sessionId)
+                                (unless (eq episode :null) episode))
+        (cond
+         ((not (pilish--normalize-string-or-null anchor)) "No saved parent session anchor is known")
+         ((not (pilish--normalize-string-or-null (plist-get run :sessionId)))
+          "This saved name has no child session identity")
+         (t "This name has an invalid child episode identity")))))
+
+(defun pilish--subagent-button-action (button)
+  "Open only BUTTON's copied saved subagent target."
+  (pilish-open-subagent-snapshot (button-get button 'pilish-subagent-name)))
+
+(defvar pilish--subagent-button-map
+  (let ((map (make-sparse-keymap)))
+    (set-keymap-parent map button-map)
+    (define-key map (kbd "TAB") #'pilish-toggle-tool-section)
+    (define-key map (kbd "<tab>") #'pilish-toggle-tool-section)
+    map))
+
+(defconst pilish--subagent-button-properties
+  (text-properties-at
+   0 (make-text-button "name" nil
+                       'action #'pilish--subagent-button-action
+                       'face nil 'mouse-face 'highlight 'follow-link t
+                       'keymap pilish--subagent-button-map
+                       'help-echo "Open a newly read saved snapshot, not live"
+                       'rear-nonsticky t)))
+
+(defun pilish--remove-subagent-button (start end &optional object)
+  "Remove owned button behavior in START..END of OBJECT, not its characters."
+  (remove-text-properties start end
+                          '(button nil category nil keymap nil action nil
+                            mouse-action nil follow-link nil help-echo nil mouse-face nil)
+                          object))
+
+(defun pilish--restore-subagent-buttons (start end &optional object)
+  "Restore owned name behavior from the canonical property in START..END.
+OBJECT is a presentation string or nil for the current buffer."
+  (let ((position start)
+        (inhibit-read-only t))
+    (with-silent-modifications
+      (while (< position end)
+        (let* ((value (get-text-property position 'pilish-subagent-name object))
+               (next (next-single-property-change position 'pilish-subagent-name object end)))
+          (cond
+           ((pilish--snapshot-target-p value)
+            (add-text-properties position next pilish--subagent-button-properties object))
+           ((stringp value)
+            (put-text-property position next 'help-echo value object)))
+          (setq position next))))))
+
+(defun pilish--clear-subagent-names (start end &optional object)
+  "Clear only previously owned names in START..END of OBJECT."
+  (let ((position start))
+    (while (< position end)
+      (let ((next (next-single-property-change position 'pilish-subagent-name object end)))
+        (when (get-text-property position 'pilish-subagent-name object)
+          (pilish--remove-subagent-button position next object)
+          (remove-text-properties position next '(pilish-subagent-name nil) object))
+        (setq position next)))))
+
+(defun pilish--subagent-spans (text spans)
+  "Return TEXT's unchanged characters annotated from transient SPANS.
+Each span is (START END TARGET-OR-REASON)."
+  (setq text (copy-sequence text))
+  (pilish--clear-subagent-names 0 (length text) text)
+  (dolist (span spans)
+    (pcase-let ((`(,start ,end ,target) span))
+      (when (< start end)
+        (put-text-property start end 'pilish-subagent-name target text))))
+  (pilish--restore-subagent-buttons 0 (length text) text)
+  text)
+
+(defun pilish--rebind-subagent-names (source start end)
+  "Rebind owned name properties in START..END to painted SOURCE."
+  (let ((position start)
+        (inhibit-read-only t))
+    (with-silent-modifications
+      (pilish--clear-subagent-names start end)
+      (setq position 0)
+      (while (< position (length source))
+        (let ((next (next-single-property-change position 'pilish-subagent-name source (length source)))
+              (value (get-text-property position 'pilish-subagent-name source)))
+          (when value (put-text-property (+ start position) (+ start next) 'pilish-subagent-name value))
+          (setq position next)))
+      (pilish--restore-subagent-buttons start end))))
+
+(defun pilish--remove-clipped-subagent-names (source slice)
+  "Remove incomplete owned names after truncating SOURCE to SLICE."
+  (let ((position 0) complete)
+    (while (< position (length source))
+      (let ((next (next-single-property-change position 'pilish-subagent-name source (length source)))
+            (value (get-text-property position 'pilish-subagent-name source)))
+        (when value (push (cons value (substring-no-properties source position next)) complete))
+        (setq position next)))
+    (setq position 0)
+    (while (< position (length slice))
+      (let ((next (next-single-property-change position 'pilish-subagent-name slice (length slice)))
+            (value (get-text-property position 'pilish-subagent-name slice)))
+        (when (and value (not (member (cons value (substring-no-properties slice position next)) complete)))
+          (pilish--remove-subagent-button position next slice)
+          (remove-text-properties position next '(pilish-subagent-name nil) slice))
+        (setq position next)))
+    slice))
+
+(defun pilish--subagent-json-names (text start mode run)
+  "Return semantic name spans in existing serialized JSON TEXT at START.
+MODE is `arguments' or `details'.  RUN supplies exact object ownership."
+  (let ((position start) spans)
+    (cl-labels
+        ((space () (while (and (< position (length text))
+                               (memq (aref text position) '(?\s ?\t ?\r ?\n)))
+                      (cl-incf position)))
+         (string-token ()
+           (let ((begin position))
+             (unless (= (aref text position) ?\") (error "Expected JSON string"))
+             (cl-incf position)
+             (while (not (= (aref text position) ?\"))
+               (when (= (aref text position) ?\\) (cl-incf position))
+               (cl-incf position))
+             (cl-incf position)
+             (list (json-parse-string (substring text begin position)) (1+ begin) (1- position))))
+         (value (kind owner)
+           (space)
+           (pcase (aref text position)
+             (?\{
+              (cl-incf position) (space)
+              (while (not (= (aref text position) ?\}))
+                (let ((key (car (string-token))))
+                  (space)
+                  (unless (= (aref text position) ?:) (error "Expected JSON colon"))
+                  (cl-incf position) (space)
+                  (cond
+                   ((and (memq kind '(arguments run)) (equal key "agent")
+                         (= (aref text position) ?\"))
+                    (pcase-let ((`(,_ ,begin ,end) (string-token)))
+                      (push (list begin end (pilish--subagent-name-target owner)) spans)))
+                   ((and (eq kind 'details) (equal key "run")) (value 'run run))
+                   ((and (eq kind 'run) (equal key "children"))
+                    (value 'children (plist-get owner :children)))
+                   (t (value nil nil))))
+                (space)
+                (when (= (aref text position) ?,) (cl-incf position) (space)))
+              (cl-incf position))
+             (?\[
+              (cl-incf position) (space)
+              (let ((index 0))
+                (while (not (= (aref text position) ?\]))
+                  (value (and (eq kind 'children) 'run)
+                         (and (eq kind 'children) (vectorp owner)
+                              (< index (length owner)) (aref owner index)))
+                  (cl-incf index) (space)
+                  (when (= (aref text position) ?,) (cl-incf position) (space))))
+              (cl-incf position))
+             (?\" (string-token))
+             (_ (while (and (< position (length text))
+                            (not (memq (aref text position) '(?, ?\} ?\] ?\s ?\t ?\n ?\r))))
+                  (cl-incf position))))))
+      (condition-case nil
+          (progn (value mode run) (nreverse spans))
+        (error (nreverse spans))))))
+
+(defun pilish--subagent-running-paths (run)
+  "Return producer-ordered running leaf paths in RUN, or its root alone."
+  (let ((stack (list (list run nil))) paths)
+    (while stack
+      (pcase-let* ((`(,node ,ancestors) (pop stack))
+                   (path (append ancestors (list node))))
+        (when (equal (plist-get node :status) "running")
+          (let ((children (and (vectorp (plist-get node :children))
+                               (seq-filter (lambda (child)
+                                             (and (listp child) (equal (plist-get child :status) "running")))
+                                           (append (plist-get node :children) nil)))))
+            (if children
+                (dolist (child (reverse children)) (push (list child path) stack))
+              (push path paths))))))
+    (or (nreverse paths) (list (list run)))))
+
+(defun pilish--subagent-progress-spans (text run)
+  "Return spans for exact producer-owned progress segments in TEXT using RUN."
+  (when (and run (string-prefix-p "Log: " text))
+    (let ((position (string-search "\n" text)) spans valid)
+      (setq valid (numberp position))
+      (dolist (path (pilish--subagent-running-paths run))
+        (when valid
+          (cl-incf position)
+          (if (not (string-prefix-p "- " (substring text position)))
+              (setq valid nil)
+            (cl-incf position 2)
+            (dolist (node path)
+              (when valid
+                (let* ((name (plist-get node :agent))
+                       (turns (plist-get node :turnCount))
+                       (usage (plist-get node :contextUsage))
+                       (percent (plist-get usage :percent))
+                       (details (concat (when usage
+                                          (if (numberp percent)
+                                              (format "%d%% ctx, " (floor (+ percent 0.5)))
+                                            "? ctx, "))
+                                        (format "%s %s" turns (if (eql turns 1) "turn" "turns"))))
+                       (segment (and (stringp name) (concat name " (" details ")"))))
+                  (if (and segment (string-prefix-p segment (substring text position)))
+                      (progn
+                        (push (list position (+ position (length name))
+                                    (pilish--subagent-name-target node)) spans)
+                        (cl-incf position (length segment))
+                        (unless (eq node (car (last path)))
+                          (if (string-prefix-p " -> " (substring text position))
+                              (cl-incf position 4)
+                            (setq valid nil))))
+                    (setq valid nil)))))
+            (when valid
+              (let* ((activity (plist-get (car (last path)) :activity))
+                     (suffix (and (stringp activity) (concat ": " activity))))
+                (if (and suffix (string-prefix-p suffix (substring text position)))
+                    (cl-incf position (length suffix))
+                  (setq valid nil)))))))
+      (when (and valid (= position (length text))) (nreverse spans)))))
+
+(defun pilish--subagent-envelope-identity (text)
+  "Recover a unique root ID only from TEXT's strict producer envelope."
+  (let ((id-re "[[:xdigit:]]\\{8\\}-[[:xdigit:]]\\{4\\}-[[:xdigit:]]\\{4\\}-[[:xdigit:]]\\{4\\}-[[:xdigit:]]\\{12\\}")
+        id kind (count 0))
+    (when (string-match "\\`## Subagent\\(?: [^\n]+\\)? \\(result\\|error\\|interrupted\\)\n" text)
+      (setq kind (match-string 1 text))
+      (let ((position 0))
+        (while (string-match (concat "^Subagent session ID: \\(" id-re "\\)$") text position)
+          (setq id (match-string 1 text) position (match-end 0))
+          (cl-incf count)))
+      (when (and (= count 1)
+                 (pcase kind
+                   ("result" (string-match-p (concat "\\`## Subagent[^\n]* result\nSubagent session ID: " id-re "\n") text))
+                   ("error" (string-suffix-p "\n\nThis child session may be recoverable. If the same task should continue after a transient failure, call `subagent_resume` with this session ID and a message. Otherwise start a new `subagent`." text))
+                   ("interrupted" (and (string-match-p "\\`## Subagent[^\n]* interrupted\n\nNo final answer was produced\.\n\nSubagent session ID: " text)
+                                       (string-suffix-p "\n\nIf the interrupted task should continue, call `subagent_resume` with this session ID and a message. Otherwise start a new `subagent`.\n\nExample for `message`:\n- You were interrupted. Continue the original task from where you left off." text)))))
+        (list :sessionId id)))))
+
+(defun pilish--subagent-output (text tool-name details &optional details-json)
+  "Annotate TEXT's exact owned names for TOOL-NAME and DETAILS.
+DETAILS-JSON is the unchanged generic serializer output when present."
+  (if (not (member tool-name '("subagent" "subagent_resume")))
+      text
+    (let* ((run (and (listp (plist-get details :run)) (plist-get details :run)))
+           (raw-text (if (and details-json (string-suffix-p details-json text))
+                         (substring text 0 (- (length text) (length details-json)
+                                              (length "\n\n**Details**\n")))
+                       text))
+           (root (or run (pilish--subagent-envelope-identity raw-text)))
+           (spans (pilish--subagent-progress-spans raw-text run)))
+      (when (string-match "\\`## Subagent \\([^\n]+\\) \\(?:result\\|error\\|interrupted\\)\n" text)
+        (push (list (match-beginning 1) (match-end 1) (pilish--subagent-name-target root)) spans))
+      (when (and details-json (string-suffix-p details-json text))
+        (setq spans (append spans (pilish--subagent-json-names
+                                  text (- (length text) (length details-json)) 'details run))))
+      (pilish--subagent-spans text spans))))
+
+(defun pilish--annotate-subagent-header (block run)
+  "Bind BLOCK's existing argument label to the RUN actually being painted."
+  (when (and block (member (overlay-get (pilish--tool-block-overlay block) 'pilish-tool-name)
+                          '("subagent" "subagent_resume")))
+    (let* ((start (overlay-start (pilish--tool-block-overlay block)))
+           (end (1- (marker-position (pilish--tool-block-header-end block))))
+           (text (buffer-substring-no-properties start end))
+           (json-start (string-search "{" text)))
+      (when json-start
+        (setq text (pilish--subagent-spans
+                    text (pilish--subagent-json-names text json-start 'arguments run))))
+      (pilish--rebind-subagent-names text start end))))
+
+(defun pilish--move-subagent-name (backward)
+  "Move to the next visible owned name, or the previous with BACKWARD."
+  (let ((position (point-min)) positions)
+    (while (< position (point-max))
+      (when (and (pilish--snapshot-target-p (get-text-property position 'pilish-subagent-name))
+                 (pilish--visible-text-span-p position)
+                 (not (invisible-p position)))
+        (push position positions))
+      (setq position (next-single-property-change position 'pilish-subagent-name nil (point-max))))
+    (let* ((current (or (and (get-text-property (point) 'pilish-subagent-name)
+                             (previous-single-property-change (1+ (point)) 'pilish-subagent-name))
+                        (point)))
+           (destination (if backward
+                            (seq-find (lambda (pos) (< pos current)) positions)
+                          (seq-find (lambda (pos) (> pos (point))) (nreverse positions)))))
+      (unless destination (user-error "No %s visible subagent name" (if backward "previous" "next")))
+      (goto-char destination))))
+
+(defun pilish-next-subagent-name ()
+  "Move to the next visible name with an exact saved child identity."
+  (interactive)
+  (pilish--move-subagent-name nil))
+
+(defun pilish-previous-subagent-name ()
+  "Move to the previous visible name with an exact saved child identity."
+  (interactive)
+  (pilish--move-subagent-name t))
+
 (defun pilish--tool-header (tool-name args &optional preview-state)
   "Return propertized header for tool TOOL-NAME with ARGS.
 The tool name prefix uses `pilish-tool-name' face and
@@ -4349,7 +4668,8 @@ LANG is passed to `pilish--wrap-in-src-block' for fence construction."
             ;; END-MARKER.  Restore both before updating the block overlay.
             (set-marker header-end body-start)
             (set-marker end-marker (+ body-start new-length))
-            (pilish--tool-block-refresh-overlay block))))))))
+            (pilish--tool-block-refresh-overlay block)))))
+      (pilish--rebind-subagent-names new-body body-start (+ body-start new-length)))))
 
 (defun pilish--display-tool-streaming-text
     (raw-text max-lines &optional lang block source-truncated)
@@ -4388,7 +4708,7 @@ shows complete lines only)."
                   (> (plist-get truncation :hidden-lines) 0)))
              (cache-key (list lang show-hidden-indicator display-content))
              (last-tail (pilish--tool-block-last-tail block)))
-        (unless (equal cache-key last-tail)
+        (unless (equal-including-properties cache-key last-tail)
           (pilish--tool-block-replace-body
            block display-content show-hidden-indicator lang)
           (pilish--tool-block-set-last-tail block cache-key))))))
@@ -4511,9 +4831,13 @@ Compound output retains parent facts and queues the owner for one repaint."
                                              (plist-get partial-result :details) :calls))
           (pilish--queue-tool-update (pilish--tool-block-tool-call-id block) block))
       (let* ((content-blocks (plist-get partial-result :content))
-             (raw-output (pilish--extract-text-from-content content-blocks)))
+             (raw-output (pilish--extract-text-from-content content-blocks))
+             (tool-name (and block (overlay-get (pilish--tool-block-overlay block) 'pilish-tool-name)))
+             (details (plist-get partial-result :details)))
         (pilish--display-tool-streaming-text
-         raw-output pilish-bash-preview-lines nil block)))))
+         (pilish--subagent-output raw-output tool-name details)
+         pilish-bash-preview-lines nil block)
+        (pilish--annotate-subagent-header block (plist-get details :run))))))
 
 (defun pilish--markdown-fence-delimiter (content)
   "Return a markdown fence delimiter safe for CONTENT.
@@ -4556,17 +4880,21 @@ and :image-content-p reports cheap image-block presence in CONTENT."
                    (pilish--content-image-previews content-blocks)))
          (svg-preview (and (not omit-image-preparation) (null images)
                            (pilish--read-svg-preview tool-name args raw-output details is-error)))
-         (edit-diff (and (equal tool-name "edit") (pilish--tool-arg-get details :diff))))
+         (edit-diff (and (equal tool-name "edit") (pilish--tool-arg-get details :diff)))
+         (details-json (and (not (member tool-name '("edit" "write" "bash" "read")))
+                            (pilish--pretty-print-json details))))
     (list :text
-          (ansi-color-filter-apply
+          (pilish--subagent-output
+           (ansi-color-filter-apply
            (pilish--render-safe-string
             (pcase tool-name
               ("edit" (or edit-diff raw-output))
               ("write" (or (pilish--tool-arg-get args :content) raw-output))
               ((or "bash" "read") raw-output)
-              (_ (if-let* ((details-json (pilish--pretty-print-json details)))
+              (_ (if details-json
                      (concat raw-output "\n\n" (pilish--propertize-details-region details-json))
                    raw-output)))))
+           tool-name details details-json)
           :lang (pilish--path-to-language (pilish--tool-path-string (pilish--tool-arg-path args)))
           :is-edit-diff (and (not is-error) (stringp edit-diff))
           :images (if svg-preview (list svg-preview) images)
@@ -4605,6 +4933,9 @@ if none exists, render the result at point without a live overlay."
                           (pilish--chat-display-width)))
              (hidden-count (plist-get truncation :hidden-lines))
              (needs-collapse (> hidden-count 0)))
+        (pilish--annotate-subagent-header
+         block (or (plist-get details :run)
+                   (pilish--subagent-envelope-identity (pilish--extract-text-from-content content))))
         (pilish--with-scroll-preservation
           (save-excursion
             (if block
@@ -5184,7 +5515,15 @@ therefore cool into their visible preview only."
                                (marker-position header-end-marker)))
               (overlay-end (overlay-end overlay))
               (bounds (pilish--tool-fenced-content-bounds header-end overlay-end)))
-    (buffer-substring-no-properties (car bounds) (cdr bounds))))
+    (let* ((source (buffer-substring (car bounds) (cdr bounds)))
+           (cold (substring-no-properties source))
+           (position 0))
+      (while (< position (length source))
+        (let ((next (next-single-property-change position 'pilish-subagent-name source (length source)))
+              (value (get-text-property position 'pilish-subagent-name source)))
+          (when value (put-text-property position next 'pilish-subagent-name value cold))
+          (setq position next)))
+      cold)))
 
 (defun pilish--cold-tool-target-metadata
     (overlay header-end collapsed)
@@ -5206,10 +5545,8 @@ buttons, full content, markers, and absolute buffer positions."
           :header-length (- header-end (overlay-start overlay)))))
 
 (defun pilish--compound-tool-cold-projection (overlay)
-  "Project OVERLAY's displayed body to inert, language-free text.
-Return :cold-body and transient absolute :deleted-spans for view mapping.
-Copy only lightweight section/summary properties and visible image previews;
-never select or truncate results again."
+  "Project OVERLAY's displayed body to language-free cold text.
+Return :cold-body and transient absolute :deleted-spans for view mapping."
   (let* ((start (marker-position (overlay-get overlay 'pilish-header-end)))
          (end (overlay-end overlay))
          (body (buffer-substring start end))
@@ -5217,7 +5554,7 @@ never select or truncate results again."
          language-spans)
     (dolist (property '(pilish-tool-section pilish-nested-summary pilish-nested-root-id
                        pilish-nested-call-id pilish-nested-duration pilish-image-preview
-                       pilish-no-fontify))
+                       pilish-no-fontify pilish-subagent-name))
       (let ((position 0))
         (while (< position (length body))
           (let ((next (next-single-property-change position property body (length body)))
@@ -5283,8 +5620,7 @@ freeze their entire currently displayed body in :cold-body."
 
 (defun pilish--cool-tool-overlay (overlay)
   "Rewrite completed tool OVERLAY into its cold plain-history form.
-Preserves the header and visible preview, drops overlays, buttons, and
-diff annotations.  Return the applied projection metadata, or nil if ineligible."
+Return the applied projection metadata, or nil if ineligible."
   (when (pilish--completed-tool-overlay-p overlay)
     (when-let* ((metadata (pilish--tool-overlay-cold-metadata overlay))
                 (header-end (marker-position
@@ -5316,7 +5652,8 @@ diff annotations.  Return the applied projection metadata, or nil if ineligible.
            ov-start (point)
            `(pilish-cold-tool-block ,target-metadata))
           (when-let* ((help (plist-get target-metadata :help)))
-            (pilish--set-hover-help ov-start (point) help)))
+            (pilish--set-hover-help ov-start (point) help))
+          (pilish--restore-subagent-buttons ov-start (point)))
         (when (and record (pilish--tool-block-compound-p record))
           (pilish--release-nested-tool-block record))
         metadata))))
@@ -7880,8 +8217,9 @@ A target without a location preserves native behavior."
 (defun pilish--dispatch-button
     (&optional position use-mouse-action strict-return)
   "Dispatch a remapped chat button at POSITION.
-On keyboard RET, a Pi tool toggle retains its standard button action.  Every
-other button resolves once through the strict file-target visitor: authoritative
+On keyboard RET, Pi tool toggles and owned saved subagent names retain their
+button actions.  Other buttons resolve through the strict file-target visitor:
+authoritative
 tool ownership is preserved, while only a semantically owned local Markdown
 link is accepted outside tools.  Invalid, non-local, reference, malformed, and
 non-Markdown buttons fail closed.  Other keyboard keys, mouse events, and direct
@@ -7895,7 +8233,9 @@ RET."
   (if (not strict-return)
       (push-button position use-mouse-action)
     (if-let* ((button (button-at (or position (point)))))
-        (if (button-get button 'pilish-tool-toggle)
+        (if (or (button-get button 'pilish-tool-toggle)
+                (and (eq (button-get button 'action) #'pilish--subagent-button-action)
+                     (pilish--snapshot-target-p (button-get button 'pilish-subagent-name))))
             (push-button position use-mouse-action)
           (let ((target (or (pilish--file-target-at-point)
                             (user-error "No file at point"))))
@@ -7906,8 +8246,8 @@ RET."
       (push-button position use-mouse-action))))
 
 (defun pilish-visit-file (&optional toggle)
-  "Visit one strict file target at point.
-Targets may be file-content rows in tool output, plain path references, or
+  "Open an owned saved subagent name or one strict file target at point.
+File targets may be content rows in tool output, plain path references, or
 labels of local Markdown links.  Tool headers and other non-content rows are
 not visitable.  Plain path locations use a one-based physical file line and
 optional one-based column; a line range visits its first line only.  Explicit
@@ -7917,9 +8257,14 @@ mark, and narrowing.  By default, `pilish-visit-file-other-window'
 selects which native opener Pi requests; Emacs display policy controls final
 placement.  With prefix argument TOGGLE, invert the opener request."
   (interactive "P")
-  (let ((target (or (pilish--file-target-at-point)
-                    (user-error "No file at point"))))
-    (pilish--visit-file-target target toggle)))
+  (let ((name (get-text-property (point) 'pilish-subagent-name)))
+    (cond
+     ((pilish--snapshot-target-p name) (pilish-open-subagent-snapshot name))
+     ((stringp name) (user-error "Saved snapshot unavailable: %s" name))
+     (t
+      (let ((target (or (pilish--file-target-at-point)
+                        (user-error "No file at point"))))
+        (pilish--visit-file-target target toggle))))))
 
 (defun pilish-copy-file-path ()
   "Copy the shell-local path for the strict file target at point.
@@ -7982,29 +8327,29 @@ For example: '+ 7     code' or '-12     code'"
 ;;;; Compaction Display
 
 (defun pilish--display-compaction-result (tokens-before summary &optional timestamp)
-  "Display a compaction result block in the chat buffer.
+  "Display a compaction result block in the transcript.
 TOKENS-BEFORE is the token count before compaction.
 SUMMARY is the compaction summary text (markdown).
 TIMESTAMP is optional time when compaction occurred."
-  (let ((start (with-current-buffer (pilish--get-chat-buffer) (point-max))))
+  (let ((start (with-current-buffer (pilish--get-render-buffer) (point-max))))
     (pilish--append-to-chat
      (concat "\n" (pilish--make-separator "Compaction" timestamp) "\n"
              (propertize (format "Compacted from %s tokens\n\n"
                                  (pilish--format-number (or tokens-before 0)))
                          'face 'pilish-tool-name)
              (pilish--render-safe-string summary) "\n"))
-    (with-current-buffer (pilish--get-chat-buffer)
+    (with-current-buffer (pilish--get-render-buffer)
       (setq pilish--assistant-header-shown nil)
       (pilish--decorate-tables-unless-deferred start (point-max)))))
 
 (defun pilish--display-branch-summary (summary &optional timestamp)
-  "Display a branch SUMMARY block in the chat buffer.
+  "Display a branch SUMMARY block in the transcript.
 TIMESTAMP is the optional time when the branch summary was created."
-  (let ((start (with-current-buffer (pilish--get-chat-buffer) (point-max))))
+  (let ((start (with-current-buffer (pilish--get-render-buffer) (point-max))))
     (pilish--append-to-chat
      (concat "\n" (pilish--make-separator "Branch Summary" timestamp) "\n"
              (pilish--render-safe-string summary) "\n"))
-    (with-current-buffer (pilish--get-chat-buffer)
+    (with-current-buffer (pilish--get-render-buffer)
       (pilish--decorate-tables-unless-deferred start (point-max)))))
 
 (defun pilish--handle-compaction-success (tokens-before summary &optional timestamp)
@@ -8083,7 +8428,8 @@ overlapping tool headers, live or finalized."
                     (when fl-face
                       (put-text-property pos next 'face fl-face))
                     (setq pos next))))
-              (put-text-property hdr-beg hdr-end 'fontified t))))))))
+              (put-text-property hdr-beg hdr-end 'fontified t))))))
+    (pilish--restore-subagent-buttons beg end)))
 
 ;;;; History Display
 
@@ -8191,9 +8537,9 @@ HELP, when non-nil, is applied to the inserted content.
 Ensures markdown structures don't leak to subsequent content.
 Display-only table decoration is applied after deferred history insertion."
   (when (and text (not (string-empty-p text)))
-    (let ((start (with-current-buffer (pilish--get-chat-buffer) (point-max))))
+    (let ((start (with-current-buffer (pilish--get-render-buffer) (point-max))))
       (pilish--append-to-chat text)
-      (with-current-buffer (pilish--get-chat-buffer)
+      (with-current-buffer (pilish--get-render-buffer)
         (let ((content-end (point-max)))
           ;; History replay should keep rendering even if markdown
           ;; fontification trips over a tree-sitter/runtime mismatch.
@@ -8541,6 +8887,12 @@ Note: When called from async callbacks, pass CHAT-BUF explicitly."
   (when (and chat-buf (buffer-live-p chat-buf))
     (with-current-buffer chat-buf
       (pilish--set-canonical-messages messages)
+      (pilish--replay-history chat-buf messages
+                              (concat (pilish--format-startup-header) "\n")))))
+
+(defun pilish--replay-history (buffer messages &optional prefix)
+  "Replay full MESSAGES into passive transcript BUFFER with optional PREFIX."
+  (with-current-buffer buffer
       (let ((inhibit-read-only t)
             ;; A full resume/reload rebuild allocates many short strings,
             ;; overlays, and display properties.  Keep GC out of the hot path;
@@ -8556,7 +8908,7 @@ Note: When called from async callbacks, pass CHAT-BUF explicitly."
             #'pilish--md-ts-change-hook-p
           (pilish--clear-render-artifacts)
           (erase-buffer)
-          (insert (pilish--format-startup-header) "\n")
+          (when prefix (insert prefix))
           (when (vectorp messages)
             (let ((pilish--defer-history-postprocessing t))
               (pilish--display-history-messages messages)))
@@ -8567,7 +8919,7 @@ Note: When called from async callbacks, pass CHAT-BUF explicitly."
           (pilish--update-hot-tail-boundary)
           (pilish--cool-completed-tool-blocks-outside-hot-tail)
           (pilish--postprocess-history-buffer)
-          (goto-char (point-max)))))))
+          (goto-char (point-max))))))
 
 (provide 'pilish-render)
 

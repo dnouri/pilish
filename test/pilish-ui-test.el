@@ -1125,8 +1125,14 @@ other family names there."
                         (expand-file-name "AGENTS.md" sub-dir) walk-file))
       (with-temp-file file (insert "agents\n")))
     (unwind-protect
-        (should (equal (pilish--startup-context-files proj-dir user-dir)
-                       (list user-file proj-file override-file walk-file)))
+        (let ((scan-directory (symbol-function 'pilish--startup-context-file-in-dir)))
+          (cl-letf (((symbol-function 'pilish--startup-context-file-in-dir)
+                     (lambda (directory)
+                       (when (string-prefix-p (file-name-as-directory root)
+                                              (file-name-as-directory directory))
+                         (funcall scan-directory directory)))))
+            (should (equal (pilish--startup-context-files proj-dir user-dir)
+                           (list user-file proj-file override-file walk-file)))))
       (delete-directory root t))))
 
 (ert-deftest pilish-test-extract-pi-version-from-clean-output ()

@@ -5376,6 +5376,7 @@ restore-defaults flow from generation-lifetime bookkeeping changes."
           (make-directory project)
           (fmakunbound 'pilish--session-list-directory)
           (let ((default-directory (file-name-as-directory project))
+                (project-find-functions nil)
                 (pilish--chat-buffer nil)
                 (process-environment (copy-sequence process-environment)))
             (setenv "PI_CODING_AGENT_DIR" agent-root)
@@ -5539,7 +5540,8 @@ and non-munged directories.  scope=current scans one directory."
                               :cwd project-a))))
     (with-temp-buffer
       (pilish-session-browser-mode)
-      (let ((default-directory (file-name-as-directory project-a)))
+      (let ((default-directory (file-name-as-directory project-a))
+            (project-find-functions nil))
         (should (equal (pilish--session-directory)
                        (file-name-as-directory project-a)))
         (cl-letf (((symbol-function 'pilish--session-list-directory)

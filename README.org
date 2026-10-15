@@ -287,6 +287,23 @@ tool block.  Its script, call list, parent output, and individual
 child outputs fold independently with =TAB=.  Reload and resume
 retain saved child-call summaries, not child outputs.
 
+On an identified subagent name, click or press =RET= to read its saved
+conversation in another window.  Use =C-c ]= and =C-c [= to reach the next
+or previous visible name.  =TAB= still folds the current section.  The
+read-only snapshot has no live session controls.  Press =q= to close only
+that observer.  Open the name again to read a new snapshot.  Existing
+snapshots never update automatically.
+
+Snapshots show the full saved current branch, including pre-compaction
+history and saved summaries.  They do not include unsaved output or recover
+an earlier resume episode.  A missing first save or an absent, conflicting
+or unsafe manifest mapping makes the snapshot unavailable.  Old results
+can recover only a root identity from the producer's strict session-ID
+envelope.  Descendant and native-call summaries without saved child
+identity remain unavailable.  Agent names, tool-call IDs, log paths and
+profile files do not identify child sessions.  Explicit remote reads use
+Emacs file handlers and retain the parent session's TRAMP route.
+
 Hover completed replies, thinking, or tool blocks for timestamps and details:
 reply provider/model and message-level token/cache usage, thinking line counts,
 or short tool command/path hints.  Native =C-h .= shows full help at point,
@@ -574,7 +591,9 @@ The main buffers:
 | =TAB=                     | input        | Complete paths and =/= commands             |
 | =M-<prior>= / =M-<next>=  | input        | Scroll the linked chat window               |
 | =TAB=                     | chat         | Toggle summary line, thinking, tool, or turn |
-| =RET=                     | chat         | Visit file target at point                  |
+| =RET=                     | chat, snapshot | Open owned subagent name or file target   |
+| =C-c ]= / =C-c [=         | chat, snapshot | Next or previous visible subagent name    |
+| =q=                       | snapshot     | Close only this saved observer              |
 | =!=                       | chat         | Run shell command on file at point          |
 | =w=                       | chat         | Copy the shell-local file path              |
 | =n= / =p=                 | chat         | Navigate user messages                      |
@@ -933,7 +952,8 @@ Chat buffer (motion state):
 | =f=       | fork session at point                   |
 | =w=       | copy shell-local file path at point     |
 | =TAB=     | toggle tool/thinking section            |
-| =RET=     | visit file at point                     |
+| =RET=     | open owned subagent name or visit file   |
+| =C-c ]= / =C-c [= | next or previous subagent name       |
 | =i= / =a= | focus input (=a= goes to end of input)  |
 | =?=       | transient menu                          |
 | =q=       | quit session                            |
@@ -1072,7 +1092,7 @@ session.  For a shareable export, use HTML export from the menu
 These are the exact rules behind =RET=, =!=, and =w= in the chat
 buffer.
 
-=RET= opens one strict file target at point: a file-content row in
+Outside owned subagent names, =RET= opens one strict file target at point: a file-content row in
 tool output, a plain path reference, or the label of a local Markdown
 link.  Tool headers, fences, preview hints, and other non-content rows
 do not open files.  Plain locations such as =src/app.el:12:3= visit
