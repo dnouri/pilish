@@ -34,6 +34,46 @@
                                '(:role "custom" :customType nil :content "Saved extension" :display t
                                        :timestamp 1792022520000.0))))))))
 
+(ert-deftest pilish-test-snapshot-disk-v087-system-full-branch ()
+  (pilish-test--with-snapshot-files
+    (with-temp-buffer
+      (insert-file-contents (expand-file-name "browse-session-v087.jsonl" pilish-test--fixture-dir))
+      (goto-char (point-min))
+      (let ((saved-header (json-parse-string
+                           (buffer-substring-no-properties (point) (line-end-position))
+                           :object-type 'plist)))
+        (delete-region (point) (line-end-position))
+        (insert (json-serialize
+                 (plist-put (plist-put saved-header :id (plist-get header :id))
+                            :cwd (plist-get header :cwd)))))
+      (write-region (point-min) (point-max) child nil 'silent))
+    (let* ((saved (pilish-jsonl-read-subagent-snapshot target))
+           (messages (pilish-jsonl-snapshot-messages saved)))
+      (should (equal (pilish-jsonl-snapshot-file saved) child))
+      (should (equal (pilish-jsonl-snapshot-cwd saved) (file-name-as-directory directory)))
+      (should (equal (mapcar (lambda (message) (plist-get message :role)) (append messages nil))
+                     '("system" "user" "assistant" "toolResult" "assistant" "compactionSummary" "user")))
+      (should (equal (aref messages 0)
+                     '(:role "system" :content ""
+                             :sections (:preamble "You are an expert coding assistant operating inside pi."
+                                        :tools "<tools>\n- read: Read file contents\n- bash: Execute bash commands\n</tools>"
+                                        :rules "<rules>\n- Use read to examine files\n</rules>"
+                                        :docs :null
+                                        :project_context "<project_context>\nPilish development guide.\n</project_context>"
+                                        :skills :null :cwd "<cwd>\n/home/daniel/co/pilish\n</cwd>")
+                             :timestamp 1790375335488 :toolsAdded [(:name "read") (:name "bash")])))
+      (should (equal (plist-get (aref messages 1) :content) [(:type "text" :text "hello")]))
+      (should (equal (plist-get (aref messages 2) :content)
+                     [(:type "thinking" :thinking "Run the echo check, then answer." :thinkingSignature "reasoning")
+                      (:type "toolCall" :id "call_9f01a2bc" :name "bash" :arguments (:command "echo ok"))]))
+      (should (equal (plist-get (aref messages 3) :content) [(:type "text" :text "ok")]))
+      (should (equal (plist-get (aref messages 4) :content) [(:type "text" :text "hi there")]))
+      (should (equal (aref messages 5)
+                     '(:role "compactionSummary" :summary "Summary of earlier turns"
+                             :tokensBefore 1234 :timestamp 1790375400000.0)))
+      (should (equal (plist-get (aref messages 6) :content)
+                     [(:type "text" :text "continue from the summary")])))))
+
 (ert-deftest pilish-test-snapshot-disk-nested-and-resumed-same-file ()
   (pilish-test--with-snapshot-files
     (pilish-test--snapshot-write
@@ -190,6 +230,100 @@
                            (concat "Saved snapshot, not live.\n\nYou\n===\n\nSaved question\n"
                                    "\nVisible saved extension\n")))
           (pilish-test--kill-live-buffers snapshot))))))
+
+(ert-deftest pilish-test-snapshot-open-system-patches-preserve-dialogue ()
+  (pilish-test--with-snapshot-files
+    (let ((leading '(:role "system" :content "Private leading instructions"
+                           :sections (:keep "Keep this section" :remove "Remove this section")
+                           :toolsAdded [(:name "old_tool" :description "Old tool"
+                                               :parameters (:type "object" :properties (:path (:type "string"))
+                                                                  :required ["path"]))]
+                           :timestamp 0))
+          (patch '(:role "system" :content [(:type "text" :text "Private later instructions")]
+                         :sections (:remove :null :added "Private new section")
+                         :toolsAdded [(:name "new_tool" :description "New tool"
+                                             :parameters (:type "object" :properties (:query (:type "string"))
+                                                                :required ["query"])
+                                             :constrainedSampling t)]
+                         :toolsRemoved [(:name "old_tool")] :timestamp 4))
+          (question '(:role "user" :content "Saved question"))
+          (first '(:role "assistant" :content [(:type "text" :text "First answer")]))
+          (second '(:role "assistant" :content [(:type "text" :text "Second answer")])))
+      (save-window-excursion
+        (let (opened)
+          (unwind-protect
+              (dolist (branch (list (list (cons "user" question) (cons "first" first) (cons "second" second))
+                                   (list (cons "system-leading" leading) (cons "user" question)
+                                         (cons "first" first) (cons "system-patch" patch) (cons "second" second))))
+                (let (parent)
+                  (pilish-test--snapshot-write
+                   child (cons header
+                               (mapcar (lambda (entry)
+                                         (prog1 (list :type "message" :id (car entry) :parentId (or parent :null)
+                                                      :message (cdr entry))
+                                           (setq parent (car entry))))
+                                       branch))))
+                (cl-letf (((symbol-function 'pilish--rpc-async) (lambda (&rest _) (ert-fail "Snapshot sent RPC")))
+                          ((symbol-function 'pilish--rpc-sync) (lambda (&rest _) (ert-fail "Snapshot sent synchronous RPC")))
+                          ((symbol-function 'pilish--send-string) (lambda (&rest _) (ert-fail "Snapshot sent process input")))
+                          ((symbol-function 'pilish--start-process) (lambda (&rest _) (ert-fail "Snapshot started pi")))
+                          ((symbol-function 'write-region) (lambda (&rest _) (ert-fail "Snapshot wrote source"))))
+                  (push (pilish-open-subagent-snapshot target) opened)
+                  (should (equal (buffer-substring-no-properties (point-min) (point-max))
+                                 (concat "Saved snapshot, not live.\n\nYou\n===\n\nSaved question\n"
+                                         "\nAssistant\n=========\n\nFirst answer\n\nSecond answer\n\n")))
+                  (should (equal (pilish-jsonl-snapshot-messages (pilish-jsonl-read-subagent-snapshot target))
+                                 (vconcat (mapcar #'cdr branch))))))
+            (apply #'pilish-test--kill-live-buffers opened)))))))
+
+(ert-deftest pilish-test-snapshot-open-system-only-independent-read-only ()
+  (pilish-test--with-snapshot-files
+    (let ((system '(:role "system" :content "" :sections (:preamble "Private system-only instructions") :timestamp 0)))
+      (pilish-test--snapshot-write
+       child (list header (list :type "message" :id "system-only" :parentId :null :message system)))
+      (pilish-test-with-mock-session directory
+        (let* ((parent (pilish--find-session directory))
+               (input (buffer-local-value 'pilish--input-buffer parent))
+               (canonical [(:role "user" :content "Parent conversation")])
+               snapshot)
+          (unwind-protect
+              (save-window-excursion
+                (switch-to-buffer parent)
+                (setq pilish--state (list :session-file anchor)
+                      pilish--status 'sending
+                      pilish--canonical-messages canonical)
+                (with-current-buffer input (insert "Unsent parent draft"))
+                (let ((parent-window (selected-window)))
+                  (cl-letf (((symbol-function 'pilish--rpc-async) (lambda (&rest _) (ert-fail "Snapshot sent RPC")))
+                            ((symbol-function 'pilish--rpc-sync) (lambda (&rest _) (ert-fail "Snapshot sent synchronous RPC")))
+                            ((symbol-function 'pilish--send-string) (lambda (&rest _) (ert-fail "Snapshot sent process input")))
+                            ((symbol-function 'pilish--start-process) (lambda (&rest _) (ert-fail "Snapshot started pi")))
+                            ((symbol-function 'write-region) (lambda (&rest _) (ert-fail "Snapshot wrote source"))))
+                    (setq snapshot (pilish-open-subagent-snapshot target))
+                    (should (equal (pilish-jsonl-snapshot-messages (pilish-jsonl-read-subagent-snapshot target))
+                                   (vector system)))
+                    (should (equal (buffer-substring-no-properties (point-min) (point-max)) "Saved snapshot, not live.\n"))
+                    (should (derived-mode-p 'pilish-snapshot-mode))
+                    (should buffer-read-only)
+                    (should-error (insert "not editable") :type 'buffer-read-only)
+                    (should-not buffer-file-name)
+                    (should-not (pilish--get-chat-buffer))
+                    (should-not (pilish--get-process))
+                    (should-not (pilish--get-input-buffer))
+                    (should (equal pilish--snapshot-source-file child))
+                    (should-not (eq parent-window (selected-window)))
+                    (should (eq (window-buffer parent-window) parent))
+                    (should (eq (window-buffer (selected-window)) snapshot))
+                    (should (eq (pilish--find-session directory) parent))
+                    (should (eq (buffer-local-value 'pilish--status parent) 'sending))
+                    (should (equal (buffer-local-value 'pilish--state parent) (list :session-file anchor)))
+                    (should (eq (buffer-local-value 'pilish--canonical-messages parent) canonical))
+                    (should (equal (with-current-buffer input (buffer-string)) "Unsent parent draft"))
+                    (pilish-snapshot-quit)
+                    (should-not (buffer-live-p snapshot))
+                    (should (buffer-live-p parent))
+                    (should (buffer-live-p input)))))
+            (pilish-test--kill-live-buffers snapshot)))))))
 
 (ert-deftest pilish-test-snapshot-open-independent-read-only-other-window ()
   (pilish-test--with-snapshot-files
