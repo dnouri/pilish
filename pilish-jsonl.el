@@ -494,7 +494,7 @@ Ignore an incomplete trailing append, but reject malformed complete records."
          (unless (and (consp message) (stringp (plist-get message :role)))
            (user-error "Invalid saved message in entry %s" (plist-get entry :id)))
          (unless (member (plist-get message :role)
-                         '("user" "assistant" "toolResult" "custom" "branchSummary" "compactionSummary"))
+                         '("system" "user" "assistant" "toolResult" "custom" "branchSummary" "compactionSummary"))
            (user-error "Unsupported saved message role %S in entry %s"
                        (plist-get message :role) (plist-get entry :id)))
          message))
