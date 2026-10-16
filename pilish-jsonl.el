@@ -377,6 +377,205 @@ skipped silently."
                             (plist-get (aref vector (1- count)) :id))
                   :name name)))))))
 
+(cl-defstruct (pilish-jsonl-snapshot
+               (:constructor pilish--make-jsonl-snapshot))
+  (file nil :read-only t)
+  (cwd nil :read-only t)
+  (messages nil :read-only t))
+
+(defun pilish--jsonl-snapshot-records (path)
+  "Read PATH once as strict JSONL objects, returning a vector.
+Ignore an incomplete trailing append, but reject malformed complete records."
+  (unless (file-readable-p path)
+    (user-error "Saved snapshot file is not readable yet: %s" path))
+  (with-temp-buffer
+    (insert-file-contents path)
+    (goto-char (point-min))
+    (let (records (line-number 0))
+      (while (not (eobp))
+        (cl-incf line-number)
+        (let* ((end (line-end-position))
+               (line (buffer-substring-no-properties (point) end))
+               (complete (< end (point-max)))
+               parsed
+               (record
+                (unless (string-blank-p line)
+                  (condition-case err
+                      (prog1 (json-parse-string line :object-type 'plist)
+                        (setq parsed t))
+                    (json-end-of-file
+                     (when complete
+                       (user-error "Incomplete saved record at %s:%d" path line-number)))
+                    (json-error
+                     (user-error "Malformed saved record at %s:%d (%s)"
+                                 path line-number (error-message-string err)))))))
+          (cond
+           ((string-blank-p line) nil)
+           ((and (consp record) (keywordp (car record)))
+            (push record records))
+           ((or complete parsed)
+            (user-error "Saved record is not an object at %s:%d" path line-number))))
+        (forward-line 1))
+      (vconcat (nreverse records)))))
+
+(defun pilish--jsonl-subagents-directory (anchor)
+  "Return the producer's root-local subagents directory for ANCHOR."
+  (let* ((file (pilish--route-preserving-expand-file-name anchor))
+         (directory (pilish--route-preserving-file-name-directory file)))
+    (if (string-suffix-p ".subagents/" directory)
+        directory
+      (pilish--route-preserving-file-name-as-directory
+       (concat file ".subagents")))))
+
+(defun pilish--jsonl-snapshot-path (raw anchor)
+  "Translate absolute producer RAW against ANCHOR, preserving its route."
+  (pilish--ensure-usable-path-string raw)
+  (unless (and (stringp raw)
+               (file-name-absolute-p (pilish--local-name-for-process raw)))
+    (user-error "Saved snapshot path is not absolute: %S" raw))
+  (pilish--route-preserving-expand-file-name (pilish--emacs-path raw anchor)))
+
+(defun pilish--jsonl-subagent-file (target records root)
+  "Resolve TARGET against manifest RECORDS under ROOT."
+  (let ((id (pilish--snapshot-target-session-id target))
+        (episode (pilish--snapshot-target-episode-id target))
+        starts mappings episode-matches file)
+    (dolist (record (append records nil))
+      (let ((type (plist-get record :type)))
+        (unless (member type '("started" "resume_started" "finished" "resume_finished"))
+          (user-error "Unsupported subagent manifest record: %S" type))
+        (when (member type '("started" "resume_started"))
+          (unless (and (pilish--normalize-string-or-null (plist-get record :sessionId))
+                       (pilish--normalize-string-or-null (plist-get record :episodeId))
+                       (pilish--normalize-string-or-null (plist-get record :sessionFile)))
+            (user-error "Incomplete subagent manifest mapping"))
+          (when (equal episode (plist-get record :episodeId))
+            (push record episode-matches))
+          (when (equal id (plist-get record :sessionId))
+            (push record mappings)
+            (when (equal type "started") (push record starts))))))
+    (unless (= (length starts) 1)
+      (user-error "Expected one subagent start for %s, found %d" id (length starts)))
+    (when (and episode
+               (not (and (= (length episode-matches) 1)
+                         (equal id (plist-get (car episode-matches) :sessionId)))))
+      (user-error "Missing or contradictory subagent episode %s" episode))
+    (dolist (record mappings)
+      (let* ((raw (plist-get record :sessionFile))
+             (path (pilish--jsonl-snapshot-path raw root)))
+        (unless (string-prefix-p root path)
+          (user-error "Subagent session path escapes its root: %s" path))
+        (unless (file-in-directory-p path root)
+          (user-error "Subagent session path escapes its root through a symlink: %s" path))
+        (when (and file (not (equal file path)))
+          (user-error "Contradictory subagent session paths for %s" id))
+        (setq file path)))
+    (dolist (record (append records nil))
+      (when (and (member (plist-get record :type) '("started" "resume_started"))
+                 (not (equal id (plist-get record :sessionId))))
+        (let ((path (pilish--jsonl-snapshot-path (plist-get record :sessionFile) root)))
+          (when (or (equal file path)
+                    (and (file-exists-p file) (file-exists-p path)
+                         (file-equal-p file path)))
+            (user-error "Subagent session path is assigned to conflicting identities")))))
+    file))
+
+(defun pilish--jsonl-snapshot-entry-message (entry)
+  "Return ENTRY's full saved message, or nil for bookkeeping."
+  (let* ((type (plist-get entry :type))
+         (stamp (plist-get entry :timestamp))
+         (timestamp (and (stringp stamp)
+                         (condition-case nil
+                             (* 1000 (float-time (date-to-time stamp)))
+                           (error nil)))))
+    (pcase type
+      ("message"
+       (let ((message (plist-get entry :message)))
+         (unless (and (consp message) (stringp (plist-get message :role)))
+           (user-error "Invalid saved message in entry %s" (plist-get entry :id)))
+         (unless (member (plist-get message :role)
+                         '("system" "user" "assistant" "toolResult" "custom" "branchSummary" "compactionSummary"))
+           (user-error "Unsupported saved message role %S in entry %s"
+                       (plist-get message :role) (plist-get entry :id)))
+         message))
+      ("custom_message"
+       (list :role "custom" :customType (plist-get entry :customType)
+             :content (plist-get entry :content)
+             :display (eq t (plist-get entry :display)) :timestamp timestamp))
+      ("branch_summary"
+       (list :role "branchSummary" :summary (plist-get entry :summary)
+             :timestamp timestamp))
+      ("compaction"
+       (list :role "compactionSummary" :summary (plist-get entry :summary)
+             :tokensBefore (plist-get entry :tokensBefore) :timestamp timestamp))
+      ((or "model_change" "thinking_level_change" "session_info" "label"
+           "custom" "usage" "context_edit") nil)
+      (_ (user-error "Unsupported saved entry type: %S" type)))))
+
+(defun pilish--jsonl-snapshot-branch (entries)
+  "Project ENTRIES' current saved leaf ancestry to a full message vector.
+Physical order selects the leaf, parentId selects its branch."
+  (let* ((canonical (pilish--jsonl-canonicalize-entries entries))
+         (ambiguous (plist-get canonical :ambiguousIds))
+         (index (make-hash-table :test #'equal))
+         (seen (make-hash-table :test #'equal))
+         (leaf (and (> (length entries) 0)
+                    (plist-get (aref entries (1- (length entries))) :id)))
+         messages)
+    (dolist (entry (append (plist-get canonical :entries) nil))
+      (unless (and (pilish--normalize-string-or-null (plist-get entry :id))
+                   (plist-member entry :parentId)
+                   (or (null (plist-get entry :parentId))
+                       (eq :null (plist-get entry :parentId))
+                       (pilish--normalize-string-or-null (plist-get entry :parentId))))
+        (user-error "Unsupported saved entry identity or ancestry"))
+      (puthash (plist-get entry :id) entry index))
+    (while leaf
+      (when (member leaf ambiguous)
+        (user-error "Conflicting saved entry id: %s" leaf))
+      (when (gethash leaf seen)
+        (user-error "Cycle in saved ancestry at %s" leaf))
+      (puthash leaf t seen)
+      (let ((entry (gethash leaf index)))
+        (unless entry (user-error "Dangling saved ancestry at %s" leaf))
+        (when-let* ((message (pilish--jsonl-snapshot-entry-message entry)))
+          (push message messages))
+        (setq leaf (pilish--jsonl-entry-parent-id entry))))
+    (vconcat messages)))
+
+(defun pilish-jsonl-read-subagent-snapshot (target)
+  "Read and validate TARGET's full current saved branch once.
+Return a `pilish-jsonl-snapshot'.  Resolve only manager-assigned manifest paths.
+Do not resume, create, modify or acquire unsaved session state.  Explicit remote
+reads use Emacs's existing file handlers and preserve the captured TRAMP route."
+  (unless (pilish--snapshot-target-p target)
+    (user-error "No saved subagent identity at point"))
+  (let* ((origin (pilish--snapshot-target-anchor-file target))
+         (anchor (pilish--jsonl-snapshot-path origin origin))
+         (root (pilish--jsonl-subagents-directory anchor))
+         (manifest (pilish--jsonl-snapshot-records (concat root "manifest.jsonl")))
+         (file (pilish--jsonl-subagent-file target manifest root))
+         (records (pilish--jsonl-snapshot-records file))
+         (header (and (> (length records) 0) (aref records 0))))
+    (unless (and (equal (plist-get header :type) "session")
+                 (eql (plist-get header :version) 3))
+      (user-error "Saved snapshot requires a version 3 session header"))
+    (unless (equal (plist-get header :id) (pilish--snapshot-target-session-id target))
+      (user-error "Saved snapshot header identity does not match its manifest"))
+    (unless (pilish--normalize-string-or-null (plist-get header :cwd))
+      (user-error "Saved snapshot has no cwd"))
+    (let (entries)
+      (dolist (record (cdr (append records nil)))
+        (if (equal (plist-get record :type) "session")
+            (unless (equal record header)
+              (user-error "Conflicting saved session headers"))
+          (push record entries)))
+      (pilish--make-jsonl-snapshot
+       :file file
+       :cwd (pilish--route-preserving-file-name-as-directory
+             (pilish--jsonl-snapshot-path (plist-get header :cwd) root))
+       :messages (pilish--jsonl-snapshot-branch (vconcat (nreverse entries)))))))
+
 ;;;; Session Discovery
 
 (defconst pilish--jsonl-line-type-re

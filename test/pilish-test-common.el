@@ -58,6 +58,35 @@ redisplay, and subprocess event delivery.")
       (insert-file-contents path)
       (json-parse-string (buffer-string) :object-type 'plist))))
 
+(defun pilish-test--snapshot-write (file records &optional tail)
+  (make-directory (file-name-directory file) t)
+  (with-temp-file file
+    (dolist (record records) (insert (json-serialize record) "\n"))
+    (when tail (insert tail))))
+
+(defmacro pilish-test--with-snapshot-files (&rest body)
+  (declare (indent 0) (debug t))
+  `(let* ((tmp-root (expand-file-name "tmp/" (file-name-directory (locate-library "pilish"))))
+          (_ (make-directory tmp-root t))
+          (directory (make-temp-file (concat tmp-root "snapshot-test-") t))
+          (anchor (expand-file-name "root.jsonl" directory))
+          (root (concat anchor ".subagents/"))
+          (child (concat root "manager-child.jsonl"))
+          (manifest (concat root "manifest.jsonl"))
+          (header (list :type "session" :version 3 :id "child-id" :cwd directory))
+          (start (list :type "started" :sessionId "child-id" :episodeId "episode-1"
+                       :sessionFile child))
+          (target (pilish--snapshot-target anchor "child-id" "episode-1")))
+     (unwind-protect
+         (progn
+           (pilish-test--snapshot-write manifest (list start))
+           ,@body)
+       (delete-directory directory t))))
+
+(defun pilish-test--snapshot-message (id parent text)
+  (list :type "message" :id id :parentId (or parent :null)
+        :message (list :role "user" :content text :timestamp 0)))
+
 ;;;; Fake-pi Helpers
 
 (defconst pilish-test-fake-pi-script

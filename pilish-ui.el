@@ -59,6 +59,10 @@
 (declare-function pilish-copy-file-path "pilish-render")
 (declare-function pilish--dispatch-button "pilish-render")
 (declare-function pilish--cleanup-on-kill "pilish-render")
+(declare-function pilish--cleanup-transcript-on-kill "pilish-render")
+(declare-function pilish-next-subagent-name "pilish-render")
+(declare-function pilish-previous-subagent-name "pilish-render")
+(declare-function pilish-snapshot-quit "pilish-snapshot")
 (declare-function pilish--process-followup-queue "pilish-render")
 (declare-function pilish--restore-tool-properties "pilish-render")
 (declare-function pilish--fontify-with-hover-help "pilish-render")
@@ -562,6 +566,32 @@ Return nil when PATH is not a string."
 
 ;;;; Major Modes
 
+(defvar-local pilish--snapshot-source-file nil)
+
+(defun pilish--set-snapshot-source-file (file)
+  "Capture validated saved FILE as this passive observer's disk origin."
+  (setq pilish--snapshot-source-file file))
+
+(defvar pilish-transcript-mode-map
+  (let ((map (make-sparse-keymap)))
+    (define-key map (kbd "n") #'pilish-next-message)
+    (define-key map (kbd "p") #'pilish-previous-message)
+    (define-key map (kbd "RET") #'pilish-visit-file)
+    (define-key map (kbd "<return>") #'pilish-visit-file)
+    (define-key map (kbd "TAB") #'pilish-toggle-tool-section)
+    (define-key map (kbd "<tab>") #'pilish-toggle-tool-section)
+    (define-key map (kbd "C-c ]") #'pilish-next-subagent-name)
+    (define-key map (kbd "C-c [") #'pilish-previous-subagent-name)
+    (define-key map [remap push-button] #'pilish--dispatch-button)
+    map)
+  "Display-only transcript keymap.")
+
+(defvar pilish-snapshot-mode-map
+  (let ((map (make-sparse-keymap)))
+    (define-key map (kbd "q") #'pilish-snapshot-quit)
+    map)
+  "Keymap for independent saved snapshots.")
+
 (defvar pilish-chat-mode-map
   (let ((map (make-sparse-keymap)))
     (define-key map (kbd "q") #'pilish-quit)
@@ -873,13 +903,11 @@ DIR is the session directory and SESSION is the optional named-session suffix."
         default-directory dir))
 
 (defun pilish--restore-chat-buffer-read-only ()
-  "Restore the normal read-only contract for chat buffers after saving."
+  "Restore the read-only contract for transcript buffers after saving."
   (setq buffer-read-only t))
 
-(define-derived-mode pilish-chat-mode md-ts-mode "Pi-Chat"
-  "Major mode for displaying pi conversation.
-Derives from `md-ts-mode' for tree-sitter syntax highlighting.
-This is a read-only buffer showing the conversation history."
+(define-derived-mode pilish-transcript-mode md-ts-mode "Pi-Transcript"
+  "Read-only Markdown transcript display without session ownership."
   :group 'pilish
   (setq-local buffer-read-only t)
   ;; Chat buffers are generated read-only views.  Recording every incremental
@@ -899,12 +927,6 @@ This is a read-only buffer showing the conversation history."
   (setq-local pilish--live-tool-blocks (make-hash-table :test 'equal))
   (setq-local pilish--tool-block-order-counter 0)
   (setq-local pilish--thinking-block-order-counter 0)
-  (setq-local pilish--history-load-generation 0)
-  (setq-local pilish--session-transition-generation 0)
-  (setq-local pilish--session-transition-active nil)
-  (setq-local pilish--model-change-generation 0)
-  (setq-local pilish--model-change-active-token nil)
-  (setq-local pilish--local-user-message-region nil)
   ;; Disable hl-line-mode: its post-command-hook overlay update causes
   ;; scroll oscillation in buffers with invisible text + variable heights.
   (setq-local global-hl-line-mode nil)
@@ -928,6 +950,24 @@ This is a read-only buffer showing the conversation history."
   (add-hook 'after-save-hook #'pilish--restore-chat-buffer-read-only nil t)
   (add-hook 'window-configuration-change-hook
             #'pilish--maybe-refresh-hot-tail-tables nil t)
+  (add-hook 'kill-buffer-hook #'pilish--cleanup-transcript-on-kill nil t))
+
+(define-derived-mode pilish-snapshot-mode pilish-transcript-mode "Pi-Snapshot"
+  "Display one saved conversation with no live session controls."
+  :group 'pilish
+  (setq-local header-line-format "Saved snapshot, not live.  q closes this observer."))
+
+(put 'pilish-snapshot-mode 'mode-class 'special)
+
+(define-derived-mode pilish-chat-mode pilish-transcript-mode "Pi-Chat"
+  "Read-only pi conversation display with live session ownership."
+  :group 'pilish
+  (setq-local pilish--history-load-generation 0)
+  (setq-local pilish--session-transition-generation 0)
+  (setq-local pilish--session-transition-active nil)
+  (setq-local pilish--model-change-generation 0)
+  (setq-local pilish--model-change-active-token nil)
+  (setq-local pilish--local-user-message-region nil)
   (add-hook 'window-size-change-functions
             #'pilish--maybe-rebalance-windows)
   (add-hook 'kill-buffer-query-functions
@@ -1860,6 +1900,12 @@ Works from either chat or input buffer."
   (if (derived-mode-p 'pilish-chat-mode)
       (current-buffer)
     pilish--chat-buffer))
+
+(defun pilish--get-render-buffer ()
+  "Return the current passive transcript or the owning live chat."
+  (if (derived-mode-p 'pilish-transcript-mode)
+      (current-buffer)
+    (pilish--get-chat-buffer)))
 
 (defun pilish--get-input-buffer ()
   "Get the input buffer for the current session.
