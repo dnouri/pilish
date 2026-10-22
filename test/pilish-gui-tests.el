@@ -141,6 +141,250 @@ raced a turn that was never submitted."
     (should (pilish-gui-test-chat-contains "Fake reply for: second turn"))
     (should (pilish-gui-test-idle-p))))
 
+(ert-deftest pilish-gui-test-snapshot-keyboard-other-window ()
+  (pilish-gui-test-with-fresh-session
+    (:backend fake :fake-scenario "prompt-lifecycle")
+    (pilish-test--with-snapshot-files
+      (pilish-test--snapshot-write
+       child (list header (pilish-test--snapshot-message "leaf" nil "GUI saved child answer")))
+      (let* ((parent (plist-get pilish-gui-test--session :chat-buffer))
+             (input (plist-get pilish-gui-test--session :input-buffer))
+             (process (plist-get pilish-gui-test--session :process))
+             (parent-window (get-buffer-window parent))
+             snapshot)
+        (unwind-protect
+            (progn
+              (with-current-buffer input (insert "Unsent GUI draft"))
+              (select-window parent-window)
+              (setq pilish--state (plist-put pilish--state :session-file anchor))
+              (let ((block (pilish--display-tool-start "subagent" '(:agent "alias") "snapshot-call")))
+                (pilish--display-tool-end
+                 "subagent" '(:agent "alias") [(:type "text" :text "## Subagent resolved result\nSaved")]
+                 details nil block))
+              (goto-char (point-min))
+              (redisplay t)
+              (execute-kbd-macro (kbd "C-c ]"))
+              (redisplay t)
+              (should (looking-at "saved child"))
+              (should (pos-visible-in-window-p (point) parent-window))
+              (execute-kbd-macro (kbd "RET"))
+              (setq snapshot (current-buffer))
+              (redisplay t)
+              (should (derived-mode-p 'pilish-snapshot-mode))
+              (should buffer-read-only)
+              (should (equal pilish--snapshot-source-file child))
+              (should-not (eq (selected-window) parent-window))
+              (should (eq (window-buffer parent-window) parent))
+              (search-forward "GUI saved child answer")
+              (redisplay t)
+              (should (pos-visible-in-window-p (match-beginning 0) (selected-window)))
+              (should-not (pilish--get-process))
+              (should (process-live-p process))
+              (should (eq (buffer-local-value 'pilish--process parent) process))
+              (should (equal (with-current-buffer input (buffer-string)) "Unsent GUI draft"))
+              (execute-kbd-macro "q")
+              (should-not (buffer-live-p snapshot))
+              (should (process-live-p process))
+              (should (buffer-live-p parent))
+              (should (buffer-live-p input)))
+          (when (buffer-live-p snapshot) (kill-buffer snapshot)))))))
+
+(ert-deftest pilish-gui-test-snapshot-refresh-keyboard-g ()
+  "Pressing g in a snapshot observer rereads and republishes it in place."
+  (pilish-gui-test-with-fresh-session
+    (:backend fake :fake-scenario "prompt-lifecycle")
+    (pilish-test--with-snapshot-files
+      (pilish-test--snapshot-write
+       child (list header (pilish-test--snapshot-message "leaf" nil "GUI saved child answer")))
+      (let* ((parent (plist-get pilish-gui-test--session :chat-buffer))
+             (input (plist-get pilish-gui-test--session :input-buffer))
+             (process (plist-get pilish-gui-test--session :process))
+             (parent-window (get-buffer-window parent))
+             snapshot replacement snapshot-window)
+        (unwind-protect
+            (progn
+              (with-current-buffer input (insert "Unsent GUI draft"))
+              (select-window parent-window)
+              (setq pilish--state (plist-put pilish--state :session-file anchor))
+              (let ((block (pilish--display-tool-start "subagent" '(:agent "alias") "snapshot-call")))
+                (pilish--display-tool-end
+                 "subagent" '(:agent "alias") [(:type "text" :text "## Subagent resolved result\nSaved")]
+                 details nil block))
+              (goto-char (point-min))
+              (redisplay t)
+              (execute-kbd-macro (kbd "C-c ]"))
+              (execute-kbd-macro (kbd "RET"))
+              (setq snapshot (current-buffer))
+              (setq snapshot-window (selected-window))
+              (redisplay t)
+              (should (string-match-p "GUI saved child answer" (buffer-string)))
+              (execute-kbd-macro (kbd "g"))
+              (redisplay t)
+              (should (eq (current-buffer) snapshot))
+              (should (eq (window-buffer snapshot-window) snapshot))
+              (pilish-test--snapshot-write
+               child (list header
+                           (pilish-test--snapshot-message "leaf" nil "GUI saved child answer")
+                           (pilish-test--snapshot-message "later" "leaf" "GUI refreshed text")))
+              (execute-kbd-macro (kbd "g"))
+              (setq replacement (window-buffer snapshot-window))
+              (redisplay t)
+              (should-not (eq replacement snapshot))
+              (should-not (buffer-live-p snapshot))
+              (with-selected-window snapshot-window
+                (should (string-match-p "GUI refreshed text" (buffer-string)))
+                (should (string-match-p "g rereads" (format-mode-line header-line-format)))
+                (goto-char (point-min))
+                (search-forward "GUI refreshed text")
+                (redisplay t)
+                (should (pos-visible-in-window-p (match-beginning 0) snapshot-window)))
+              (delete-file child)
+              (with-current-buffer replacement
+                (should-error (pilish-snapshot-refresh) :type 'user-error))
+              (redisplay t)
+              (should (buffer-live-p replacement))
+              (should (eq (window-buffer snapshot-window) replacement))
+              (with-current-buffer replacement
+                (should (string-match-p "Refresh failed:"
+                                        (format-mode-line header-line-format))))
+              (pilish-test--snapshot-write
+               child (list header
+                           (pilish-test--snapshot-message "leaf" nil "GUI saved child answer")
+                           (pilish-test--snapshot-message "later" "leaf" "GUI refreshed text")))
+              (with-current-buffer replacement
+                (pilish-snapshot-refresh))
+              (redisplay t)
+              (with-current-buffer replacement
+                (should-not (string-match-p "Refresh failed:"
+                                            (format-mode-line header-line-format))))
+              (execute-kbd-macro "q")
+              (redisplay t)
+              (should-not (buffer-live-p replacement))
+              (should (process-live-p process))
+              (should (buffer-live-p parent))
+              (should (eq (window-buffer parent-window) parent))
+              (should (equal (with-current-buffer input (buffer-string)) "Unsent GUI draft")))
+          (when (buffer-live-p replacement) (kill-buffer replacement))
+          (when (buffer-live-p snapshot) (kill-buffer snapshot)))))))
+
+(ert-deftest pilish-gui-test-snapshot-refresh-preserves-markdown-display ()
+  "Changed refreshes preserve Markdown faces and hidden delimiters."
+  (pilish-test--with-snapshot-files
+    (save-window-excursion
+      (let (snapshot snapshot-window buffers messages)
+        (unwind-protect
+            (dolist (phase '((open "Initial") (g "Keyboard") (revert "Reverted")))
+              (ert-info ((format "Snapshot Markdown display after %s" (car phase)))
+                (let ((label (cadr phase))
+                      (previous snapshot))
+                  (pilish-test--snapshot-write
+                   child (list header
+                               (pilish-test--snapshot-message
+                                "leaf" nil
+                                (format "## %s heading\n\nA **%s bold answer**.\n" label label))))
+                  (setq messages nil)
+                  (cl-letf (((symbol-function 'message)
+                             (lambda (fmt &rest args)
+                               (push (apply #'format fmt args) messages))))
+                    (pcase (car phase)
+                      ('open
+                       (setq snapshot (pilish-open-subagent-snapshot target)
+                             snapshot-window (selected-window)))
+                      ('g (execute-kbd-macro (kbd "g")))
+                      ('revert (revert-buffer nil t))))
+                  (setq snapshot (window-buffer snapshot-window))
+                  (push snapshot buffers)
+                  (when previous
+                    (should-not (eq snapshot previous))
+                    (should-not (buffer-live-p previous))
+                    (should (member "Saved conversation updated" messages)))
+                  (with-selected-window snapshot-window
+                    (goto-char (point-min))
+                    (set-window-start snapshot-window (point-min))
+                    (redisplay t)
+                    (should (search-forward (concat "## " label " heading") nil t))
+                    (let ((marker (match-beginning 0)))
+                      (should (pos-visible-in-window-p (+ marker 3) snapshot-window))
+                      (should (invisible-p marker))
+                      (should (memq 'md-ts-heading-2
+                                    (ensure-list (get-text-property (+ marker 3) 'face)))))
+                    (should (search-forward (concat "**" label " bold answer**") nil t))
+                    (let ((marker (match-beginning 0))
+                          (end (match-end 0)))
+                      (should (pos-visible-in-window-p (+ marker 2) snapshot-window))
+                      (should (invisible-p marker))
+                      (should (invisible-p (- end 2)))
+                      (should (memq 'bold
+                                    (ensure-list (get-text-property (+ marker 2) 'face)))))))))
+          (apply #'pilish-test--kill-live-buffers buffers))))))
+
+(ert-deftest pilish-gui-test-snapshot-refresh-header-repaints-failure-and-recovery ()
+  "Failed and unchanged-success rereads repaint the displayed observer header."
+  (skip-unless (fboundp 'x-export-frames))
+  (pilish-test--with-snapshot-files
+    (pilish-test--snapshot-write
+     child (list header (pilish-test--snapshot-message "leaf" nil "Last good saved text")))
+    (save-window-excursion
+      (let (snapshot messages)
+        (unwind-protect
+            (progn
+              (setq snapshot (pilish-open-subagent-snapshot target))
+              (delete-other-windows)
+              (setq-local cursor-type nil)
+              (redisplay t)
+              (let ((clean (secure-hash 'sha256 (x-export-frames nil 'png))))
+                (should (equal clean (secure-hash 'sha256 (x-export-frames nil 'png))))
+                (delete-file child)
+                (should-error (pilish-snapshot-refresh) :type 'user-error)
+                (redisplay t)
+                (should-not (equal clean (secure-hash 'sha256 (x-export-frames nil 'png))))
+                (should (string-match-p "Last good saved text" (buffer-string)))
+                (pilish-test--snapshot-write
+                 child (list header (pilish-test--snapshot-message "leaf" nil "Last good saved text")))
+                (cl-letf (((symbol-function 'message)
+                           (lambda (fmt &rest args)
+                             (push (apply #'format fmt args) messages))))
+                  (should (eq (pilish-snapshot-refresh) snapshot)))
+                (should (member "Saved conversation unchanged" messages))
+                (redisplay t)
+                (should (equal clean (secure-hash 'sha256 (x-export-frames nil 'png))))))
+          (pilish-test--kill-live-buffers snapshot))))))
+
+(ert-deftest pilish-gui-test-snapshot-refresh-header-literal-percents ()
+  "Formatted and painted refresh notes preserve literal percent constructs."
+  (skip-unless (fboundp 'x-export-frames))
+  (save-window-excursion
+    (let ((snapshot (generate-new-buffer " *snapshot-percent-header*"))
+          (width (frame-width))
+          (note "Refresh failed: /tmp/child%s%d.jsonl"))
+      (unwind-protect
+          (progn
+            (set-frame-width nil 140)
+            (sit-for 0.1)
+            (switch-to-buffer snapshot)
+            (delete-other-windows)
+            (pilish-snapshot-mode)
+            (setq-local cursor-type nil)
+            (pilish--set-snapshot-refresh-note note)
+            (redisplay t)
+            (should (equal (format-mode-line header-line-format)
+                           (concat "Pi session, read-only.  g rereads, q closes.  " note)))
+            (let ((painted (secure-hash 'sha256 (x-export-frames nil 'png))))
+              (pilish--set-snapshot-refresh-note note)
+              (redisplay t)
+              (should (equal pilish--snapshot-refresh-note note))
+              (should (equal painted (secure-hash 'sha256 (x-export-frames nil 'png))))
+              (setq-local header-line-format
+                          '("Pi session, read-only.  g rereads, q closes."
+                            (:eval (propertize "  Refresh failed: /tmp/child%%s%%d.jsonl"
+                                               'face 'pilish-error-notice))))
+              (force-mode-line-update)
+              (redisplay t)
+              (should (equal painted (secure-hash 'sha256 (x-export-frames nil 'png))))))
+        (pilish-test--kill-live-buffers snapshot)
+        (set-frame-width nil width)
+        (sit-for 0.1)))))
+
 ;;;; Scroll Preservation Tests
 
 (ert-deftest pilish-gui-test-scroll-preserved-streaming ()

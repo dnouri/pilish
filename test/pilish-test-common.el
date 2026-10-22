@@ -58,6 +58,58 @@ redisplay, and subprocess event delivery.")
       (insert-file-contents path)
       (json-parse-string (buffer-string) :object-type 'plist))))
 
+(defun pilish-test--snapshot-write (file records &optional tail)
+  (make-directory (file-name-directory file) t)
+  (with-temp-file file
+    (dolist (record records) (insert (json-serialize record) "\n"))
+    (when tail (insert tail))))
+
+(defmacro pilish-test--with-snapshot-files (&rest body)
+  (declare (indent 0) (debug t))
+  `(let* ((tmp-root (expand-file-name "tmp/" (file-name-directory (locate-library "pilish"))))
+          (_ (make-directory tmp-root t))
+          (directory (make-temp-file (concat tmp-root "snapshot-test-") t))
+          (anchor (expand-file-name "root.jsonl" directory))
+          (root (file-name-as-directory (expand-file-name "saved-conversations" directory)))
+          (child (concat root "dialogue.jsonl"))
+          (header (list :type "session" :version 3 :id "child-id" :cwd directory))
+          (declaration (list :version 1 :root root :items
+                             [(:sessionId "child-id" :file "dialogue.jsonl" :label "saved child")]))
+          (details (list :savedConversations declaration))
+          (target (pilish--snapshot-target-for-pi-v3 anchor "child-id" root "dialogue.jsonl")))
+     (unwind-protect
+         (progn
+           (make-directory root t)
+           ,@body)
+       (delete-directory directory t))))
+
+(defmacro pilish-test--with-saved-conversation-files (&rest body)
+  (declare (indent 0) (debug t))
+  `(let* ((tmp-root (expand-file-name "tmp/" (file-name-directory (locate-library "pilish"))))
+          (_ (make-directory tmp-root t))
+          (directory (make-temp-file (concat tmp-root "saved-reference-test-") t))
+          (anchor (expand-file-name "sessions/parent.jsonl" directory))
+          (root (expand-file-name "worker-cache" directory))
+          (relative "buckets/blue/dialogue.jsonl")
+          (child (expand-file-name relative root))
+          (other (expand-file-name "reviews/red/transcript.jsonl" root))
+          (header (list :type "session" :version 3 :id "worker-17" :cwd directory))
+          (declaration (list :version 1 :root root
+                             :items (vector (list :sessionId "worker-17" :file relative :label "reviewer")
+                                            (list :sessionId "worker-42" :file "reviews/red/transcript.jsonl"
+                                                  :label "reviewer")))))
+     (unwind-protect
+         (progn
+           (pilish-test--snapshot-write child (list header (pilish-test--snapshot-message "leaf" nil "Blue saved conversation")))
+           (pilish-test--snapshot-write other (list (plist-put (copy-sequence header) :id "worker-42")
+                                                   (pilish-test--snapshot-message "leaf" nil "Red saved conversation")))
+           ,@body)
+       (delete-directory directory t))))
+
+(defun pilish-test--snapshot-message (id parent text)
+  (list :type "message" :id id :parentId (or parent :null)
+        :message (list :role "user" :content text :timestamp 0)))
+
 ;;;; Fake-pi Helpers
 
 (defconst pilish-test-fake-pi-script

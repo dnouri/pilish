@@ -86,6 +86,12 @@ fontification when the same cell content reappears at different widths.")
 
 ;;;; Visibility and Width
 
+(defvar pilish--chat-display-width-override nil
+  "Dynamically bound width for `pilish--chat-display-width'.
+Hidden staging buffers bind this so width-sensitive rendering (tool
+preview truncation, table decoration) matches the window the result
+will be displayed in.  Never set this globally.")
+
 (defun pilish--chat-display-window ()
   "Return a visible window showing the current chat buffer.
 Prefer a window on the selected frame, then fall back to any
@@ -111,7 +117,9 @@ Excludes columns reserved by fringes such as line-number display."
 
 (defun pilish--chat-display-width ()
   "Return the usable character width of the chat window, or 80 if hidden."
-  (or (pilish--chat-window-width) 80))
+  (or pilish--chat-display-width-override
+      (pilish--chat-window-width)
+      80))
 
 ;;;; Hot-Tail Resize Refresh
 

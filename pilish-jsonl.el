@@ -377,6 +377,175 @@ skipped silently."
                             (plist-get (aref vector (1- count)) :id))
                   :name name)))))))
 
+(cl-defstruct (pilish-jsonl-snapshot
+               (:constructor pilish--make-jsonl-snapshot))
+  "A validated saved branch read once from disk.
+DIGEST combines the resolved FILE, CWD and a content hash of the exact
+read, so an equal DIGEST means a redraw would produce identical content."
+  (file nil :read-only t)
+  (cwd nil :read-only t)
+  (messages nil :read-only t)
+  (digest nil :read-only t))
+
+(defun pilish--jsonl-snapshot-records (path)
+  "Read PATH once as strict JSONL objects.
+Return a plist with :records (a vector) and :digest (a content hash of
+this same in-memory read).  Ignore an incomplete trailing append, but
+reject malformed complete records."
+  (unless (file-readable-p path)
+    (user-error "Saved snapshot file is not readable yet: %s" path))
+  (with-temp-buffer
+    (insert-file-contents path)
+    (let ((digest (buffer-hash)))
+      (goto-char (point-min))
+      (let (records (line-number 0))
+        (while (not (eobp))
+          (cl-incf line-number)
+          (let* ((end (line-end-position))
+                 (line (buffer-substring-no-properties (point) end))
+                 (complete (< end (point-max)))
+                 parsed
+                 (record
+                  (unless (string-blank-p line)
+                    (condition-case err
+                        (prog1 (json-parse-string line :object-type 'plist)
+                          (setq parsed t))
+                      (json-end-of-file
+                       (when complete
+                         (user-error "Incomplete saved record at %s:%d" path line-number)))
+                      (json-error
+                       (user-error "Malformed saved record at %s:%d (%s)"
+                                   path line-number (error-message-string err)))))))
+            (cond
+             ((string-blank-p line) nil)
+             ((and (consp record) (keywordp (car record)))
+              (push record records))
+             ((or complete parsed)
+              (user-error "Saved record is not an object at %s:%d" path line-number))))
+          (forward-line 1))
+        (list :records (vconcat (nreverse records)) :digest digest)))))
+
+(defun pilish--jsonl-snapshot-path (raw anchor)
+  "Translate absolute producer RAW against ANCHOR, preserving its route."
+  (pilish--ensure-usable-path-string raw)
+  (unless (and (stringp raw)
+               (file-name-absolute-p (pilish--local-name-for-process raw)))
+    (user-error "Saved snapshot path is not absolute: %S" raw))
+  (pilish--route-preserving-expand-file-name (pilish--emacs-path raw anchor)))
+
+(defun pilish--jsonl-snapshot-entry-message (entry)
+  "Return ENTRY's full saved message, or nil for bookkeeping."
+  (let* ((type (plist-get entry :type))
+         (stamp (plist-get entry :timestamp))
+         (timestamp (and (stringp stamp)
+                         (condition-case nil
+                             (* 1000 (float-time (date-to-time stamp)))
+                           (error nil)))))
+    (pcase type
+      ("message"
+       (let ((message (plist-get entry :message)))
+         (unless (and (consp message) (stringp (plist-get message :role)))
+           (user-error "Invalid saved message in entry %s" (plist-get entry :id)))
+         (unless (member (plist-get message :role)
+                         '("system" "user" "assistant" "toolResult" "custom" "branchSummary" "compactionSummary"))
+           (user-error "Unsupported saved message role %S in entry %s"
+                       (plist-get message :role) (plist-get entry :id)))
+         message))
+      ("custom_message"
+       (list :role "custom" :customType (plist-get entry :customType)
+             :content (plist-get entry :content)
+             :display (eq t (plist-get entry :display)) :timestamp timestamp))
+      ("branch_summary"
+       (list :role "branchSummary" :summary (plist-get entry :summary)
+             :timestamp timestamp))
+      ("compaction"
+       (list :role "compactionSummary" :summary (plist-get entry :summary)
+             :tokensBefore (plist-get entry :tokensBefore) :timestamp timestamp))
+      ((or "model_change" "thinking_level_change" "session_info" "label"
+           "custom" "usage" "context_edit") nil)
+      (_ (user-error "Unsupported saved entry type: %S" type)))))
+
+(defun pilish--jsonl-snapshot-branch (entries)
+  "Project ENTRIES' current saved leaf ancestry to a full message vector.
+Physical order selects the leaf, parentId selects its branch."
+  (let* ((canonical (pilish--jsonl-canonicalize-entries entries))
+         (ambiguous (plist-get canonical :ambiguousIds))
+         (index (make-hash-table :test #'equal))
+         (seen (make-hash-table :test #'equal))
+         (leaf (and (> (length entries) 0)
+                    (plist-get (aref entries (1- (length entries))) :id)))
+         messages)
+    (dolist (entry (append (plist-get canonical :entries) nil))
+      (unless (and (pilish--normalize-string-or-null (plist-get entry :id))
+                   (plist-member entry :parentId)
+                   (or (null (plist-get entry :parentId))
+                       (eq :null (plist-get entry :parentId))
+                       (pilish--normalize-string-or-null (plist-get entry :parentId))))
+        (user-error "Unsupported saved entry identity or ancestry"))
+      (puthash (plist-get entry :id) entry index))
+    (while leaf
+      (when (member leaf ambiguous)
+        (user-error "Conflicting saved entry id: %s" leaf))
+      (when (gethash leaf seen)
+        (user-error "Cycle in saved ancestry at %s" leaf))
+      (puthash leaf t seen)
+      (let ((entry (gethash leaf index)))
+        (unless entry (user-error "Dangling saved ancestry at %s" leaf))
+        (when-let* ((message (pilish--jsonl-snapshot-entry-message entry)))
+          (push message messages))
+        (setq leaf (pilish--jsonl-entry-parent-id entry))))
+    (vconcat messages)))
+
+(defun pilish--jsonl-read-pi-v3-snapshot (file session-id)
+  "Read FILE's strict Pi v3 branch with exact SESSION-ID."
+  (let* ((read (pilish--jsonl-snapshot-records file))
+         (records (plist-get read :records))
+         (header (and (> (length records) 0) (aref records 0))))
+    (unless (and (equal (plist-get header :type) "session")
+                 (eql (plist-get header :version) 3))
+      (user-error "Saved snapshot requires a version 3 session header"))
+    (unless (equal (plist-get header :id) session-id)
+      (user-error "Saved snapshot header identity does not match its reference"))
+    (unless (pilish--normalize-string-or-null (plist-get header :cwd))
+      (user-error "Saved snapshot has no cwd"))
+    (let (entries)
+      (dolist (record (cdr (append records nil)))
+        (if (equal (plist-get record :type) "session")
+            (unless (equal record header)
+              (user-error "Conflicting saved session headers"))
+          (push record entries)))
+      (let ((cwd (pilish--route-preserving-file-name-as-directory
+                  (pilish--jsonl-snapshot-path (plist-get header :cwd) file))))
+        (pilish--make-jsonl-snapshot
+         :file file
+         :cwd cwd
+         :messages (pilish--jsonl-snapshot-branch (vconcat (nreverse entries)))
+         :digest (list :file file :cwd cwd
+                       :content (plist-get read :digest)))))))
+
+(defun pilish-jsonl-read-snapshot (target)
+  "Read and validate TARGET's full current saved branch once.
+Return a `pilish-jsonl-snapshot'.  Recheck the captured file association and
+exact saved identity on every call; the returned digest identifies the exact
+read so callers can detect unchanged content without rendering.  Do not
+resume, create or modify a session.  Explicit remote reads preserve the
+captured TRAMP route through Emacs file handlers."
+  (unless (pilish--snapshot-target-p target)
+    (user-error "No saved conversation identity at point"))
+  (let ((validated (pilish--snapshot-target-for-pi-v3
+                    (pilish--snapshot-target-anchor-file target)
+                    (pilish--snapshot-target-session-id target)
+                    (pilish--snapshot-target-root target)
+                    (pilish--snapshot-target-file target))))
+    (unless validated (user-error "Malformed saved conversation reference"))
+    (let* ((root (pilish--route-preserving-file-name-as-directory
+                  (pilish--snapshot-target-root validated)))
+           (file (pilish--route-preserving-expand-file-name
+                  (pilish--snapshot-target-file validated) root)))
+      (unless (and (string-prefix-p root file) (file-in-directory-p file root))
+        (user-error "Saved conversation file escapes its storage root: %s" file))
+      (pilish--jsonl-read-pi-v3-snapshot file (pilish--snapshot-target-session-id validated)))))
+
 ;;;; Session Discovery
 
 (defconst pilish--jsonl-line-type-re

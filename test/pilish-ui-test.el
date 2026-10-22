@@ -819,6 +819,19 @@ without an input window."
 
 ;;; Chat Keymap
 
+(ert-deftest pilish-test-chat-mode-inherits-transcript-bindings ()
+  "Chat keeps shared transcript navigation and activation bindings."
+  (with-temp-buffer
+    (pilish-chat-mode)
+    (dolist (binding '(("n" . pilish-next-message)
+                       ("p" . pilish-previous-message)
+                       ("RET" . pilish-visit-file)
+                       ("<return>" . pilish-visit-file)
+                       ("TAB" . pilish-toggle-tool-section)
+                       ("<tab>" . pilish-toggle-tool-section)))
+      (should (eq (key-binding (kbd (car binding))) (cdr binding))))
+    (should (eq (command-remapping #'push-button) #'pilish--dispatch-button))))
+
 (ert-deftest pilish-test-chat-mode-map-shell-command-at-point ()
   "The chat `!' key runs one file command without changing other actions."
   (with-temp-buffer
@@ -1125,8 +1138,14 @@ other family names there."
                         (expand-file-name "AGENTS.md" sub-dir) walk-file))
       (with-temp-file file (insert "agents\n")))
     (unwind-protect
-        (should (equal (pilish--startup-context-files proj-dir user-dir)
-                       (list user-file proj-file override-file walk-file)))
+        (let ((scan-directory (symbol-function 'pilish--startup-context-file-in-dir)))
+          (cl-letf (((symbol-function 'pilish--startup-context-file-in-dir)
+                     (lambda (directory)
+                       (when (string-prefix-p (file-name-as-directory root)
+                                              (file-name-as-directory directory))
+                         (funcall scan-directory directory)))))
+            (should (equal (pilish--startup-context-files proj-dir user-dir)
+                           (list user-file proj-file override-file walk-file)))))
       (delete-directory root t))))
 
 (ert-deftest pilish-test-extract-pi-version-from-clean-output ()

@@ -287,6 +287,42 @@ tool block.  Its script, call list, parent output, and individual
 child outputs fold independently with =TAB=.  Reload and resume
 retain saved child-call summaries, not child outputs.
 
+On a generated Pi session link, click or press =RET= to read the
+saved conversation in another window.  Use =C-c ]= and =C-c [= to reach the
+next or previous visible link.  =TAB= still folds the current section.
+The snapshot is read-only and has no live session controls.  Opening the
+same name again reads a new, independent observer, and =q= closes only
+that observer.  Existing snapshots never update automatically.
+
+#+caption: A parent and its linked child session.  This example uses scripted replies.
+[[file:assets/pi-session-view.png]]
+
+Press =g=, or run =M-x revert-buffer=, to reread the observer's saved
+conversation from disk.  The saved file is revalidated first.  The
+captured file association and the exact session header, branch, and role
+rules must still hold.  An unchanged read keeps the buffer, its folds,
+and your view exactly.  A changed read replaces the content, keeps the
+buffer name, restores your approximate position, and resets folds to
+their defaults.  A failed or invalid read keeps the last good view and
+shows a stale note in the header until a later =g= succeeds.  Reads and
+rendering are synchronous, so large saves and TRAMP reads can block
+Emacs.
+
+A snapshot shows the full current saved branch, including pre-compaction
+history and saved summaries, but not unsaved output.  A link to a resumed
+child shows its current branch, not the state when the result was emitted.
+Remote reads reuse the captured parent session's TRAMP route.
+
+A running tool can declare its planned file before the first save.  If
+=RET= fails because that file does not exist yet, retry =RET= later in
+the parent.  A failed open creates no observer.  A reference can also
+become unavailable when its file disappears or fails validation.
+
+Results without the current declaration stay readable.  Pilish never
+rewrites saved files or infers links from names, run metadata, or output.
+To add links to your own tools, see =Publishing saved conversations=
+under =Extension support= in Advanced.
+
 Hover completed replies, thinking, or tool blocks for timestamps and details:
 reply provider/model and message-level token/cache usage, thinking line counts,
 or short tool command/path hints.  Native =C-h .= shows full help at point,
@@ -574,7 +610,10 @@ The main buffers:
 | =TAB=                     | input        | Complete paths and =/= commands             |
 | =M-<prior>= / =M-<next>=  | input        | Scroll the linked chat window               |
 | =TAB=                     | chat         | Toggle summary line, thinking, tool, or turn |
-| =RET=                     | chat         | Visit file target at point                  |
+| =RET=                     | chat, snapshot | Open Pi session link or file target       |
+| =C-c ]= / =C-c [=         | chat, snapshot | Next or previous Pi session link           |
+| =g=                       | snapshot     | Reread this observer's saved conversation   |
+| =q=                       | snapshot     | Close only this saved observer              |
 | =!=                       | chat         | Run shell command on file at point          |
 | =w=                       | chat         | Copy the shell-local file path              |
 | =n= / =p=                 | chat         | Navigate user messages                      |
@@ -933,7 +972,8 @@ Chat buffer (motion state):
 | =f=       | fork session at point                   |
 | =w=       | copy shell-local file path at point     |
 | =TAB=     | toggle tool/thinking section            |
-| =RET=     | visit file at point                     |
+| =RET=     | open Pi session link or visit file      |
+| =C-c ]= / =C-c [= | next or previous Pi session link        |
 | =i= / =a= | focus input (=a= goes to end of input)  |
 | =?=       | transient menu                          |
 | =q=       | quit session                            |
@@ -958,6 +998,10 @@ keymap stack never swallows them (evil's
 motion state owns =/=, =?= and the =g= prefix; evil-snipe's =f= / =t=
 are disabled in these buffers, mirroring the chat buffer's =f= fork
 binding).
+
+Saved snapshot observers also start in motion state.  Motion bindings
+include =RET=, =TAB=, =n=, =p=, =C-c ]=, =C-c [=, =g= to reread, and
+=q= to close.
 
 Setup also sets =pilish-copy-raw-markdown= buffer-locally in
 chat buffers, so that yanking preserves code fences and markup without
@@ -1072,7 +1116,7 @@ session.  For a shareable export, use HTML export from the menu
 These are the exact rules behind =RET=, =!=, and =w= in the chat
 buffer.
 
-=RET= opens one strict file target at point: a file-content row in
+Outside Pi session links, =RET= opens one strict file target at point: a file-content row in
 tool output, a plain path reference, or the label of a local Markdown
 link.  Tool headers, fences, preview hints, and other non-content rows
 do not open files.  Plain locations such as =src/app.el:12:3= visit
@@ -1119,6 +1163,64 @@ component-based views are unavailable or fall back.  Hover extension
 status text in the header line to see the exact =statusKey=, which you
 can use to change the font for that extension's status text using
 =pilish-extension-status-faces=.
+
+*** Publishing saved conversations
+
+Return =details.savedConversations= from any tool that saves Pi
+conversations.  Pilish adds clickable labels without extra configuration
+or Pilish-specific code.  This is a tool-result convention understood by
+Pilish, not an upstream Pi API.  A tool named =delegate_work= can return:
+
+#+begin_src json
+{
+  "content": [
+    {"type": "text", "text": "Delegated review finished"}
+  ],
+  "details": {
+    "savedConversations": {
+      "version": 1,
+      "root": "/var/tmp/team-ledger",
+      "items": [
+        {"sessionId": "exact-child-id", "file": "workers/blue/dialogue.jsonl", "label": "reviewer"}
+      ]
+    }
+  }
+}
+#+end_src
+
+Replace the placeholder paths and ID with your owned save's values.
+Copy the file and ID from your session manager's =getSessionFile()=
+and =getSessionId()= methods.  Choose a storage root and make =file=
+relative to it.  Do not derive a
+filename from the ID or recover identity from output text.
+
+The declaration has these rules:
+
+- =version= is the number 1.  The saved Pi session header must have version 3.
+- =root= is an absolute directory, not a filesystem root.
+- =items= is a nonempty array with unique session IDs and file paths.
+- =sessionId= exactly matches the saved header's ID.  =file= is its exact
+  root-relative path, must not start with =~=, and has no empty, =.=, or
+  =..= components.  Pilish rechecks real containment, including symlinks,
+  when opening or refreshing.
+- =label= is optional, defaults to the ID, and must be nonempty single-line
+  text.  Duplicate labels are valid.  Paths, IDs, and labels cannot contain
+  control characters, format characters, or line or paragraph separators.
+
+To keep links on a failed run, return the result with =isError: true=.
+Throwing an error does not preserve custom details.
+
+If you cannot change the producer, add a capture-only function to
+=pilish-saved-conversation-functions=.  It receives the tool name,
+content, and details, and returns nil or the same =version=, =root=,
+and =items= object without I/O.  Pilish copies its data at capture.
+An explicit =savedConversations= field wins even when null, malformed,
+or unsupported.  Invalid declarations and adapter errors produce inert
+unavailable labels.  See the variable's docstring for the full contract.
+
+pi-submarine publishes exactly one item per result, its immediate
+child.  Deeper saved results carry their own declarations inside that
+child.
 
 ** MCP servers
 

@@ -247,5 +247,16 @@ of the suite."
      (should-not (memq #'pilish-evil--copy-raw-markdown-in-chat
                        pilish-chat-mode-hook)))))
 
+(ert-deftest pilish-evil-test-snapshot-motion-bindings ()
+  "Motion state binds the documented snapshot observer keys."
+  (pilish-evil-test--with-evil
+   (pilish-evil-setup)
+   (let ((map (evil-get-auxiliary-keymap pilish-snapshot-mode-map
+                                         'motion)))
+     (should map)
+     (should (eq (lookup-key map "g") #'pilish-snapshot-refresh))
+     (should (eq (lookup-key map "q") #'pilish-snapshot-quit))
+     (should (eq (lookup-key map "n") #'pilish-next-message)))))
+
 (provide 'pilish-evil-test)
 ;;; pilish-evil-test.el ends here

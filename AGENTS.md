@@ -6,14 +6,15 @@ Communicates with the pi CLI via JSON-over-stdio (RPC).
 
 ## Module Architecture
 
-Ten production source modules form a dependency DAG (no cycles), plus
+Eleven production source modules form a dependency DAG (no cycles), plus
 an optional Evil integration module.  Direct internal `require` edges are:
 
 ```
-pilish.el -> menu, input, browse
+pilish.el -> menu, input, browse, snapshot
 menu.el           -> jsonl, render
 input.el          -> render
 browse.el         -> core, jsonl, ui
+snapshot.el       -> jsonl, render
 render.el         -> table, ui
 table.el          -> ui
 ui.el             -> core, grammars
@@ -56,21 +57,31 @@ acceptance and observed start/echo, since an extension's acknowledgment can foll
 its run's settlement. Stop sends `clear_queue` before `abort` and reapplies its
 latch on delayed agent/compaction starts.
 
+Saved-conversation links have one generic declaration path through
+`details.savedConversations` version 1 for any tool.  Capture copies
+anchor-file/session-id/root/file without disk I/O.  Explicit field presence
+wins over capture-only user adapters, even when its value is invalid.
+Tool names, `details.run`, and output envelopes never establish saved identity.
+Opening or refreshing revalidates real root containment and the exact Pi-v3
+header and current branch.  Historical results without a declaration remain
+readable but lose inferred links.  Do not rewrite them or add a legacy adapter.
+
 ## Source Files
 
 | File | Purpose |
 |------|---------|
 | `pilish.el` | Entry point, autoloads, `--setup-session` |
-| `pilish-core.el` | JSON parsing, line buffering, RPC request correlation, and process protocol |
-| `pilish-ui.el` | Shared session/buffer state, accessors, faces, customization, chat/input modes and keymaps, header/activity UI, and local slash-command dispatch; requires core and grammars, not jsonl |
+| `pilish-core.el` | JSON parsing, immutable copied saved-conversation targets with anchor-file/session-id/root/file fields, line buffering, RPC request correlation, and process protocol |
+| `pilish-ui.el` | Shared session/buffer state, accessors, faces, customization, passive transcript, sibling chat/snapshot, and input modes and keymaps, header/activity UI, and local slash-command dispatch; requires core and grammars, not jsonl |
 | `pilish-render.el` | Streaming and history rendering for user, assistant, branch-summary, and compaction messages; tool output, deferred completed-tool cooling outside the hot tail, fontification, diffs, and deferred history table postprocessing |
 | `pilish-table.el` | Display-only pipe table decoration, wrapping, overlay management, and resize refresh over UI visible-text/scroll seams |
 | `pilish-input.el` | Input history/isearch, send/abort, file/path/slash completion, queuing, and local `/resume` dispatch to the session browser |
 | `pilish-menu.el` | Transient menu; guarded new/reload/resume transitions; canonical jsonl cwd/name metadata; model, thinking, command, export, and stats actions; `r` sessions and `w` tree entries |
 | `pilish-browse.el` | Persistent magit-section session/tree browsers: time-sliced disk session discovery, filters/search/sort/scope, guarded switching, rename, and deletion; disk tree projection, filters/search, labels, and guarded navigation through an atomic local rewrite plus the menu resume flow. Browsing and labels need no live process; switching/navigation do. TRAMP non-atomicity and independent-writer races are documented constraints |
+| `pilish-snapshot.el` | Independent read-only saved-conversation observers with captured disk identity and observer-only quit. Manual `g` and `revert-buffer` revalidate disk authority and identity. Unchanged content preserves the buffer and folds. Changed content uses shared replay at the observer's window width, then publishes a replacement with approximate view restoration. Failed reads/builds retain the last good observer and a header note. No live-session ownership or automatic refresh |
 | `pilish-grammars.el` | Tree-sitter grammar recipes, install prompts, `M-x pilish-install-grammars` |
-| `pilish-jsonl.el` | Pure core-only JSONL APIs: whole-file reading, canonical regex-first session metadata, sessions-root/cwd directory mapping, raw tree building and display projection, tool-call previews, and byte-preserving navigation target/line calculations. Production browsers consume these disk APIs rather than `get_tree`/`get_entries` RPCs |
-| `pilish-evil.el` | Optional Evil keybindings; auto-loaded by `pilish--maybe-load-evil-integration` when a session is set up while Evil is present. Leaf module: requires `ui`, `input`, and `menu` directly (never the top-level feature, to avoid a recursive require during auto-load). Must byte-compile and load without Evil installed |
+| `pilish-jsonl.el` | Pure core-only JSONL APIs: whole-file reading, canonical regex-first session metadata, sessions-root/cwd directory mapping, raw tree building and display projection, tool-call previews, and byte-preserving navigation target/line calculations. Production browsers consume these disk APIs rather than `get_tree`/`get_entries` RPCs. The strict snapshot API validates explicit storage-root/relative-file references and exact saved identity, then returns full current-branch messages, including pre-compaction history.  Every snapshot read also returns a digest of the resolved file, cwd and content from the same single filesystem read, so refresh can skip rendering on unchanged content without mtime/size shortcuts |
+| `pilish-evil.el` | Optional Evil keybindings; auto-loaded by `pilish--maybe-load-evil-integration` when a session is set up or a snapshot is opened while Evil is present. Leaf module: requires `ui`, `input`, and `menu` directly (never the top-level feature, to avoid a recursive require during auto-load). Must byte-compile and load without Evil installed |
 
 ## Test Files
 
@@ -84,6 +95,7 @@ latch on delayed agent/compaction starts.
 | `test/pilish-menu-test.el` | Session transitions and cwd guards, canonical jsonl name metadata, transient browser entries, model/command actions, and reconnect |
 | `test/pilish-browse-test.el` | Session/tree helpers, magit rendering and point restoration; asynchronous disk scans, cancellation/error states, search/filter/sort/scope, switch guards, rename, and deletion; disk tree loading, labels, and navigation guards/targets, atomic rewrite failures, prefill, and settle/quit behavior |
 | `test/pilish-jsonl-test.el` | JSONL reading, canonical session metadata, raw tree/projection and golden fixtures, tool-call formatting, session discovery, navigation targets, and byte-preserving line reordering across branches/malformed input |
+| `test/pilish-snapshot-test.el` | Strict explicit-file/saved-branch reads, exact owned label lifetimes, actual name openers, isolated observers, independent windows and optional Evil behavior; manual refresh: digest no-op, same-size/mtime-preserving rewrites, containment/identity revalidation, staged replacement and rollback, observer independence, view/tail/clamp restoration, width hint, and quit semantics |
 | `test/pilish-fake-pi-test.el` | Black-box fake subprocess contract: strict framing/events, valid v3 persistence, entry/tree/message RPC projections, transactional switching, and full resume/history choreography |
 | `test/pilish-build-test.el` | Batch helper scripts for dependency and grammar installation |
 | `test/pilish-evil-test.el` | Optional Evil integration: initial states, motion-state keymap registrations for chat and browser modes, snipe disabling, and the copy-raw-markdown default (all skip when Evil is absent) |
@@ -148,6 +160,7 @@ make test-input
 make test-menu
 make test-browse
 make test-jsonl
+make test-snapshot
 make test-build
 ```
 

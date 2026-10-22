@@ -43,6 +43,50 @@ Returns nil if LINE is not valid JSON."
       (json-parse-string line :object-type 'plist)
     (json-error nil)))
 
+(cl-defstruct (pilish--snapshot-target
+               (:constructor pilish--make-snapshot-target))
+  "Copied origin and one exact saved Pi v3 file association."
+  (anchor-file nil :read-only t)
+  (session-id nil :read-only t)
+  (root nil :read-only t)
+  (file nil :read-only t))
+
+(defun pilish--saved-reference-string-p (value)
+  "Return non-nil for nonempty VALUE without control characters."
+  (and (stringp value) (not (string-empty-p value))
+       (cl-notany (lambda (char)
+                    (memq (get-char-code-property char 'general-category) '(Cc Cf Zl Zp)))
+                  value)))
+
+(defun pilish--saved-reference-relative-file-p (file)
+  "Return non-nil for an exact, safe relative FILE association."
+  (and (pilish--saved-reference-string-p file)
+       (not (file-name-absolute-p file))
+       (not (string-prefix-p "~" file))
+       (cl-every (lambda (part) (not (member part '("" "." ".."))))
+                 (split-string file "/" nil))))
+
+(defun pilish--snapshot-target-for-pi-v3 (anchor-file session-id root file)
+  "Capture ANCHOR-FILE and SESSION-ID's explicit ROOT and relative FILE.
+Translate ROOT using the captured origin, without file I/O.  Return nil
+for malformed associations or incompatible remote routes."
+  (when (and (pilish--saved-reference-string-p anchor-file)
+             (pilish--saved-reference-string-p session-id)
+             (pilish--saved-reference-string-p root)
+             (pilish--saved-reference-relative-file-p file))
+    (condition-case nil
+        (when (string-prefix-p "/" (pilish--local-name-for-process root))
+          (let* ((root (pilish--route-preserving-expand-file-name
+                        (pilish--emacs-path root anchor-file)))
+                 (local (pilish--local-name-for-process root)))
+            (unless (equal (directory-file-name local) "/")
+              (pilish--make-snapshot-target
+               :anchor-file (substring-no-properties anchor-file)
+               :session-id (substring-no-properties session-id)
+               :root (substring-no-properties root)
+               :file (substring-no-properties file)))))
+      (user-error nil))))
+
 ;;;; Line Accumulation
 
 (defun pilish--line-chunks-string (chunks)
