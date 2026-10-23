@@ -348,25 +348,42 @@
     (nreverse rows)))
 
 (ert-deftest pilish-test-snapshot-session-link-copy ()
-  (with-temp-buffer
-    (pilish-chat-mode)
-    (setq pilish--state '(:session-file "/saved/parent.jsonl"))
-    (let* ((labels (pilish--saved-conversation-labels
-                    "delegate_work" [] (pilish-test--saved-details "child" "reviewer")))
-           (block (pilish--display-tool-start "delegate_work" nil "call"))
-           (call (pilish--make-nested-call :id "nested" :name "delegate_work"
-                                          :status 'ok :saved-labels labels)))
-      (pilish--annotate-saved-conversation-header block labels)
-      (should (string-suffix-p
-               " · Pi session: reviewer"
-               (buffer-substring-no-properties
-                (overlay-start (pilish--tool-block-overlay block))
-                (1- (marker-position (pilish--tool-block-header-end block))))))
-      (should (string-suffix-p " · Pi session: reviewer"
-                               (pilish--nested-call-summary call nil)))
-      (should (equal (substring-no-properties
-                      (pilish--saved-conversation-output "Done" labels))
-                     "Done\n\nPi sessions: reviewer")))))
+  (dolist (nested '(nil t))
+    (with-temp-buffer
+      (pilish-chat-mode)
+      (setq pilish--state '(:session-file "/saved/parent.jsonl"))
+      (let ((pilish-tool-preview-lines 1)
+            (result (list :content [(:type "text" :text "Done")]
+                          :details (pilish-test--saved-details "child" "reviewer"))))
+        (when nested
+          (pilish--handle-display-event
+           '(:type "tool_execution_start" :toolCallId "owner" :toolName "codemode")))
+        (pilish--handle-display-event
+         (append '(:type "tool_execution_start" :toolCallId "call" :toolName "delegate_work")
+                 (when nested '(:parentToolCallId "owner"))))
+        (pilish--handle-display-event
+         (append (list :type "tool_execution_end" :toolCallId "call" :toolName "delegate_work" :result result)
+                 (when nested '(:parentToolCallId "owner"))))
+        (when nested
+          (pilish--handle-display-event
+           '(:type "tool_execution_end" :toolCallId "owner" :toolName "codemode" :result (:content []))))
+        (goto-char (point-min))
+        (pilish-next-subagent-name)
+        (should (equal (pilish-test--snapshot-name-rows)
+                       '(("reviewer" "child" "/saved/parent.jsonl"))))
+        (dolist (pilish-copy-raw-markdown '(nil t))
+          (let ((copy (filter-buffer-substring (line-beginning-position) (line-end-position))))
+            (should (string-suffix-p " · Pi session: reviewer" copy))
+            (should (equal-including-properties copy (substring-no-properties copy)))))
+        (call-interactively (key-binding (kbd "TAB")))
+        (search-forward "Done")
+        (let ((start (- (point) (length "Done"))))
+          (search-forward "Pi sessions: reviewer")
+          (dolist (pilish-copy-raw-markdown '(nil t))
+            (let ((copy (filter-buffer-substring start (point))))
+              (should (string-prefix-p "Done\n\n**Details**\n" copy))
+              (should (string-suffix-p "\n\nPi sessions: reviewer" copy))
+              (should (equal-including-properties copy (substring-no-properties copy))))))))))
 
 (ert-deftest pilish-test-snapshot-session-link-face ()
   (with-temp-buffer
@@ -591,8 +608,16 @@
                     (pilish--display-tool-end
                      tool args [(:type "text" :text "## Subagent result\nSaved answer")]
                      details nil block)
+                    (let* ((button (pilish--find-toggle-button-in-region
+                                    (overlay-start overlay) (overlay-end overlay)))
+                           (original (and button (button-get button 'pilish-full-content))))
+                      (should (stringp original))
+                      (should (string-prefix-p "## Subagent result\nSaved answer\n\n**Details**\n" original))
+                      (should (string-suffix-p "\n\nPi sessions: saved child" original))
+                      (should (= (length (split-string original "\n")) 19))
+                      (should (= (button-get button 'hidden-count) 18)))
                     (should (equal (pilish-test--snapshot-name-rows) (list (list "saved child" "child-id" anchor))))
-                    (should (string-match-p "more lines" (buffer-string)))
+                    (should (string-match-p "^Output$" (buffer-string)))
                     (let ((plain (buffer-substring-no-properties (point-min) (point-max))))
                       (goto-char (point-min))
                       (execute-kbd-macro (kbd "C-c ]"))
@@ -612,7 +637,12 @@
                         (font-lock-flush)
                         (font-lock-ensure)
                         (pilish--restore-tool-properties (point-min) (point-max))
-                        (should (equal (buffer-substring-no-properties (point-min) (point-max)) plain))
+                        (should (equal (buffer-substring-no-properties (point-min) (point-max))
+                                       (if cold
+                                           (replace-regexp-in-string
+                                            "\n```\n\n\\'"
+                                            "\n```\n... (18 more lines)\n\n" plain t t)
+                                         plain)))
                         (should (equal (pilish-test--snapshot-name-rows) (list (list "saved child" "child-id" anchor))))
                         (goto-char (point-min))
                         (execute-kbd-macro (kbd "C-c ]"))
@@ -896,6 +926,8 @@
                   :result '(:content [(:type "text" :text "Saved")])))
            (overlay (pilish--tool-block-overlay block)))
       (pilish--enable-compound-tool block args)
+      (pilish--argument-observe block nil "codemode" args)
+      (pilish--argument-observe block call "subagent" (pilish--nested-call-arguments call))
       (setf (pilish--tool-block-nested-calls block) (list call))
       (pilish--redraw-compound-tool block)
       (pilish--tool-overlay-finalize 'pilish-tool-block block)
@@ -1453,7 +1485,7 @@
                      (call (car (pilish--tool-block-nested-calls block)))
                      (overlay (pilish--tool-block-overlay block)))
                 (goto-char (point-min))
-                (search-forward "[+ output]")
+                (re-search-forward "^Output$")
                 (button-activate (button-at (1- (point))))
                 (should (equal (mapcar #'cadr (pilish-test--snapshot-name-rows))
                                '("worker-17" "worker-42" "worker-17" "worker-42")))
@@ -1599,7 +1631,7 @@
               (setq win (selected-window))
               (should (string-match-p "fold-line-05" (buffer-string)))
               (should-not (string-match-p "fold-line-15" (buffer-string)))
-              (should (string-match-p "10 more lines" (buffer-string)))
+              (should (string-match-p "^Output$" (buffer-string)))
               (goto-char (point-min))
               (search-forward "fold-line-01")
               (execute-kbd-macro (kbd "TAB"))
@@ -1674,7 +1706,7 @@
                   (should (string-match-p "Fresh saved text" (buffer-string)))
                   (should (string-match-p "fold-line-05" (buffer-string)))
                   (should-not (string-match-p "fold-line-15" (buffer-string)))
-                  (should (string-match-p "10 more lines" (buffer-string))))
+                  (should (string-match-p "^Output$" (buffer-string))))
                 (should (equal (buffer-local-value 'pilish--status parent) 'sending))
                 (should (equal (buffer-local-value 'pilish--state parent) (list :session-file anchor)))
                 (should (eq (buffer-local-value 'pilish--canonical-messages parent) canonical))
@@ -2096,7 +2128,7 @@
                   (should (< (pilish--chat-display-width) 60))
                   (should-not (string-match-p (make-string 300 ?x) (buffer-string)))
                   (should (string-match-p (make-string 100 ?x) (buffer-string)))
-                  (should (string-match-p "more lines" (buffer-string)))
+                  (should (string-match-p "^Output$" (buffer-string)))
                   (should (string-match-p "Width marker" (buffer-string)))))
             (pilish-test--kill-live-buffers replacement snapshot)))))))
 
@@ -2156,5 +2188,31 @@
                 (should-not (buffer-live-p replacement))
                 (should (buffer-live-p parent)))
             (pilish-test--kill-live-buffers replacement snapshot parent)))))))
+
+(ert-deftest pilish-test-polish-snapshot-publication-keeps-window-margins ()
+  "Replacement snapshots retain each reader's independent margin widths."
+  (let ((old (generate-new-buffer " *polish-old-snapshot*"))
+        (staged (generate-new-buffer " *polish-staged-snapshot*")))
+    (unwind-protect
+        (save-window-excursion
+          (delete-other-windows)
+          (dolist (buffer (list old staged))
+            (with-current-buffer buffer
+              (pilish-snapshot-mode)
+              (pilish--replay-history buffer [] "Snapshot text\n" 25)
+              (should (= left-margin-width 1))))
+          (switch-to-buffer old)
+          (let ((first (selected-window)) (second (split-window-right 28)))
+            (set-window-buffer second old)
+            (set-window-margins first 3 2)
+            (set-window-margins second 1 4)
+            (let ((views (with-current-buffer old (pilish--capture-window-rewrite-states))))
+              (should (eq staged (pilish--snapshot-publish-replacement old staged views))))
+            (should (equal (window-margins first) '(3 . 2)))
+            (should (equal (window-margins second) '(1 . 4)))
+            (should (eq (window-buffer first) staged))
+            (should (eq (window-buffer second) staged))))
+      (when (buffer-live-p old) (kill-buffer old))
+      (when (buffer-live-p staged) (kill-buffer staged)))))
 
 (provide 'pilish-snapshot-test)

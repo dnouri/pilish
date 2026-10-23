@@ -258,5 +258,28 @@ of the suite."
      (should (eq (lookup-key map "q") #'pilish-snapshot-quit))
      (should (eq (lookup-key map "n") #'pilish-next-message)))))
 
+(ert-deftest pilish-evil-test-browser-yank-preserves-hidden-source ()
+  "Evil yanks keep folded rows and literal triangles without gutter paint."
+  (pilish-evil-test--with-evil
+   (require 'pilish-browse-test)
+   (pilish-evil-setup)
+   (dolist (mode '(pilish-session-browser-mode pilish-tree-browser-mode))
+     (with-temp-buffer
+       (pilish-test--browse-disclosure-fixture mode)
+       (evil-local-mode 1)
+       (evil-motion-state)
+       (goto-char (point-min))
+       (pilish-browse-toggle-fold)
+       (let ((kill-ring nil)
+             (kill-ring-yank-pointer nil)
+             (source (buffer-substring-no-properties (point-min) (point-max))))
+         (evil-yank (point-min) (point-max) 'char)
+         (let ((copy (current-kill 0 t)))
+           (should (equal copy source))
+           (should (string-match-p "Child ▾" copy))
+           (should (= (cl-count ?▸ copy) 1))
+           (should (= (cl-count ?▾ copy) 1))
+           (should-not (text-property-not-all 0 (length copy) 'pilish-disclosure-hit nil copy))))))))
+
 (provide 'pilish-evil-test)
 ;;; pilish-evil-test.el ends here

@@ -367,13 +367,17 @@ how expensive each render is on the host.")
               lines))
       (nreverse lines))))
 
+(defconst pilish-tu-bench--cooling-live-command
+  "cooling-live --sentinel COOLING-SEMANTIC-LIVE"
+  "Complete deterministic command in the cooling fixture's live title.")
+
 (defun pilish-tu-bench--expected-semantic-lines ()
   "Return exact semantic sentinel lines expected from the cooling fixture."
   (append
    (cl-loop for index below (pilish-tu-bench--fill-tool-count)
             collect (format "COOLING-SEMANTIC call-cooling-%04d" index))
-   '("| COOLING-SEMANTIC-HOT-TABLE | hot | remains decorated and outside the completed cooling cohort |"
-     "$ cooling-live --sentinel COOLING-SEMANTIC-LIVE")))
+   (list "| COOLING-SEMANTIC-HOT-TABLE | hot | remains decorated and outside the completed cooling cohort |"
+         (concat "$ " pilish-tu-bench--cooling-live-command))))
 
 (defun pilish-tu-bench--expected-semantic-hash ()
   "Return SHA-256 of the exact expected cooling semantic projection."
@@ -461,7 +465,14 @@ helper, so the two views cannot drift apart.  Pure observation."
 
 (defun pilish-tu-bench--semantic-summary ()
   "Return (LINE-COUNT . SHA-256) of the current semantic projection."
-  (let ((lines (pilish-tu-bench--semantic-lines)))
+  (let ((lines
+         (cl-loop for line in (pilish-tu-bench--semantic-lines)
+                  for ordinal from 0
+                  collect
+                  (if (and (= ordinal (1+ (pilish-tu-bench--fill-tool-count)))
+                           (equal line (concat "bash " pilish-tu-bench--cooling-live-command)))
+                      (concat "$ " pilish-tu-bench--cooling-live-command)
+                    line))))
     (cons (length lines)
           (secure-hash 'sha256 (string-join lines "\n")))))
 
@@ -581,7 +592,7 @@ Calls ORIG with EVENT and appends to the benchmark event log."
                  :queueBefore queue-before
                  :queueAfter queue-after
                  :queueDelta delta
-                 :candidateId (or candidate-id :json-null)
+                 :candidateId candidate-id
                  :candidateEligible
                  (pilish-tu-bench--json-bool candidate-eligible)
                  :candidateOverlayAliveAfter
@@ -983,7 +994,7 @@ Each row is a plist with :type :count :totalMs :meanMs and :maxMs."
                 :postHook
                 (pilish-tu-bench--json-bool
                  (plist-get job :postHookAt))
-                :error (or error-text :json-null)
+                :error error-text
                 :window (pilish-tu-bench--capture-window-state)))))
         (push row pilish-tu-bench--command-log))
       (setq pilish-tu-bench--command-current-job nil)
@@ -1203,12 +1214,12 @@ Each row is a plist with :type :count :totalMs :meanMs and :maxMs."
          :fontLockOk
          (pilish-tu-bench--json-bool (null font-lock-error))
          :parserCount (length (treesit-parser-list))
-         :rootType (or root-type :json-null)
-         :rootStart (or root-start :json-null)
-         :rootEnd (or root-end :json-null)
+         :rootType root-type
+         :rootStart root-start
+         :rootEnd root-end
          :fontLockMs font-lock-ms
-         :parserError (or parser-error :json-null)
-         :fontLockError (or font-lock-error :json-null)
+         :parserError parser-error
+         :fontLockError font-lock-error
          :treeRoots (pilish-tu-bench--tree-root-row))))))
 
 (defun pilish-tu-bench--tool-name-counts (metadata)
@@ -1260,9 +1271,9 @@ Each row is a plist with :type :count :totalMs :meanMs and :maxMs."
                        tool-overlays))
                 #'string<))
          :currentOverlayStart
-         (if current (overlay-start current) :json-null)
+         (and current (overlay-start current))
          :currentOverlayEnd
-         (if current (overlay-end current) :json-null)
+         (and current (overlay-end current))
          :currentInsideHotTail
          (pilish-tu-bench--json-bool
           (and current boundary (>= (overlay-start current) boundary)))
@@ -1272,7 +1283,7 @@ Each row is a plist with :type :count :totalMs :meanMs and :maxMs."
                (get-text-property
                 (overlay-start current)
                 'pilish-cold-tool-block)))
-         :hotTailBoundary (or boundary :json-null)
+         :hotTailBoundary boundary
          :buttons (pilish-tu-bench--button-count)
          :diffOverlays
          (cl-count-if
@@ -1305,7 +1316,7 @@ Each row is a plist with :type :count :totalMs :meanMs and :maxMs."
                    :frameLines (frame-height (window-frame window))
                    :chatColumns (window-width window)
                    :chatLines (window-height window))
-           :json-null)
+           nil)
          :parser parser-state)))))
 
 (defun pilish-tu-bench--cooling-slices-in-order ()
@@ -1652,7 +1663,7 @@ Every entry must have a true :ok for the benchmark run to pass."
             (lambda (row)
               (and (eq (plist-get row :preHook) t)
                    (eq (plist-get row :postHook) t)
-                   (eq (plist-get row :error) :json-null)
+                   (null (plist-get row :error))
                    (eq (plist-get (plist-get row :window) :viewOk) t)))
             commands)
            (seq-every-p
@@ -1993,7 +2004,7 @@ all scenarios await agent_settled before declaring the session complete."
                    (if (eq (plist-get row :postHook) t) 1 0)
                    (plist-get window :expectedRoute)
                    (if (eq (plist-get window :viewOk) t) 1 0)
-                   (if (eq (plist-get row :error) :json-null)
+                   (if (null (plist-get row :error))
                        ""
                      (plist-get row :error)))))))))
 
@@ -2037,8 +2048,8 @@ all scenarios await agent_settled before declaring the session complete."
                       :hardFailure :json-false)
                 :ok (plist-get metrics :ok)
                 :settled (plist-get metrics :settled)
-                :error (or (plist-get metrics :error) :json-null)
-                :wallMs (or (plist-get metrics :wallMs) :json-null)
+                :error (plist-get metrics :error)
+                :wallMs (plist-get metrics :wallMs)
                 :seconds (plist-get metrics :seconds)
                 :gcs (plist-get metrics :gcs)
                 :gcSeconds (plist-get metrics :gcSeconds)
@@ -2046,8 +2057,7 @@ all scenarios await agent_settled before declaring the session complete."
                 :bufferLines (plist-get metrics :bufferLines)
                 :overlays (plist-get metrics :overlays)
                 :agentEnd
-                (or pilish-tu-bench--agent-end-observation
-                    :json-null)
+                pilish-tu-bench--agent-end-observation
                 :processFilters
                 (list :count (length filters)
                       :maxMs
@@ -2058,8 +2068,7 @@ all scenarios await agent_settled before declaring the session complete."
                                          filters))
                         0.0)
                       :agentEnd
-                      (or pilish-tu-bench--agent-end-filter
-                          :json-null))
+                      pilish-tu-bench--agent-end-filter)
                 :eventStats
                 (vconcat
                  (mapcar (lambda (row)
@@ -2091,7 +2100,7 @@ all scenarios await agent_settled before declaring the session complete."
                 :cooling
                 (if cooling
                     (list
-                     :drain (or (plist-get metrics :drain) :json-null)
+                     :drain (plist-get metrics :drain)
                      :slices
                      (vconcat
                       (pilish-tu-bench--cooling-slices-in-order))
@@ -2113,11 +2122,12 @@ all scenarios await agent_settled before declaring the session complete."
                            pilish-tu-bench-cooling-slices-file
                            :commandsTsv
                            pilish-tu-bench-commands-file))
-                  :json-null)
+                  nil)
                 :checks (pilish-tu-bench--checks-json
                          (plist-get metrics :checks)))))
     (with-temp-file pilish-tu-bench-result-file
-      (insert (json-encode object) "\n"))))
+      (let ((json-null nil) (json-false :json-false))
+        (insert (json-encode object) "\n")))))
 
 (defun pilish-tu-bench--write-report (metrics run-ok)
   "Write a Markdown report for METRICS; RUN-OK is the overall verdict."
@@ -2347,9 +2357,10 @@ benchmark scenario.  It prevents settled-only JSON success from regressing."
                  (list (list :name "synthetic-failed-cooling-check"
                              :ok :json-false)))))
          (run-ok (eq (plist-get metrics :ok) t))
-         (encoded (json-encode
-                   (list :ok (plist-get metrics :ok)
-                         :settled (plist-get metrics :settled)))))
+         (encoded (let ((json-null nil) (json-false :json-false))
+                    (json-encode
+                     (list :ok (plist-get metrics :ok)
+                           :settled (plist-get metrics :settled))))))
     (unless (and (eq (plist-get metrics :ok) :json-false)
                  (string-match-p "\\\"ok\\\":false" encoded)
                  (equal (pilish-tu-bench--verdict-label run-ok)

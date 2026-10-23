@@ -677,25 +677,6 @@ Accommodates: count (4 digits + \" msgs \") + age (2 + 1 + 7) + padding.
   "Right margin width for the tree browser.
 Accommodates: \"[\" + 12-char label + \"]\" + padding = 16.")
 
-(defvar-local pilish--browse-margin-width nil
-  "Right margin width for the current browse buffer.
-Set by the derived mode; used by the window-configuration hook.")
-
-(defun pilish--browse-set-window-margins (width &optional window)
-  "Set right margin to WIDTH on WINDOW (default: selected window).
-Preserves any existing left margin."
-  (let ((win (or window (selected-window))))
-    (when (window-live-p win)
-      (set-window-margins win (car (window-margins win)) width))))
-
-(defun pilish--browse-apply-margins ()
-  "Re-apply right margins for the current browse buffer.
-Reads width from `pilish--browse-margin-width'.
-Intended as a `window-configuration-change-hook' callback."
-  (when pilish--browse-margin-width
-    (pilish--browse-set-window-margins
-     pilish--browse-margin-width)))
-
 ;;;; Margin Age Formatting
 
 (defconst pilish--age-spec
@@ -1576,20 +1557,18 @@ while a value removed from the published data is forgotten."
         pilish--browse-fold-row-by-section (make-hash-table :test #'eq)))
 
 (defun pilish--browse-register-fold-row
-    (section value depth surface foldable &optional indicator-offset)
+    (section value depth surface foldable)
   "Register one flat renderer row for post-insert folding.
 SECTION is its flat Magit section, VALUE its existing canonical section
 value, and DEPTH its ancestry depth in the displayed topology.  SURFACE
 is one of `tree', `threaded', `recent', or `flat'.  FOLDABLE says the
-already-computed next row is a descendant.  INDICATOR-OFFSET is its
-character offset after any connector prefix.  A non-string VALUE remains
+already-computed next row is a descendant.  A non-string VALUE remains
 visible and participates in topology, but is never a fold target."
   (push (list :section section
               :value value
               :depth depth
               :surface surface
               :foldable (and foldable (stringp value))
-              :indicator-offset (or indicator-offset 0)
               :index nil
               :end-index nil
               :parent nil
@@ -1598,11 +1577,6 @@ visible and participates in topology, but is never a fold target."
               :body-start nil
               :end nil)
         pilish--browse-fold-rows))
-
-(defun pilish--browse-fold-indicator (value)
-  "Return a non-color fold indicator for canonical section VALUE."
-  (propertize (if (pilish--browse-folded-p value) "▸ " "▾ ")
-              'pilish-browse-fold-indicator value))
 
 (defun pilish--browse-finish-fold-render ()
   "Derive flat extents and apply folds after all row insertion.
@@ -1664,35 +1638,24 @@ but deep fold-all renders do not accumulate overlapping overlays."
   (let ((inhibit-read-only t)
         (covered-until 0))
     (dolist (row pilish--browse-fold-rows)
-      (when (plist-get row :foldable)
-        (let* ((value (plist-get row :value))
-               (folded (pilish--browse-folded-p value))
-               (start (+ (oref (plist-get row :section) start)
-                         (plist-get row :indicator-offset))))
-          ;; `subst-char-in-region' changes one glyph in place: positions,
-          ;; Magit's section properties, and its insertion-type markers stay
-          ;; unchanged, while `buffer-string' and redisplay both tell the
-          ;; truth about the current state.
-          (when (equal (get-text-property
-                        start 'pilish-browse-fold-indicator)
-                       value)
-            (remove-text-properties start (1+ start) '(display nil))
-            (let ((glyph (string-to-char (if folded "▸" "▾"))))
-              (unless (= (char-after start) glyph)
-                (subst-char-in-region start (1+ start)
-                                      (char-after start) glyph t))))
-          (when (and folded
-                     (>= (plist-get row :index) covered-until))
-            (let ((beg (plist-get row :body-start))
-                  (end (plist-get row :end)))
-              (when (< beg end)
-                (let ((overlay (make-overlay beg end nil nil t)))
-                  (overlay-put overlay 'evaporate t)
-                  (overlay-put overlay 'invisible 'pilish-browse-fold)
-                  (overlay-put overlay 'cursor-intangible t)
-                  (overlay-put overlay 'pilish-browse-fold-header row)
-                  (push overlay pilish--browse-fold-overlays)))
-              (setq covered-until (plist-get row :end-index)))))))
+      (let* ((section (plist-get row :section))
+             (foldable (plist-get row :foldable))
+             (folded (pilish--browse-folded-p (plist-get row :value))))
+        (pilish--put-disclosure
+         (oref section start) (oref section end) (not folded)
+         (and foldable #'pilish-browse-toggle-fold))
+        (when (and foldable folded
+                   (>= (plist-get row :index) covered-until))
+          (let ((beg (plist-get row :body-start))
+                (end (plist-get row :end)))
+            (when (< beg end)
+              (let ((overlay (make-overlay beg end nil nil t)))
+                (overlay-put overlay 'evaporate t)
+                (overlay-put overlay 'invisible 'pilish-browse-fold)
+                (overlay-put overlay 'cursor-intangible t)
+                (overlay-put overlay 'pilish-browse-fold-header row)
+                (push overlay pilish--browse-fold-overlays)))
+            (setq covered-until (plist-get row :end-index))))))
     (setq pilish--browse-fold-overlays
           (nreverse pilish--browse-fold-overlays))))
 
@@ -1829,6 +1792,8 @@ walking every hidden row."
                    "<left-fringe> <mouse-1>"
                    "<left-fringe> <mouse-2>"))
       (define-key map (kbd key) nil))
+    (define-key map [left-margin down-mouse-1] #'ignore)
+    (define-key map [left-margin mouse-1] #'pilish--disclosure-click)
     (define-key map (kbd "TAB") #'pilish-browse-toggle-fold)
     (define-key map [tab] #'pilish-browse-toggle-fold)
     (define-key map (kbd "<backtab>") #'pilish-browse-fold-all)
@@ -2072,6 +2037,10 @@ Uses Magit's flat section navigation plus Pilish's explicit row folding."
         pilish--browse-fold-row-by-section (make-hash-table :test #'eq)
         pilish--browse-fold-overlays nil)
   (add-to-invisibility-spec 'pilish-browse-fold)
+  (setq-local filter-buffer-substring-function #'pilish--disclosure-filter-substring)
+  (pilish--apply-disclosure-margins)
+  (add-hook 'window-configuration-change-hook
+            #'pilish--apply-disclosure-margins nil t)
   (add-hook 'magit-section-movement-hook
             #'pilish--browse-skip-folded-section nil t))
 
@@ -2104,11 +2073,7 @@ re-initializes from the current defaults."
         pilish-session-browser-default-named-only)
   (setq-local header-line-format
               '(:eval (pilish--session-browser-header-line)))
-  (setq pilish--browse-margin-width
-        pilish--session-margin-width)
-  (setq-local right-margin-width pilish--session-margin-width)
-  (add-hook 'window-configuration-change-hook
-            #'pilish--browse-apply-margins nil t))
+  (setq-local right-margin-width pilish--session-margin-width))
 
 ;;;; Buffer Management
 
@@ -2401,10 +2366,8 @@ session keys to project tokens; LIVE-PATHS marks live sessions."
                 (pilish--browse-register-fold-row
                  group-section group 0 'recent t)
                 (magit-insert-heading
-                  (concat
-                   (pilish--browse-fold-indicator group)
-                   (pilish--propertize-face
-                    group 'pilish-session-group-header))))
+                  (pilish--propertize-face
+                   group 'pilish-session-group-header)))
               (setq last-group group)))
           (pilish--session-browser-insert-session
            item (plist-get item :canonicalPath) nil fields live-paths
@@ -2445,18 +2408,11 @@ shape.  Message count and age are rendered as a right-margin overlay."
          (is-fork (plist-get session :parentSessionPath))
          (live-p (gethash key live-paths))
          (token (and fields (gethash key fields)))
-         (fold-indicator
-          (and foldable (pilish--browse-fold-indicator key)))
          (display-prefix
           (cond
            (prefix
-            ;; Keep every connector in its original column.  A fold glyph
-            ;; follows this row's complete connector instead of shifting
-            ;; descendant gutters to the right.
-            (concat
-             (pilish--propertize-face
-              prefix 'pilish-session-thread-connector)
-             fold-indicator))
+            (pilish--propertize-face
+             prefix 'pilish-session-thread-connector))
            (is-fork
             (pilish--propertize-face
              "fork: " 'pilish-session-thread-connector))
@@ -2500,11 +2456,7 @@ shape.  Message count and age are rendered as a right-margin overlay."
         (magit-insert-section session-section (session key)
           (pilish--session-browser-ensure-render-current buf generation)
           (pilish--browse-register-fold-row
-           session-section key (or depth 0) (or surface 'flat) foldable
-           (and foldable
-                (text-property-any
-                 0 (length heading)
-                 'pilish-browse-fold-indicator key heading)))
+           session-section key (or depth 0) (or surface 'flat) foldable)
           (magit-insert-heading heading)
           (pilish--make-margin-overlay margin-str))))))
 
@@ -3553,11 +3505,7 @@ re-running this mode re-initializes from the current default."
         pilish-tree-browser-default-filter)
   (setq-local header-line-format
               '(:eval (pilish--tree-browser-header-line)))
-  (setq pilish--browse-margin-width
-        pilish--tree-margin-width)
-  (setq-local right-margin-width pilish--tree-margin-width)
-  (add-hook 'window-configuration-change-hook
-            #'pilish--browse-apply-margins nil t))
+  (setq-local right-margin-width pilish--tree-margin-width))
 
 ;;;; Tree Browser Buffer Management
 
@@ -3906,14 +3854,6 @@ obsolete insertion when a newer load lands reentrantly."
                        (prefix-str (pilish--propertize-face
                                     prefix
                                     'pilish-tree-connector))
-                       ;; Marker (two characters), the padded type, then one
-                       ;; separator.  %-7s is a minimum width, so use the
-                       ;; actual string length for custom tool/type names.
-                       (indicator-index
-                        (+ 3
-                           (length
-                            (format "%-7s"
-                                    (pilish--tree-node-type-label node)))))
                        (line (pilish--tree-format-node-line
                               node is-active is-current)))
                   (magit-insert-section node-section
@@ -3922,19 +3862,8 @@ obsolete insertion when a newer load lands reentrantly."
                     ;; the section visibility hook has just returned.
                     (pilish--tree-browser-ensure-render-current)
                     (pilish--browse-register-fold-row
-                     node-section section-value depth 'tree foldable
-                     (+ (length prefix) indicator-index))
-                    (magit-insert-heading
-                      ;; Preserve the established connector, @/* marker, and
-                      ;; seven-column type label.  The fold glyph follows
-                      ;; those discovery columns and precedes the preview.
-                      (if foldable
-                          (concat prefix-str
-                                  (substring line 0 indicator-index)
-                                  (pilish--browse-fold-indicator
-                                   section-value)
-                                  (substring line indicator-index))
-                        (concat prefix-str line)))
+                     node-section section-value depth 'tree foldable)
+                    (magit-insert-heading (concat prefix-str line))
                     (when-let* ((label (plist-get node :label)))
                       ;; 3 = "[" + "]" + 1 char padding
                       (let ((truncated
@@ -5472,7 +5401,7 @@ the browser major mode re-initializes from the current defaults."
         (with-current-buffer buf
           (setq pilish--chat-buffer chat-buf))))
     (pop-to-buffer buf)
-    (pilish--browse-apply-margins)
+    (pilish--apply-disclosure-margins)
     (pilish--session-browser-fetch-and-render)
     (when new-p
       (message "Pi: Press ? for available commands"))))
@@ -5503,7 +5432,7 @@ browser major mode re-initializes from the current defaults."
         (with-current-buffer buf
           (setq pilish--chat-buffer chat-buf))))
     (pop-to-buffer buf)
-    (pilish--browse-apply-margins)
+    (pilish--apply-disclosure-margins)
     (pilish--tree-browser-fetch-and-render)
     (when new-p
       (message "Pi: Press ? for available commands"))))

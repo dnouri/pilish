@@ -1273,6 +1273,15 @@ SPEC is (SESSION SCENARIO &rest EXTRA-ARGS)."
                (with-current-buffer chat-buf
                  (not (pilish--session-transition-active-p))))
              "resume transition settlement")
+            (pilish-fake-pi-test--wait-or-fail
+             proc
+             (lambda ()
+               (with-current-buffer chat-buf
+                 (seq-find
+                  (lambda (command)
+                    (equal (plist-get command :name) "test-confirm"))
+                  pilish--commands)))
+             "post-resume get_commands refresh" 2)
             (let* ((log-records
                     (pilish-fake-pi-test--read-jsonl-file log-file))
                    (types
@@ -1286,15 +1295,6 @@ SPEC is (SESSION SCENARIO &rest EXTRA-ARGS)."
               ;; Ignore get_session_stats: history refresh may request it for
               ;; the header, but these four retained calls are the transition.
               (should (equal observed required)))
-            (pilish-fake-pi-test--wait-or-fail
-             proc
-             (lambda ()
-               (with-current-buffer chat-buf
-                 (seq-find
-                  (lambda (command)
-                    (equal (plist-get command :name) "test-confirm"))
-                  pilish--commands)))
-             "post-resume get_commands refresh" 2)
             (with-current-buffer chat-buf
               (should (equal (plist-get pilish--state :session-id)
                              (plist-get fixture :session-id)))
@@ -2161,21 +2161,20 @@ SPEC is (SESSION SCENARIO &rest EXTRA-ARGS)."
        proc (lambda ()
               (with-current-buffer chat-buf
                 (let ((late (cdr (assoc "parent/3"
-                                        (pilish-test--nested-summary-lines "parent" t)))))
-                  (and late (string-prefix-p "  ✗ bash " late)
-                       (string-match-p "Command aborted" late)))))
+                                        (pilish-test--nested-summary-lines "parent")))))
+                  (and late (string-prefix-p "✗ failed bash " late)
+                       (string-match-p "Command aborted" (pilish--visible-text (point-min) (point-max)))))))
        "late child result under its original parent")
       (with-current-buffer chat-buf
         (font-lock-ensure)
-        (let* ((rows (pilish-test--nested-summary-lines "parent" t))
-               (visible-rows (pilish-test--nested-summary-lines "parent"))
-               (read-summary (cdr (assoc "parent/1" visible-rows)))
-               (error-summary (cdr (assoc "parent/2" visible-rows)))
+        (let* ((rows (pilish-test--nested-summary-lines "parent"))
+               (read-summary (cdr (assoc "parent/1" rows)))
+               (error-summary (cdr (assoc "parent/2" rows)))
                (read-row (seq-find (lambda (row)
                                      (string-match-p "/tmp/CHILD-READ" (cdr row))) rows))
                (error-row (seq-find (lambda (row)
                                       (string-match-p "CHILD-ERROR" (cdr row))) rows))
-               (late-summary (cdr (assoc "parent/3" visible-rows))))
+               (late-summary (cdr (assoc "parent/3" rows))))
           (should (equal (mapcar #'car rows) expected-ids))
           (should (equal (car read-row) "parent/1"))
           (should (equal (car error-row) "parent/2"))
@@ -2183,15 +2182,16 @@ SPEC is (SESSION SCENARIO &rest EXTRA-ARGS)."
                 live-visible (pilish--visible-text (point-min) (point-max)))
           (should (= 1 (pilish-test--count-matches (regexp-quote read-summary) live-visible)))
           (should (= 1 (pilish-test--count-matches (regexp-quote error-summary) live-visible)))
-          (should (equal (cdr read-row) "  ✓ read {\"path\":\"/tmp/CHILD-READ\"}"))
+          (should (equal (cdr read-row) "read /tmp/CHILD-READ"))
           (should (string-prefix-p
-                   "  ✗ bash {\"command\":\"printf 'CHILD-ERROR'; exit 7; # " error-summary))
-          (should (string-suffix-p
-                   " — CHILD-ERROR\\n\\nCommand exited with code 7" error-summary))
+                   "✗ failed bash\nprintf 'CHILD-ERROR'; exit 7;" error-summary))
+          (should (string-match-p "…" error-summary))
+          (should (string-match-p
+                   (regexp-quote "Error: CHILD-ERROR\\n\\nCommand exited with code 7") live-visible))
           (should (equal (cdr (assoc "parent/models.classify/1" rows))
-                         "  ✓ models.classify fake/classifier $0.002"))
+                         "models.classify fake/classifier"))
           (should (equal (cdr (assoc "parent/models.generateImages/2" rows))
-                         "  ⊘ models.generateImages fake/image"))
+                         "⊘ cancelled models.generateImages fake/image"))
           (let ((late-child-position (string-match (regexp-quote late-summary) live-visible))
                 (final-assistant-position (string-match "FINAL-AFTER-PARENT" live-visible)))
             (should late-child-position)
@@ -2229,17 +2229,27 @@ SPEC is (SESSION SCENARIO &rest EXTRA-ARGS)."
           (pilish-chat-mode)
           (pilish--display-history-messages messages)
           (font-lock-ensure)
-          (let* ((rows (pilish-test--nested-summary-lines "parent" t))
-                 (visible-rows (pilish-test--nested-summary-lines "parent"))
-                 (read-summary (cdr (assoc "parent/1" visible-rows)))
-                 (error-summary (cdr (assoc "parent/2" visible-rows)))
+          (let* ((rows (pilish-test--nested-summary-lines "parent"))
+                 (read-summary (cdr (assoc "parent/1" rows)))
+                 (error-summary (cdr (assoc "parent/2" rows)))
                  (completed-history-lines (seq-take rows 2))
                  (late-summary (cdr (assoc "parent/3" rows))))
             (should (equal (mapcar #'car rows) expected-ids))
-            (should (equal completed-live-lines completed-history-lines))
+            ;; parent/1's saved facts are complete, so live and saved
+            ;; grammar match.  parent/2's saved arguments are unavailable
+            ;; (argumentsBytes): history keeps the opaque saved preview
+            ;; while the live run showed the authoritative bounded label.
+            (should (equal (cdr (assoc "parent/1" rows))
+                           "read /tmp/CHILD-READ"))
+            (let ((history-error (cdr (nth 1 completed-history-lines))))
+              (should (string-prefix-p
+                       "✗ failed bash {\"command\":\"printf 'CHILD-ERROR'; exit 7;"
+                       history-error)))
             (should (equal late-summary
-                           "  ? bash {\"command\":\"printf 'CHILD-LATE'; sleep 1\"} unfinished when saved"))
+                           "? unfinished when saved bash printf 'CHILD-LATE'; sleep 1"))
             (setq history-visible (pilish--visible-text (point-min) (point-max)))
+            (should (string-match-p
+                     (regexp-quote "Error: CHILD-ERROR\\n\\nCommand exited with code 7") history-visible))
             (should (= 1 (pilish-test--count-matches (regexp-quote read-summary) history-visible)))
             (should (= 1 (pilish-test--count-matches (regexp-quote error-summary) history-visible)))
             (should (= 1 (pilish-test--count-matches (regexp-quote late-summary) history-visible)))

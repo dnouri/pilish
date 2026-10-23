@@ -30,7 +30,7 @@ SELECTOR ?=
 # Example: make test VERBOSE=1
 VERBOSE ?=
 
-.PHONY: test test-unit test-core test-ui test-render test-table test-input test-menu test-browse test-jsonl test-snapshot test-build
+.PHONY: test test-unit test-core test-ui test-render test-arguments test-table test-input test-menu test-browse test-jsonl test-snapshot test-build
 .PHONY: test-integration test-integration-fake test-integration-real test-integration-ci test-integration-ci-real test-gui test-gui-ci test-all
 .PHONY: bench bench-batch bench-reload-resume bench-reload-resume-batch bench-reload-resume-smoke
 .PHONY: bench-tool-update bench-tool-update-batch bench-tool-update-smoke
@@ -45,6 +45,7 @@ help:
 	@echo "  make test-core        Core/RPC tests only"
 	@echo "  make test-ui          UI foundation tests only"
 	@echo "  make test-render      Render tests only"
+	@echo "  make test-arguments   Bounded argument projection tests only"
 	@echo "  make test-table       Table decoration tests only"
 	@echo "  make test-input       Input buffer tests only"
 	@echo "  make test-menu        Menu/session tests only"
@@ -127,6 +128,8 @@ test: .deps-stamp
 		-l pilish-core-test \
 		-l pilish-ui-test \
 		-l pilish-render-test \
+		-l pilish-arguments-test \
+		-l pilish-benchmark-test \
 		-l pilish-table-test \
 		-l pilish-input-test \
 		-l pilish-menu-test \
@@ -163,6 +166,9 @@ test-ui: .deps-stamp
 	@$(BATCH_TEST) -l pilish-ui-test $(ERT_RUN)
 test-render: .deps-stamp
 	@$(BATCH_TEST) -l pilish-render-test $(ERT_RUN)
+
+test-arguments: .deps-stamp
+	@$(BATCH_TEST) -l pilish-arguments-test $(ERT_RUN)
 test-table: .deps-stamp
 	@$(BATCH_TEST) -l pilish-table-test $(ERT_RUN)
 test-input: .deps-stamp

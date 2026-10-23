@@ -44,6 +44,19 @@ Cross-module state mutations use accessor functions defined in `ui.el`
 (e.g., `--set-process`, `--set-aborted`, `--push-followup`).  Within a
 module, direct `setq` is fine.
 
+Disclosure painting/removal, exact margin clicks, and all-window margin
+minima live in `ui.el`.  `pilish--put-disclosure` derives paint from each
+owner's state.  Its fresh `[ACTION-SYMBOL]` witness carries no payload,
+identity, closure, or expansion state.  Tools, completed Thinking, startup
+spans, and browser fold hashes keep their existing authority.  Render's
+hidden-heading repair may extend paint through the preceding hidden fence
+inside the same block, but preserves each prefix property run and never
+crosses preceding visible text.  Native image/stretch prefixes use the same
+reversible UI composer as normal painting.  Cold tools release all common
+paint before capture.  Browser copy cleanup removes only that paint, not
+ordinary overlay-hidden descendant characters.  Return keeps its existing
+file, saved-session, button, or browser navigation action.
+
 `agent_end` finishes the low-level loop and finalizes tools. `agent_settled`
 releases waiting (`sending`) work, not observably newer streaming/compaction:
 Pi emits it *after* awaited extension hooks, which can start another operation.
@@ -56,6 +69,26 @@ RPC table until its correlated response. Prompt request records separately track
 acceptance and observed start/echo, since an extension's acknowledgment can follow
 its run's settlement. Stop sends `clear_queue` before `abort` and reapplies its
 latch on delayed agent/compaction starts.
+
+Tool arguments are rendered through one block-owned bounded projection.
+`pilish--argument-observe` captures authoritative arguments for each tool
+call or nested child into a work- and size-bounded view; headers and
+per-argument rows compose from that view, with `(argument NODE-ID ORDINAL)`
+fold locators carried as text properties (never hidden payload copies).
+Child argument toggles splice only their owned address spans, not output.
+Literal protection is independent of fold actionability and survives cooling.
+`pilish--argument-settle` reconciles rows against actual execution results;
+missing-result fallback cannot demote previously settled evidence.
+The retained display copy is released before cold metadata capture during
+cooling (`pilish--argument-release-cold`).  Cold history keeps the currently
+visible text, hidden literal guards and alignment, but no argument controls
+or retained display document.  Completed header-only blocks cool without
+inventing an output body; active generation blocks remain hot.
+Successful write/edit input represented by
+output stays omitted even when its capture was clipped.  Missing results
+keep bounded diagnostic input.  Undeliverable input renders as an inert notice,
+never a fabricated preview; saved `argumentsBytes` and codemode
+`details.calls` args stay opaque previews shown as data.
 
 Saved-conversation links have one generic declaration path through
 `details.savedConversations` version 1 for any tool.  Capture copies
@@ -73,7 +106,7 @@ readable but lose inferred links.  Do not rewrite them or add a legacy adapter.
 | `pilish.el` | Entry point, autoloads, `--setup-session` |
 | `pilish-core.el` | JSON parsing, immutable copied saved-conversation targets with anchor-file/session-id/root/file fields, line buffering, RPC request correlation, and process protocol |
 | `pilish-ui.el` | Shared session/buffer state, accessors, faces, customization, passive transcript, sibling chat/snapshot, and input modes and keymaps, header/activity UI, and local slash-command dispatch; requires core and grammars, not jsonl |
-| `pilish-render.el` | Streaming and history rendering for user, assistant, branch-summary, and compaction messages; tool output, deferred completed-tool cooling outside the hot tail, fontification, diffs, and deferred history table postprocessing |
+| `pilish-render.el` | Streaming and history rendering for user, assistant, branch-summary, and compaction messages; bounded tool-argument projection (block-owned view/ledger with per-argument fold controls, truthful omission notices, and display-copy release at cooling); tool output, deferred completed-tool cooling outside the hot tail, fontification, diffs, and deferred history table postprocessing |
 | `pilish-table.el` | Display-only pipe table decoration, wrapping, overlay management, and resize refresh over UI visible-text/scroll seams |
 | `pilish-input.el` | Input history/isearch, send/abort, file/path/slash completion, queuing, and local `/resume` dispatch to the session browser |
 | `pilish-menu.el` | Transient menu; guarded new/reload/resume transitions; canonical jsonl cwd/name metadata; model, thinking, command, export, and stats actions; `r` sessions and `w` tree entries |
@@ -90,6 +123,7 @@ readable but lose inferred links.  Do not rewrite them or add a legacy adapter.
 | `test/pilish-core-test.el` | Core/RPC protocol, framing, request lifecycle, and JSON normalization |
 | `test/pilish-ui-test.el` | Buffer naming/modes, session directories, direct browser key bindings, startup header, slash dispatch, and grammar install |
 | `test/pilish-render-test.el` | Streaming/history response display, branch summaries, tools, tables, file actions, fontification, and diffs |
+| `test/pilish-arguments-test.el` | Bounded tool-argument projection: visitor/ledger bounds and settlement outcomes, header/row composition and truthfulness, fold toggles and viewport anchoring, file-action inertness, nested child rows, saved-history rendering, and cooling release |
 | `test/pilish-table-test.el` | Table decoration, overlays, streaming, resize |
 | `test/pilish-input-test.el` | History, send/abort, queuing, completion, and local `/resume` browser routing |
 | `test/pilish-menu-test.el` | Session transitions and cwd guards, canonical jsonl name metadata, transient browser entries, model/command actions, and reconnect |
@@ -156,6 +190,7 @@ Run tests for a single module:
 make test-core
 make test-ui
 make test-render
+make test-arguments
 make test-input
 make test-menu
 make test-browse

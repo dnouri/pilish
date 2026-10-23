@@ -529,7 +529,7 @@ Zero keeps the original single-delta tool boundary check.")
    (cl-loop for index below pilish-sd-bench-backlog-deltas
             collect (cons 'payload (pilish-sd-bench--backlog-line index)))
    (list '(omit . "")
-         (cons 'tool (substring (pilish-sd-bench--tool-command) 5))
+         (cons 'tool (concat "$ " (pilish-sd-bench--tool-command)))
          '(omit . ""))))
 
 (defun pilish-sd-bench--actual-projection (chat-buf)
@@ -564,7 +564,7 @@ other visible line is retained so unexpected text fails projection equality."
                        line)
                      normalized))
               ('tool
-               (push (if (equal line (concat "$ echo " (cdr spec)))
+               (push (if (equal line (concat "bash " (substring (cdr spec) 2)))
                          (cdr spec)
                        line)
                      normalized))

@@ -282,6 +282,14 @@ tools appear inline in graphical Emacs and as a type-and-size
 placeholder in terminals; the limits are described under =Images= in
 Advanced.
 
+Tools, completed thinking, startup details, and both browsers use the
+same left-margin caret.  Click it or press =TAB= in the section to
+expand or collapse it.  Carets are not included in copied text.
+
+Tool arguments appear in the header or on separate rows.  Use =TAB=
+to expand an argument independently of the output.  Expanded shell
+commands have syntax highlighting.
+
 For =codemode=, the script and child calls appear inside the parent
 tool block.  Its script, call list, parent output, and individual
 child outputs fold independently with =TAB=.  Reload and resume
@@ -347,9 +355,10 @@ that turn.  Use =n= and =p= in the chat buffer to jump between user
 messages, and =f= to fork the conversation from the turn at point.
 
 The chat header ends with a summary line showing the pi and Pilish
-versions plus skill and prompt-template counts.  Press =TAB= on it to
-expand sections listing context files, skills, prompt templates, and
-extension commands, grouped by Project and User, with explicit paths
+versions plus skill and prompt-template counts.  Click its caret or
+press =TAB= on the summary to expand sections listing context files,
+skills, prompt templates, and extension commands, grouped by Project
+and User, with explicit paths
 and unknown-scope resources kept separate; the extension section
 lists registered commands.  Names are links when a source file exists.
 Descriptions appear when available, so you can explore what is on
@@ -436,7 +445,7 @@ Recent queries keep their time groups.  Folds survive rerenders and a
 filter/search round trip; they are forgotten
 when the corresponding session or group leaves the published snapshot.
 =n= / =p= (and =M-n= / =M-p=) keep Magit's flat section motion and skip
-rows hidden by a fold.
+rows hidden by a fold.  Copying includes folded descendants.
 
 Search results are always flat — a query never draws family
 connectors.  A queried Threaded (fork families) view orders the
@@ -1049,7 +1058,8 @@ that default persist across restarts, set
 =pilish-thinking-display= in your init file or via
 =M-x customize-option=.
 
-Press =TAB= inside completed thinking to toggle that block locally.
+Press =TAB= inside completed thinking or click its margin caret to
+expand or collapse it.  Live thinking cannot be collapsed.
 
 ** Markdown tables
 

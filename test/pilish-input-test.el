@@ -2438,17 +2438,16 @@ message_start role=assistant displays the 'Assistant' header."
     (pilish--display-tool-end "bash" nil
                           '((:type "text" :text "L1\nL2\nL3\nL4\nL5\nL6\nL7\nL8\nL9\nL10"))
                           nil nil)
-    ;; Initially collapsed - should have "... (N more lines)"
-    (should (string-match-p "\\.\\.\\..*more lines" (buffer-string)))
+    (should-not (button-get (next-button (point-min)) 'pilish-expanded))
     (should-not (string-match-p "L10" (buffer-string)))
     ;; Find and click the button
     (goto-char (point-min))
-    (search-forward "..." nil t)
+    (search-forward "Output")
     (backward-char 1)
     (pilish-toggle-tool-section)
     ;; Now should show all lines
     (should (string-match-p "L10" (buffer-string)))
-    (should (string-match-p "\\[-\\]" (buffer-string)))))
+    (should (button-get (next-button (point-min)) 'pilish-expanded))))
 
 (ert-deftest pilish-test-tool-toggle-collapses-content ()
   "Toggle button collapses expanded tool output."
@@ -2460,17 +2459,16 @@ message_start role=assistant displays the 'Assistant' header."
                           nil nil)
     ;; Expand first
     (goto-char (point-min))
-    (search-forward "..." nil t)
+    (search-forward "Output")
     (backward-char 1)
     (pilish-toggle-tool-section)
     (should (string-match-p "L10" (buffer-string)))
     ;; Now collapse
     (goto-char (point-min))
-    (search-forward "[-]" nil t)
+    (search-forward "Output")
     (backward-char 1)
     (pilish-toggle-tool-section)
-    ;; Should be collapsed again
-    (should (string-match-p "\\.\\.\\..*more lines" (buffer-string)))
+    (should-not (button-get (next-button (point-min)) 'pilish-expanded))
     (should-not (string-match-p "L10" (buffer-string)))))
 
 (ert-deftest pilish-test-tool-toggle-re-expand-after-collapse-from-button ()
@@ -2487,17 +2485,17 @@ button position in the expanded state exceeds the collapsed overlay end."
                           nil nil)
     ;; Expand
     (goto-char (point-min))
-    (search-forward "..." nil t)
+    (search-forward "Output")
     (backward-char 1)
     (pilish-toggle-tool-section)
     (should (string-match-p "L15" (buffer-string)))
     ;; Navigate to the [-] button (near end of expanded block)
     (goto-char (point-min))
-    (search-forward "[-]" nil t)
+    (search-forward "Output")
     (beginning-of-line)
     ;; Collapse from the button position
     (pilish-toggle-tool-section)
-    (should (string-match-p "\\.\\.\\..*more lines" (buffer-string)))
+    (should-not (button-get (next-button (point-min)) 'pilish-expanded))
     ;; Verify cursor landed inside the tool block overlay, not at its boundary
     (should (seq-find (lambda (o) (overlay-get o 'pilish-tool-block))
                       (overlays-at (point))))
@@ -2517,12 +2515,11 @@ the markdown grammar.  Tool output face also applies."
     (pilish--display-tool-end "read" '(:path "test.py")
                           '((:type "text" :text "line1\nline2\nline3\nline4\nline5\nline6\nline7\nline8\nline9\nline10\ndef hello():\n    return 42"))
                           nil nil)
-    ;; Initially collapsed - 'def' is hidden
-    (should (string-match-p "\\.\\.\\..*more lines" (buffer-string)))
+    (should-not (button-get (next-button (point-min)) 'pilish-expanded))
     (should-not (string-match-p "def hello" (buffer-string)))
     ;; Expand
     (goto-char (point-min))
-    (search-forward "..." nil t)
+    (search-forward "Output")
     (backward-char 1)
     (pilish-toggle-tool-section)
     ;; Now 'def' should be visible
@@ -2547,7 +2544,7 @@ the markdown grammar.  Tool output face also applies."
                           nil nil)
     ;; Go to the header line (not the button)
     (goto-char (point-min))
-    (search-forward "$ ls" nil t)
+    (search-forward "bash ls")
     (beginning-of-line)
     ;; TAB should still expand
     (pilish-toggle-tool-section)
@@ -2602,12 +2599,15 @@ When window shows content BEFORE the tool block, toggle should not jump away."
                 (recenter 0)
                 (let ((start-before (window-start win)))
                   ;; Expand the tool content
-                  (search-forward "..." nil t)
+                  (search-forward "Output" nil t)
+                  (beginning-of-line)
                   (pilish-toggle-tool-section)
                   ;; Window should not have jumped
                   (should (= (window-start win) start-before))
                   ;; Now collapse
-                  (search-forward "[-]" nil t)
+                  (goto-char (point-min))
+                  (search-forward "Output" nil t)
+                  (beginning-of-line)
                   (pilish-toggle-tool-section)
                   ;; Window should still be at same position
                   (should (= (window-start win) start-before)))))))
@@ -5647,8 +5647,7 @@ This occurs after compaction before the next assistant message."
   (with-temp-buffer
     (pilish-chat-mode)
     (pilish--display-tool-start "bash" '(:command "ls -la"))
-    ;; Should have "$ ls -la" header
-    (should (string-match-p "\\$ ls -la" (buffer-string)))
+    (should (string-match-p "bash ls -la" (buffer-string)))
     ;; Should NOT have drawer syntax
     (should-not (string-match-p ":BASH:" (buffer-string)))))
 

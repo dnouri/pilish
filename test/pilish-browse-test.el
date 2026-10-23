@@ -214,8 +214,8 @@ Stands in for the dropped `pilish--parse-session-list'."
            (display (get-text-property 0 'display bs)))
       (should (equal (cadr display) " ")))))
 
-(ert-deftest pilish-test-browse-apply-margins ()
-  "Apply-margins sets the right margin on the window showing the buffer."
+(ert-deftest pilish-test-browse-disclosure-margins ()
+  "The common margin adapter honors the browser's right margin default."
   (let ((buf (generate-new-buffer " *test-margins*"))
         (prev-buf (window-buffer (selected-window)))
         (prev-margins (window-margins (selected-window))))
@@ -223,8 +223,8 @@ Stands in for the dropped `pilish--parse-session-list'."
         (progn
           (set-window-buffer (selected-window) buf)
           (with-current-buffer buf
-            (setq pilish--browse-margin-width 20)
-            (pilish--browse-apply-margins))
+            (setq-local right-margin-width 20)
+            (pilish--apply-disclosure-margins))
           (should (equal (cdr (window-margins (selected-window))) 20)))
       (set-window-margins (selected-window)
                           (car prev-margins) (cdr prev-margins))
@@ -254,7 +254,7 @@ another buffer — Emacs resets window margins from the new buffer's
 (ert-deftest pilish-test-browse-mode-no-margin-leak ()
   "Mode setup must not set margins on unrelated windows.
 When the browse buffer is created via `with-current-buffer' (not yet
-displayed), `--browse-apply-margins' must not touch `selected-window'."
+displayed), the common margin hook must not touch `selected-window'."
   (let ((other-buf (current-buffer))
         (browse-buf (generate-new-buffer " *test-tree-leak*")))
     (unwind-protect
@@ -3702,13 +3702,13 @@ tomorrow mtime is constructed on the decoded calendar (adding
                 (dolist (heading '("Future" "Today" "Yesterday"))
                   (should (equal 1 (cl-count-if
                                     (lambda (line)
-                                      (equal line (concat "▾ " heading)))
+                                      (equal line heading))
                                     (split-string text "\n")))))
-                (should (< (string-match "\\`▾ Future\n" text)
+                (should (< (string-match "\\`Future\n" text)
                            (string-match "Clock skew" text)
-                           (string-match "\n▾ Today\n" text)
+                           (string-match "\nToday\n" text)
                            (string-match "Early morning" text)
-                           (string-match "\n▾ Yesterday\n" text)
+                           (string-match "\nYesterday\n" text)
                            (string-match "Late night" text))))))))
       (if saved
           (set-time-zone-rule saved)
@@ -3743,20 +3743,20 @@ and across the groups.  The renderer's production clock is pinned."
           (let ((text (buffer-string)))
             ;; Calendar grouping: yesterday 23:55 is Yesterday even minutes
             ;; after midnight; today 00:05 is Today.
-            (should (string-match-p "\\`▾ Today
+            (should (string-match-p "\\`Today
 " text))
             (should (string-match-p "
-▾ Yesterday
+Yesterday
 " text))
             ;; Newest first within and across groups.
             (should (< (string-match "Early morning" text)
                        (string-match "Late night" text)))
             ;; Each row sits under its own group heading.
-            (should (< (string-match "\\`▾ Today
+            (should (< (string-match "\\`Today
 " text)
                        (string-match "Early morning" text)
                        (string-match "
-▾ Yesterday
+Yesterday
 " text)
                        (string-match "Late night" text)))))))))
 
@@ -4134,8 +4134,8 @@ Fixture: test/fixtures/browse-session-v087.jsonl (ids: system
           (should (string-match-p "hello" text))
           (should (string-match-p "continue from the summary" text)))))))
 
-(ert-deftest pilish-test-tree-browser-fold-indicator-follows-long-type-label ()
-  "A fold indicator does not split a type label wider than seven columns."
+(ert-deftest pilish-test-tree-browser-gutter-preserves-long-type-label ()
+  "A gutter caret leaves a type label wider than seven columns intact."
   (with-temp-buffer
     (pilish-tree-browser-mode)
     (let* ((tool-name "LongCustomToolName")
@@ -4149,15 +4149,12 @@ Fixture: test/fixtures/browse-session-v087.jsonl (ids: system
             pilish--tree-browser-filter 'default)
       (pilish--tree-browser-rerender)
       (let* ((row (pilish-test--browse-fold-row "parent"))
-             (section (plist-get row :section))
-             (indicator (+ (oref section start)
-                           (plist-get row :indicator-offset))))
+             (section (plist-get row :section)))
         (should (string-match-p
-                 (concat (regexp-quote tool-name) " ▾")
+                 (concat (regexp-quote tool-name) " parent")
                  (buffer-string)))
-        (should (= (char-after indicator) (string-to-char "▾")))
-        (should (= (plist-get row :indicator-offset)
-                   (+ 3 (length tool-name))))))))
+        (should-not (string-match-p "[▾▸]" (buffer-string)))
+        (should (equal (pilish-test--browse-gutter (oref section start)) "▾"))))))
 
 (ert-deftest pilish-test-tree-browser-filtered-current-marker-is-truthful ()
   "A hidden current leaf does not turn its visible ancestor into current."
@@ -7888,8 +7885,6 @@ browser buffer is created."
                      (setq created t)
                      guard-buf))
                   ((symbol-function 'pop-to-buffer) #'ignore)
-                  ((symbol-function 'pilish--browse-apply-margins)
-                   #'ignore)
                   ((symbol-function
                     'pilish--tree-browser-fetch-and-render)
                    #'ignore))
@@ -9980,7 +9975,7 @@ just the session browser (V14)."
       (should-error (pilish-browse-toggle-fold) :type 'user-error)
       (should-not (gethash "dup" pilish--browse-fold-state))
       (should-not (get-text-property
-                   (point) 'pilish-browse-fold-indicator)))))
+                   (point) 'pilish-disclosure-hit)))))
 
 (ert-deftest pilish-test-session-fold-threaded-query-round-trip-and-parent ()
   "Threaded family folds persist through flat query results; ^ finds root."
@@ -10007,17 +10002,10 @@ just the session browser (V14)."
       (pilish-browse-toggle-fold))
     (should (gethash "/tmp/pilish-fold-parent.jsonl"
                      pilish--browse-fold-state))
-    ;; In All-projects layout the fixed project/live fields precede the
-    ;; connector; indicator updates still target the marked glyph itself.
-    (let* ((row (pilish-test--browse-fold-row
-                 "/tmp/pilish-fold-parent.jsonl"))
-           (section (plist-get row :section))
-           (indicator (+ (oref section start)
-                         (plist-get row :indicator-offset))))
-      (should (equal (get-text-property
-                      indicator 'pilish-browse-fold-indicator)
+    (should (equal (pilish-test--browse-gutter
+                    (pilish-test--browse-fold-row-start
                      "/tmp/pilish-fold-parent.jsonl"))
-      (should (= (char-after indicator) (string-to-char "▸"))))
+                   "▸"))
     (should (invisible-p
              (pilish-test--browse-fold-row-start
               "/tmp/pilish-fold-child.jsonl")))
@@ -10099,11 +10087,9 @@ just the session browser (V14)."
                500))
     (pilish-browse-fold-all)
     (should (= (length pilish--browse-fold-overlays) 1))
-    (let ((root-row (pilish-test--browse-fold-row "node-1")))
-      (should (= (char-after
-                  (+ (oref (plist-get root-row :section) start)
-                     (plist-get root-row :indicator-offset)))
-                 (string-to-char "▸"))))
+    (should (equal (pilish-test--browse-gutter
+                    (pilish-test--browse-fold-row-start "node-1"))
+                   "▸"))
     (should (invisible-p (pilish-test--browse-fold-row-start "node-501")))
     (pilish-browse-fold-all t)
     (should-not pilish--browse-fold-overlays)
@@ -10201,6 +10187,143 @@ just the session browser (V14)."
                    "<left-fringe> <mouse-1>"
                    "<left-fringe> <mouse-2>"))
       (should-not (lookup-key map (kbd key))))))
+
+(defun pilish-test--browse-gutter (position)
+  "Return the displayed gutter string at POSITION, or nil."
+  (let ((prefix (get-text-property position 'line-prefix)))
+    (when (stringp prefix)
+      (let ((display (get-text-property 0 'display prefix)))
+        (when (equal (car-safe display) '(margin left-margin))
+          (cadr display))))))
+
+(defun pilish-test--browse-disclosure-fixture (mode)
+  "Render a small family with literal triangles under browser MODE."
+  (funcall mode)
+  (if (eq mode 'pilish-tree-browser-mode)
+      (setq pilish--tree-browser-tree
+            [(:id "parent" :type "message" :role "user" :preview "Parent ▸"
+              :children [(:id "child" :type "message" :role "assistant"
+                          :preview "Child ▾" :children [])])]
+            pilish--tree-browser-leaf-id "child"
+            pilish--tree-browser-filter 'default)
+    (setq pilish--session-browser-items
+          '((:path "/tmp/parent.jsonl" :name "Parent ▸"
+             :modified "2026-01-01T00:00:00Z")
+            (:path "/tmp/child.jsonl" :name "Child ▾"
+             :parentSessionPath "/tmp/parent.jsonl"
+             :modified "2026-01-02T00:00:00Z"))
+          pilish--session-browser-view 'threaded))
+  (if (eq mode 'pilish-tree-browser-mode)
+      (pilish--tree-browser-rerender)
+    (pilish--session-browser-rerender)))
+
+(ert-deftest pilish-test-browser-disclosure-nonfoldable-and-flat-rows ()
+  "Recent groups have carets; leaves, queries and message sorting do not."
+  (with-temp-buffer
+    (pilish-test--browse-disclosure-fixture 'pilish-session-browser-mode)
+    (dolist (view '(recent messages threaded))
+      (setq pilish--session-browser-view view
+            pilish--session-browser-search-tokens (and (eq view 'threaded) '("Child")))
+      (pilish--session-browser-rerender)
+      (dolist (row pilish--browse-fold-rows)
+        (let* ((section (plist-get row :section))
+               (start (oref section start))
+               (end (oref section end)))
+          (should (equal (pilish-test--browse-gutter start)
+                         (and (eq view 'recent)
+                              (eq (oref section type) 'time-group) "▾")))
+          (unless (plist-get row :foldable)
+            (pilish--put-disclosure start end nil #'ignore)
+            (pilish--browse-apply-folds)
+            (should-not (get-text-property start 'pilish-disclosure-hit))))))))
+
+(ert-deftest pilish-test-browser-disclosure-gutter-and-owner ()
+  "Both browsers paint outside text and dispatch only exact live owners."
+  (dolist (mode '(pilish-session-browser-mode pilish-tree-browser-mode))
+    (save-window-excursion
+      (with-temp-buffer
+        (switch-to-buffer (current-buffer))
+        (pilish-test--browse-disclosure-fixture mode)
+        (let* ((parent (car pilish--browse-fold-rows))
+               (child (cadr pilish--browse-fold-rows))
+               (p (marker-position (oref (plist-get parent :section) start)))
+               (c (marker-position (oref (plist-get child :section) start)))
+               (glyph (pilish-test--browse-gutter p))
+               (before (buffer-substring-no-properties (point-min) (point-max)))
+               (event (list 'mouse-1
+                            (list (selected-window) 'left-margin '(0 . 0) 0
+                                  (cons glyph 0) p))))
+          (should (equal glyph "▾"))
+          (should-not (pilish-test--browse-gutter c))
+          (should (= (cl-count ?▸ before) 1))
+          (should (= (cl-count ?▾ before) 1))
+          (should (eq (key-binding [left-margin mouse-1]) #'pilish--disclosure-click))
+          (pilish--disclosure-click event)
+          (should (pilish--browse-folded-p (plist-get parent :value)))
+          (should (invisible-p c))
+          (should (equal (pilish-test--browse-gutter p) "▸"))
+          (should (equal before (buffer-substring-no-properties (point-min) (point-max))))
+          (pilish--disclosure-click event)
+          (should (pilish--browse-folded-p (plist-get parent :value)))
+          (pilish--disclosure-click
+           (list 'mouse-1 (list (selected-window) 'left-margin '(0 . 0) 0 nil c)))
+          (should (pilish--browse-folded-p (plist-get parent :value)))
+          (pilish--disclosure-click
+           (list 'mouse-1 (list (selected-window) 'left-margin '(0 . 0) 0
+                               (cons (pilish-test--browse-gutter p) 0) c)))
+          (should (pilish--browse-folded-p (plist-get parent :value)))
+          (pilish--disclosure-click
+           (list 'mouse-1 (list (selected-window) 'left-margin '(0 . 0) 0
+                               (cons (pilish-test--browse-gutter p) 0) p)))
+          (should-not (pilish--browse-folded-p (plist-get parent :value)))
+          (goto-char c)
+          (pilish-browse-toggle-fold)
+          (should (pilish--browse-folded-p (plist-get parent :value))))))))
+
+(ert-deftest pilish-test-browser-disclosure-copy-keeps-hidden-source ()
+  "Ordinary copy includes folded descendants but strips only common paint."
+  (dolist (mode '(pilish-session-browser-mode pilish-tree-browser-mode))
+    (with-temp-buffer
+      (pilish-test--browse-disclosure-fixture mode)
+      (goto-char (point-min))
+      (pilish-browse-toggle-fold)
+      (let* ((p (point-min))
+             (inhibit-read-only t)
+             (prefix (get-text-property p 'line-prefix))
+             (hit (get-text-property p 'pilish-disclosure-hit))
+             (source (buffer-substring-no-properties (point-min) (point-max))))
+        (put-text-property p (1+ p) 'unrelated-copy-data 'keep)
+        (let ((copy (filter-buffer-substring (point-min) (point-max))))
+          (should (equal (substring-no-properties copy) source))
+          (should (string-match-p "Child ▾" copy))
+          (should (string-match-p "Parent ▸" copy))
+          (should (eq (get-text-property 0 'unrelated-copy-data copy) 'keep))
+          (should-not (text-property-not-all 0 (length copy) 'pilish-disclosure-hit nil copy))
+          (should-not (get-text-property 0 'line-prefix copy))
+          (should (eq hit (get-text-property p 'pilish-disclosure-hit)))
+          (should (eq prefix (get-text-property p 'line-prefix))))))))
+
+(ert-deftest pilish-test-browser-disclosure-all-window-margins ()
+  "Both browsers reserve a gutter in all windows without shrinking margins."
+  (dolist (mode '(pilish-session-browser-mode pilish-tree-browser-mode))
+    (save-window-excursion
+      (delete-other-windows)
+      (with-temp-buffer
+        (funcall mode)
+        (switch-to-buffer (current-buffer))
+        (let* ((first (selected-window))
+               (second (split-window-below))
+               (required (if (eq mode 'pilish-session-browser-mode) 20 16)))
+          (set-window-buffer second (current-buffer))
+          (set-window-margins first 3 (+ required 4))
+          (set-window-margins second 0 2)
+          (run-hooks 'window-configuration-change-hook)
+          (should (>= left-margin-width 1))
+          (should (equal (window-margins first) (cons 3 (+ required 4))))
+          (should (equal (window-margins second) (cons 1 required)))
+          (set-window-margins second 5 (+ required 7))
+          (run-hooks 'window-configuration-change-hook)
+          (should (equal (window-margins second) (cons 5 (+ required 7)))))))))
 
 (provide 'pilish-browse-test)
 ;;; pilish-browse-test.el ends here

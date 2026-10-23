@@ -3313,12 +3313,12 @@ The tree is built iteratively to avoid recursion in test setup."
         (should button)
         (pilish--toggle-tool-output button))
       (should (string-match-p "L12" (buffer-string)))
-      (should (string-match-p "\\[-\\]" (buffer-string)))
+      (should (button-get (pilish--find-toggle-button-in-region (point-min) (point-max)) 'pilish-expanded))
       (pilish-toggle-thinking-display)
       (let ((text (buffer-string)))
         (should (string-match-p "L12" text))
-        (should (string-match-p "\\[-\\]" text))
-        (should-not (string-match-p "\\.\\.\\. ([0-9]+ more lines)" text))))))
+        (should (button-get (pilish--find-toggle-button-in-region (point-min) (point-max)) 'pilish-expanded))
+        (should-not (string-match-p "[▸▾] Output" text))))))
 
 (ert-deftest pilish-test-menu-model-description-uses-short-name ()
   "Menu model description shows shortened name, not full \"Claude Opus 4.6\"."

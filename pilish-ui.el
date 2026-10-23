@@ -58,6 +58,7 @@
 (declare-function pilish-visit-file "pilish-render")
 (declare-function pilish-copy-file-path "pilish-render")
 (declare-function pilish--dispatch-button "pilish-render")
+(declare-function pilish--toggle-startup-banner-at-point "pilish-render")
 (declare-function pilish--cleanup-on-kill "pilish-render")
 (declare-function pilish--cleanup-transcript-on-kill "pilish-render")
 (declare-function pilish-next-subagent-name "pilish-render")
@@ -592,6 +593,8 @@ Return nil when PATH is not a string."
     (define-key map (kbd "<tab>") #'pilish-toggle-tool-section)
     (define-key map (kbd "C-c ]") #'pilish-next-subagent-name)
     (define-key map (kbd "C-c [") #'pilish-previous-subagent-name)
+    (define-key map [left-margin down-mouse-1] #'ignore)
+    (define-key map [left-margin mouse-1] #'pilish--disclosure-click)
     (define-key map [remap push-button] #'pilish--dispatch-button)
     map)
   "Display-only transcript keymap.")
@@ -910,6 +913,131 @@ DIR is the session directory and SESSION is the optional named-session suffix."
   "Restore the read-only contract for transcript buffers after saving."
   (setq buffer-read-only t))
 
+(defun pilish--disclosure-clean-prefix (prefix)
+  "Return PREFIX without owned disclosure fragments, preserving other paint."
+  (if (not (stringp prefix)) prefix
+    (let ((position 0) parts)
+      (while (< position (length prefix))
+        (let ((next (next-single-property-change
+                     position 'pilish-disclosure-hit prefix (length prefix))))
+          (unless (get-text-property position 'pilish-disclosure-hit prefix)
+            (push (substring prefix position next) parts))
+          (setq position next)))
+      (let ((text (apply #'concat (nreverse parts))))
+        (cond
+         ((string-empty-p text) nil)
+         ((and (= (length text) 1)
+               (get-text-property 0 'pilish-disclosure-native-prefix text))
+          (get-text-property 0 'display text))
+         (t text))))))
+
+(defun pilish--disclosure-compose-prefix (caret prefix)
+  "Prepend CARET to PREFIX, replacing owned disclosure paint reversibly."
+  (let ((base (pilish--disclosure-clean-prefix prefix)))
+    (concat caret
+            (if (or (null base) (stringp base)) base
+              (propertize " " 'display base 'pilish-disclosure-native-prefix t)))))
+
+(defun pilish--disclosure-hidden-p (position object)
+  "Return non-nil when POSITION in OBJECT contributes no display text."
+  (or (equal (get-text-property position 'display object) "")
+      (invisible-p (get-text-property position 'invisible object))))
+
+(defun pilish--put-disclosure (beg end expanded activate &optional object)
+  "Paint one disclosure on the first displaying row of BEG..END in OBJECT.
+OBJECT is a string or nil for the current buffer.  Return OBJECT.
+ACTIVATE is an owner action symbol, never a closure or retained fold state.
+Nil ACTIVATE removes only owned paint.  EXPANDED selects the caret.
+A fresh [ACTIVATE] witness tags the prefix and its bounded source envelope.
+Leading hidden wrappers must be included in the supplied display envelope."
+  (unless (symbolp activate) (error "Disclosure action must be a symbol"))
+  (with-silent-modifications
+    (dolist (property '(line-prefix wrap-prefix))
+      (let ((position beg))
+        (while (< position end)
+          (let* ((next (next-single-property-change position property object end))
+                 (prefix (get-text-property position property object)))
+            (when (stringp prefix)
+              (put-text-property position next property
+                                 (pilish--disclosure-clean-prefix prefix) object))
+            (setq position next)))))
+    (remove-text-properties beg end '(pilish-disclosure-hit nil) object)
+    (when activate
+      (let ((first beg))
+        (while (and (< first end) (pilish--disclosure-hidden-p first object))
+          (setq first (min (next-single-property-change first 'display object end)
+                           (next-single-property-change first 'invisible object end))))
+        (when (< first end)
+          (let* ((row-end (if object
+                              (if-let* ((newline (string-match-p "\n" object first)))
+                                  (min end (1+ newline)) end)
+                            (save-excursion
+                              (goto-char first) (min end (1+ (line-end-position))))))
+                 (hit (vector activate))
+                 (glyph (propertize (if expanded "▾" "▸")
+                                    'face '(:inherit shadow :slant normal)
+                                    'pilish-disclosure-hit hit))
+                 (proxy (propertize " " 'display `((margin left-margin) ,glyph)
+                                    'pilish-disclosure-hit hit))
+                 (position beg))
+            (while (< position row-end)
+              (let ((next (next-single-property-change position 'line-prefix object row-end))
+                    (prefix (get-text-property position 'line-prefix object)))
+                (put-text-property position next 'line-prefix
+                                   (pilish--disclosure-compose-prefix proxy prefix) object)
+                (setq position next)))
+            (add-text-properties beg row-end
+                                 `(pilish-disclosure-hit ,hit rear-nonsticky t) object))))))
+  object)
+
+(defun pilish--disclosure-click (event)
+  "Invoke the owner of EVENT's exact, still attached margin witness."
+  (interactive "e")
+  (let* ((position (event-start event))
+         (window (posn-window position))
+         (source (posn-point position))
+         (displayed (posn-string position))
+         (hit (and displayed
+                   (get-text-property (cdr displayed) 'pilish-disclosure-hit (car displayed)))))
+    (when (and (window-live-p window) (integerp source)
+               (eq (posn-area position) 'left-margin)
+               (vectorp hit) (= (length hit) 1) (symbolp (aref hit 0)))
+      (with-selected-window window
+        (when (and (<= (point-min) source) (< source (point-max))
+                   (eq hit (get-text-property source 'pilish-disclosure-hit))
+                   (let ((prefix (get-text-property source 'line-prefix)))
+                     (and (stringp prefix)
+                          (text-property-any 0 (length prefix) 'pilish-disclosure-hit hit prefix))))
+          (let ((first (previous-single-property-change
+                        (1+ source) 'pilish-disclosure-hit nil (point-min)))
+                (end (next-single-property-change source 'pilish-disclosure-hit nil (point-max))))
+            (while (and (< first end) (pilish--disclosure-hidden-p first nil))
+              (setq first (min (next-single-property-change first 'display nil end)
+                               (next-single-property-change first 'invisible nil end))))
+            (when (< first end)
+              (goto-char first)
+              (funcall (aref hit 0)))))))))
+
+(defun pilish--disclosure-filter-substring (beg end &optional delete)
+  "Copy ordinary characters in BEG..END without disclosure paint.
+Honor DELETE.  Hidden character inclusion follows `buffer-substring--filter',
+not transcript visible-text policy.  The source and unrelated paint stay intact."
+  (let ((text (buffer-substring--filter beg end delete)))
+    (pilish--put-disclosure 0 (length text) nil nil text)))
+
+(defun pilish--apply-disclosure-margins ()
+  "Maintain buffer margin minima in every displaying window.
+Reserve at least one left column and preserve each window's larger margins."
+  (setq-local left-margin-width (max 1 (or left-margin-width 0)))
+  (dolist (window (get-buffer-window-list (current-buffer) nil t))
+    (let* ((old (window-margins window))
+           (left (max left-margin-width (or (car old) 0)))
+           (right (if (> (or right-margin-width 0) 0)
+                      (max right-margin-width (or (cdr old) 0))
+                    (cdr old))))
+      (unless (equal old (cons left right))
+        (set-window-margins window left right)))))
+
 (define-derived-mode pilish-transcript-mode md-ts-mode "Pi-Transcript"
   "Read-only Markdown transcript display without session ownership."
   :group 'pilish
@@ -920,6 +1048,9 @@ DIR is the session directory and SESSION is the optional named-session suffix."
   (buffer-disable-undo)
   (setq-local truncate-lines nil)
   (setq-local word-wrap t)
+  (pilish--apply-disclosure-margins)
+  (add-hook 'window-configuration-change-hook
+            #'pilish--apply-disclosure-margins nil t)
   ;; Hide markdown markup (**, `, ```) for cleaner display
   (setq-local md-ts-hide-markup t)
   (md-ts--set-hide-markup t)
@@ -2717,26 +2848,27 @@ includes \"pilish V\" from `pilish-version'."
 STATE is `compact' or `expanded'; the `pilish-startup-banner' text property
 marks the toggleable span and records its current display, mirroring how
 completed thinking blocks tag their spans."
-  (propertize text
-              'pilish-startup-banner state
-              'help-echo "TAB: toggle session details"))
+  (setq text (propertize text
+                         'pilish-startup-banner state
+                         'help-echo "TAB: toggle session details"))
+  (pilish--put-disclosure 0 (length text) (eq state 'expanded)
+                         #'pilish--toggle-startup-banner-at-point text))
 
-(defun pilish--format-startup-banner-compact ()
-  "Return the propertized compact startup banner summary line.
-Count segments are omitted entirely while `pilish--commands' is unset, so a
-session that has not loaded commands yet never shows misleading zero
-counts."
+(defun pilish--startup-banner-summary ()
+  "Return the plain startup version and known resource counts.
+Omit counts while `pilish--commands' is unset."
   (let ((segments (pilish--startup-banner-version-segments)))
     (when pilish--commands
-      (setq segments
-            (append segments
-                    (list (format "%d skills"
-                                  (length (pilish--commands-by-source "skill")))
-                          (format "%d prompts"
-                                  (length (pilish--commands-by-source "prompt")))))))
-    (pilish--propertize-startup-banner
-     (concat (mapconcat #'identity segments " · ") " · TAB details")
-     'compact)))
+      (dolist (source '("skill" "prompt"))
+        (let ((count (length (pilish--commands-by-source source))))
+          (setq segments (append segments
+                                 (list (format "%d %s%s" count source
+                                               (if (= count 1) "" "s"))))))))
+    (string-join segments " · ")))
+
+(defun pilish--format-startup-banner-compact ()
+  "Return the compact startup summary with its existing banner authority."
+  (pilish--propertize-startup-banner (pilish--startup-banner-summary) 'compact))
 
 (defun pilish--startup-banner-region ()
   "Return the startup banner span in the current buffer as (START . END).
