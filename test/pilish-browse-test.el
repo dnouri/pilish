@@ -3529,7 +3529,7 @@ snapshot untouched."
 
 (defconst pilish-test--narrow-body-columns 32
   "Usable text columns of the narrowest supported session browser.
-A 52-column terminal with the mode's 20-column right margin leaves
+A 53-column terminal with the browser's 21 columns of combined margins leaves
 32 body columns; empty-state hint lines must fit, since a truncated
 hint hides the recovery key it names.")
 

@@ -2112,8 +2112,8 @@ real keybinding: \\[pilish-session-browser-toggle-scope] switches
 scope, \\[pilish-session-browser-toggle-named] clears named-only,
 and an empty \\[pilish-session-browser-search] input clears the
 query.  Each hint is its own short line, key first, so the recovery
-action survives the 32 usable columns of a 52-column terminal with
-the 20-column right margin — one long sentence would truncate
+action survives the 32 usable columns of a 53-column terminal with
+21 columns of combined margins — one long sentence would truncate
 before its first key.  Precedence under `filter' follows recency of
 narrowing — the query first, then named-only, then the scope switch
 — with at most two hints; an empty All-projects scan has no wider
