@@ -280,6 +280,12 @@ FORMS must start with a literal session options plist containing an explicit
          (pilish-gui-test--capture-failure-snapshot)
          (pilish-gui-test-end-session)))))
 
+(defun pilish-gui-test--select-tests-or-error (selector)
+  (let ((tests (ert-select-tests selector t)))
+    (unless tests
+      (user-error "Selector matched no tests: %S" selector))
+    tests))
+
 ;;;; Waiting
 
 (defun pilish-gui-test-idle-p ()

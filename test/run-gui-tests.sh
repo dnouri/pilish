@@ -112,7 +112,14 @@ cat >> "$RUNNER_FILE" << EOF
        (skipped 0)
        (failed 0)
        (total 0)
-       (test-list (pilish-gui-test--order-tests (ert-select-tests selector t))))
+       (test-list
+        (condition-case err
+            (pilish-gui-test--order-tests
+             (pilish-gui-test--select-tests-or-error selector))
+          (error
+           (pilish-gui-test--log "GUI test selection failed: %s"
+                                 (error-message-string err))
+           (kill-emacs 2)))))
   (setq total (length test-list))
   (pilish-gui-test--log "Running %d GUI tests..." total)
   (with-temp-buffer

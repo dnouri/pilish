@@ -43,5 +43,19 @@
                (lambda () 'layout-ok)))
       (should (eq (pilish-gui-test-ensure-session) 'layout-ok)))))
 
+(ert-deftest pilish-gui-test-utils-test-select-tests-rejects-zero-matches ()
+  (let* ((selector "pilish-gui-test-definitely-no-such-test")
+         (error (should-error
+                 (pilish-gui-test--select-tests-or-error selector)
+                 :type 'user-error)))
+    (should (string-match-p (regexp-quote selector)
+                            (error-message-string error)))))
+
+(ert-deftest pilish-gui-test-utils-test-select-tests-returns-matches ()
+  (let* ((name 'pilish-gui-test-utils-test-select-tests-returns-matches)
+         (tests (pilish-gui-test--select-tests-or-error (symbol-name name))))
+    (should (= 1 (length tests)))
+    (should (eq name (ert-test-name (car tests))))))
+
 (provide 'pilish-gui-test-utils-test)
 ;;; pilish-gui-test-utils-test.el ends here
