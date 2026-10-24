@@ -994,7 +994,7 @@ buffer (jit-lock active) to verify under real GUI conditions."
 window.
 Renders the session browser in a dedicated buffer and frame whose
 window body is exactly 32 columns wide — the text area of a
-52-column terminal next to the mode's 20-column right margin
+53-column terminal next to the browser's 21 columns of combined margins
 \\(`window-body-width' already excludes margins) — and checks
 visibility with display widths (`string-width'), not character
 offsets.  Adversarial fixtures: two projects sharing a long common
@@ -1045,7 +1045,8 @@ keep their recovery keys on screen too."
     ;; already created.
     (unwind-protect
         (progn
-          (setq frame (make-frame '((width . 52) (height . 22))))
+          ;; Includes the 21 margin columns; resizing later is not portable.
+          (setq frame (make-frame '((width . 53) (height . 22))))
           (setq win (frame-selected-window frame))
           (setq buffer (generate-new-buffer " *pilish-gui-narrow*"))
           (setq chat-buf
