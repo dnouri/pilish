@@ -21431,6 +21431,45 @@ invisible, or markdown face properties."
         (should (eq (get-text-property pos 'face)
                     'pilish-tool-command))))))
 
+(ert-deftest pilish-test-restore-tool-properties-without-native-link-cleanup ()
+  "Literal repair works without md-ts's optional link cleanup helper."
+  (let* ((native-cleanup
+          (and (fboundp 'md-ts--remove-link-button-properties)
+               (symbol-function 'md-ts--remove-link-button-properties)))
+         (image '(image :type png :data "preview")))
+    (dolist (cleanup (if native-cleanup (list native-cleanup nil) '(nil)))
+      (ert-info ((if cleanup "Native helper present" "Native helper absent"))
+        ;; A plain buffer prevents native fontification while the helper is absent.
+        (with-temp-buffer
+          (insert (propertize "**literal**\n"
+                              'pilish-argument-literal t
+                              'font-lock-face 'pilish-tool-command))
+          (let* ((outcome-start (point))
+                 (image-start
+                  (progn
+                    (insert (propertize "[Error] __failed__\n"
+                                        'pilish-assistant-outcome t))
+                    (point))))
+            (insert (pilish--image-preview-string "Image\n" image))
+            (add-text-properties (point-min) image-start
+                                 '(display "Markdown replacement"
+                                   invisible md-ts--markup face md-ts-bold))
+            (cl-letf (((symbol-function 'md-ts--remove-link-button-properties)
+                       cleanup))
+              (pilish--restore-tool-properties (point-min) (point-max)))
+            (should (equal (buffer-substring-no-properties (point-min) (point-max))
+                           "**literal**\n[Error] __failed__\nImage\n"))
+            (should-not (text-property-not-all
+                         (point-min) image-start 'display nil))
+            (should-not (text-property-not-all
+                         (point-min) image-start 'invisible nil))
+            (should-not (text-property-not-all
+                         (point-min) outcome-start 'face 'pilish-tool-command))
+            (should-not (text-property-not-all
+                         outcome-start image-start 'face 'pilish-error-notice))
+            (should (equal (get-text-property image-start 'display) image))
+            (should (get-text-property image-start 'pilish-image-preview))))))))
+
 (ert-deftest pilish-test-restore-tool-properties-restores-all-live-tool-headers ()
   "restore-tool-properties repairs every overlapping live tool header."
   (with-temp-buffer
