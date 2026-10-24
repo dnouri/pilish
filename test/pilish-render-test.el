@@ -21432,7 +21432,6 @@ invisible, or markdown face properties."
                     'pilish-tool-command))))))
 
 (ert-deftest pilish-test-restore-tool-properties-without-native-link-cleanup ()
-  "Literal repair works without md-ts's optional link cleanup helper."
   (let* ((native-cleanup
           (and (fboundp 'md-ts--remove-link-button-properties)
                (symbol-function 'md-ts--remove-link-button-properties)))

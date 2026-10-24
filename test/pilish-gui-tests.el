@@ -1045,7 +1045,6 @@ keep their recovery keys on screen too."
     ;; already created.
     (unwind-protect
         (progn
-          ;; Includes the 21 margin columns; resizing later is not portable.
           (setq frame (make-frame '((width . 53) (height . 22))))
           (setq win (frame-selected-window frame))
           (setq buffer (generate-new-buffer " *pilish-gui-narrow*"))
