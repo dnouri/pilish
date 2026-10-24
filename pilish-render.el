@@ -4562,7 +4562,9 @@ This boundary copies identity strings and performs no disk reads."
 (defun pilish--saved-conversation-labels (tool-name content details)
   "Capture saved labels for TOOL-NAME's observed CONTENT and DETAILS.
 Return nil when there is no neutral declaration.  Malformed declarations
-and adapter failures return an inert label carrying the failure reason."
+and adapter failures return an inert label carrying the failure reason.
+Historical results without declarations remain readable without inferred
+links.  Do not rewrite saved files or add a legacy adapter."
   (condition-case err
       (let* ((explicit (pilish--tool-arg-member details :savedConversations))
              (declaration
