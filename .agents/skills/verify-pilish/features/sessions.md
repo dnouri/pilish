@@ -26,6 +26,7 @@ Preconditions:
 ## Gotchas
 
 - The large browser scenario uses 2,000 synthetic rows in each browser. It enters the modes directly and does not resume those rows.
+- PNG capture requires `x-export-frames`. Missing PNGs make the screenshot requirement blocked even when the assertions pass.
 - The resume bench calls `pilish-session-browser-switch` directly. These recipes do not cover the `C-c C-r`, `/resume`, or `C-c C-p w` opening aliases, or `RET` key dispatch.
 - The reload and resume scenario proves correctness only. Do not cite its timings as a performance result.
 - The benchmark runner replaces its marked output directory on a later run. Always give it a new feature-owned directory.
