@@ -2350,10 +2350,10 @@ larger window when the selected one cannot be split."
 ;; During streaming, windows "following" output (window-point at buffer end)
 ;; scroll to show new content. Windows where the user scrolled up stay put.
 ;;
-;; Key mechanism: `window-point-insertion-type' is set to t in pilish-chat-mode,
-;; making window-point move with inserted text. We track which windows are
-;; following before each insert, then restore point for non-following windows
-;; afterward. Emacs naturally scrolls to keep point visible.
+;; Key mechanism: each non-following window gets a temporary advancing marker
+;; before the edit.  Markers follow surviving text through insertions, deletions,
+;; and replacements.  Following windows move to the new end; other windows are
+;; restored to their markers.  Emacs naturally scrolls to keep point visible.
 
 (defun pilish--window-following-p (window)
   "Return non-nil if WINDOW is following output (point at end of buffer)."
