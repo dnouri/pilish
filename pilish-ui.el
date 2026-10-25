@@ -2350,35 +2350,54 @@ larger window when the selected one cannot be split."
 ;; During streaming, windows "following" output (window-point at buffer end)
 ;; scroll to show new content. Windows where the user scrolled up stay put.
 ;;
-;; Key mechanism: `window-point-insertion-type' is set to t in pilish-chat-mode,
-;; making window-point move with inserted text. We track which windows are
-;; following before each insert, then restore point for non-following windows
-;; afterward. Emacs naturally scrolls to keep point visible.
+;; Key mechanism: each non-following window gets a temporary advancing marker
+;; before the edit.  Markers follow surviving text through insertions, deletions,
+;; and replacements.  Following windows move to the new end; other windows are
+;; restored to their markers.  Emacs naturally scrolls to keep point visible.
 
 (defun pilish--window-following-p (window)
   "Return non-nil if WINDOW is following output (point at end of buffer)."
   (>= (window-point window) (1- (point-max))))
 
 (defmacro pilish--with-scroll-preservation (&rest body)
-  "Execute BODY preserving scroll for windows not following output.
-Windows at buffer end will scroll to show new content.
-Windows where user scrolled up stay in place.
-Valid for append-only inserts; for mid-buffer rewrites like tool cooling, see
-`pilish--capture-tool-cooling-view' in pilish-render.el."
+  "Execute BODY preserving text-relative points for non-following windows.
+Windows at buffer end follow the new end.  Other window points track edits
+with advancing markers.  Restore points only when BODY completes normally,
+and only in live windows still displaying the original buffer.
+Return nil.  Window starts are not preserved."
   (declare (indent 0) (debug t))
-  `(let* ((windows (get-buffer-window-list (current-buffer) nil t))
-          (following (cl-remove-if-not #'pilish--window-following-p windows))
-          (saved-points (mapcar (lambda (w) (cons w (window-point w)))
-                                (cl-remove-if #'pilish--window-following-p windows))))
-     ,@body
-     ;; Restore point for non-following windows
-     (dolist (pair saved-points)
-       (when (window-live-p (car pair))
-         (set-window-point (car pair) (cdr pair))))
-     ;; Move following windows to new end
-     (dolist (win following)
-       (when (window-live-p win)
-         (set-window-point win (point-max))))))
+  (let ((buffer (make-symbol "buffer"))
+        (windows (make-symbol "windows"))
+        (views (make-symbol "views"))
+        (window (make-symbol "window"))
+        (view (make-symbol "view")))
+    `(let* ((,buffer (current-buffer))
+            (,windows (get-buffer-window-list ,buffer nil t))
+            (,views nil))
+       (unwind-protect
+           (progn
+             (dolist (,window ,windows)
+               (push (cons ,window
+                           (if (pilish--window-following-p ,window)
+                               :tail
+                             (copy-marker (window-point ,window) t)))
+                     ,views))
+             (setq ,views (nreverse ,views))
+             ,@body
+             (dolist (,view ,views)
+               (when (and (not (eq (cdr ,view) :tail))
+                          (window-live-p (car ,view))
+                          (eq (window-buffer (car ,view)) ,buffer))
+                 (set-window-point (car ,view) (cdr ,view))))
+             (dolist (,view ,views)
+               (when (and (eq (cdr ,view) :tail)
+                          (window-live-p (car ,view))
+                          (eq (window-buffer (car ,view)) ,buffer))
+                 (set-window-point
+                  (car ,view) (with-current-buffer ,buffer (point-max))))))
+         (dolist (,view ,views)
+           (when (markerp (cdr ,view))
+             (set-marker (cdr ,view) nil)))))))
 
 (defun pilish--append-to-chat (text)
   "Append TEXT to the chat buffer.
