@@ -10036,6 +10036,30 @@ When EXPANDED is non-nil, expand its preview before returning the overlay."
       (should (= 0 (pilish-test--count-overlays-with-prop
                     'pilish-tool-block))))))
 
+(ert-deftest pilish-test-cool-completed-tool-blocks-preserves-point-after-block ()
+  "Synchronous cooling keeps point on text after the rewritten block."
+  (let ((buffer (generate-new-buffer " *pilish-sync-cooling-point*")))
+    (unwind-protect
+        (save-window-excursion
+          (delete-other-windows)
+          (switch-to-buffer buffer)
+          (pilish-chat-mode)
+          (let ((overlay (pilish-test--render-long-cooling-read-block
+                          "sync-cooling-point" t))
+                (inhibit-read-only t))
+            (goto-char (point-max))
+            (insert "AFTER-COOLING sentinel\n")
+            (goto-char (point-min))
+            (search-forward "AFTER-COOLING sentinel")
+            (beginning-of-line)
+            (let ((old-size (point-max)))
+              (pilish--cool-completed-tool-blocks (list overlay))
+              (should (< (point-max) old-size))
+              (should-not (overlay-buffer overlay))
+              (should (looking-at-p "AFTER-COOLING sentinel"))
+              (should (= (window-point (selected-window)) (point))))))
+      (kill-buffer buffer))))
+
 (ert-deftest pilish-test-agent-end-cools-tool-blocks-outside-hot-tail ()
   "agent_end cools completed tool blocks before the hot-tail boundary.
 With hot-tail-turn-count 1, only the most recent headed turn stays hot."

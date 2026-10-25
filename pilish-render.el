@@ -6748,10 +6748,9 @@ new body end.  Positions at or after OLD-END shift by the actual length delta."
 
 (defun pilish--capture-tool-cooling-view ()
   "Capture buffer point and visible-window positions before tool cooling.
-Unlike `pilish--with-scroll-preservation', which restores unmapped
-`window-point' and is valid for append-only inserts, cooling rewrites
-mid-buffer ranges, so positions and window starts must be mapped through
-the replacement."
+Unlike the marker-based `pilish--with-scroll-preservation', cooling also
+preserves buffer point and window starts, mapping all positions through
+explicit replacement bounds."
   (list
    :point (point)
    :windows

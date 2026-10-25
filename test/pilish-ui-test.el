@@ -1840,6 +1840,71 @@ Buffer is read-only with `inhibit-read-only' used for insertion.
         (pilish-test--kill-session-buffers root-a)
         (pilish-test--kill-session-buffers root-b)))))
 
+;;; Scroll Preservation
+
+(ert-deftest pilish-test-scroll-preservation-keeps-reader-and-tail-points ()
+  "An insertion keeps a nonselected reader and a follower on their text."
+  (let ((chat (generate-new-buffer " *pilish-scroll-reader-and-tail*")))
+    (unwind-protect
+        (save-window-excursion
+          (delete-other-windows)
+          (switch-to-buffer chat)
+          (pilish-chat-mode)
+          (let ((inhibit-read-only t))
+            (insert "AFTER-STREAM sentinel\n")
+            (let* ((reader (selected-window))
+                   (tail (split-window-right))
+                   (reader-point (point-min)))
+              (set-window-buffer tail chat)
+              (set-window-point tail (point-max))
+              (goto-char reader-point)
+              (set-window-start reader (point-min) t)
+              (select-window tail)
+              (should-not (pilish--window-following-p reader))
+              (should (pilish--window-following-p tail))
+              (should
+               (null
+                (pilish--with-scroll-preservation
+                  (save-excursion
+                    (goto-char reader-point)
+                    (insert "streamed output\n")
+                    'body-value))))
+              (with-selected-window reader
+                (should (looking-at-p "AFTER-STREAM sentinel"))
+                (should (= (window-point reader) (point))))
+              (should (= (window-point tail) (point-max))))))
+      (kill-buffer chat))))
+
+(ert-deftest pilish-test-scroll-preservation-keeps-point-after-contraction ()
+  "A deletion before point keeps a nonselected reader on the same text."
+  (let ((chat (generate-new-buffer " *pilish-scroll-contraction*"))
+        (input (generate-new-buffer " *pilish-scroll-input*")))
+    (unwind-protect
+        (save-window-excursion
+          (delete-other-windows)
+          (switch-to-buffer chat)
+          (pilish-chat-mode)
+          (let ((inhibit-read-only t))
+            (insert "remove this prefix\nAFTER-STREAM sentinel\n")
+            (goto-char (point-min))
+            (search-forward "AFTER-STREAM sentinel")
+            (beginning-of-line)
+            (let* ((reader (selected-window))
+                   (input-window (split-window-below))
+                   (sentinel (point)))
+              (set-window-buffer input-window input)
+              (set-window-point reader sentinel)
+              (select-window input-window)
+              (with-current-buffer chat
+                (pilish--with-scroll-preservation
+                  (save-excursion
+                    (delete-region (point-min) sentinel))))
+              (with-selected-window reader
+                (should (looking-at-p "AFTER-STREAM sentinel"))
+                (should (= (window-point reader) (point)))))))
+      (kill-buffer chat)
+      (kill-buffer input))))
+
 ;;; Turn Detection
 
 (ert-deftest pilish-test-turn-index-on-first-heading ()
