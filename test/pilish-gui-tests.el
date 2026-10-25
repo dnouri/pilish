@@ -420,6 +420,44 @@ raced a turn that was never submitted."
       (should (= line-before (pilish-gui-test-top-line-number)))
       (should (pilish-gui-test-chat-contains "fake tool output")))))
 
+(ert-deftest pilish-gui-test-tool-streaming-preserves-point-after-block ()
+  "Tool growth and contraction keep point on text after the block."
+  (let ((buf (get-buffer-create "*pi-gui-tool-point-stability*")))
+    (unwind-protect
+        (progn
+          (switch-to-buffer buf)
+          (pilish-chat-mode)
+          (let ((block (pilish--display-tool-start
+                        "bash" '(:command "demo") "point-stability"))
+                (inhibit-read-only t)
+                after-expansion after-contraction)
+            (goto-char (point-max))
+            (insert "AFTER-TOOL sentinel\n")
+            (goto-char (point-min))
+            (search-forward "AFTER-TOOL sentinel")
+            (beginning-of-line)
+            (set-window-point (selected-window) (point))
+            (redisplay)
+            (pilish--display-tool-update
+             '(:content [(:type "text" :text "one\ntwo\nthree\n")])
+             block)
+            (redisplay)
+            (setq after-expansion
+                  (pilish-gui-test--window-current-line (selected-window)))
+            (goto-char (point-min))
+            (search-forward "AFTER-TOOL sentinel")
+            (beginning-of-line)
+            (set-window-point (selected-window) (point))
+            (pilish--display-tool-end
+             "bash" '(:command "demo")
+             '[(:type "text" :text "final\n")] nil nil block)
+            (redisplay)
+            (setq after-contraction
+                  (pilish-gui-test--window-current-line (selected-window)))
+            (should (equal '("AFTER-TOOL sentinel" "AFTER-TOOL sentinel")
+                           (list after-expansion after-contraction)))))
+      (kill-buffer buf))))
+
 (ert-deftest pilish-gui-test-scroll-auto-when-at-end ()
   "Test auto-scroll when user is at end across deterministic fake turns.
 Regression: `pilish--display-agent-end' must leave window-point at
