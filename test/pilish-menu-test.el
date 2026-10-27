@@ -1594,6 +1594,32 @@ Pi v0.51.3+ renamed SlashCommandSource from \"template\" to \"prompt\"."
   (cl-find-if (lambda (obj) (equal (oref obj key) key))
               transient--suffixes))
 
+(ert-deftest pilish-test-reply-details-menu-transcript-only ()
+  "Only transcript-origin menus advertise completed-block details."
+  (save-window-excursion
+    (dolist (mode '(pilish-chat-mode pilish-snapshot-mode pilish-input-mode))
+      (with-temp-buffer
+        (funcall mode)
+        (unwind-protect
+            (progn
+              (switch-to-buffer (current-buffer))
+              (transient-setup 'pilish-menu)
+              (let ((suffix (pilish-test--suffix-key-bound-p "d")))
+                (if (derived-mode-p 'pilish-transcript-mode)
+                    (progn
+                      (should suffix)
+                      (should-not (oref suffix inactive))
+                      (should (equal (transient-format-description suffix) "details"))
+                      (should (eq (lookup-key transient--transient-map (kbd "d"))
+                                  #'pilish-describe-reply)))
+                  (should (oref suffix inactive)))
+                (let ((rendered (with-temp-buffer
+                                  (transient--insert-groups)
+                                  (buffer-string))))
+                  (should (eq (not (null (string-match-p "details" rendered)))
+                              (not (null (derived-mode-p 'pilish-transcript-mode))))))))
+          (transient--emergency-exit))))))
+
 (ert-deftest pilish-test-transient-opens-session-and-tree-browsers ()
   "The main menu exposes the session and tree browser actions."
   (transient-setup 'pilish-menu)

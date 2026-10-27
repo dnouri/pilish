@@ -624,6 +624,19 @@ Closes the category from issue #234: any instance without a usable
         (pilish-test--kill-session-buffers root)
         (delete-other-windows)))))
 
+(ert-deftest pilish-test-reply-details-shared-transcript-keys ()
+  "Only transcripts remap local help to completed-block inspection."
+  (should-not (lookup-key pilish-transcript-mode-map (kbd "C-c C-d")))
+  (dolist (mode '(pilish-chat-mode pilish-snapshot-mode))
+    (with-temp-buffer
+      (funcall mode)
+      (should-not (key-binding (kbd "C-c C-d")))
+      (should (eq (key-binding (kbd "C-h .")) #'pilish--transcript-local-help))))
+  (with-temp-buffer
+    (pilish-input-mode)
+    (should-not (key-binding (kbd "C-c C-d")))
+    (should (eq (key-binding (kbd "C-h .")) #'display-local-help))))
+
 (ert-deftest pilish-test-chat-mode-map-binds-commands ()
   "Chat mode map binds abort, session, context, model, and info chords."
   (dolist (expected '(("C-c C-k" . pilish-abort)

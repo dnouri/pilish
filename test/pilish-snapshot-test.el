@@ -320,6 +320,67 @@
                   (should (buffer-live-p input)))))
           (pilish-test--kill-live-buffers snapshot second))))))
 
+(ert-deftest pilish-test-snapshot-details-survive-source-death ()
+  "Every saved block opens detached Help without timing, RPC, or source retention."
+  (pilish-test--with-snapshot-files
+    (pilish-test--snapshot-write
+     child (list header
+                 '(:type "message" :id "reply" :parentId :null
+                   :message (:role "assistant" :timestamp 0 :provider "saved"
+                             :model "historical" :usage (:input 0 :output 7)
+                             :content [(:type "text" :text "Saved inspected answer")
+                                       (:type "thinking" :thinking "Saved private thinking")
+                                       (:type "toolCall" :id "A" :name "bash"
+                                        :arguments (:command "printf '\\[find-file]' %"))]))
+                 '(:type "message" :id "result" :parentId "reply"
+                   :message (:role "toolResult" :toolCallId "A" :timestamp 0
+                             :content [(:type "text" :text "Saved private output")]))))
+    (save-window-excursion
+      (let (snapshot reports)
+        (unwind-protect
+            (cl-letf (((symbol-function 'pilish--rpc-async)
+                       (lambda (&rest _) (ert-fail "Saved inspector sent RPC"))))
+              (setq snapshot (pilish-open-subagent-snapshot target))
+              (dolist (text '("Saved inspected" "Saved private thinking" "Saved private output"))
+                (goto-char (point-min))
+                (search-forward text)
+                (backward-char)
+                (let ((expected (pilish--details-at-point)) shown)
+                  (should (stringp expected))
+                  (should-not (get-text-property (point) 'help-echo))
+                  (cl-letf (((symbol-function 'message)
+                             (lambda (fmt &rest args) (when fmt (setq shown (apply #'format fmt args))))))
+                    (call-interactively (key-binding (kbd "C-h ."))))
+                  (should (equal shown expected))
+                  (should-not (string-match-p "Stream:\\|Execution time:\\|Saved inspected\\|private" expected))
+                  (call-interactively #'pilish-describe-reply)
+                  (set-buffer (window-buffer (selected-window)))
+                  (should (derived-mode-p 'help-mode))
+                  (should buffer-read-only)
+                  (should (string-prefix-p (concat expected "\n") (buffer-string)))
+                  (push expected reports)
+                  (quit-window)
+                  (set-buffer (window-buffer (selected-window)))
+                  (should (eq (current-buffer) snapshot))))
+              (should (string-match-p "saved / historical" (nth 2 reports)))
+              (should (string-match-p "Message tokens: input 0 · output 7" (nth 2 reports)))
+              (should (string-match-p "saved / historical" (nth 1 reports)))
+              (should (string-match-p (regexp-quote "printf '\\[find-file]' %") (car reports)))
+              (kill-buffer snapshot)
+              (delete-file child)
+              (switch-to-buffer (get-buffer "*Help*"))
+              (dolist (report reports)
+                (revert-buffer nil t)
+                (should (string-prefix-p (concat report "\n") (buffer-string)))
+                (unless (equal report (car (last reports)))
+                  (help-xref-go-back (current-buffer))))
+              (help-xref-go-forward (current-buffer))
+              (should (string-prefix-p (nth 1 reports) (buffer-string)))
+              (help-xref-go-forward (current-buffer))
+              (should (string-prefix-p (car reports) (buffer-string))))
+          (when (buffer-live-p snapshot) (kill-buffer snapshot))
+          (when (get-buffer "*Help*") (kill-buffer "*Help*")))))))
+
 (ert-deftest pilish-test-snapshot-open-render-failure-is-not-published ()
   (pilish-test--with-snapshot-files
     (pilish-test--snapshot-write child (list header))

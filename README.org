@@ -331,11 +331,26 @@ rewrites saved files or infers links from names, run metadata, or output.
 To add links to your own tools, see =Publishing saved conversations=
 under =Extension support= in Advanced.
 
-Hover completed replies, thinking, or tool blocks for timestamps and details:
-reply provider/model and message-level token/cache usage, thinking line counts,
-or short tool command/path hints.  Native =C-h .= shows full help at point,
-including in terminals.  Reply-stream durations and output rates are
-approximate and live-only; reload or resume drops them.
+In a live chat, place point on a completed reply, thinking block, or tool
+block and press =C-c C-p d= to inspect its details in standard =*Help*=.
+In a saved snapshot, run =M-x pilish-describe-reply= on the same kinds of
+completed blocks.  Reply details include the timestamp, provider and model,
+and message-level token and cache usage.  Thinking details include line
+counts and, once the message finishes, its timestamp and provenance.
+Tool details include a short command or path hint and the saved result
+timestamp when available.
+
+Pilish selects the Help window.  Press =q= to return without quitting the
+session or closing the snapshot.  In both transcripts, =C-h .= shows the
+same details in the echo area, while native link and control help takes
+priority.  Unfinished blocks, shared headings, and trailing separators
+have no block details.
+
+Reply, thinking, and tool metadata no longer appears on automatic hover.
+Other hover behavior is unchanged, including native chat links and
+controls, input headers, browsers, and menus.  Reply-stream durations,
+output rates, and tool execution times are approximate and live-only.
+Reload or resume drops these measurements.
 
 Press =RET= on a file target to visit it: a file-content row in tool
 output, a plain path reference, or the label of a local Markdown
@@ -620,6 +635,8 @@ The main buffers:
 | =M-<prior>= / =M-<next>=  | input        | Scroll the linked chat window               |
 | =TAB=                     | chat         | Toggle summary line, thinking, tool, or turn |
 | =RET=                     | chat, snapshot | Open Pi session link or file target       |
+| =C-c C-p d=               | chat menu    | Describe a completed reply, thinking, or tool |
+| =C-h .=                   | chat, snapshot | Show native help or completed-block details |
 | =C-c ]= / =C-c [=         | chat, snapshot | Next or previous Pi session link           |
 | =g=                       | snapshot     | Reread this observer's saved conversation   |
 | =q=                       | snapshot     | Close only this saved observer              |
@@ -661,8 +678,8 @@ their Meta variants) are intentionally unbound.
 
 The transient menu (=C-c C-p=) collects the full command set — new
 session, reload, name, export, quit, compact, fork, tree, model,
-thinking, stats, and copy last — plus submenus for skills, prompt
-templates, and extension commands.  =M-x pilish-toggle= hides or
+thinking, stats, details, and copy last, plus submenus for skills,
+prompt templates, and extension commands.  =M-x pilish-toggle= hides or
 shows the session windows.
 
 #+html: <a id="troubleshooting"></a>

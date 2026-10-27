@@ -26,6 +26,7 @@ This directory maps user-facing Pilish features to their existing verification c
 - Tests with `G1_CAPTURE` support write Elisp traces and, where supported, PNG frames. Check every required file with `test -s` after cleanup.
 - Tests without capture support provide assertion logs only. Do not claim screenshot evidence for them.
 - Fake-backed tests do not prove real model or tool behavior. Correctness smoke runs do not prove performance.
+- Reply, thinking, and tool metadata is explicit-only. Unit tests check that it is absent from native hover properties and that native chat help coexists with inspection. Other hover behavior is unchanged. Headless PGTK journeys prove explicit actions, not physical hover.
 - Report an unreachable path as `verified-unreachable` only with the attempted route and concrete prerequisite. Report a deliberately unrun path as `not run`.
 - Keep proof artifacts after deleting scratch state.
 
@@ -43,7 +44,7 @@ Keep implementation ownership out of the map. The feature file names user paths,
 ## Features
 
 - [Compose and send](./compose-and-send.md) covers session layout and consecutive prompt submission.
-- [Read streamed output](./read-output.md) covers streaming, thinking display, scrolling, and table resizing.
-- [Work with tool blocks](./tool-blocks.md) covers tool output, native folds, child arguments, cursor stability, and cooling.
+- [Read streamed output](./read-output.md) covers streaming, thinking display, scrolling, table resizing, and completed-block inspection.
+- [Work with tool blocks](./tool-blocks.md) covers tool output, explicit tool details, native folds, child arguments, cursor stability, and cooling.
 - [Browse and resume sessions](./sessions.md) covers session and tree browser actions plus browser-based resume.
-- [Open saved conversations](./saved-conversations.md) covers independent observers, refresh, failure retention, and observer-only quit.
+- [Open saved conversations](./saved-conversations.md) covers independent observers, completed-block inspection, refresh, failure retention, and observer-only quit.

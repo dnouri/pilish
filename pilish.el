@@ -75,6 +75,8 @@
 ;;     w              Copy the shell-local file path to the kill ring
 ;;     RET            Visit strict file target at point (tool content,
 ;;                    plain path, or local Markdown label)
+;;     C-c C-p d      Describe a completed reply, thinking, or tool in Help
+;;     C-h .          Show local help at point in the echo area
 ;;     C-c C-k        Abort current operation
 ;;     C-c C-n        New session
 ;;     C-c C-r        Browse sessions
@@ -84,6 +86,13 @@
 ;;     C-c C-t        Cycle thinking level
 ;;     C-c C-y        Copy last message
 ;;     C-c C-p        Open menu
+;;
+;; In saved snapshots, run M-x pilish-describe-reply on a completed reply,
+;; thinking, or tool block.  C-h . shows quick help in both transcripts,
+;; with native link and control help first.  Reply, thinking, and tool
+;; metadata does not appear on automatic hover.  Other hover behavior,
+;; including native chat controls, input headers, browsers, and menus,
+;; is unchanged.
 ;;
 ;; Editor Features:
 ;;   - File reference (@): Type @ to search project files (respects .gitignore)

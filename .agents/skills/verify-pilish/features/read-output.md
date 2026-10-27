@@ -1,6 +1,6 @@
 # Read streamed output
 
-The chat renders streamed Markdown and changes thinking display without losing the reader's place. It preserves reading positions, follows the tail on request, and rewraps hot tables after a resize.
+The chat renders streamed Markdown and changes thinking display without losing the reader's place. It preserves reading positions, follows the tail on request, and rewraps hot tables after a resize. Completed replies, thinking, and tools expose literal details through explicit Help and echo-area commands. This metadata does not appear on automatic hover; other hover behavior is unchanged.
 
 ## Sub-features
 
@@ -8,6 +8,7 @@ The chat renders streamed Markdown and changes thinking display without losing t
 - `output-thinking` changes completed thinking display in two windows.
 - `output-scroll` preserves a scrolled-back view while output arrives and keeps tail-following windows at the end.
 - `output-table` rewraps a hot table after a frame resize.
+- `output-block-details` inspects completed reply, thinking, and tool details without changing the session or draft.
 
 ## How to get to it (user POV)
 
@@ -16,6 +17,10 @@ The chat renders streamed Markdown and changes thinking display without losing t
 - Scroll back with ordinary Emacs scrolling commands while new output arrives.
 - Stay at the stream tail across consecutive turns.
 - Resize the frame while viewing a table in recent history.
+- In a live chat, place point on a completed reply, thinking block, or tool block and press `C-c C-p d` to open its details in standard Help. In a saved snapshot, run `M-x pilish-describe-reply`.
+- Press `C-h .` for an echo-area peek. Native link and control help keeps priority.
+- Press `q` in Help to return to the chat or saved snapshot.
+- Native chat links and controls retain their hover help and click actions. Input headers, browsers, and menus keep their existing hover behavior.
 
 ## Driving it with Pilish harnesses
 
@@ -28,10 +33,15 @@ Preconditions:
 - **Scroll back.** Run `./test/run-gui-tests.sh --headless pilish-gui-test-scroll-preserved-streaming 2>&1 | tee "$RUN_DIR/scroll.log"`. Record `scroll.exit`. Streaming does not pull the scrolled-back window to the tail.
 - **Follow the tail.** Run `./test/run-gui-tests.sh --headless pilish-gui-test-scroll-auto-when-at-end 2>&1 | tee "$RUN_DIR/tail.log"`. Record `tail.exit`. Consecutive turns leave window point and the viewport at the end.
 - **Resize a table.** Run `./test/run-gui-tests.sh --headless pilish-gui-test-table-resize-refreshes-hot-tail-only 2>&1 | tee "$RUN_DIR/table.log"`. Record `table.exit`. The hot table rewraps and its surrounding content survives.
-- **Check the proof.** Require zero statuses and nonempty logs for all five commands. Use the evidence pattern from the skill.
+- **Inspect completed blocks.** Run `./test/run-gui-tests.sh --headless pilish-gui-test-reply-details-keyboard-help-and-safe-quit 2>&1 | tee "$RUN_DIR/reply-details.log"`. Record `reply-details.exit`. Real `C-h .` and `C-c C-p d` inspect a fake reply, synthetic completed thinking before and after `TAB`, and a synthetic tool before and after output folds and cooling. The reply opens selected read-only Help both fresh and in an existing Help window. Reports contain metadata, not private thinking or tool output. `q` returns to the chat with the same live process, draft, and session-file bytes.
+- **Check the proof.** Require zero statuses and nonempty logs for all six commands. Use the evidence pattern from the skill.
 
 ## Gotchas
 
 - The thinking test invokes the real toggle command directly. Do not describe it as a keystroke test.
 - These tests assert text, properties, and window state. They do not save PNG evidence.
 - Cold tables intentionally remain unchanged during the hot-tail resize test.
+- The `details` menu suffix appears only for transcript-origin menus. It does not appear in the input-origin menu.
+- Completed replies, thinking, and tools are inspector targets. Shared headings, outcome notices, unfinished blocks, and trailing separators are not targets.
+- Saved reports omit live stream estimates and tool execution times. The saved-conversations recipe drives the snapshot inspector.
+- Unit tests check that custom metadata is absent from native hover properties, native chat help still works, and provisional thinking details survive finalization. These keyboard journeys do not prove physical PGTK hover.
