@@ -9731,10 +9731,8 @@ clamp the row so the tail still fills the window after the rewrite."
 POINT-MAX is the old buffer end before the rewrite begins."
   (let* ((point (window-point window))
          (body-height (max 1 (window-body-height window)))
-         (row (count-screen-lines (window-start window)
-                                  point
-                                  nil
-                                  window)))
+         (row (pilish--count-screen-lines-up-to
+               (window-start window) point body-height window)))
     (list :window window
           :tail-p (pilish--rewrite-tail-window-p
                    point
@@ -9822,8 +9820,10 @@ nil for positions deleted by the rewrite."
                   (progn
                     (set-window-start win saved-start t)
                     (set-window-point win (max point saved-start)))
-                (let* ((above-lines (count-screen-lines (point-min) point nil win))
-                       (tail-lines (max 1 (count-screen-lines point point-max nil win)))
+                (let* ((above-lines (pilish--count-screen-lines-up-to
+                                     (point-min) point (max 0 (1- body-height)) win))
+                       (tail-lines (max 1 (pilish--count-screen-lines-up-to
+                                          point point-max body-height win)))
                        (row (pilish--clamp-rewrite-point-row
                              (plist-get window-state :row)
                              above-lines

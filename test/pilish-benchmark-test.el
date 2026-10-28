@@ -240,6 +240,71 @@ STREAM chooses the stream engine rather than the tool engine."
                   (should (eq (plist-get json :ok) :false)))))))
       (delete-file file))))
 
+(ert-deftest pilish-test-benchmark-reader-contract ()
+  (let* ((state '(:start 1 :point 1 :following :json-false))
+         (pilish-sd-bench-scenario "reader")
+         (pilish-sd-bench-timer-text-deltas 12)
+         (pilish-sd-bench-backlog-deltas 20)
+         (pilish-sd-bench--event-counts (make-hash-table :test 'equal))
+         (pilish-sd-bench--reader-initial (copy-sequence state))
+         (pilish-sd-bench--reader-settled (copy-sequence state))
+         (pilish-sd-bench--thinking-end-rows
+          (list (list :before (copy-sequence state) :after (copy-sequence state)
+                      :wallMs 0 :jitCreated 0)))
+         (reader-names '("non-tail-reader-observed" "reader-start-preserved"
+                         "reader-point-preserved")))
+    (cl-labels ((metrics () (list :settled t :checks (pilish-sd-bench--reader-checks))))
+      (should (pilish-sd-bench--metrics-ok-p (metrics)))
+      (let ((checks (pilish-sd-bench--collect-checks
+                     nil nil 0 0 "" '(:supported :json-false))))
+        (should (equal (mapcar (lambda (row) (plist-get row :name)) checks)
+                       (append pilish-benchmark-test--stream-names reader-names)))
+        (dolist (name '("representative-history-size" "representative-text-delta-count"
+                        "timer-and-synchronous-flushes-observed"))
+          (should (eq (plist-get (seq-find
+                                  (lambda (row) (equal (plist-get row :name) name))
+                                  checks) :ok)
+                      :json-false))))
+      (dolist (sample (list pilish-sd-bench--reader-initial
+                            (plist-get (car pilish-sd-bench--thinking-end-rows) :before)
+                            (plist-get (car pilish-sd-bench--thinking-end-rows) :after)
+                            pilish-sd-bench--reader-settled))
+        (dolist (case '((:start 2 "reader-start-preserved")
+                        (:point 2 "reader-point-preserved")
+                        (:following t "non-tail-reader-observed")))
+          (let ((old (plist-get sample (car case))))
+            (setf (plist-get sample (car case)) (cadr case))
+            (pilish-benchmark-test--assert-verdict (metrics) (nth 2 case) nil t)
+            (setf (plist-get sample (car case)) old))))
+      (let ((pilish-sd-bench--thinking-end-rows nil))
+        (pilish-benchmark-test--assert-verdict
+         (metrics) "non-tail-reader-observed" nil t))
+      (let ((pilish-sd-bench--reader-settled nil))
+        (pilish-benchmark-test--assert-verdict
+         (metrics) "reader-start-preserved" nil t)))))
+
+(ert-deftest pilish-test-benchmark-reader-timer-ownership ()
+  (with-temp-buffer
+    (let ((pilish-sd-bench--reader-chat-buffer (current-buffer))
+          (pilish-sd-bench--phase "stream")
+          (pilish-sd-bench--jit-created 0)
+          (owned (copy-marker (point-min)))
+          (detached (make-marker)))
+      (with-temp-buffer
+        (let ((foreign (copy-marker (point-min))))
+          (dolist (case `((jit-lock-force-redisplay ,owned)
+                          (jit-lock-force-redisplay ,foreign)
+                          (jit-lock-force-redisplay ,detached)
+                          (ignore ,owned)))
+            (should (eq (pilish-sd-bench--around-run-with-timer
+                         (lambda (&rest _) 'timer) 0 nil (car case) (cadr case))
+                        'timer)))
+          (should (= pilish-sd-bench--jit-created 1))
+          (let ((pilish-sd-bench--phase "validation"))
+            (pilish-sd-bench--around-run-with-timer
+             #'ignore 0 nil 'jit-lock-force-redisplay owned))
+          (should (= pilish-sd-bench--jit-created 1)))))))
+
 (ert-deftest pilish-test-benchmark-cooling-exact-contract ()
   "Retain order and multiplicity at each cooling observation independently."
   (let* ((good (pilish-benchmark-test--cooling-lines "$ "))

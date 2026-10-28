@@ -581,6 +581,172 @@ raced a turn that was never submitted."
 
 ;;;; Scroll Preservation Tests
 
+(defun pilish-gui-test--check-bounded-screen-lines (window regions)
+  (dolist (region regions)
+    (dolist (endpoints (list region (cons (cdr region) (car region))))
+      (dolist (final-newline '(nil t))
+        (let* ((start (car endpoints))
+               (finish (cdr endpoints))
+               (exact (count-screen-lines start finish final-newline window))
+               (before (list (point) (point-min) (point-max) (selected-window)
+                             (window-start window) (window-point window)
+                             (window-hscroll window) (window-vscroll window))))
+          (dolist (limit (delete-dups (list 0 1 (max 0 (1- exact)) exact
+                                          (1+ exact) (+ exact 2))))
+            (ert-info ((format "width=%S hscroll=%S region=%S final=%S limit=%S"
+                               (window-body-width window) (window-hscroll window)
+                               endpoints final-newline limit))
+              (should (= (min limit exact)
+                         (pilish--count-screen-lines-up-to
+                          start finish limit window final-newline)))
+              (should (equal before
+                             (list (point) (point-min) (point-max) (selected-window)
+                                   (window-start window) (window-point window)
+                                   (window-hscroll window) (window-vscroll window)))))))))))
+
+(ert-deftest pilish-gui-test-bounded-screen-lines-wrapping ()
+  (should (display-graphic-p))
+  (save-window-excursion
+    (delete-other-windows)
+    (with-temp-buffer
+      (switch-to-buffer (current-buffer))
+      (setq-local word-wrap t
+                  truncate-lines nil
+                  truncate-partial-width-windows nil)
+      (insert (apply #'concat (make-list 60 "wrap words ")) "\n")
+      (let ((long-end (point))
+            (window (selected-window))
+            counts)
+        (insert "hidden markup\nreplacement\nlast\n")
+        (put-text-property long-end (+ long-end 14) 'invisible t)
+        (put-text-property (+ long-end 14) (+ long-end 25)
+                           'display "displayed\non two rows")
+        (goto-char 20)
+        (set-window-start window (point-min) t)
+        (dolist (partial '(nil t))
+          (when partial (split-window-right))
+          (redisplay t)
+          (let ((exact (count-screen-lines (point-min) (point-max) nil window)))
+            (should (> exact (count-lines (point-min) (point-max))))
+            (push exact counts))
+          (pilish-gui-test--check-bounded-screen-lines
+           window (list (cons (point-min) (point-max)) (cons 17 (- long-end 9))
+                        (cons long-end (point-max)) (cons long-end long-end)))
+          (save-restriction
+            (narrow-to-region 10 (- long-end 3))
+            (pilish-gui-test--check-bounded-screen-lines
+             window (list (cons (point-min) (point-max))
+                          (cons 22 (1- (point-max)))))))
+        (should (> (car counts) (cadr counts)))))))
+
+(ert-deftest pilish-gui-test-bounded-screen-lines-truncation-and-hscroll ()
+  (should (display-graphic-p))
+  (save-window-excursion
+    (delete-other-windows)
+    (with-temp-buffer
+      (switch-to-buffer (current-buffer))
+      (setq-local truncate-lines t
+                  truncate-partial-width-windows t
+                  auto-hscroll-mode nil)
+      (insert (make-string (* 4 (window-body-width)) ?x))
+      (let ((long-end (point))
+            (window (selected-window)))
+        (insert "\nshort\n")
+        (goto-char (point-min))
+        (set-window-start window (point-min) t)
+        (dolist (partial '(nil t))
+          (when partial
+            (split-window-right)
+            (setq truncate-lines nil)
+            (should (truncated-partial-width-window-p window)))
+          (dolist (hscroll '(0 7 25))
+            (set-window-hscroll window hscroll)
+            (redisplay t)
+            (should (= hscroll (window-hscroll window)))
+            (should (= 1 (count-screen-lines 1 long-end nil window)))
+            (let ((edge (+ 1 hscroll (window-body-width window))))
+              (pilish-gui-test--check-bounded-screen-lines
+               window (list (cons 1 long-end) (cons 1 (point-max))
+                            (cons 1 (1- edge)) (cons 1 edge) (cons 1 (1+ edge))
+                            (cons 12 long-end) (cons (1+ long-end) (point-max)))))
+            (save-restriction
+              (narrow-to-region 3 (1- (point-max)))
+              (pilish-gui-test--check-bounded-screen-lines
+               window (list (cons (point-min) (point-max)) (cons 10 long-end))))))))))
+
+(ert-deftest pilish-gui-test-bounded-thinking-end-preserves-non-tail-reader ()
+  (let ((chat (generate-new-buffer " *pi-bounded-thinking-reader*"))
+        (input (generate-new-buffer " *pi-bounded-thinking-input*")))
+    (unwind-protect
+        (save-window-excursion
+          (delete-other-windows)
+          (switch-to-buffer chat)
+          (pilish-chat-mode)
+          (setq pilish--thinking-display 'visible)
+          (let ((inhibit-read-only t))
+            (dotimes (index 150)
+              (insert (format "History %03d with enough words to wrap in a narrow reader window.\n"
+                              index))))
+          (pilish--display-agent-start)
+          (pilish--display-thinking-start)
+          (pilish--display-thinking-delta "Visible thinking stays visible.\nAnother thought.")
+          (let ((inhibit-read-only t))
+            (save-excursion
+              (goto-char pilish--thinking-marker)
+              (pilish--ensure-blank-line-separator)))
+          (let* ((reader (selected-window))
+                 (input-window (split-window reader -5 'below))
+                 (tail (split-window reader nil 'right))
+                 (motion (symbol-function 'vertical-motion))
+                 (restore (symbol-function 'pilish--restore-window-rewrite-states))
+                 (thinking-start (marker-position pilish--thinking-start-marker))
+                 (text (buffer-substring-no-properties (point-min) (point-max)))
+                 (chars-tick (buffer-chars-modified-tick))
+                 requests (restorations 0))
+            (set-window-buffer tail chat)
+            (with-selected-window tail (goto-char (point-max)) (recenter -1))
+            (goto-char (point-min))
+            (forward-line 7)
+            (recenter 3)
+            (set-window-buffer input-window input)
+            (select-window input-window)
+            (insert "An unsent draft.\nStill here.")
+            (goto-char 5)
+            (redisplay t)
+            (let ((start (window-start reader))
+                  (point (window-point reader)))
+              (with-current-buffer chat
+                (should-not (pilish--window-following-p reader))
+                (cl-letf (((symbol-function 'vertical-motion)
+                           (lambda (rows &rest args)
+                             (push (list rows (car args)) requests)
+                             (apply motion rows args)))
+                          ((symbol-function 'pilish--restore-window-rewrite-states)
+                           (lambda (&rest args)
+                             (cl-incf restorations)
+                             (apply restore args))))
+                  (pilish--display-thinking-end ""))
+                (should (= restorations 1))
+                (should requests)
+                (dolist (request requests)
+                  (should (<= (car request)
+                              (1+ (window-body-height (cadr request))))))
+                (should (equal text (buffer-substring-no-properties (point-min) (point-max))))
+                (should (= chars-tick (buffer-chars-modified-tick)))
+                (should (pilish--thinking-block-at-pos thinking-start)))
+              (redisplay t)
+              (should (= start (window-start reader)))
+              (should (= point (window-point reader)))
+              (should (eq (selected-window) input-window))
+              (should (= (point) 5))
+              (should (equal (buffer-string) "An unsent draft.\nStill here."))
+              (with-current-buffer chat
+                (should-not (pilish--window-following-p reader))
+                (should (pilish--window-following-p tail))
+                (should (pilish-gui-test--window-substantially-filled-p tail))))))
+      (kill-buffer chat)
+      (kill-buffer input))))
+
 (ert-deftest pilish-gui-test-scroll-preserved-streaming ()
   "Test scroll position is preserved while a fake stream updates below."
   (pilish-gui-test-with-fresh-session

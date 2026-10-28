@@ -6170,6 +6170,71 @@ replay output without it, byte for byte."
   "When the whole buffer is shorter than the window, preserve the highest visible row."
   (should (= 5 (pilish--clamp-rewrite-point-row 10 5 8 20))))
 
+(ert-deftest pilish-test-clamp-rewrite-point-row-capped-counts-equivalent ()
+  (dolist (height '(1 2 3 5 8))
+    (dotimes (above (+ 2 (* 2 height)))
+      (cl-loop for tail from 1 to (+ 2 (* 2 height)) do
+               (dolist (row (delete-dups (list 0 1 (1- height) height
+                                               (1+ height) (* 3 height))))
+                 (should
+                  (= (pilish--clamp-rewrite-point-row row above tail height)
+                     (pilish--clamp-rewrite-point-row
+                      (min row height) (min above (max 0 (1- height)))
+                      (min tail height) height))))))))
+
+(ert-deftest pilish-test-capture-window-rewrite-state-caps-offscreen-row ()
+  (save-window-excursion
+    (with-temp-buffer
+      (switch-to-buffer (current-buffer))
+      (dotimes (_ 200) (insert "history line\n"))
+      (let* ((window (selected-window))
+             (height (max 1 (window-body-height window)))
+             (motion (symbol-function 'vertical-motion))
+             requests state)
+        (goto-char (point-min))
+        (forward-line 150)
+        (set-window-start window (point-min) t)
+        (cl-letf (((symbol-function 'window-end) (lambda (&rest _) (point-max)))
+                  ((symbol-function 'count-screen-lines)
+                   (lambda (&rest _) (ert-fail "Unrestricted capture count")))
+                  ((symbol-function 'vertical-motion)
+                   (lambda (rows &rest args)
+                     (push rows requests)
+                     (apply motion rows args))))
+          (setq state (pilish--capture-window-rewrite-state window (point-max))))
+        (should (= height (plist-get state :row)))
+        (should (equal requests (list height)))
+        (should-not (plist-get state :tail-p))
+        (should (= (plist-get state :point) (point)))
+        (should (= (plist-get state :start) (point-min)))))))
+
+(ert-deftest pilish-test-rewrite-viewport-counts-bounded-fallback ()
+  (save-window-excursion
+    (with-temp-buffer
+      (switch-to-buffer (current-buffer))
+      (dotimes (_ 200) (insert "history line\n"))
+      (goto-char (point-min))
+      (forward-line 100)
+      (let* ((window (selected-window))
+             (height (max 1 (window-body-height window)))
+             (motion (symbol-function 'vertical-motion))
+             requests row)
+        (cl-letf (((symbol-function 'pilish--window-start-fills-window-within-one-row-p)
+                   (lambda (&rest _) nil))
+                  ((symbol-function 'recenter)
+                   (lambda (value &rest _) (setq row value)))
+                  ((symbol-function 'count-screen-lines)
+                   (lambda (&rest _) (ert-fail "Unrestricted fallback count")))
+                  ((symbol-function 'vertical-motion)
+                   (lambda (rows &rest args)
+                     (push rows requests)
+                     (apply motion rows args))))
+          (pilish--restore-window-rewrite-state
+           (list :window window :tail-p nil :point (point)
+                 :start (point-min) :row (+ height 100))))
+        (should (equal (nreverse requests) (list (1- height) height)))
+        (should (= row (1- height)))))))
+
 ;;; Pandoc Conversion
 
 (ert-deftest pilish-test-message-start-marker-created ()

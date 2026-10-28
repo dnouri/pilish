@@ -6,6 +6,7 @@
 #   ./bench/run-stream-delta-bench.sh --batch               # batch full preset
 #   ./bench/run-stream-delta-bench.sh --scenario smoke -c 1 # cheap CI smoke
 #   ./bench/run-stream-delta-bench.sh --scenario toolcall  # bash argument stream
+#   ./bench/run-stream-delta-bench.sh --scenario reader    # cold non-tail GUI reader
 #   ./bench/run-stream-delta-bench.sh -c 3                  # repetitions
 #   ./bench/run-stream-delta-bench.sh --out-dir tmp/sd      # custom artifacts
 #
@@ -94,7 +95,7 @@ PI_SD_BENCH_SEED=20240817
 PI_SD_BENCH_TIMEOUT_SECONDS=30
 EOF
             ;;
-        full)
+        full|reader)
             cat <<'EOF'
 PI_SD_BENCH_HISTORY_TURNS=180
 PI_SD_BENCH_HISTORY_TEXT_BYTES=1200
@@ -130,6 +131,10 @@ EOF
 
 for scenario in "${SCENARIOS[@]}"; do
     scenario_env "$scenario" >/dev/null
+    if [[ "$scenario" == "reader" && "$BATCH" == "1" ]]; then
+        echo "ERROR: reader requires the GUI lane; --batch cannot measure reader geometry" >&2
+        exit 1
+    fi
 done
 
 if [[ -z "$OUT_DIR" ]]; then
@@ -276,6 +281,8 @@ for result_path in sorted(out.glob("*/iter-*/result.json")):
     gc = mapping(result.get("gc"))
     history = mapping(result.get("history"))
     md_ts = mapping(result.get("mdTs"))
+    reader = mapping(result.get("reader"))
+    thinking_ends = reader.get("thinkingEnds") or []
     rows.append(
         {
             "scenario": result.get("scenario"),
@@ -302,6 +309,9 @@ for result_path in sorted(out.glob("*/iter-*/result.json")):
             "probeMaxMs": probe.get("maxMs") or 0,
             "gcs": gc.get("collections") or 0,
             "gcSeconds": gc.get("seconds") or 0,
+            "thinkingEndMs": sum(row["wallMs"] for row in thinking_ends),
+            "thinkingEndJitCreated": sum(row["jitCreated"] for row in thinking_ends),
+            "readerJitCreated": reader.get("jitCreated"),
             "mdTsDirtyBefore": md_ts.get("beforeCount"),
             "mdTsDirtyAfter": md_ts.get("afterCount"),
             "failedChecks": ";".join(failed_checks),
@@ -334,6 +344,7 @@ summary: list[str] = [
 print("\nsummary")
 print("scenario  wall-ms history-B filter-total/max backlog timer/sync displays/deltas ratio toolcall-paints/deltas toolcall-ratio probe-p95/max GC dirty ok")
 failed = [row for row in rows if not row["ok"]]
+reader_detail = ""
 for scenario in sorted({str(row["scenario"]) for row in rows}):
     all_rows = [row for row in rows if str(row["scenario"]) == scenario]
     good = [row for row in all_rows if row["ok"]]
@@ -366,6 +377,13 @@ for scenario in sorted({str(row["scenario"]) for row in rows}):
         f"{median('probeP95Ms'):.1f}/{maximum('probeMaxMs'):.1f} "
         f"{int(maximum('gcs'))} {dirty} {ok_count}"
     )
+    if scenario == "reader":
+        reader_detail = (
+            f"Reader thinking_end: {median('thinkingEndMs'):.3f} ms median; "
+            f"{median('thinkingEndJitCreated'):g} chat-owned JIT timers created "
+            f"in the handler, {median('readerJitCreated'):g} through settlement."
+        )
+        print(reader_detail)
     summary.append(
         f"| {scenario} | {wall_median:.1f} | {int(sample['historyBytes'])} | "
         f"{median('filterTotalMs'):.1f}/{maximum('filterMaxMs'):.1f} | "
@@ -378,6 +396,9 @@ for scenario in sorted({str(row["scenario"]) for row in rows}):
         f"{median('probeP95Ms'):.1f}/{maximum('probeMaxMs'):.1f} | "
         f"{int(maximum('gcs'))} | {dirty} | {ok_count} |"
     )
+
+if reader_detail:
+    summary.extend(["", reader_detail])
 
 summary.extend(
     [

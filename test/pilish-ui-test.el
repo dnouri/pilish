@@ -1855,6 +1855,156 @@ Buffer is read-only with `inhibit-read-only' used for insertion.
 
 ;;; Scroll Preservation
 
+(ert-deftest pilish-test-count-screen-lines-up-to-matches-native ()
+  (save-window-excursion
+    (with-temp-buffer
+      (switch-to-buffer (current-buffer))
+      (let ((window (selected-window)))
+        (dolist (text (list "" "\n" "\n\n" "a" "a\n" "a\nb" "a\nb\n"
+                           "short\n\nlast\n"
+                           (propertize "x" 'display "a\nb\nc\nd\n")))
+          (erase-buffer)
+          (insert text)
+          (dolist (narrowed '(nil t))
+            (save-restriction
+              (when (and narrowed (> (buffer-size) 3))
+                (narrow-to-region 2 (1- (point-max))))
+              (let ((beg (point-min))
+                    (end (point-max)))
+                (cl-loop for start from beg to end do
+                         (cl-loop for finish from beg to end do
+                                  (dolist (final-newline '(nil t))
+                                    (let ((exact (count-screen-lines
+                                                  start finish final-newline window)))
+                                      (dolist (limit (delete-dups
+                                                      (list 0 1 (max 0 (1- exact))
+                                                            exact (1+ exact) (+ exact 2))))
+                                        (ert-info ((format "%S narrowed=%S region=%S final=%S limit=%S"
+                                                           text narrowed (list start finish)
+                                                           final-newline limit))
+                                          (should
+                                           (= (min limit exact)
+                                              (pilish--count-screen-lines-up-to
+                                               start finish limit window final-newline)))))))))
+                (should (= beg (point-min)))
+                (should (= end (point-max)))))))))))
+
+(ert-deftest pilish-test-count-screen-lines-up-to-display-properties ()
+  (save-window-excursion
+    (with-temp-buffer
+      (switch-to-buffer (current-buffer))
+      (insert "a\nhidden\nshown\nz")
+      (put-text-property 3 10 'invisible t)
+      (put-text-property 10 15 'display "two\nrows\n")
+      (dolist (final-newline '(nil t))
+        (let ((exact (count-screen-lines (point-min) (point-max)
+                                         final-newline (selected-window))))
+          (dotimes (limit (+ exact 2))
+            (should (= (min limit exact)
+                       (pilish--count-screen-lines-up-to
+                        (point-min) (point-max) limit (selected-window)
+                        final-newline)))))))))
+
+(ert-deftest pilish-test-count-screen-lines-up-to-motion-budget-and-state ()
+  (save-window-excursion
+    (delete-other-windows)
+    (with-temp-buffer
+      (switch-to-buffer (current-buffer))
+      (dotimes (_ 200) (insert "a short line\n"))
+      (let* ((window (selected-window))
+             (other (split-window-right))
+             (motion (symbol-function 'vertical-motion))
+             requests)
+        (set-window-start window 14 t)
+        (set-window-point window 27)
+        (set-window-hscroll window 3)
+        (select-window other)
+        (goto-char 40)
+        (narrow-to-region 14 (1- (point-max)))
+        (let ((before (list (point) (point-min) (point-max)
+                            (selected-window) (window-start window)
+                            (window-point window) (window-hscroll window))))
+          (cl-letf (((symbol-function 'count-screen-lines)
+                     (lambda (&rest _) (ert-fail "Unrestricted display count")))
+                    ((symbol-function 'vertical-motion)
+                     (lambda (rows &rest args)
+                       (push rows requests)
+                       (apply motion rows args))))
+            (should (= 7 (pilish--count-screen-lines-up-to
+                          (point-min) (point-max) 7 window)))
+            (should (equal requests '(7)))
+            (setq requests nil)
+            (should (= 0 (pilish--count-screen-lines-up-to
+                          (point-min) (point-max) 0 window)))
+            (should-not requests)
+            (should (= 0 (pilish--count-screen-lines-up-to 20 20 7 window)))
+            (should-not requests))
+          (should (equal before
+                         (list (point) (point-min) (point-max)
+                               (selected-window) (window-start window)
+                               (window-point window) (window-hscroll window)))))))))
+
+(ert-deftest pilish-test-count-screen-lines-up-to-unwinds-on-motion-error ()
+  (with-temp-buffer
+    (insert "before\nmeasure\nafter\n")
+    (goto-char 10)
+    (narrow-to-region 4 18)
+    (cl-letf (((symbol-function 'vertical-motion)
+               (lambda (&rest _) (error "Expected display failure"))))
+      (should (equal (should-error (pilish--count-screen-lines-up-to
+                                   5 16 3 (selected-window)))
+                     '(error "Expected display failure"))))
+    (should (= (point) 10))
+    (should (= (point-min) 4))
+    (should (= (point-max) 18))))
+
+(ert-deftest pilish-test-viewport-counts-fill-and-tail-thresholds ()
+  (save-window-excursion
+    (with-temp-buffer
+      (switch-to-buffer (current-buffer))
+      (let ((window (selected-window))
+            (motion (symbol-function 'vertical-motion))
+            requests starts recenters)
+        (dotimes (_ 8) (insert "line\n"))
+        (cl-letf (((symbol-function 'count-screen-lines)
+                   (lambda (&rest _) (ert-fail "Unrestricted viewport count")))
+                  ((symbol-function 'vertical-motion)
+                   (lambda (rows &rest args)
+                     (push rows requests)
+                     (apply motion rows args))))
+          (dolist (height '(1 2 5))
+            (dolist (lines (delete-dups (list (max 0 (- height 2))
+                                             (1- height) height)))
+              (setq requests nil)
+              (let ((end (1+ (* 5 lines))))
+                (should (eq (not (null (pilish--window-start-fills-window-within-one-row-p
+                                       1 end height window)))
+                            (>= lines (1- height))))
+                (should (equal requests (unless (or (= height 1) (= lines 0))
+                                          (list (1- height)))))))))
+        (let ((height 5))
+          (dolist (lines (list (1- height) height))
+            (erase-buffer)
+            (dotimes (_ lines) (insert "line\n"))
+            (setq requests nil starts nil recenters nil)
+            (cl-letf (((symbol-function 'window-body-height)
+                       (lambda (&rest _) height))
+                      ((symbol-function 'set-window-start)
+                       (lambda (_win start &rest _) (push start starts)))
+                      ((symbol-function 'recenter)
+                       (lambda (row &rest _) (push row recenters)))
+                      ((symbol-function 'count-screen-lines)
+                       (lambda (&rest _) (ert-fail "Unrestricted tail count")))
+                      ((symbol-function 'vertical-motion)
+                       (lambda (rows &rest args)
+                         (push rows requests)
+                         (apply motion rows args))))
+              (pilish--restore-tail-window window (point-min)))
+            (should (equal (nreverse requests)
+                           (list (1- height) (1+ height))))
+            (should (equal starts (when (= lines (1- height)) '(1))))
+            (should (equal recenters (when (= lines height) '(-1))))))))))
+
 (ert-deftest pilish-test-scroll-preservation-keeps-reader-and-tail-points ()
   "An insertion keeps a nonselected reader and a follower on their text."
   (let ((chat (generate-new-buffer " *pilish-scroll-reader-and-tail*")))
