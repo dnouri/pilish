@@ -6,6 +6,52 @@
 (defvar evil-snipe-local-mode-hook nil)
 (defvar evil-snipe-override-local-mode-hook nil)
 
+(ert-deftest pilish-test-snapshot-hidden-build-does-not-settle-windows ()
+  "A hidden replay builds the full observer without moving visible windows."
+  (pilish-test--with-snapshot-files
+    (pilish-test--snapshot-write
+     child (list header '(:type "message" :id "question" :parentId :null
+                          :message (:role "user" :content "Saved question"))
+                 '(:type "message" :id "answer" :parentId "question"
+                   :message (:role "assistant"
+                             :content [(:type "text" :text "Saved answer")]))))
+    (let ((saved (pilish-jsonl-read-snapshot target))
+          (capture (symbol-function 'get-buffer-window-list))
+          (replay (symbol-function 'pilish--replay-history))
+          (windows (window-state-get nil t))
+          (captures 0)
+          replaying snapshot)
+      (unwind-protect
+          (progn
+            (cl-letf (((symbol-function 'pilish--replay-history)
+                       (lambda (&rest args)
+                         (setq replaying t)
+                         (unwind-protect (apply replay args)
+                           (setq replaying nil))))
+                      ((symbol-function 'get-buffer-window-list)
+                       (lambda (&rest args)
+                         (when replaying (cl-incf captures))
+                         (let ((result (apply capture args)))
+                           (should-not result)
+                           result)))
+                      ((symbol-function 'pilish--restore-tail-window)
+                       (lambda (&rest _) (ert-fail "Hidden build settled a window")))
+                      ((symbol-function 'set-window-point)
+                       (lambda (&rest _) (ert-fail "Hidden build moved window point")))
+                      ((symbol-function 'set-window-start)
+                       (lambda (&rest _) (ert-fail "Hidden build moved window start"))))
+              (setq snapshot (pilish--snapshot-build-buffer target saved)))
+            (should (= captures 1))
+            (should (equal windows (window-state-get nil t)))
+            (should-not (get-buffer-window snapshot t))
+            (with-current-buffer snapshot
+              (should (derived-mode-p 'pilish-snapshot-mode))
+              (should (= (point) (point-min)))
+              (should buffer-read-only)
+              (should (equal (buffer-substring-no-properties (point-min) (point-max))
+                             "Pi session, read-only.\n\nYou\n===\n\nSaved question\n\nAssistant\n=========\n\nSaved answer\n\n"))))
+        (pilish-test--kill-live-buffers snapshot)))))
+
 (ert-deftest pilish-test-snapshot-disk-selected-full-branch ()
   (pilish-test--with-snapshot-files
     (let* ((first (pilish-test--snapshot-message "first" nil "Full pre-compaction user text"))

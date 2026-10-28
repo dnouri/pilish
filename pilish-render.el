@@ -5600,12 +5600,13 @@ FUNCTION must not yield or change unrelated text.  Return nil."
       (unwind-protect
           (progn
             (setq buffer-point (anchor (point)))
-            (dolist (window (get-buffer-window-list buffer nil t))
-              (push (list :window window
-                          :following (pilish--window-following-p window)
-                          :point (anchor (window-point window))
-                          :start (anchor (window-start window)))
-                    views))
+            (unless (pilish--viewport-updates-deferred-p)
+              (dolist (window (get-buffer-window-list buffer nil t))
+                (push (list :window window
+                            :following (pilish--window-following-p window)
+                            :point (anchor (window-point window))
+                            :start (anchor (window-start window)))
+                      views)))
             (funcall function)
             (when (buffer-live-p buffer)
               (with-current-buffer buffer
@@ -6815,17 +6816,19 @@ new body end.  Positions at or after OLD-END shift by the actual length delta."
 
 (defun pilish--capture-tool-cooling-view ()
   "Capture buffer point and visible-window positions before tool cooling.
-Every position is mapped through explicit replacement bounds."
+Every position is mapped through explicit replacement bounds.
+During transcript construction, capture only buffer point."
   (list
    :point (point)
    :windows
-   (mapcar
-    (lambda (window)
-      (list :window window
-            :following (pilish--window-following-p window)
-            :start (window-start window)
-            :point (window-point window)))
-    (get-buffer-window-list (current-buffer) nil t))))
+   (unless (pilish--viewport-updates-deferred-p)
+     (mapcar
+      (lambda (window)
+        (list :window window
+              :following (pilish--window-following-p window)
+              :start (window-start window)
+              :point (window-point window)))
+      (get-buffer-window-list (current-buffer) nil t)))))
 
 (defun pilish--restore-tool-cooling-view
     (view old-start old-end new-end &optional map-position)
@@ -9958,17 +9961,18 @@ hidden.  Callers that omit it get the live window width or the fallback."
           (pilish--clear-render-artifacts)
           (erase-buffer)
           (when prefix (insert prefix))
-          (when (vectorp messages)
-            (let ((pilish--defer-history-postprocessing t))
-              (pilish--display-history-messages messages)))
-          (goto-char (point-max))
-          (unless (bolp) (insert "\n"))
-          (pilish--set-message-start-marker nil)
-          (pilish--set-streaming-marker nil)
-          (pilish--update-hot-tail-boundary)
-          (pilish--cool-completed-tool-blocks-outside-hot-tail)
-          (pilish--postprocess-history-buffer)
-          (goto-char (point-max))))))
+          (pilish--with-transcript-construction
+            (when (vectorp messages)
+              (let ((pilish--defer-history-postprocessing t))
+                (pilish--display-history-messages messages)))
+            (goto-char (point-max))
+            (unless (bolp) (insert "\n"))
+            (pilish--set-message-start-marker nil)
+            (pilish--set-streaming-marker nil)
+            (pilish--update-hot-tail-boundary)
+            (pilish--cool-completed-tool-blocks-outside-hot-tail)
+            (pilish--postprocess-history-buffer)
+            (goto-char (point-max)))))))
 
 (provide 'pilish-render)
 

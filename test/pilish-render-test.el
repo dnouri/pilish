@@ -4732,6 +4732,121 @@ When PARTIAL-TEXT is supplied it must precede the outcome, never be erased."
                  text))
         (should-not (string-match-p "> Need to double-check\\." text))))))
 
+(ert-deftest pilish-test-replay-empty-history-keeps-unselected-window-neutral ()
+  "Empty and ignored-only histories do not acquire viewport settlement."
+  (save-window-excursion
+    (delete-other-windows)
+    (let ((chat (generate-new-buffer " *pilish-empty-replay*"))
+          (input (generate-new-buffer " *pilish-empty-replay-input*")))
+      (unwind-protect
+          (progn
+            (switch-to-buffer chat)
+            (pilish-chat-mode)
+            (let ((chat-window (selected-window))
+                  (input-window (split-window-below)))
+              (set-window-buffer input-window input)
+              (select-window input-window)
+              (dolist (messages (list nil []
+                                     [(:role "toolResult" :content "ignored")
+                                      (:role "custom" :display nil :content "hidden")]))
+                (dolist (prefix '(nil "" "\n" "prefix\n" "prefix"))
+                  (with-current-buffer chat
+                    (let ((inhibit-read-only t))
+                      (erase-buffer)
+                      (insert "old transcript\n"))
+                    (set-window-point chat-window 3)
+                    (pilish--replay-history chat messages prefix)
+                    (should (equal (buffer-string)
+                                   (pcase prefix
+                                     ((or 'nil "") "")
+                                     ("prefix" "prefix\n")
+                                     (_ prefix))))
+                    (should (= (point) (point-max)))
+                    (should (= (window-point chat-window) 1))
+                    (should (= (window-start chat-window) 1))
+                    (should (eq (selected-window) input-window)))))))
+        (kill-buffer chat)
+        (kill-buffer input)))))
+
+(ert-deftest pilish-test-replay-settles-after-tools-cooling-and-tables ()
+  "Mixed replay preserves rendering while doing one final viewport pass."
+  (save-window-excursion
+    (with-temp-buffer
+      (switch-to-buffer (current-buffer))
+      (pilish-chat-mode)
+      (let* ((pilish-hot-tail-turn-count 1)
+             (messages
+              (vconcat (pilish-test--nested-history-messages)
+                       [(:role "user" :content "Latest question")
+                        (:role "assistant"
+                         :content [(:type "thinking" :thinking "Saved reasoning")
+                                   (:type "text" :text "Latest answer\n\n| a | b |\n|---|---|\n| 1 | 2 |")])]))
+             (capture (symbol-function 'get-buffer-window-list))
+             (restore (symbol-function 'pilish--restore-tail-window))
+             (append-text (symbol-function 'pilish--append-to-chat))
+             (edit-body (symbol-function 'pilish--call-with-tool-body-edit))
+             (cooling-view (symbol-function 'pilish--capture-tool-cooling-view))
+             (cool (symbol-function 'pilish--cool-tool-overlay))
+             (decorate (symbol-function 'pilish--decorate-tables-in-region))
+             first-text first-appends)
+        (dotimes (iteration 2)
+          (let ((captures 0) (restores 0) (appends 0) (edits 0)
+                (cooling-views 0) (cools 0) (decorations 0) settled-text)
+            (cl-letf (((symbol-function 'get-buffer-window-list)
+                       (lambda (&rest args)
+                         (cl-incf captures)
+                         (apply capture args)))
+                      ((symbol-function 'pilish--restore-tail-window)
+                       (lambda (&rest args)
+                         (cl-incf restores)
+                         (setq settled-text (buffer-string))
+                         (should (= decorations 1))
+                         (should (> cools 0))
+                         (apply restore args)))
+                      ((symbol-function 'pilish--append-to-chat)
+                       (lambda (&rest args)
+                         (cl-incf appends)
+                         (apply append-text args)))
+                      ((symbol-function 'pilish--call-with-tool-body-edit)
+                       (lambda (&rest args)
+                         (cl-incf edits)
+                         (apply edit-body args)))
+                      ((symbol-function 'pilish--capture-tool-cooling-view)
+                       (lambda ()
+                         (cl-incf cooling-views)
+                         (funcall cooling-view)))
+                      ((symbol-function 'pilish--cool-tool-overlay)
+                       (lambda (&rest args)
+                         (cl-incf cools)
+                         (apply cool args)))
+                      ((symbol-function 'pilish--decorate-tables-in-region)
+                       (lambda (&rest args)
+                         (cl-incf decorations)
+                         (should-not pilish--defer-history-postprocessing)
+                         (apply decorate args))))
+              (pilish--replay-history (current-buffer) messages))
+            (should (= captures 1))
+            (should (= restores 1))
+            (should (> appends 1))
+            (should (> edits 0))
+            (should (> cooling-views 0))
+            (should (equal-including-properties settled-text (buffer-string)))
+            (should (= (point) (point-max)))
+            (should (= (window-point (selected-window)) (point-max)))
+            (should-not (pilish-test--all-tool-overlays))
+            (should (= (hash-table-count pilish--live-tool-blocks) 0))
+            (should-not pilish--pending-tool-updates)
+            (should-not pilish--tool-cooling-queue)
+            (should (> (marker-position pilish--hot-tail-start) (point-min)))
+            (should (string-match-p "Child outputs are not saved in sessions" (buffer-string)))
+            (should (string-match-p "LEGACY-OUTPUT" (buffer-string)))
+            (should (string-match-p "Latest answer" (buffer-string)))
+            (if (zerop iteration)
+                (setq first-text (buffer-substring-no-properties (point-min) (point-max))
+                      first-appends appends)
+              (should (equal first-text (buffer-substring-no-properties (point-min) (point-max))))
+              (should (= first-appends appends)))))))))
+
 (ert-deftest pilish-test-display-session-history-batches-postprocessing ()
   "Session history replay defers per-message display post-processing."
   (with-temp-buffer
@@ -18227,20 +18342,26 @@ Regression test: streaming output with no newlines should still be capped."
 
 (ert-deftest pilish-test-tool-body-edit-restores-point-boundaries ()
   "Replacement anchors preserve suffixes and use the fallback only inside edits."
-  (dolist (spec '((1 1) (8 8) (9 8) (11 16) (14 19)))
-    (with-temp-buffer
-      (insert "before OLD suffix\n")
-      (goto-char (car spec))
-      (should
-       (null
-        (pilish--call-with-tool-body-edit
-         8 11 8
-         (lambda ()
-           (goto-char 8)
-           (delete-region 8 11)
-           (insert "NEW LONG")
-           'ignored-callback-value))))
-      (should (= (point) (cadr spec)))))
+  (dolist (construction '(nil t))
+    (dolist (spec '((1 1) (8 8) (9 8) (11 16) (14 19)))
+      (with-temp-buffer
+        (let ((edit
+               (lambda ()
+                 (insert "before OLD suffix\n")
+                 (goto-char (car spec))
+                 (should
+                  (null
+                   (pilish--call-with-tool-body-edit
+                    8 11 8
+                    (lambda ()
+                      (goto-char 8)
+                      (delete-region 8 11)
+                      (insert "NEW LONG")
+                      'ignored-callback-value))))
+                 (should (= (point) (cadr spec))))))
+          (if construction
+              (pilish--with-transcript-construction (funcall edit))
+            (funcall edit))))))
   (with-temp-buffer
     (insert "before suffix\n")
     (goto-char 8)

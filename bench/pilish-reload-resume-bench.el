@@ -477,6 +477,12 @@ extras.  Return a metrics plist for the generated session."
                      pilish--browse-scan-session-files
                      pilish--browse-session-directories
                      pilish--browse-session-files
+                     pilish-jsonl-open-session-info
+                     pilish-jsonl-step-session-info
+                     pilish--jsonl-info-scan-line
+                     pilish--jsonl-info-result
+                     pilish--jsonl-parse-current-line
+                     pilish--jsonl-extract-text
                      pilish-jsonl-read-session-info
                      pilish--session-browser-render
                      pilish--session-browser-rerender
@@ -505,6 +511,11 @@ extras.  Return a metrics plist for the generated session."
                      pilish--render-history-thinking
                      pilish--render-history-tool
                      pilish--append-to-chat
+                     pilish--restore-tail-window
+                     pilish--window-start-fills-window-within-one-row-p
+                     pilish--count-screen-lines-up-to
+                     vertical-motion
+                     recenter
                      pilish--update-hot-tail-boundary
                      pilish--cool-completed-tool-blocks-outside-hot-tail
                      pilish--cool-completed-tool-blocks
