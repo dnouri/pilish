@@ -200,21 +200,14 @@ Zero keeps the original single-delta tool boundary check.")
 (defvar pilish-sd-bench--probe-timer nil
   "Active benchmark probe timer, or nil.")
 
-(defvar pilish-sd-bench--reader-window nil
-  "Existing chat window used by the cold reader scenario.")
-(defvar pilish-sd-bench--reader-chat-buffer nil
-  "Chat buffer whose JIT timer creations are measured.")
-(defvar pilish-sd-bench--reader-initial nil
-  "Reader state before streaming begins.")
-(defvar pilish-sd-bench--reader-settled nil
-  "Reader state after the measured stream settles.")
-(defvar pilish-sd-bench--jit-created 0
-  "Cumulative chat-owned JIT timer creations during the measured stream.")
-(defvar pilish-sd-bench--thinking-end-rows nil
-  "Thinking-end handler observations, newest first.")
+(defvar pilish-sd-bench--reader-window nil)
+(defvar pilish-sd-bench--reader-chat-buffer nil)
+(defvar pilish-sd-bench--reader-initial nil)
+(defvar pilish-sd-bench--reader-settled nil)
+(defvar pilish-sd-bench--jit-created 0)
+(defvar pilish-sd-bench--thinking-end-rows nil)
 
 (defun pilish-sd-bench--reader-state ()
-  "Return the reader's exact positions and following status, if live."
   (when (and (window-live-p pilish-sd-bench--reader-window)
              (buffer-live-p pilish-sd-bench--reader-chat-buffer)
              (eq (window-buffer pilish-sd-bench--reader-window)
@@ -228,7 +221,6 @@ Zero keeps the original single-delta tool boundary check.")
 
 (defun pilish-sd-bench--around-run-with-timer
     (orig secs repeat function &rest args)
-  "Count chat-owned JIT timer creations while calling ORIG with its arguments."
   (prog1 (apply orig secs repeat function args)
     (when (and (equal pilish-sd-bench--phase "stream")
                (eq function 'jit-lock-force-redisplay)
@@ -239,7 +231,6 @@ Zero keeps the original single-delta tool boundary check.")
       (cl-incf pilish-sd-bench--jit-created))))
 
 (defun pilish-sd-bench--around-thinking-end (orig content)
-  "Measure thinking-end handler ORIG for CONTENT without forcing redisplay."
   (let ((before (pilish-sd-bench--reader-state))
         (jit-before pilish-sd-bench--jit-created)
         (start (float-time)))
@@ -657,7 +648,6 @@ other visible line is retained so unexpected text fails projection equality."
   (list :name name :ok (pilish-sd-bench--json-bool ok) :detail detail))
 
 (defun pilish-sd-bench--reader-checks ()
-  "Return reader-only checks; timer creation and timing remain diagnostic."
   (let* ((rows (pilish-sd-bench--rows-in-order
                 pilish-sd-bench--thinking-end-rows))
          (states (append (list pilish-sd-bench--reader-initial)
@@ -1107,7 +1097,6 @@ the settled rendered buffer."
         :seed pilish-sd-bench-seed))
 
 (defun pilish-sd-bench--insert-reader-tsv (phase state jit-created)
-  "Insert reader STATE and cumulative JIT-CREATED TSV rows for PHASE."
   (dolist (entry `(("start" . ,(plist-get state :start))
                    ("point" . ,(plist-get state :point))
                    ("following" . ,(if (eq (plist-get state :following) t) 1 0))
@@ -1116,7 +1105,6 @@ the settled rendered buffer."
                     phase (car entry) (or (cdr entry) "")))))
 
 (defun pilish-sd-bench--write-times-tsv ()
-  "Write filter, flush, display, probe, and reader observations to timing TSV."
   (with-temp-file pilish-sd-bench-times-file
     (insert (concat "series\tindex\tphase\tkind\titems\tbytes\tchars\t"
                     "wall_ms\tgcs\tgc_ms\tfilter_id\tboundary\tbacklog\n"))

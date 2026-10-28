@@ -241,7 +241,6 @@ STREAM chooses the stream engine rather than the tool engine."
       (delete-file file))))
 
 (ert-deftest pilish-test-benchmark-reader-contract ()
-  "Require a non-tail reader and exact positions at every observation."
   (let* ((state '(:start 1 :point 1 :following :json-false))
          (pilish-sd-bench-scenario "reader")
          (pilish-sd-bench-timer-text-deltas 12)
@@ -285,7 +284,6 @@ STREAM chooses the stream engine rather than the tool engine."
          (metrics) "reader-start-preserved" nil t)))))
 
 (ert-deftest pilish-test-benchmark-reader-timer-ownership ()
-  "Count JIT creations by their live marker buffer, not the current buffer."
   (with-temp-buffer
     (let ((pilish-sd-bench--reader-chat-buffer (current-buffer))
           (pilish-sd-bench--phase "stream")

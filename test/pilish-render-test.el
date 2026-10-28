@@ -6171,7 +6171,6 @@ replay output without it, byte for byte."
   (should (= 5 (pilish--clamp-rewrite-point-row 10 5 8 20))))
 
 (ert-deftest pilish-test-clamp-rewrite-point-row-capped-counts-equivalent ()
-  "Saturating counts and saved rows preserves the stable-height clamp."
   (dolist (height '(1 2 3 5 8))
     (dotimes (above (+ 2 (* 2 height)))
       (cl-loop for tail from 1 to (+ 2 (* 2 height)) do
@@ -6184,7 +6183,6 @@ replay output without it, byte for byte."
                       (min tail height) height))))))))
 
 (ert-deftest pilish-test-capture-window-rewrite-state-caps-offscreen-row ()
-  "Distant point capture uses one window of rows and never follows a stale end."
   (save-window-excursion
     (with-temp-buffer
       (switch-to-buffer (current-buffer))
@@ -6211,7 +6209,6 @@ replay output without it, byte for byte."
         (should (= (plist-get state :start) (point-min)))))))
 
 (ert-deftest pilish-test-rewrite-viewport-counts-bounded-fallback ()
-  "Reader fallback measures only the counts that can affect its row clamp."
   (save-window-excursion
     (with-temp-buffer
       (switch-to-buffer (current-buffer))

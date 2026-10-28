@@ -582,7 +582,6 @@ raced a turn that was never submitted."
 ;;;; Scroll Preservation Tests
 
 (defun pilish-gui-test--check-bounded-screen-lines (window regions)
-  "Compare bounded and native counts in WINDOW for each pair in REGIONS."
   (dolist (region regions)
     (dolist (endpoints (list region (cons (cdr region) (car region))))
       (dolist (final-newline '(nil t))
@@ -606,7 +605,6 @@ raced a turn that was never submitted."
                                    (window-hscroll window) (window-vscroll window)))))))))))
 
 (ert-deftest pilish-gui-test-bounded-screen-lines-wrapping ()
-  "Wrapped rows, hidden text, and display replacements match at two widths."
   (should (display-graphic-p))
   (save-window-excursion
     (delete-other-windows)
@@ -642,7 +640,6 @@ raced a turn that was never submitted."
         (should (> (car counts) (cadr counts)))))))
 
 (ert-deftest pilish-gui-test-bounded-screen-lines-truncation-and-hscroll ()
-  "Truncated endpoints keep native corrections, including partial-width views."
   (should (display-graphic-p))
   (save-window-excursion
     (delete-other-windows)
@@ -678,7 +675,6 @@ raced a turn that was never submitted."
                window (list (cons (point-min) (point-max)) (cons 10 long-end))))))))))
 
 (ert-deftest pilish-gui-test-bounded-thinking-end-preserves-non-tail-reader ()
-  "Visible thinking completion preserves independent readers with bounded motion."
   (let ((chat (generate-new-buffer " *pi-bounded-thinking-reader*"))
         (input (generate-new-buffer " *pi-bounded-thinking-input*")))
     (unwind-protect
@@ -694,7 +690,6 @@ raced a turn that was never submitted."
           (pilish--display-agent-start)
           (pilish--display-thinking-start)
           (pilish--display-thinking-delta "Visible thinking stays visible.\nAnother thought.")
-          ;; An existing separator makes visible completion property-only.
           (let ((inhibit-read-only t))
             (save-excursion
               (goto-char pilish--thinking-marker)
@@ -706,6 +701,7 @@ raced a turn that was never submitted."
                  (restore (symbol-function 'pilish--restore-window-rewrite-states))
                  (thinking-start (marker-position pilish--thinking-start-marker))
                  (text (buffer-substring-no-properties (point-min) (point-max)))
+                 (chars-tick (buffer-chars-modified-tick))
                  requests (restorations 0))
             (set-window-buffer tail chat)
             (with-selected-window tail (goto-char (point-max)) (recenter -1))
@@ -736,6 +732,7 @@ raced a turn that was never submitted."
                   (should (<= (car request)
                               (1+ (window-body-height (cadr request))))))
                 (should (equal text (buffer-substring-no-properties (point-min) (point-max))))
+                (should (= chars-tick (buffer-chars-modified-tick)))
                 (should (pilish--thinking-block-at-pos thinking-start)))
               (redisplay t)
               (should (= start (window-start reader)))

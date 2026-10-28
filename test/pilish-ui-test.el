@@ -1856,7 +1856,6 @@ Buffer is read-only with `inhibit-read-only' used for insertion.
 ;;; Scroll Preservation
 
 (ert-deftest pilish-test-count-screen-lines-up-to-matches-native ()
-  "Bounded counts match native endpoint, newline, and restriction rules."
   (save-window-excursion
     (with-temp-buffer
       (switch-to-buffer (current-buffer))
@@ -1891,7 +1890,6 @@ Buffer is read-only with `inhibit-read-only' used for insertion.
                 (should (= end (point-max)))))))))))
 
 (ert-deftest pilish-test-count-screen-lines-up-to-display-properties ()
-  "Invisible text and display replacements retain the native row count."
   (save-window-excursion
     (with-temp-buffer
       (switch-to-buffer (current-buffer))
@@ -1908,7 +1906,6 @@ Buffer is read-only with `inhibit-read-only' used for insertion.
                         final-newline)))))))))
 
 (ert-deftest pilish-test-count-screen-lines-up-to-motion-budget-and-state ()
-  "A count uses one bounded motion and preserves every incoming view."
   (save-window-excursion
     (delete-other-windows)
     (with-temp-buffer
@@ -1948,7 +1945,6 @@ Buffer is read-only with `inhibit-read-only' used for insertion.
                                (window-point window) (window-hscroll window)))))))))
 
 (ert-deftest pilish-test-count-screen-lines-up-to-unwinds-on-motion-error ()
-  "An interrupted display measurement restores point and restriction."
   (with-temp-buffer
     (insert "before\nmeasure\nafter\n")
     (goto-char 10)
@@ -1963,7 +1959,6 @@ Buffer is read-only with `inhibit-read-only' used for insertion.
     (should (= (point-max) 18))))
 
 (ert-deftest pilish-test-viewport-counts-fill-and-tail-thresholds ()
-  "Fill and tail-fit decisions stop at their first decisive display row."
   (save-window-excursion
     (with-temp-buffer
       (switch-to-buffer (current-buffer))
@@ -1987,26 +1982,28 @@ Buffer is read-only with `inhibit-read-only' used for insertion.
                             (>= lines (1- height))))
                 (should (equal requests (unless (or (= height 1) (= lines 0))
                                           (list (1- height)))))))))
-        ;; Including the final newline makes these tails exactly H and H+1.
-        (dolist (lines '(4 5))
-          (erase-buffer)
-          (dotimes (_ lines) (insert "line\n"))
-          (setq requests nil starts nil recenters nil)
-          (cl-letf (((symbol-function 'window-body-height) (lambda (&rest _) 5))
-                    ((symbol-function 'set-window-start)
-                     (lambda (_win start &rest _) (push start starts)))
-                    ((symbol-function 'recenter)
-                     (lambda (row &rest _) (push row recenters)))
-                    ((symbol-function 'count-screen-lines)
-                     (lambda (&rest _) (ert-fail "Unrestricted tail count")))
-                    ((symbol-function 'vertical-motion)
-                     (lambda (rows &rest args)
-                       (push rows requests)
-                       (apply motion rows args))))
-            (pilish--restore-tail-window window (point-min)))
-          (should (equal (nreverse requests) '(4 6)))
-          (should (equal starts (when (= lines 4) '(1))))
-          (should (equal recenters (when (= lines 5) '(-1)))))))))
+        (let ((height 5))
+          (dolist (lines (list (1- height) height))
+            (erase-buffer)
+            (dotimes (_ lines) (insert "line\n"))
+            (setq requests nil starts nil recenters nil)
+            (cl-letf (((symbol-function 'window-body-height)
+                       (lambda (&rest _) height))
+                      ((symbol-function 'set-window-start)
+                       (lambda (_win start &rest _) (push start starts)))
+                      ((symbol-function 'recenter)
+                       (lambda (row &rest _) (push row recenters)))
+                      ((symbol-function 'count-screen-lines)
+                       (lambda (&rest _) (ert-fail "Unrestricted tail count")))
+                      ((symbol-function 'vertical-motion)
+                       (lambda (rows &rest args)
+                         (push rows requests)
+                         (apply motion rows args))))
+              (pilish--restore-tail-window window (point-min)))
+            (should (equal (nreverse requests)
+                           (list (1- height) (1+ height))))
+            (should (equal starts (when (= lines (1- height)) '(1))))
+            (should (equal recenters (when (= lines height) '(-1))))))))))
 
 (ert-deftest pilish-test-scroll-preservation-keeps-reader-and-tail-points ()
   "An insertion keeps a nonselected reader and a follower on their text."
