@@ -243,20 +243,30 @@ font configuration."
                 (overlays-in (point-min) (point-max)))))
       (should (>= (length ovs) 1)))))
 
-(ert-deftest pilish-test-decorate-table-preserves-trailing-newline ()
-  "Display string preserves trailing newline from the raw table."
+(ert-deftest pilish-test-decorate-table-leaves-row-newlines-in-raw-text ()
   (with-temp-buffer
     (pilish-chat-mode)
-    (let ((inhibit-read-only t))
-      (insert "before\n\n" pilish-test--wide-table "\nafter\n"))
+    (let ((inhibit-read-only t)
+          raw-before)
+      (insert "before\n\n" pilish-test--wide-table "\nafter\n")
+      (setq raw-before (buffer-substring-no-properties
+                        (point-min) (point-max)))
     (font-lock-ensure)
     (pilish--decorate-tables-in-region (point-min) (point-max) 40)
-    (let* ((ovs (seq-filter
-                 (lambda (ov) (overlay-get ov 'pilish-table-display))
-                 (overlays-in (point-min) (point-max))))
-           (disp (overlay-get (car ovs) 'display)))
-      ;; Display string should end with newline (from tree-sitter node)
-      (should (string-suffix-p "\n" disp)))))
+    (let ((ovs (seq-filter
+                (lambda (ov) (overlay-get ov 'pilish-table-display))
+                (overlays-in (point-min) (point-max)))))
+      (should ovs)
+      (dolist (ov ovs)
+        (should (= (overlay-end ov)
+                   (save-excursion
+                     (goto-char (overlay-start ov))
+                     (line-end-position))))
+        (should-not (string-suffix-p "\n" (overlay-get ov 'display))))
+      (should (equal raw-before
+                     (buffer-substring-no-properties
+                      (point-min) (point-max))))
+      (should (string-suffix-p "\n\nafter\n" raw-before))))))
 
 (ert-deftest pilish-test-table-decoration-copy-returns-raw ()
   "Copying a decorated table returns the raw canonical markdown."
