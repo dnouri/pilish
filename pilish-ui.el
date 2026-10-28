@@ -2368,12 +2368,49 @@ larger window when the selected one cannot be split."
         (and (= point (1- (point-max)))
              (eq (char-after point) ?\n)))))
 
+(defun pilish--count-screen-lines-up-to
+    (beg end limit window &optional count-final-newline)
+  "Count display rows between BEG and END, saturating at nonnegative LIMIT.
+A result below LIMIT is exact.  WINDOW supplies display geometry for the
+current buffer.  COUNT-FINAL-NEWLINE has the meaning in `count-screen-lines'.
+Preserve point and the incoming restriction.  A zero LIMIT does no display
+work."
+  (if (zerop limit)
+      0
+    (setq beg (or beg (point-min))
+          end (or end (point-max)))
+    (if (= beg end)
+        0
+      (let* ((start (min beg end))
+             (finish (max beg end))
+             ;; Keep the native truncated-end correction before motion:
+             ;; fontification during motion can change display properties.
+             (end-invisible-p
+              (and (or truncate-lines (truncated-partial-width-window-p window))
+                   (save-excursion
+                     (goto-char finish)
+                     (> (- (current-column) (window-hscroll window))
+                        (window-body-width window))))))
+        (save-excursion
+          (save-restriction
+            (widen)
+            (narrow-to-region start
+                              (if (and (not count-final-newline)
+                                       (= ?\n (char-before finish)))
+                                  (1- finish)
+                                finish))
+            (goto-char start)
+            ;; Retain the native ceiling for display strings that expand text.
+            (let ((count (vertical-motion (min limit (buffer-size)) window)))
+              (min limit (if end-invisible-p count (1+ count))))))))))
+
 (defun pilish--window-start-fills-window-within-one-row-p
     (start point-max body-height window)
   "Return non-nil if START would leave at most one blank row after POINT-MAX.
 BODY-HEIGHT and WINDOW select the geometry used for the count."
-  (>= (count-screen-lines start point-max nil window)
-      (1- body-height)))
+  (let ((limit (max 0 (1- body-height))))
+    (>= (pilish--count-screen-lines-up-to start point-max limit window)
+        limit)))
 
 (defun pilish--restore-tail-window (window start)
   "Restore following WINDOW using mapped candidate START.
@@ -2388,7 +2425,9 @@ Return nil."
         (goto-char end)
         (if (and (pilish--window-start-fills-window-within-one-row-p
                   start end body-height window)
-                 (<= (count-screen-lines start end t window) body-height))
+                 (<= (pilish--count-screen-lines-up-to
+                      start end (1+ body-height) window t)
+                     body-height))
             (set-window-start window start t)
           (recenter -1))))
     (set-window-point window end))
