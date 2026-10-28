@@ -1918,6 +1918,71 @@ Buffer is read-only with `inhibit-read-only' used for insertion.
       (kill-buffer chat)
       (kill-buffer input))))
 
+(ert-deftest pilish-test-scroll-preservation-restores-tail-only-after-character-edits ()
+  "Property edits keep follower starts, and every exit releases anchors."
+  (let ((chat (generate-new-buffer " *pilish-scroll-gate-chat*"))
+        (input (generate-new-buffer " *pilish-scroll-gate-input*")))
+    (unwind-protect
+        (save-window-excursion
+          (delete-other-windows)
+          (switch-to-buffer chat)
+          (insert (mapconcat (lambda (n) (format "line %02d" n))
+                             (number-sequence 1 50) "\n"))
+          (let* ((reader (selected-window))
+                 (tail (split-window-right))
+                 (input-window (split-window reader -5 'below))
+                 (original-copy (symbol-function 'copy-marker))
+                 (original-restore (symbol-function 'pilish--restore-tail-window))
+                 calls anchors)
+            (set-window-point reader 20)
+            (set-window-buffer tail chat)
+            (set-window-point tail (point-max))
+            (set-window-buffer input-window input)
+            (select-window input-window)
+            (insert "unchanged draft")
+            (goto-char 5)
+            (with-current-buffer chat
+              (goto-char 20)
+              (cl-letf (((symbol-function 'copy-marker)
+                         (lambda (&rest args)
+                           (let ((marker (apply original-copy args)))
+                             (push marker anchors)
+                             marker)))
+                        ((symbol-function 'pilish--restore-tail-window)
+                         (lambda (window start)
+                           (push window calls)
+                           (funcall original-restore window start))))
+                (dolist (operation '(none face overlay text))
+                  (setq calls nil anchors nil)
+                  (should
+                   (null
+                    (pilish--with-scroll-preservation
+                      (save-excursion
+                        (pcase operation
+                          ('face (put-text-property 1 2 'face 'bold))
+                          ('overlay (delete-overlay (make-overlay 1 2)))
+                          ('text (subst-char-in-region 1 2 ?l ?L)))))))
+                  (should (= (length calls) (if (eq operation 'text) 1 0)))
+                  (should (= (length anchors) 2))
+                  (should (cl-every (lambda (marker) (null (marker-buffer marker)))
+                                    anchors))
+                  (should (= (point) 20))
+                  (should (= (window-point reader) 20))
+                  (should (eq (selected-window) input-window))
+                  (should (= (window-point input-window) 5))
+                  (should (equal (with-current-buffer input (buffer-string))
+                                 "unchanged draft")))
+                (setq calls nil anchors nil)
+                (condition-case nil
+                    (pilish--with-scroll-preservation (error "Expected error"))
+                  (error nil))
+                (should-not calls)
+                (should (= (length anchors) 2))
+                (should (cl-every (lambda (marker) (null (marker-buffer marker)))
+                                  anchors))))))
+      (kill-buffer chat)
+      (kill-buffer input))))
+
 ;;; Turn Detection
 
 (ert-deftest pilish-test-turn-index-on-first-heading ()

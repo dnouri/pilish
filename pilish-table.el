@@ -589,13 +589,12 @@ corresponding wrapped output (which may span multiple visual lines
 when columns wrap).
 
 Container prefixes (for example `> ' in blockquotes or list indentation)
-are preserved on every visual continuation line.  Trailing newlines from
-the tree-sitter node are preserved in the last overlay's display string so
-blank-line spacing between a table and following text is not collapsed."
+are preserved on every visual continuation line.  Raw row newlines and
+trailing blank lines stay outside the overlays so raw end-of-line positions
+appear after the wrapped rows."
   (let* ((table-beg (save-excursion (goto-char beg) (line-beginning-position)))
          (raw (buffer-substring-no-properties table-beg end))
-         (trimmed (string-trim-right raw "\n+"))
-         (trailing (substring raw (length trimmed))))
+         (trimmed (string-trim-right raw "\n+")))
     (when-let* ((raw-lines (split-string trimmed "\n"))
                 (groups (pilish--table-display-groups raw-lines width)))
       (unless (and (= (length groups) (length raw-lines))
@@ -608,13 +607,9 @@ blank-line spacing between a table and following text is not collapsed."
             (goto-char table-beg)
             (dotimes (i n)
               (let* ((line-beg (line-beginning-position))
-                     (line-end (if (= i (1- n))
-                                   end ; last line: cover trailing newlines
-                                 (min (1+ (line-end-position)) end)))
+                     (line-end (min (line-end-position) end))
                      (group (nth i groups))
-                     (display-str (concat
-                                   (mapconcat #'identity group "\n")
-                                   (if (= i (1- n)) trailing "\n")))
+                     (display-str (mapconcat #'identity group "\n"))
                      (ov (make-overlay line-beg line-end nil nil nil)))
                 (overlay-put ov 'display
                              (pilish--neutralize-fonts display-str))

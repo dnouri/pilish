@@ -5399,13 +5399,11 @@ The banner is toggled before thinking blocks and outline cycling."
                  (reply-overlays
                   (seq-filter (lambda (ov) (overlay-get ov 'pilish-table-display))
                               (overlays-in (cdr bounds) (point-max))))
-                 ;; The thinking table may overlap the separator newline.
-                 (reply-overlays (seq-difference reply-overlays thinking-overlays))
                  (reply-displays (mapcar (lambda (ov) (overlay-get ov 'display))
                                          reply-overlays)))
             (should (= (length thinking-overlays) 3))
             (should (= (length reply-overlays) 3))
-            (should (seq-some (lambda (ov) (> (overlay-end ov) (cdr bounds)))
+            (should (cl-every (lambda (ov) (<= (overlay-end ov) (cdr bounds)))
                               thinking-overlays))
             (if (eq action 'tab)
                 (pilish-toggle-tool-section)
@@ -5439,8 +5437,6 @@ The banner is toggled before thinking blocks and outline cycling."
       (pilish-test--with-streaming-assistant
         (pilish--display-thinking-start)
         (pilish--display-thinking-delta pilish-test--thinking-with-table)
-        ;; A streamed tool header adds a newline outside the live thinking
-        ;; marker.  Resize decoration includes it in the last table overlay.
         (pilish-test--send-assistant-message-update
          '(:type "toolcall_start" :contentIndex 1
            :id "call_1" :toolName "read"))
@@ -5454,7 +5450,8 @@ The banner is toggled before thinking blocks and outline cycling."
                           (overlays-in (point-min) (point-max))))
                (displays (mapcar (lambda (ov) (overlay-get ov 'display)) overlays)))
           (should (= (length overlays) 3))
-          (should (seq-some (lambda (ov) (> (overlay-end ov) pilish--thinking-marker))
+          (should (cl-every (lambda (ov) (<= (overlay-end ov)
+                                             pilish--thinking-marker))
                             overlays))
           (pilish--display-thinking-end "")
           (if (eq display 'hidden)
@@ -6139,6 +6136,17 @@ replay output without it, byte for byte."
     ;; Mock window-point to return position before end
     (cl-letf (((symbol-function 'window-point) (lambda (_w) 1)))
       (should-not (pilish--window-following-p 'mock-window)))))
+
+(ert-deftest pilish-test-window-following-p-only-tolerates-trailing-newline ()
+  "A point before the last non-newline character is not a follower."
+  (with-temp-buffer
+    (insert "some content")
+    (cl-letf (((symbol-function 'window-point) (lambda (_w) (1- (point-max)))))
+      (should-not (pilish--window-following-p 'mock-window))))
+  (with-temp-buffer
+    (insert "some content\n")
+    (cl-letf (((symbol-function 'window-point) (lambda (_w) (1- (point-max)))))
+      (should (pilish--window-following-p 'mock-window)))))
 
 (ert-deftest pilish-test-rewrite-tail-window-p-keeps-lower-tail-view-following ()
   "A lower-window tail view should stay in tail-following mode after a rewrite."
@@ -18151,6 +18159,92 @@ Regression test: streaming output with no newlines should still be capped."
       (let ((tick (buffer-modified-tick)))
         (pilish--tool-block-replace-body first "again" nil nil)
         (should (= tick (buffer-modified-tick)))))))
+
+(ert-deftest pilish-test-tool-body-edit-restores-point-boundaries ()
+  "Replacement anchors preserve suffixes and use the fallback only inside edits."
+  (dolist (spec '((1 1) (8 8) (9 8) (11 16) (14 19)))
+    (with-temp-buffer
+      (insert "before OLD suffix\n")
+      (goto-char (car spec))
+      (should
+       (null
+        (pilish--call-with-tool-body-edit
+         8 11 8
+         (lambda ()
+           (goto-char 8)
+           (delete-region 8 11)
+           (insert "NEW LONG")
+           'ignored-callback-value))))
+      (should (= (point) (cadr spec)))))
+  (with-temp-buffer
+    (insert "before suffix\n")
+    (goto-char 8)
+    (pilish--call-with-tool-body-edit
+     8 8 8 (lambda () (insert "inserted ")))
+    (should (= (point) 17))))
+
+(ert-deftest pilish-test-tool-body-edit-preserves-selected-input-and-readers ()
+  "Tool edits keep independent buffer, window, and input positions separate."
+  (let ((chat (generate-new-buffer " *pilish-tool-edit-chat*"))
+        (input (generate-new-buffer " *pilish-tool-edit-input*")))
+    (unwind-protect
+        (save-window-excursion
+          (delete-other-windows)
+          (switch-to-buffer chat)
+          (insert "before OLD suffix\n")
+          (dotimes (index 70)
+            (insert (format "tail %02d\n" index)))
+          (let ((reader (selected-window))
+                (follower (split-window-right)))
+            (set-window-buffer follower chat)
+            (set-window-start follower 100 t)
+            (set-window-point follower (point-max))
+            (set-window-start reader 1 t)
+            (set-window-point reader 14)
+            (let ((input-window (split-window-below)))
+              (set-window-buffer input-window input)
+              (select-window input-window)
+              (insert "an unsent draft")
+              (goto-char 5)
+              (with-current-buffer chat
+                (goto-char 9)
+                (pilish--call-with-tool-body-edit
+                 8 11 8
+                 (lambda ()
+                   (goto-char 8)
+                   (delete-region 8 11)
+                   (insert "NEW LONG")))
+                (should (= (point) 8))
+                (should (= (window-point reader) 19))
+                (should (= (window-start reader) 1))
+                (should (= (window-point follower) (point-max))))
+              (should (eq (selected-window) input-window))
+              (should (= (point) 5))
+              (should (equal (buffer-string) "an unsent draft")))))
+      (kill-buffer chat)
+      (kill-buffer input))))
+
+(ert-deftest pilish-test-tool-body-edit-detaches-anchors-on-error ()
+  "Errors and quits release every temporary replacement anchor."
+  (dolist (failure '(error quit))
+    (with-temp-buffer
+      (insert "before OLD suffix\n")
+      (goto-char 9)
+      (let ((copy (symbol-function 'copy-marker))
+            markers)
+        (cl-letf (((symbol-function 'copy-marker)
+                   (lambda (&rest args)
+                     (let ((marker (apply copy args)))
+                       (push marker markers)
+                       marker))))
+          (condition-case nil
+              (pilish--call-with-tool-body-edit
+               8 11 8 (lambda () (signal failure nil)))
+            (error nil)
+            (quit nil)))
+        (should markers)
+        (should (cl-every (lambda (marker) (null (marker-buffer marker)))
+                          markers))))))
 
 (ert-deftest pilish-test-parallel-tool-execution-keeps-output-with-own-header ()
   "Interleaved execution updates stay attached to their matching headers."

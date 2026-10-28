@@ -635,10 +635,6 @@ raced a turn that was never submitted."
             (redisplay)
             (setq after-expansion
                   (pilish-gui-test--window-current-line (selected-window)))
-            (goto-char (point-min))
-            (search-forward "AFTER-TOOL sentinel")
-            (beginning-of-line)
-            (set-window-point (selected-window) (point))
             (pilish--display-tool-end
              "bash" '(:command "demo")
              '[(:type "text" :text "final\n")] nil nil block)
@@ -647,6 +643,153 @@ raced a turn that was never submitted."
                   (pilish-gui-test--window-current-line (selected-window)))
             (should (equal '("AFTER-TOOL sentinel" "AFTER-TOOL sentinel")
                            (list after-expansion after-contraction)))))
+      (kill-buffer buf))))
+
+(ert-deftest pilish-gui-test-tool-streaming-restores-deleted-point-to-body-start ()
+  (let ((buf (get-buffer-create "*pi-gui-tool-deleted-preview-point*")))
+    (unwind-protect
+        (progn
+          (switch-to-buffer buf)
+          (pilish-chat-mode)
+          (let ((block (pilish--display-tool-start
+                        "bash" '(:command "demo") "deleted-preview-point"))
+                body-start)
+            (pilish--display-tool-update
+             '(:content [(:type "text" :text "old preview text\n")])
+             block)
+            (setq body-start
+                  (marker-position (pilish--tool-block-header-end block)))
+            (goto-char (point-min))
+            (search-forward "old pre")
+            (pilish--display-tool-update
+             '(:content [(:type "text" :text "new result text\n")])
+             block)
+            (redisplay)
+            (should (= (point) body-start))))
+      (kill-buffer buf))))
+
+(ert-deftest pilish-gui-test-tool-completion-restores-deleted-point-to-body-start ()
+  (let ((buf (get-buffer-create "*pi-gui-tool-deleted-final-point*")))
+    (unwind-protect
+        (progn
+          (switch-to-buffer buf)
+          (pilish-chat-mode)
+          (let ((block (pilish--display-tool-start
+                        "bash" '(:command "demo") "deleted-final-point"))
+                body-start)
+            (pilish--display-tool-update
+             '(:content [(:type "text"
+                          :text "first\nstreaming text that will disappear\nlast\n")])
+             block)
+            (setq body-start
+                  (marker-position (pilish--tool-block-header-end block)))
+            (goto-char (point-min))
+            (search-forward "streaming text ")
+            (pilish--display-tool-end
+             "bash" '(:command "demo")
+             (vector (list :type "text" :text "Short final result"))
+             nil nil block)
+            (redisplay)
+            (should (= (point) body-start))))
+      (kill-buffer buf))))
+
+(ert-deftest pilish-gui-test-append-keeps-tail-filled ()
+  (let ((buf (get-buffer-create "*pi-gui-append-tail*")))
+    (unwind-protect
+        (save-window-excursion
+          (delete-other-windows)
+          (switch-to-buffer buf)
+          (pilish-chat-mode)
+          (let ((window (selected-window))
+                (inhibit-read-only t))
+            (dotimes (index 45)
+              (insert (format "Earlier transcript line %02d\n" index)))
+            (redisplay t)
+            (sit-for 0.2)
+            (goto-char (point-max))
+            (recenter -1)
+            (redisplay)
+            (should (pilish-gui-test--window-substantially-filled-p window))
+            (pilish--append-to-chat "Next streamed line\n")
+            (redisplay)
+            (should (>= (window-point window) (1- (point-max))))
+            (should (>= (window-end window t) (1- (point-max))))
+            (should (pilish-gui-test--window-substantially-filled-p window))))
+      (kill-buffer buf))))
+
+(ert-deftest pilish-gui-test-streaming-delta-keeps-tail-filled ()
+  (let ((buf (get-buffer-create "*pi-gui-delta-tail*")))
+    (unwind-protect
+        (save-window-excursion
+          (delete-other-windows)
+          (switch-to-buffer buf)
+          (pilish-chat-mode)
+          (let ((window (selected-window))
+                (inhibit-read-only t))
+            (dotimes (index 45)
+              (insert (format "Earlier transcript line %02d\n" index)))
+            (pilish--display-agent-start)
+            (redisplay t)
+            (sit-for 0.2)
+            (goto-char (point-max))
+            (recenter -1)
+            (redisplay)
+            (should (pilish-gui-test--window-substantially-filled-p window))
+            (pilish--display-message-delta "Next streamed line\n")
+            (redisplay)
+            (should (>= (window-point window) (1- (point-max))))
+            (should (>= (window-end window t) (1- (point-max))))
+            (should (pilish-gui-test--window-substantially-filled-p window))))
+      (kill-buffer buf))))
+
+(ert-deftest pilish-gui-test-tool-completion-keeps-independent-views-filled ()
+  (let ((buf (get-buffer-create "*pi-gui-tool-tail-contraction*")))
+    (unwind-protect
+        (save-window-excursion
+          (delete-other-windows)
+          (switch-to-buffer buf)
+          (pilish-chat-mode)
+          (let ((tail-window (selected-window))
+                (inhibit-read-only t)
+                block reader-window reader-start reader-point)
+            (dotimes (index 45)
+              (insert (format "Earlier transcript line %02d\n" index)))
+            (setq block
+                  (pilish--display-tool-start
+                   "bash" '(:command "demo") "tail-contraction"))
+            (pilish--display-tool-update
+             (list :content
+                   (vector
+                    (list :type "text"
+                          :text (mapconcat
+                                 (lambda (index)
+                                   (format "Streaming output line %02d" index))
+                                 (number-sequence 1 50) "\n"))))
+             block)
+            (goto-char (point-max))
+            (recenter -1)
+            (setq reader-window (split-window-right))
+            (set-window-buffer reader-window buf)
+            (set-window-start reader-window (point-min) t)
+            (set-window-point reader-window (point-min))
+            (setq reader-start (window-start reader-window)
+                  reader-point (window-point reader-window))
+            (redisplay)
+            (pilish--display-tool-end
+             "bash" '(:command "demo")
+             (vector (list :type "text" :text "Short final result"))
+             nil nil block)
+            (redisplay)
+            (should (>= (window-point tail-window) (1- (point-max))))
+            (should (pilish-gui-test--window-substantially-filled-p tail-window))
+            (should (= (window-start reader-window) reader-start))
+            (should (= (window-point reader-window) reader-point))
+            (pilish--append-to-chat "Next streamed line\n")
+            (redisplay)
+            (should (>= (window-point tail-window) (1- (point-max))))
+            (should (pilish-gui-test--window-substantially-filled-p tail-window))
+            (should (= (window-start reader-window) reader-start))
+            (should (= (window-point reader-window) reader-point))))
       (kill-buffer buf))))
 
 (ert-deftest pilish-gui-test-scroll-auto-when-at-end ()
@@ -662,6 +805,25 @@ buffer end so the next streamed turn still follows automatically."
     (should (pilish-gui-test-window-point-at-end-p))
     (should (pilish-gui-test-at-end-p))
     (should (pilish-gui-test-chat-contains "Scroll line 24 for second turn"))))
+
+(ert-deftest pilish-gui-test-thinking-initial-whitespace-keeps-point ()
+  (let ((buf (get-buffer-create "*pi-gui-thinking-initial-point*")))
+    (unwind-protect
+        (progn
+          (switch-to-buffer buf)
+          (pilish-chat-mode)
+          (pilish--display-agent-start)
+          (pilish--display-thinking-start)
+          (let ((position (1+ (marker-position pilish--thinking-start-marker))))
+            (goto-char position)
+            (pilish--display-thinking-delta "\n")
+            (pilish--display-thinking-delta "alpha")
+            (redisplay)
+            (should (equal (buffer-substring-no-properties
+                            (line-beginning-position) (line-end-position))
+                           "> alpha"))
+            (should (= (point) position))))
+      (kill-buffer buf))))
 
 (ert-deftest pilish-gui-test-thinking-display-toggle-keeps-tail-filled ()
   "Toggling completed thinking keeps a tail-following chat window filled.
@@ -907,6 +1069,61 @@ logical block and should not start following later streamed output."
               (should (= line-before (pilish-gui-test-top-line-number)))))
         (set-frame-size frame orig-width (frame-height))
         (redisplay)))))
+
+(ert-deftest pilish-gui-test-table-kill-line-moves-cursor-to-visual-end ()
+  (let ((buf (get-buffer-create "*pi-gui-table-kill-line*")))
+    (unwind-protect
+        (progn
+          (switch-to-buffer buf)
+          (pilish-chat-mode)
+          (remove-hook 'window-configuration-change-hook
+                       #'pilish--maybe-refresh-hot-tail-tables t)
+          (let ((inhibit-read-only t))
+            (insert "before\n"
+                    "| Name | Description |\n"
+                    "|------|-------------|\n"
+                    "| Auth | OAuth2 with refresh tokens and renewal |\n"
+                    "| Other | short |\n"
+                    "after\n"))
+          (font-lock-ensure)
+          (pilish--decorate-tables-in-region (point-min) (point-max) 30)
+          (goto-char (point-min))
+          (search-forward "| Auth |")
+          (let* ((window (selected-window))
+                 (raw-before (buffer-substring-no-properties
+                              (point-min) (point-max)))
+                 (row-start (line-beginning-position))
+                 (row-end (line-end-position))
+                 (overlay (cl-find-if
+                           (lambda (candidate)
+                             (and (overlay-get candidate 'pilish-table-display)
+                                  (= (overlay-start candidate) row-start)))
+                           (overlays-in row-start (1+ row-start))))
+                 (display-lines (and overlay
+                                     (split-string
+                                      (string-trim-right
+                                       (overlay-get overlay 'display) "\n+")
+                                      "\n")))
+                 (expected-copy (buffer-substring-no-properties (point) row-end))
+                 before-y after-y)
+            (should (> (length display-lines) 1))
+            (redisplay)
+            (setq before-y (cdr (posn-x-y (posn-at-point (point) window))))
+            (let ((kill-read-only-ok t)
+                  (kill-ring nil)
+                  (kill-ring-yank-pointer nil)
+                  (last-command nil))
+              (execute-kbd-macro (kbd "C-k"))
+              (should (= (point) row-end))
+              (should (equal (current-kill 0) expected-copy)))
+            (redisplay)
+            (setq after-y (cdr (posn-x-y (posn-at-point (point) window))))
+            (should (= (point) row-end))
+            (should (> after-y before-y))
+            (should (equal raw-before
+                           (buffer-substring-no-properties
+                            (point-min) (point-max))))))
+      (kill-buffer buf))))
 
 ;;;; Content Tests
 

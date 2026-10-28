@@ -632,7 +632,9 @@ Returns non-nil when meaningful content remains after normalization."
            (end (marker-position pilish--thinking-marker))
            (normalized (pilish--thinking-normalize-text
                         pilish--thinking-raw))
-           (rendered (pilish--thinking-blockquote-text normalized))
+           (rendered (if (string-empty-p normalized)
+                         "> "
+                       (pilish--thinking-blockquote-text normalized)))
            (prev pilish--thinking-prev-rendered))
       (when (<= start end)
         (cond
@@ -5575,6 +5577,64 @@ This is O(k) where k is the size of the tail, not O(n) like `split-string'."
       ;; Return tail and whether there's hidden content
       (cons (substring content pos) (> pos 0))))))
 
+(defun pilish--call-with-tool-body-edit (beg end fallback function)
+  "Call FUNCTION for one ordinary tool-body edit in the current buffer.
+BEG and END delimit the old half-open replacement interval.  Positions
+inside it move to the tool body start FALLBACK; surviving points and
+window starts use advancing markers.  Following windows stay at a filled
+tail.  Restore views only on normal completion and always detach markers.
+FUNCTION must not yield or change unrelated text.  Return nil."
+  (unless (and (integerp beg) (integerp end) (integerp fallback)
+               (<= (point-min) fallback beg end (point-max)))
+    (error "Invalid tool body edit bounds"))
+  (let ((buffer (current-buffer))
+        (selected (selected-window))
+        markers buffer-point views selected-point)
+    (cl-labels ((anchor (position)
+                  (let* ((deleted (and (< beg end) (<= beg position)
+                                       (< position end)))
+                         (marker (copy-marker (if deleted fallback position)
+                                              (not deleted))))
+                    (push marker markers)
+                    marker)))
+      (unwind-protect
+          (progn
+            (setq buffer-point (anchor (point)))
+            (dolist (window (get-buffer-window-list buffer nil t))
+              (push (list :window window
+                          :following (pilish--window-following-p window)
+                          :point (anchor (window-point window))
+                          :start (anchor (window-start window)))
+                    views))
+            (funcall function)
+            (when (buffer-live-p buffer)
+              (with-current-buffer buffer
+                (save-selected-window
+                  (dolist (view (nreverse views))
+                    (let ((window (plist-get view :window)))
+                      (when (and (window-live-p window)
+                                 (eq (window-buffer window) buffer))
+                        (let* ((following (plist-get view :following))
+                               (point-anchor (plist-get view :point))
+                               (point (if following (point-max)
+                                        (marker-position point-anchor)))
+                               (start (marker-position (plist-get view :start))))
+                          (when (and (not (marker-insertion-type point-anchor))
+                                     (< point start))
+                            (setq start point))
+                          (if following
+                              (pilish--restore-tail-window window start)
+                            (set-window-start window start t)
+                            (set-window-point window point))
+                          (when (eq window selected)
+                            (setq selected-point point)))))))
+                (goto-char buffer-point)
+                (when selected-point
+                  (set-window-point selected selected-point))))
+            nil)
+        (dolist (marker markers)
+          (set-marker marker nil))))))
+
 (defun pilish--tool-block-replace-body
     (block display-content show-hidden-indicator lang)
   "Replace BLOCK body with DISPLAY-CONTENT.
@@ -5611,29 +5671,29 @@ LANG is passed to `pilish--wrap-in-src-block' for fence construction."
         (cl-incf common-suffix))
       (unless (and (= common-prefix old-length)
                    (= common-prefix new-length))
-        (pilish--with-scroll-preservation
-          (save-excursion
-            (let* ((edit-start (+ body-start common-prefix))
-                   (edit-end (- (+ body-start old-length) common-suffix))
-                   (old-text (substring old-body common-prefix
-                                        (- old-length common-suffix)))
-                   (new-text (substring new-body common-prefix
-                                        (- new-length common-suffix))))
-              (goto-char edit-start)
-              (save-match-data
-                (cond
-                 ((= edit-start edit-end) (insert new-text))
-                 ((string-empty-p new-text) (delete-region edit-start edit-end))
-                 (t
-                  (unless (and (search-forward old-text edit-end t)
-                               (= (point) edit-end))
-                    (error "Tool preview changed during redraw"))
-                  (replace-match new-text t t))))
-            ;; Insertion at the body boundary can move HEADER-END as well as
-            ;; END-MARKER.  Restore both before updating the block overlay.
-            (set-marker header-end body-start)
-            (set-marker end-marker (+ body-start new-length))
-            (pilish--tool-block-refresh-overlay block)))))
+        (let* ((edit-start (+ body-start common-prefix))
+               (edit-end (- (+ body-start old-length) common-suffix))
+               (old-text (substring old-body common-prefix
+                                    (- old-length common-suffix)))
+               (new-text (substring new-body common-prefix
+                                    (- new-length common-suffix))))
+          (pilish--call-with-tool-body-edit
+           edit-start edit-end body-start
+           (lambda ()
+             (save-excursion
+               (goto-char edit-start)
+               (save-match-data
+                 (cond
+                  ((= edit-start edit-end) (insert new-text))
+                  ((string-empty-p new-text) (delete-region edit-start edit-end))
+                  (t
+                   (unless (and (search-forward old-text edit-end t)
+                                (= (point) edit-end))
+                     (error "Tool preview changed during redraw"))
+                   (replace-match new-text t t))))
+               (set-marker header-end body-start)
+               (set-marker end-marker (+ body-start new-length))
+               (pilish--tool-block-refresh-overlay block))))))
       (pilish--rebind-subagent-names new-body body-start (+ body-start new-length)))))
 
 (defun pilish--display-tool-streaming-text
@@ -5941,34 +6001,39 @@ if none exists, render the result at point without a live overlay."
              (hidden-count (plist-get truncation :hidden-lines))
              (needs-collapse (> hidden-count 0)))
         (pilish--annotate-saved-conversation-header block labels)
-        (pilish--with-scroll-preservation
-          (save-excursion
-            (if block
-                (let* ((header-end (pilish--tool-block-header-end block))
-                       (end-marker (pilish--tool-block-end-marker block)))
-                  (goto-char (marker-position header-end))
-                  (delete-region (marker-position header-end)
-                                 (marker-position end-marker))
-                  (if needs-collapse
-                      ;; Long output: show preview with toggle button.
-                      (let ((preview-content (plist-get truncation :content)))
-                        (pilish--insert-tool-content-with-toggle
-                         preview-content display-content lang is-edit-diff hidden-count nil))
-                    (unless (string-empty-p display-content)
-                      (pilish--insert-rendered-tool-content
-                       (string-trim-right display-content "\n+") lang is-edit-diff)))
-                  (pilish--insert-image-previews image-previews)
-                  (pilish--tool-block-set-image-previews block image-previews)
-                  (set-marker end-marker (point))
-                  (pilish--tool-block-refresh-overlay block)
-                  ;; Error content and the overlay face suffice; no error badge.
-                  (when-let* ((offset (plist-get presentation :offset)))
-                    (pilish--tool-block-set-offset block offset))
-                  (when-let* ((line-map (plist-get truncation :line-map)))
-                    (pilish--tool-block-set-line-map block line-map))
-                  (pilish--tool-overlay-finalize
-                   (if is-error 'pilish-tool-block-error 'pilish-tool-block) block)
-                  (when (eobp) (insert "\n")))
+        (if block
+            (let* ((header-end (pilish--tool-block-header-end block))
+                   (end-marker (pilish--tool-block-end-marker block))
+                   (body-start (marker-position header-end))
+                   (old-end (marker-position end-marker)))
+              (pilish--call-with-tool-body-edit
+               body-start old-end body-start
+               (lambda ()
+                 (save-excursion
+                   (goto-char body-start)
+                   (delete-region body-start old-end)
+                   (if needs-collapse
+                       ;; Long output: show preview with toggle button.
+                       (let ((preview-content (plist-get truncation :content)))
+                         (pilish--insert-tool-content-with-toggle
+                          preview-content display-content lang is-edit-diff hidden-count nil))
+                     (unless (string-empty-p display-content)
+                       (pilish--insert-rendered-tool-content
+                        (string-trim-right display-content "\n+") lang is-edit-diff)))
+                   (pilish--insert-image-previews image-previews)
+                   (pilish--tool-block-set-image-previews block image-previews)
+                   (set-marker end-marker (point))
+                   (pilish--tool-block-refresh-overlay block)
+                   ;; Error content and the overlay face suffice; no error badge.
+                   (when-let* ((offset (plist-get presentation :offset)))
+                     (pilish--tool-block-set-offset block offset))
+                   (when-let* ((line-map (plist-get truncation :line-map)))
+                     (pilish--tool-block-set-line-map block line-map))
+                   (pilish--tool-overlay-finalize
+                    (if is-error 'pilish-tool-block-error 'pilish-tool-block) block)
+                   (when (eobp) (insert "\n"))))))
+          (pilish--with-scroll-preservation
+            (save-excursion
               (goto-char (point-max))
               (if needs-collapse
                   (let ((preview-content (plist-get truncation :content)))
@@ -6055,7 +6120,6 @@ Returns the new bounds as (START . NEW-END)."
         new-end)
     (save-excursion
       (goto-char start)
-      ;; A table overlay may include a trailing newline outside this block.
       (pilish--remove-table-overlays start end)
       (delete-region start end)
       (insert rendered)
@@ -6751,9 +6815,7 @@ new body end.  Positions at or after OLD-END shift by the actual length delta."
 
 (defun pilish--capture-tool-cooling-view ()
   "Capture buffer point and visible-window positions before tool cooling.
-Unlike the marker-based `pilish--with-scroll-preservation', cooling also
-preserves buffer point and window starts, mapping all positions through
-explicit replacement bounds."
+Every position is mapped through explicit replacement bounds."
   (list
    :point (point)
    :windows
@@ -9729,15 +9791,6 @@ provided, or clamp it into the rewritten buffer."
        map-position
        (min (plist-get window-state :point) (point-max)))))
 
-(defun pilish--window-start-fills-window-p
-    (start point-max body-height window)
-  "Return non-nil when START still fills WINDOW after a rewrite.
-A filled view leaves at most one blank row in BODY-HEIGHT after POINT-MAX.
-Preserving the user's viewport is better than scrolling to command point when
-the old start remains useful."
-  (>= (count-screen-lines start point-max nil window)
-      (1- body-height)))
-
 (defun pilish--restore-window-rewrite-state
     (window-state &optional map-position)
   "Restore WINDOW-STATE after a large buffer rewrite.
@@ -9764,7 +9817,7 @@ nil for positions deleted by the rewrite."
                      (plist-get window-state :start)
                      map-position
                      point)))
-              (if (pilish--window-start-fills-window-p
+              (if (pilish--window-start-fills-window-within-one-row-p
                    saved-start point-max body-height win)
                   (progn
                     (set-window-start win saved-start t)
