@@ -1389,6 +1389,7 @@ Uses commands from pi's `get_commands' RPC."
     (pilish-menu-chat-thinking-display)
     (pilish-menu-default-thinking-display)]
    ["Info"
+    ("d" "details" pilish-describe-reply :if-derived pilish-transcript-mode)
     ("i" "stats" pilish-session-stats)
     ("y" "copy last" pilish-copy-last-message)]])
 

@@ -47,6 +47,7 @@
 (require 'pilish-grammars)
 (require 'color)
 (require 'diff-mode)
+(require 'button)
 
 
 ;; Forward declarations: keymaps bind functions defined in other modules.
@@ -54,6 +55,7 @@
 
 ;; pilish-render.el (chat buffer commands)
 (declare-function pilish-toggle-tool-section "pilish-render")
+(declare-function pilish--transcript-local-help "pilish-render")
 (declare-function pilish-shell-command-at-point "pilish-render")
 (declare-function pilish-visit-file "pilish-render")
 (declare-function pilish-copy-file-path "pilish-render")
@@ -68,8 +70,8 @@
 (declare-function pilish--snapshot-revert-buffer "pilish-snapshot")
 (declare-function pilish--process-followup-queue "pilish-render")
 (declare-function pilish--restore-tool-properties "pilish-render")
-(declare-function pilish--fontify-with-hover-help "pilish-render")
-(declare-function pilish--hover-clear-live-state "pilish-render")
+(declare-function pilish--fontify-and-restore-tool-properties "pilish-render")
+(declare-function pilish--clear-live-details-state "pilish-render")
 (declare-function pilish--release-nested-tool-state "pilish-render")
 (declare-function pilish--maybe-refresh-hot-tail-tables "pilish-table")
 
@@ -96,6 +98,15 @@
 (declare-function pilish-cycle-thinking "pilish-menu")
 (declare-function pilish-fork-at-point "pilish-menu")
 (declare-function pilish-copy-last-message "pilish-menu")
+
+;;;; Explicit help
+
+(defun pilish--native-local-help-at-point-p ()
+  "Recognize native help or controls at point without evaluating callbacks."
+  (or (get-char-property (point) 'kbd-help)
+      (get-char-property (point) 'help-echo)
+      (button-at (point))
+      (and (fboundp 'widget-at) (widget-at (point)))))
 
 ;;;; Customization Group
 
@@ -591,6 +602,7 @@ Return nil when PATH is not a string."
     (define-key map (kbd "<return>") #'pilish-visit-file)
     (define-key map (kbd "TAB") #'pilish-toggle-tool-section)
     (define-key map (kbd "<tab>") #'pilish-toggle-tool-section)
+    (define-key map [remap display-local-help] #'pilish--transcript-local-help)
     (define-key map (kbd "C-c ]") #'pilish-next-subagent-name)
     (define-key map (kbd "C-c [") #'pilish-previous-subagent-name)
     (define-key map [left-margin down-mouse-1] #'ignore)
@@ -1074,9 +1086,8 @@ Reserve at least one left column and preserve each window's larger margins."
 
   ;; Run after font-lock to undo markdown damage in tool overlays.
   (jit-lock-register #'pilish--restore-tool-properties)
-  ;; Let native Markdown help take precedence over completed-block fallback.
   (add-function :around (local 'font-lock-fontify-region-function)
-                #'pilish--fontify-with-hover-help)
+                #'pilish--fontify-and-restore-tool-properties)
 
   ;; Compute theme-derived faces used by chat overlays.
   (pilish--update-theme-derived-faces)
@@ -1370,8 +1381,8 @@ new live processes in interactive sessions."
     (pilish--invalidate-prompt-start-wait)
     ;; Reload can replace a process without its exit handler or a successful
     ;; subsequent history refresh.  End live measurements at this boundary.
-    (when (fboundp 'pilish--hover-clear-live-state)
-      (pilish--hover-clear-live-state))
+    (when (fboundp 'pilish--clear-live-details-state)
+      (pilish--clear-live-details-state))
     (when (fboundp 'pilish--release-nested-tool-state)
       (pilish--release-nested-tool-state t))
     (force-mode-line-update t))

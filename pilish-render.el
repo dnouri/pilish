@@ -38,6 +38,7 @@
 ;; - File navigation from strict tool rows, plain paths, and local
 ;;   Markdown labels
 ;; - Session history display and rendering
+;; - Literal details on completed replies, thinking, and tools for explicit Help
 
 ;;; Code:
 
@@ -47,6 +48,7 @@
 (require 'ansi-color)
 (require 'image)
 (require 'url-util)
+(require 'help-mode)
 
 ;; Forward references for functions in other modules
 (declare-function pilish-compact "pilish-menu" (&optional custom-instructions))
@@ -227,14 +229,14 @@ still marked for fontification at the next redisplay."
        (if pilish--saved-after-local
            (setq-local after-change-functions pilish--saved-after)
          (kill-local-variable 'after-change-functions)))))
-(defvar-local pilish--hover-assistant nil
+(defvar-local pilish--assistant-details-clock nil
   "Current assistant boundary: saved timestamp, local start time, stream seen.
 The timestamp matches the final message, never a heading/content index.  Local
 samples are display-only and cleared at completion, teardown and rebuild.")
 
-(defvar-local pilish--hover-pending-tool-blocks nil
+(defvar-local pilish--pending-tool-details nil
   "Call-ID associations awaiting timestamped toolResult messages this run.
-Values are weak references to existing finalized tool records: hover must not
+Values are weak references to existing finalized tool records: details must not
 retain their output, markers, or overlays after cooling.  Entries are removed
 on receipt and the table is cleared at agent/session/process teardown.")
 
@@ -505,15 +507,15 @@ at most one empty paragraph separator while preserving indentation."
     order))
 
 (defun pilish--propertize-completed-thinking
-    (rendered order normalized display &optional help)
-  "Return RENDERED tagged with ORDER, NORMALIZED text, DISPLAY mode and HELP."
+    (rendered order normalized display details)
+  "Return RENDERED tagged with ORDER, NORMALIZED text, DISPLAY and DETAILS."
   (pilish--apply-completed-thinking-properties
-   0 (length rendered) order normalized display help rendered)
+   0 (length rendered) order normalized display details rendered)
   rendered)
 
 (defun pilish--apply-completed-thinking-properties
-    (start end order normalized display &optional help object)
-  "Tag START..END with ORDER, NORMALIZED text, DISPLAY mode and native HELP.
+    (start end order normalized display details &optional object)
+  "Tag START..END with ORDER, NORMALIZED text, DISPLAY and literal DETAILS.
 OBJECT is a rendered string, or nil for the current buffer."
   (when (< start end)
     (add-text-properties
@@ -521,10 +523,8 @@ OBJECT is a rendered string, or nil for the current buffer."
      `(pilish-thinking-block ,order
        pilish-thinking-normalized ,normalized
        pilish-thinking-block-display ,display
-       pilish-thinking-help ,help
        rear-nonsticky t) object)
-    (pilish--set-hover-help
-     start end (or help (pilish--thinking-hover-help nil normalized)) object)
+    (pilish--set-details start end details object)
     (pilish--put-disclosure start end (eq display 'visible)
                            #'pilish--toggle-thinking-block-at-point object)))
 
@@ -580,7 +580,7 @@ PROBE must already be inside a completed-thinking block."
                                           'pilish-thinking-block-display)
                        'visible)
           :normalized normalized
-          :help (get-text-property probe 'pilish-thinking-help)
+          :details (get-text-property probe 'pilish-details)
           :start (car bounds)
           :end (cdr bounds))))
 
@@ -607,13 +607,13 @@ non-empty."
                          (get-text-property 0
                                             'pilish-thinking-block-display
                                             text)))
-           (help (and order (get-text-property 0 'pilish-thinking-help text))))
+           (details (and order (get-text-property 0 'pilish-details text))))
       (when (<= start end)
         (let ((existing (buffer-substring-no-properties start end)))
           (if (equal existing plain-text)
               (when order
                 (pilish--apply-completed-thinking-properties
-                 start end order normalized display help))
+                 start end order normalized display details))
             (goto-char start)
             (pilish--remove-table-overlays start end)
             (delete-region start end)
@@ -1114,7 +1114,7 @@ Shows success or final failure with raw error."
   "Display ERROR-MSG from the server."
   (pilish--append-to-chat
    (concat "\n" (propertize (format "[Error: %s]" (or error-msg "unknown"))
-                            'face 'pilish-error-notice)
+                            'face 'pilish-error-notice 'pilish-assistant-outcome t)
            "\n")))
 
 (defconst pilish--startup-env-node-hint
@@ -1507,7 +1507,7 @@ which asks upfront before any buffers are touched."
         (pilish--finalize-live-tool-blocks
          'pilish-tool-block-error)
         (pilish--reset-toolcall-streams)
-        (pilish--hover-clear-live-state)
+        (pilish--clear-live-details-state)
         (when pilish--tool-args-cache
           (clrhash pilish--tool-args-cache))
         (pilish--set-process nil)
@@ -1536,7 +1536,7 @@ which asks upfront before any buffers are touched."
 Updates buffer-local state and renders display updates."
   ;; Sample before state updates or rendering, never on deltas or remote
   ;; user/toolResult lifecycle events.  Both endpoints use this local clock.
-  (let ((hover-time
+  (let ((boundary-time
          (when (or (member (plist-get event :type)
                            '("tool_execution_start" "tool_execution_end"))
                    (and (member (plist-get event :type) '("message_start" "message_end"))
@@ -1572,9 +1572,9 @@ Updates buffer-local state and renders display updates."
     (pcase (plist-get event :type)
     ((and (or "tool_execution_start" "tool_execution_update" "tool_execution_end")
           (guard (plist-member event :parentToolCallId)))
-     (pilish--handle-nested-tool-event event hover-time))
+     (pilish--handle-nested-tool-event event boundary-time))
     ("agent_start"
-     (pilish--hover-clear-live-state)
+     (pilish--clear-live-details-state)
      (pilish--note-prompt-start)
      (pilish--display-agent-start)
      (when pilish--aborted
@@ -1588,8 +1588,8 @@ Updates buffer-local state and renders display updates."
          (setq pilish--in-thinking-block nil)
          (pilish--reset-thinking-state))
        (when (equal role "assistant")
-         (setq pilish--hover-assistant
-               (list :timestamp (plist-get message :timestamp) :time hover-time))
+         (setq pilish--assistant-details-clock
+               (list :timestamp (plist-get message :timestamp) :time boundary-time))
          (pilish--reset-toolcall-streams))
        (pcase role
          ("user"
@@ -1632,25 +1632,25 @@ Updates buffer-local state and renders display updates."
        ;; their incremental assembler here before queuing a preview paint.
        (pcase event-type
          ("text_start"
-          (when pilish--hover-assistant
-            (setq pilish--hover-assistant
-                  (plist-put pilish--hover-assistant :streamed t))))
+          (when pilish--assistant-details-clock
+            (setq pilish--assistant-details-clock
+                  (plist-put pilish--assistant-details-clock :streamed t))))
          ("text_end"
           ;; Text block ended — finalize any active table that may have
           ;; a trailing row without newline (backstop for streaming).
           (pilish--maybe-decorate-streaming-table)
           (setq pilish--streaming-table-candidate nil))
          ("thinking_start"
-          (when pilish--hover-assistant
-            (setq pilish--hover-assistant
-                  (plist-put pilish--hover-assistant :streamed t)))
+          (when pilish--assistant-details-clock
+            (setq pilish--assistant-details-clock
+                  (plist-put pilish--assistant-details-clock :streamed t)))
           (pilish--display-thinking-start))
          ("thinking_end"
           (pilish--display-thinking-end (plist-get msg-event :content)))
          ((or "toolcall_start" "toolcall_delta" "toolcall_end")
-          (when (and pilish--hover-assistant (equal event-type "toolcall_start"))
-            (setq pilish--hover-assistant
-                  (plist-put pilish--hover-assistant :streamed t)))
+          (when (and pilish--assistant-details-clock (equal event-type "toolcall_start"))
+            (setq pilish--assistant-details-clock
+                  (plist-put pilish--assistant-details-clock :streamed t)))
           (pilish--set-activity-phase "running")
           (pilish--handle-toolcall-message-event msg-event))
          ("error"
@@ -1662,14 +1662,14 @@ Updates buffer-local state and renders display updates."
             (assistant-p (equal role "assistant"))
             (duration
              (and assistant-p
-                  (plist-get pilish--hover-assistant :streamed)
-                  (equal (plist-get pilish--hover-assistant :timestamp)
+                  (plist-get pilish--assistant-details-clock :streamed)
+                  (equal (plist-get pilish--assistant-details-clock :timestamp)
                          (plist-get message :timestamp))
                   (not (member (plist-get message :stopReason) '("error" "aborted")))
                   (not pilish--aborted)
-                  (pilish--hover-elapsed
-                   (plist-get pilish--hover-assistant :time) hover-time))))
-       (when assistant-p (setq pilish--hover-assistant nil))
+                  (pilish--details-elapsed
+                   (plist-get pilish--assistant-details-clock :time) boundary-time))))
+       (when assistant-p (setq pilish--assistant-details-clock nil))
        ;; Display error if message ended with error (e.g., API error)
        (when (equal (plist-get message :stopReason) "error")
          (pilish--display-error (plist-get message :errorMessage)))
@@ -1681,7 +1681,7 @@ Updates buffer-local state and renders display updates."
          (pilish--reset-toolcall-streams)
          (pilish--refresh-header))
        (when (equal role "toolResult")
-         (pilish--hover-update-tool-from-result message)
+         (pilish--update-tool-details-from-result message)
          (when-let* ((id (plist-get message :toolCallId))
                      (block (or (pilish--nested-tool-owner id)
                                 (pilish--tool-block-get id)))
@@ -1696,7 +1696,7 @@ Updates buffer-local state and renders display updates."
          (pilish--render-complete-message)
          ;; message_end.message is authoritative; state has already cleared
          ;; :current-message before this handler runs.
-         (pilish--apply-assistant-message-hover message duration))))
+         (pilish--apply-assistant-message-metadata message duration))))
     ("tool_execution_start"
      (pilish--set-activity-phase "running")
      (pilish--with-md-ts-change-hooks-suspended
@@ -1711,7 +1711,7 @@ Updates buffer-local state and renders display updates."
          (unless block
            (setq block (pilish--display-tool-start
                         (plist-get event :toolName) args tool-call-id)))
-         (pilish--tool-block-set-execution-start block hover-time args)
+         (pilish--tool-block-set-execution-start block boundary-time args)
          (pilish--argument-observe
           block nil (plist-get event :toolName) args)
          (when (equal (plist-get event :toolName) "codemode")
@@ -1743,9 +1743,9 @@ Updates buffer-local state and renders display updates."
                     (if (and block (pilish--tool-block-compound-p block))
                         (pilish--tool-block-args block)
                       cached)))
-            (duration (pilish--hover-elapsed
+            (duration (pilish--details-elapsed
                        (and block (pilish--tool-block-execution-start block))
-                       hover-time)))
+                       boundary-time)))
        ;; The authoritative result supersedes any pending preview; discard
        ;; it first so completion renders exactly once.
        (pilish--discard-pending-tool-update tool-call-id)
@@ -1756,7 +1756,7 @@ Updates buffer-local state and renders display updates."
                                  (plist-get event :isError)
                                  block)
        (when block
-         (pilish--complete-tool-hover block (plist-get event :toolName) args duration))))
+         (pilish--complete-tool-details block (plist-get event :toolName) args duration))))
     ("tool_execution_update"
      (let* ((tool-call-id (plist-get event :toolCallId))
             (partial-result (plist-get event :partialResult))
@@ -1790,7 +1790,7 @@ Updates buffer-local state and renders display updates."
      (pilish--set-canonical-messages
       (plist-get pilish--state :messages))
      (pilish--display-agent-end)
-     (pilish--hover-clear-live-state)
+     (pilish--clear-live-details-state)
      (pilish--update-hot-tail-boundary)
      (pilish--queue-tool-cooling-outside-hot-tail))
     ("agent_settled" nil)
@@ -1909,7 +1909,7 @@ overlays are left alone."
   (when pilish--live-tool-blocks
     (clrhash pilish--live-tool-blocks))
   (pilish--reset-toolcall-streams)
-  (pilish--hover-clear-live-state))
+  (pilish--clear-live-details-state))
 
 (cl-defstruct (pilish--tool-block
                (:constructor pilish--make-tool-block))
@@ -1926,7 +1926,7 @@ overlays are left alone."
   last-tail
   image-previews
   execution-start
-  help-echo
+  details
   compound-p
   args
   result
@@ -3724,8 +3724,8 @@ needed for compatibility, the current non-keyed pending block."
                  (pilish--tool-block-line-map block))
     (overlay-put ov 'pilish-last-tail
                  (pilish--tool-block-last-tail block))
-    (when (pilish--tool-block-help-echo block)
-      (pilish--tool-block-apply-hover block)))
+    (when (pilish--tool-block-details block)
+      (pilish--tool-block-apply-details block)))
   block)
 
 (defun pilish--tool-block-set-execution-start (block time args)
@@ -3733,12 +3733,12 @@ needed for compatibility, the current non-keyed pending block."
   (setf (pilish--tool-block-execution-start block) time
         (pilish--tool-block-args block) args))
 
-(defun pilish--tool-block-apply-hover (block)
-  "Apply BLOCK's completed help to its current text, below specific UI help."
-  (when-let* ((help (pilish--tool-block-help-echo block))
+(defun pilish--tool-block-apply-details (block)
+  "Project BLOCK's completed details onto its current owned text."
+  (when-let* ((details (pilish--tool-block-details block))
               (ov (pilish--tool-block-overlay block))
               (start (overlay-start ov)))
-    (pilish--set-hover-help start (overlay-end ov) help)))
+    (pilish--set-details start (overlay-end ov) details)))
 
 (defun pilish--tool-emacs-path (path)
   "Return Pi tool PATH normalized for Emacs in the current chat session."
@@ -3841,9 +3841,9 @@ renders with the normal absent-path placeholder."
   (when-let* ((path (pilish--tool-path-string path)))
     (pilish--escape-control-chars-for-display path)))
 
-;;;; Completed block help
+;;;; Completed block details
 
-(defun pilish--hover-title (title message)
+(defun pilish--details-title (title message)
   "Return TITLE with MESSAGE's saved timestamp when available."
   (if-let* ((timestamp (plist-get message :timestamp))
             ((numberp timestamp)))
@@ -3851,18 +3851,19 @@ renders with the normal absent-path placeholder."
               (pilish--format-message-timestamp (pilish--ms-to-time timestamp)))
     title))
 
-(defun pilish--hover-provenance (message)
+(defun pilish--details-provenance (message)
   "Return MESSAGE's provider/model line, without consulting session state."
   (string-join
    (delq nil (mapcar (lambda (key)
-                      (pilish--normalize-string-or-null (plist-get message key)))
+                     (pilish--escape-control-chars-for-display
+                      (pilish--normalize-string-or-null (plist-get message key))))
                     '(:provider :model)))
    " / "))
 
-(defun pilish--assistant-hover-help (message &optional duration)
-  "Return native reply help for final MESSAGE and optional live DURATION."
-  (let ((lines (list (pilish--hover-title "Reply" message)))
-        (provenance (pilish--hover-provenance message))
+(defun pilish--format-reply-details (message &optional duration)
+  "Return literal metadata for final MESSAGE and qualified live DURATION."
+  (let ((lines (list (pilish--details-title "Reply" message)))
+        (provenance (pilish--details-provenance message))
         (usage (plist-get message :usage)))
     (unless (string-empty-p provenance) (push provenance lines))
     (dolist (group '(("Message tokens: " (:input . "input") (:output . "output"))
@@ -3874,25 +3875,25 @@ renders with the normal absent-path placeholder."
             (push (format "%s %s" (cdr field) (pilish--format-number value)) fields)))
         (when fields
           (push (concat (car group) (string-join (nreverse fields) " · ")) lines))))
-    (when duration
+    (when (and (numberp duration) (> duration 0))
       (push (concat (format "Stream: %.1f s" duration)
                     (when-let* ((output (plist-get usage :output))
                                 ((numberp output)))
                       (format " · ~%.0f output tokens/s" (/ (float output) duration))))
             lines))
-    (help--docstring-quote (string-join (nreverse lines) "\n"))))
+    (substring-no-properties (string-join (nreverse lines) "\n"))))
 
-(defun pilish--thinking-hover-help (message normalized)
-  "Return thinking help for MESSAGE and NORMALIZED text, without an excerpt."
-  (let ((provenance (pilish--hover-provenance message)))
-    (help--docstring-quote
-     (concat (pilish--hover-title "Thinking" message)
+(defun pilish--format-thinking-details (message normalized)
+  "Return literal thinking details for MESSAGE and NORMALIZED, without an excerpt."
+  (let ((provenance (pilish--details-provenance message)))
+    (substring-no-properties
+     (concat (pilish--details-title "Thinking" message)
              " · " (pilish--thinking-line-count-label
                       (length (split-string normalized "\n" nil)))
              (unless (string-empty-p provenance) (concat "\n" provenance))))))
 
-(defun pilish--tool-hover-help (tool-name args &optional result)
-  "Return native tool help for TOOL-NAME, ARGS and matching saved RESULT."
+(defun pilish--format-tool-details (tool-name args &optional result duration)
+  "Return literal details for TOOL-NAME, ARGS, saved RESULT and live DURATION."
   (let* ((title (if (member tool-name '("bash" "read" "write" "edit"))
                     (capitalize tool-name)
                   (pilish--tool-display-value-string tool-name "Tool")))
@@ -3906,147 +3907,149 @@ renders with the normal absent-path placeholder."
                       ((numberp value)))
             (push (format "%s %s" (substring (symbol-name field) 1) value) range)))
         (when range (setq hint (format "%s (%s)" hint (string-join (nreverse range) ", "))))))
-    ;; Quote once, after abbreviation: native help substitutes documentation
-    ;; escapes such as \\{...}, even in shell commands and file names.
-    (help--docstring-quote
-     (concat (pilish--hover-title title result)
+    (substring-no-properties
+     (concat (pilish--details-title title result)
              (when (and (stringp hint) (not (string-blank-p hint)))
                (concat "\n" (pilish--truncate-string
                               (pilish--escape-control-chars-for-display
                                (string-trim (replace-regexp-in-string "[ \t\n\r\f]+" " " hint)))
-                              80)))))))
+                              80)))
+             (when (and (numberp duration) (> duration 0))
+               (format "\nExecution time: %.1f s" duration))))))
 
-(defun pilish--set-hover-help (start end help &optional object)
-  "Set native HELP on START..END in OBJECT, or the current buffer.
-HELP is already quoted for native documentation substitution.  Save fallback
-throughout the span, including underneath specific help, but only replace
-absent or previously owned help.  Links, images and buttons keep precedence."
-  (let ((inhibit-read-only t)
-        (pos start))
-    ;; These properties do not change Markdown content or require reparsing.
+(defun pilish--fontify-and-restore-tool-properties (function start end &rest args)
+  "Call FUNCTION with START, END and ARGS, then repair tool properties.
+Use the actual fontified bounds and return FUNCTION's result unchanged."
+  (let ((result (apply function start end args)))
+    (save-restriction
+      (widen)
+      (pcase result
+        (`(jit-lock-bounds ,beg . ,limit)
+         (pilish--restore-tool-properties beg limit))
+        (_ (pilish--restore-tool-properties start end))))
+    result))
+
+(defun pilish--set-details (start end details &optional object)
+  "Silently attach literal DETAILS to START..END of OBJECT or this buffer."
+  (let ((inhibit-read-only t))
     (with-silent-modifications
-      (while (< pos end)
-        (let* ((existing (get-text-property pos 'help-echo object))
-               (next (min (next-single-property-change pos 'help-echo object end)
-                          (next-single-property-change pos 'pilish-hover-help object end))))
-          (when (or (null existing)
-                    (equal existing (get-text-property pos 'pilish-hover-help object)))
-            (put-text-property pos next 'help-echo help object))
-          (setq pos next)))
       (add-text-properties start end
-                           `(pilish-hover-help ,help rear-nonsticky t) object))))
+                           `(pilish-details ,details rear-nonsticky t) object))))
 
-(defun pilish--fontify-with-hover-help (function start end &rest args)
-  "Fontify START..END with FUNCTION and ARGS, letting native help win.
-Mask fallback at the native unfontification seam: its bounds already include
-line/multiline expansion, unlike the original fontification request.  Repair
-literal metadata in the actual fontified bounds, then restore cached
-fallback after native links have supplied their more-specific help."
-  (let ((unfontify font-lock-unfontify-region-function)
-        ranges)
-    (let ((font-lock-unfontify-region-function
-           (lambda (beg end)
-             (save-restriction
-               (widen)
-               (let ((pos beg))
-                 ;; No completed help in a streaming span: one property lookup.
-                 (while (setq pos (text-property-not-all pos end 'pilish-hover-help nil))
-                   (let ((limit (next-single-property-change pos 'pilish-hover-help nil end))
-                         (help (get-text-property pos 'pilish-hover-help)))
-                     (push (list pos limit help) ranges)
-                     (while (< pos limit)
-                       (let ((next (next-single-property-change pos 'help-echo nil limit)))
-                         (when (equal (get-text-property pos 'help-echo) help)
-                           (remove-text-properties pos next '(help-echo nil)))
-                         (setq pos next)))))))
-             (funcall unfontify beg end))))
-      (with-silent-modifications
-        (unwind-protect
-            (let ((result (apply function start end args)))
-              (save-restriction
-                (widen)
-                (pcase result
-                  (`(jit-lock-bounds ,beg . ,end)
-                   (pilish--restore-tool-properties beg end))
-                  (_ (pilish--restore-tool-properties start end))))
-              result)
-          (save-restriction
-            (widen)
-            (dolist (range ranges)
-              (pilish--set-hover-help (car range) (cadr range) (nth 2 range)))))))))
+(defun pilish--details-at-point ()
+  "Return completed block details at the exact accessible character, or nil."
+  (when (and (derived-mode-p 'pilish-transcript-mode) (< (point) (point-max)))
+    (let ((details (get-text-property (point) 'pilish-details)))
+      (when (and (stringp details) (not (string-empty-p details))) details))))
 
-(defun pilish--apply-assistant-message-hover (message &optional duration)
-  "Apply final MESSAGE help and live DURATION inside its message markers."
+(defun pilish--transcript-local-help (&optional inhibit-warning describe-button)
+  "Show native local help first, then exact-point completed block details.
+Pass INHIBIT-WARNING and DESCRIBE-BUTTON unchanged to native help."
+  (interactive (list nil current-prefix-arg))
+  (if (pilish--native-local-help-at-point-p)
+      (display-local-help inhibit-warning describe-button)
+    (if-let* ((details (pilish--details-at-point)))
+        (message "%s" details)
+      (display-local-help inhibit-warning describe-button))))
+
+(defun pilish--show-details (details &optional interactive-p)
+  "Recreate a detached DETAILS Help page.
+INTERACTIVE-P is passed to standard Help history setup."
+  (help-setup-xref (list #'pilish--show-details details) interactive-p)
+  (let ((help-window-select t))
+    (with-help-window (help-buffer)
+      (insert details "\n"))))
+
+(defun pilish-describe-reply ()
+  "Describe the completed reply, thinking, or tool block at point.
+Move onto completed block text in a chat or saved snapshot to open
+standard Help.  Shared headings, outcome notices and unfinished blocks
+have no details."
+  (interactive)
+  (let ((details (pilish--details-at-point)))
+    (unless details
+      (user-error "Move onto a completed reply, thinking, or tool block in a chat or snapshot"))
+    (pilish--show-details (substring-no-properties details)
+                         (called-interactively-p 'interactive))))
+
+(defun pilish--apply-assistant-message-metadata (message &optional duration)
+  "Apply final MESSAGE details and live DURATION inside its message markers."
   (when (and pilish--message-start-marker pilish--streaming-marker)
-    (let ((help (pilish--assistant-hover-help message duration))
-          (start (marker-position pilish--message-start-marker))
-          (end (marker-position pilish--streaming-marker)))
+    (let* ((details (pilish--format-reply-details message duration))
+           (start (marker-position pilish--message-start-marker))
+           (end (marker-position pilish--streaming-marker))
+           (reply-end (if (and (> end start) (eq (char-before end) ?\n))
+                          (1- end)
+                        end)))
       ;; Tools have their own ownership.  Work only inside this message, not
       ;; the shared Assistant heading or content indexes reused next message.
       ;; Abort/error may omit thinking_end.  Leave that active span unfinished,
-      ;; without completed help, rather than assigning it reply usage.
+      ;; without completed details, rather than assigning it reply usage.
       (dolist (range (append
                       (pilish--ranges-excluding-property
                        start (if pilish--thinking-start-marker
                                  (marker-position pilish--thinking-start-marker)
-                               end)
+                               reply-end)
                        'pilish-thinking-block)
                       (when pilish--thinking-marker
                         (pilish--ranges-excluding-property
-                         (marker-position pilish--thinking-marker) end
+                         (marker-position pilish--thinking-marker) reply-end
                          'pilish-thinking-block))))
         (let ((pos (car range)))
           (dolist (ov (pilish--tool-block-overlays-in-region (car range) (cdr range)))
-            (pilish--set-hover-help pos (max pos (overlay-start ov)) help)
+            (dolist (span (pilish--ranges-excluding-property
+                           pos (max pos (overlay-start ov)) 'pilish-assistant-outcome))
+              (pilish--set-details (car span) (cdr span) details))
             (setq pos (max pos (overlay-end ov))))
-          (pilish--set-hover-help pos (cdr range) help)))
+          (dolist (span (pilish--ranges-excluding-property
+                         pos (cdr range) 'pilish-assistant-outcome))
+            (pilish--set-details (car span) (cdr span) details))))
       (let ((pos start) (inhibit-read-only t))
         (while (< pos end)
           (let ((next (next-single-property-change pos 'pilish-thinking-block nil end)))
             (when-let* ((normalized (get-text-property pos 'pilish-thinking-normalized)))
-              (let ((thinking-help (pilish--thinking-hover-help message normalized)))
-                (put-text-property pos next 'pilish-thinking-help thinking-help)
-                (pilish--set-hover-help pos next thinking-help)))
+              (pilish--set-details
+               pos next (pilish--format-thinking-details message normalized)))
             (setq pos next)))))))
 
-(defun pilish--hover-elapsed (start end)
+(defun pilish--details-elapsed (start end)
   "Return elapsed seconds for positive local START..END boundaries, or nil."
   (when (and (numberp start) (numberp end) (> end start)) (- end start)))
 
-(defun pilish--hover-clear-live-state ()
-  "Clear unfinished hover measurements and pending result associations."
-  (setq pilish--hover-assistant nil)
+(defun pilish--clear-live-details-state ()
+  "Clear unfinished measurements and pending result associations."
+  (setq pilish--assistant-details-clock nil)
   (when pilish--live-tool-blocks
     (maphash (lambda (_id block)
                (setf (pilish--tool-block-execution-start block) nil))
              pilish--live-tool-blocks))
-  (when pilish--hover-pending-tool-blocks
-    (clrhash pilish--hover-pending-tool-blocks)))
+  (when pilish--pending-tool-details
+    (clrhash pilish--pending-tool-details)))
 
-(defun pilish--complete-tool-hover (block tool-name args duration)
-  "Complete BLOCK's TOOL-NAME/ARGS help with DURATION, awaiting its saved result."
-  (setf (pilish--tool-block-help-echo block)
-        (concat (pilish--tool-hover-help tool-name args)
-                (when duration (format "\nExecution time: %.1f s" duration))))
-  (pilish--tool-block-apply-hover block)
-  (unless pilish--hover-pending-tool-blocks
-    (setq pilish--hover-pending-tool-blocks
+(defun pilish--complete-tool-details (block tool-name args duration)
+  "Complete BLOCK's TOOL-NAME and ARGS details with live DURATION.
+Await its saved result for a timestamp."
+  (setf (pilish--tool-block-details block)
+        (pilish--format-tool-details tool-name args nil duration))
+  (pilish--tool-block-apply-details block)
+  (unless pilish--pending-tool-details
+    (setq pilish--pending-tool-details
           (make-hash-table :test 'equal :weakness 'value)))
   (puthash (pilish--tool-block-tool-call-id block)
-           block pilish--hover-pending-tool-blocks))
+           block pilish--pending-tool-details))
 
-(defun pilish--hover-update-tool-from-result (result)
+(defun pilish--update-tool-details-from-result (result)
   "Attach RESULT's saved timestamp to its completed block by call ID."
-  (when-let* ((pending pilish--hover-pending-tool-blocks)
+  (when-let* ((pending pilish--pending-tool-details)
               (id (plist-get result :toolCallId))
               (block (gethash id pending)))
     (remhash id pending)
-    (when-let* ((help (pilish--tool-block-help-echo block)))
-      (let ((split (string-match "\n" help)))
-        (setf (pilish--tool-block-help-echo block)
-              (concat (pilish--hover-title (substring help 0 split) result)
-                      (and split (substring help split)))))
-      (pilish--tool-block-apply-hover block))))
+    (when-let* ((details (pilish--tool-block-details block)))
+      (let ((split (string-match "\n" details)))
+        (setf (pilish--tool-block-details block)
+              (concat (pilish--details-title (substring details 0 split) result)
+                      (and split (substring details split)))))
+      (pilish--tool-block-apply-details block))))
 
 (defun pilish--tool-render-path-metadata (path)
   "Return passive render metadata for backend tool PATH.
@@ -6111,7 +6114,7 @@ coordinates from before the rewrites."
                         (plist-get block :normalized)
                         (plist-get block :order)
                         display
-                        (plist-get block :help))))
+                        (plist-get block :details))))
             (let* ((start (plist-get block :start))
                    (end (plist-get block :end))
                    (new-bounds (pilish--replace-thinking-block-region
@@ -6132,7 +6135,7 @@ was toggled successfully."
                          normalized
                          order
                          (if (eq display 'hidden) 'visible 'hidden)
-                         (plist-get block :help))))
+                         (plist-get block :details))))
     (let* ((original-pos (point))
            (new-bounds (pilish--replace-thinking-block block rendered))
            (new-start (car new-bounds))
@@ -6500,7 +6503,6 @@ buttons, full content, markers, and absolute buffer positions."
           :raw-path (overlay-get overlay 'pilish-tool-raw-path)
           :path-error (overlay-get overlay 'pilish-tool-path-error)
           :offset (overlay-get overlay 'pilish-tool-offset)
-          :help (and record (pilish--tool-block-help-echo record))
           ;; Only collapsed previews need the small visible-line map.
           :line-map (and collapsed
                          (overlay-get overlay 'pilish-line-map))
@@ -6642,7 +6644,8 @@ Return the applied projection metadata, or nil if ineligible."
                                (concat (pilish--tool-hidden-line-label hidden-count) "\n")))))
              (ov-start (overlay-start overlay))
              (ov-end (overlay-end overlay))
-             (record (pilish--tool-block-from-overlay overlay)))
+             (record (pilish--tool-block-from-overlay overlay))
+             (details (and record (pilish--tool-block-details record))))
         (remove-overlays ov-start ov-end 'pilish-diff-overlay t)
         (remove-text-properties
          ov-start ov-end '(pilish-cold-tool-block nil))
@@ -6655,8 +6658,8 @@ Return the applied projection metadata, or nil if ineligible."
           (add-text-properties
            ov-start (point)
            `(pilish-cold-tool-block ,target-metadata))
-          (when-let* ((help (plist-get target-metadata :help)))
-            (pilish--set-hover-help ov-start (point) help))
+          (when details
+            (pilish--set-details ov-start (point) details))
           (pilish--restore-subagent-buttons ov-start (point)))
         (when (and record (pilish--tool-block-compound-p record))
           (pilish--release-nested-tool-block record))
@@ -9432,10 +9435,10 @@ MESSAGE has no visible text content."
      (t nil))))
 
 (defun pilish--completed-thinking-rendered-from-normalized
-    (normalized &optional block-order display help)
+    (normalized &optional block-order display details)
   "Return completed thinking NORMALIZED text rendered for DISPLAY.
 BLOCK-ORDER identifies the logical completed-thinking block across rerenders.
-HELP is the owning message's native thinking help when known.
+DETAILS is the owning message's literal report when known.
 Returns nil when NORMALIZED has no visible completed-thinking content."
   (unless (string-empty-p normalized)
     (let ((display (or display (pilish--thinking-display-mode))))
@@ -9446,29 +9449,29 @@ Returns nil when NORMALIZED has no visible completed-thinking content."
        (or block-order (pilish--next-thinking-block-order))
        normalized
        display
-       help))))
+       (or details (pilish--format-thinking-details nil normalized))))))
 
 (defun pilish--completed-thinking-rendered-text
-    (text &optional block-order display help)
+    (text &optional block-order display details)
   "Return completed thinking TEXT rendered for DISPLAY.
 BLOCK-ORDER identifies the logical completed-thinking block across rerenders.
-HELP is the owning message's native thinking help when known.
+DETAILS is the owning message's literal report when known.
 Returns nil when TEXT normalizes to no visible thinking content."
   (pilish--completed-thinking-rendered-from-normalized
    (pilish--thinking-normalize-text text)
    block-order
    display
-   help))
+   details))
 
 (defun pilish--render-history-thinking (text &optional message)
   "Render completed thinking TEXT for assistant MESSAGE during history replay.
 Uses the current buffer's completed-thinking display mode."
   (let* ((normalized (pilish--thinking-normalize-text text))
-         (help (pilish--thinking-hover-help message normalized)))
+         (details (pilish--format-thinking-details message normalized)))
     (when-let* ((rendered
                  (pilish--completed-thinking-rendered-from-normalized
-                  normalized nil nil help)))
-      (pilish--render-history-text rendered help))))
+                  normalized nil nil details)))
+      (pilish--render-history-text rendered details))))
 
 (defun pilish--build-tool-result-index (messages)
   "Build hash-table mapping toolCallId to toolResult message from MESSAGES."
@@ -9517,9 +9520,9 @@ synchronous pass decorates candidate tables in the recent hot tail."
         (narrow-to-region start end)
         (pilish--decorate-tables-in-region start end)))))
 
-(defun pilish--render-history-text (text &optional help)
+(defun pilish--render-history-text (text &optional details)
   "Render TEXT as markdown content with proper isolation.
-HELP, when non-nil, is applied to the inserted content.
+Literal DETAILS is applied to the inserted content.
 Ensures markdown structures don't leak to subsequent content.
 Display-only table decoration is applied after deferred history insertion."
   (when (and text (not (string-empty-p text)))
@@ -9535,8 +9538,8 @@ Display-only table decoration is applied after deferred history insertion."
                 (font-lock-ensure start content-end)
               (error nil))
             (pilish--decorate-tables-in-region start content-end))
-          (when help
-            (pilish--set-hover-help start content-end help))))
+          (when details
+            (pilish--set-details start content-end details))))
       ;; Two trailing newlines reset any open markdown list/paragraph context
       (pilish--append-to-chat "\n\n"))))
 
@@ -9570,26 +9573,26 @@ and :arguments.  RESULT is the matching toolResult message, or nil."
       (pilish--tool-overlay-finalize 'pilish-tool-block block)
       (let ((inhibit-read-only t))
         (save-excursion (goto-char (point-max)) (insert "\n"))))
-    (setf (pilish--tool-block-help-echo block)
-          (pilish--tool-hover-help tool-name args result))
-    (pilish--tool-block-apply-hover block)))
+    (setf (pilish--tool-block-details block)
+          (pilish--format-tool-details tool-name args result))
+    (pilish--tool-block-apply-details block)))
 
 (defun pilish--render-history-assistant-content (message results)
   "Render assistant MESSAGE content in order, followed by its saved outcome.
 RESULTS maps toolCallId strings to matching toolResult messages."
   (let ((content (plist-get message :content))
-        (help (pilish--assistant-hover-help message))
+        (details (pilish--format-reply-details message))
         (pending-text nil))
     (cl-labels ((flush-text ()
                   (when pending-text
                     (pilish--render-history-text
                      (string-join (nreverse pending-text) "")
-                     help)
+                     details)
                     (setq pending-text nil))))
       (cond
        ((stringp content)
         (unless (string-empty-p content)
-          (pilish--render-history-text content help)))
+          (pilish--render-history-text content details)))
        ((vectorp content)
         (dolist (block (pilish--content-block-list content))
           (let ((block-type (plist-get block :type)))

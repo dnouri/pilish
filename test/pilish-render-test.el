@@ -17,7 +17,223 @@
 (require 'pilish-test-common)
 (require 'help-at-pt)
 
-;;; Hover metadata
+;;; Reply details
+
+(ert-deftest pilish-test-reply-details-literal-without-hover ()
+  "Reply inspection is exact and literal without installing hover help."
+  (with-temp-buffer
+    (pilish-chat-mode)
+    (pilish--display-session-history
+     (vector (pilish-test--hover-message
+              [(:type "text" :text "Owned **reply**\n# Authored heading")]
+              :timestamp nil :provider (propertize "p\n\t\\[find-file]" 'source (current-buffer))
+              :model "m'`%" :usage '(:output 0 :cacheWrite 0))))
+    (font-lock-flush)
+    (font-lock-ensure)
+    (goto-char (pilish-test--hover-pos "Owned"))
+    (let ((expected "Reply\np\\n\\t\\[find-file] / m'`%\nMessage tokens: output 0\nCache: write 0"))
+      (should (equal (get-text-property (point) 'pilish-details) expected))
+      (let ((details (get-text-property (point) 'pilish-details)))
+        (should (equal-including-properties details (substring-no-properties details))))
+      (should-not (get-text-property (point) 'kbd-help))
+      (should-not (get-text-property (point) 'help-echo))
+      (should-not (get-text-property (point) 'pilish-hover-help))
+      (should (equal (pilish-test--hover-displayed-help "Owned") expected))
+      (should (equal (pilish-test--hover-displayed-help "Authored heading") expected)))
+    (goto-char (pilish-test--hover-pos "Assistant"))
+    (should-error (pilish-describe-reply) :type 'user-error)
+    (goto-char (+ (pilish-test--hover-pos "Authored heading") (length "Authored heading")))
+    (should-error (pilish-describe-reply) :type 'user-error)))
+
+(ert-deftest pilish-test-reply-details-help-detached-history-and-focus ()
+  "Help is selected and literal, and history survives replacing and killing source."
+  (save-window-excursion
+    (let ((source (generate-new-buffer " *reply-source*"))
+          (help-window-select nil)
+          (first "Reply\np\\{global-map} / m'`\\[find-file]%\nMessage tokens: output 0"))
+      (unwind-protect
+          (progn
+            (when (get-buffer "*Help*") (kill-buffer "*Help*"))
+            (switch-to-buffer source)
+            (pilish-chat-mode)
+            (pilish--display-session-history
+             (vector (pilish-test--hover-message "First secret body"
+                                                :timestamp nil :provider "p\\{global-map}"
+                                                :model "m'`\\[find-file]%" :usage '(:output 0))
+                     (pilish-test--hover-message "Second secret body"
+                                                :timestamp nil :provider nil :model nil :usage nil)))
+            (goto-char (pilish-test--hover-pos "First secret"))
+            (call-interactively #'pilish-describe-reply)
+            (set-buffer (window-buffer (selected-window)))
+            (should (derived-mode-p 'help-mode))
+            (should (eq (window-buffer (selected-window)) (current-buffer)))
+            (should buffer-read-only)
+            (should (string-prefix-p (concat first "\n") (buffer-string)))
+            (should-not (string-match-p "secret body" (buffer-string)))
+            (should (equal help-xref-stack-item (list #'pilish--show-details first)))
+            (should-not (text-properties-at 0 (cadr help-xref-stack-item)))
+            (quit-window)
+            (set-buffer (window-buffer (selected-window)))
+            (should (eq (current-buffer) source))
+            (goto-char (pilish-test--hover-pos "Second secret"))
+            (call-interactively #'pilish-describe-reply)
+            (set-buffer (window-buffer (selected-window)))
+            (should (derived-mode-p 'help-mode))
+            (with-current-buffer source (pilish--display-session-history []))
+            (kill-buffer source)
+            (cl-letf (((symbol-function 'pilish--rpc-async)
+                       (lambda (&rest _) (ert-fail "Help sent RPC")))
+                      ((symbol-function 'pilish--rpc-sync)
+                       (lambda (&rest _) (ert-fail "Help sent RPC"))))
+              (help-xref-go-back (current-buffer))
+              (should (string-prefix-p (concat first "\n") (buffer-string)))
+              (revert-buffer nil t)
+              (should (string-prefix-p (concat first "\n") (buffer-string)))
+              (help-xref-go-forward (current-buffer))
+              (should (string-prefix-p "Reply\n" (buffer-string)))
+              (should-not (string-match-p "Message tokens:" (buffer-string)))))
+        (when (buffer-live-p source) (kill-buffer source))
+        (when (get-buffer "*Help*") (kill-buffer "*Help*"))))))
+
+(ert-deftest pilish-test-reply-details-invalid-target-preserves-help ()
+  "Invalid commands cannot replace Help or infer another reply."
+  (save-window-excursion
+    (let ((help (get-buffer-create "*Help*")))
+      (with-current-buffer help
+        (let ((inhibit-read-only t)) (erase-buffer) (insert "Existing Help"))
+        (help-mode))
+      (unwind-protect
+          (dolist (mode '(fundamental-mode pilish-input-mode pilish-chat-mode pilish-snapshot-mode))
+            (with-temp-buffer
+              (funcall mode)
+              (let ((inhibit-read-only t)) (insert "No completed reply"))
+              (let ((selected (selected-window)))
+                (should-error (call-interactively #'pilish-describe-reply) :type 'user-error)
+                (should (eq selected (selected-window)))
+                (should (equal (with-current-buffer help (buffer-string)) "Existing Help")))))
+        (kill-buffer help)))))
+
+(ert-deftest pilish-test-reply-details-quick-native-precedence-and-exact-point ()
+  "Quick help delegates native callbacks and controls, but never looks behind for replies."
+  (with-temp-buffer
+    (pilish-chat-mode)
+    (pilish--display-session-history
+     (vector (pilish-test--hover-message "Plain [link](https://example.org/details) tail"
+                                        :timestamp nil :provider nil :model nil :usage nil)))
+    (font-lock-ensure)
+    (should (equal (pilish-test--hover-displayed-help "link") "https://example.org/details"))
+    (should (equal (pilish-test--hover-displayed-help "Plain") "Reply"))
+    (let* ((pos (pilish-test--hover-pos "Plain"))
+           (ov (make-overlay pos (+ pos 5)))
+           (calls 0))
+      (overlay-put ov 'kbd-help (lambda (&rest _) (cl-incf calls) "Native keyboard help"))
+      (should (equal (pilish-test--hover-displayed-help "Plain") "Native keyboard help"))
+      (should (= calls 1))
+      (overlay-put ov 'kbd-help nil)
+      (overlay-put ov 'help-echo (lambda (&rest _) (cl-incf calls) "Native mouse help"))
+      (should (equal (pilish-test--hover-displayed-help "Plain") "Native mouse help"))
+      (should (= calls 2))
+      (goto-char (+ pos 5))
+      (let (shown)
+        (cl-letf (((symbol-function 'message)
+                   (lambda (fmt &rest args) (setq shown (apply #'format fmt args)))))
+          (call-interactively (key-binding (kbd "C-h ."))))
+        (should (equal shown "Reply"))
+        (should (= calls 2)))
+      (overlay-put ov 'help-echo nil)
+      (delete-overlay ov))
+    (goto-char (pilish-test--hover-pos "link"))
+    (should (equal (pilish--details-at-point) "Reply"))
+    (goto-char (+ (pilish-test--hover-pos " tail") 5))
+    (should-error (pilish-describe-reply) :type 'user-error)
+    (let (called)
+      (cl-letf (((symbol-function 'display-local-help)
+                 (lambda (&rest args) (setq called args))))
+        (pilish--transcript-local-help t 'prefix))
+      (should (equal called '(t prefix))))))
+
+(ert-deftest pilish-test-reply-details-quick-native-controls-and-prefix ()
+  "Button and widget actions win even without an effective help string."
+  (require 'wid-edit)
+  (with-temp-buffer
+    (pilish-chat-mode)
+    (pilish--display-session-history
+     (vector (pilish-test--hover-message "Button label and field label"
+                                        :timestamp nil :provider nil :model nil :usage nil)))
+    (let* ((button-pos (pilish-test--hover-pos "Button"))
+           (field-pos (pilish-test--hover-pos "field"))
+           (field (make-overlay field-pos (+ field-pos 5)))
+           (widget (widget-convert 'editable-field :value "field")))
+      (let ((inhibit-read-only t))
+        (make-text-button button-pos (+ button-pos 6) 'help-echo nil))
+      (overlay-put field 'field widget)
+      (dolist (pos (list button-pos field-pos))
+        (goto-char pos)
+        (let ((current-prefix-arg '(4)) observed)
+          (cl-letf (((symbol-function 'button-describe)
+                     (lambda (&rest _) (setq observed 'button)))
+                    ((symbol-function 'widget-describe)
+                     (lambda (&rest _) (setq observed 'widget))))
+            (call-interactively (key-binding (kbd "C-h ."))))
+          (should (eq observed (if (= pos button-pos) 'button 'widget)))))
+      (delete-overlay field))))
+
+(ert-deftest pilish-test-reply-details-live-target-ownership ()
+  "Reply usage belongs to ordinary text; completed thinking owns its own details."
+  (dolist (reason '("stop" "error" "aborted"))
+    (with-temp-buffer
+      (pilish-chat-mode)
+      (let* ((message (pilish-test--hover-message
+                       [(:type "text" :text "First owned span\n")
+                        (:type "thinking" :thinking "Private thinking")
+                        (:type "text" :text "Second owned span")
+                        (:type "toolCall" :id "A" :name "bash" :arguments (:command "ls"))]
+                       :stopReason reason :errorMessage "Outcome explanation")))
+        (pilish--handle-display-event '(:type "agent_start"))
+        (pilish--handle-display-event `(:type "message_start" :message ,message))
+        (pilish-test--hover-stream-content message)
+        (goto-char (pilish-test--hover-pos "First owned"))
+        (should-error (pilish-describe-reply) :type 'user-error)
+        (should-not (get-text-property (point) 'pilish-details))
+        (pilish--handle-display-event `(:type "message_end" :message ,message))
+        (let ((details (get-text-property (point) 'pilish-details)))
+          (should (stringp details))
+          (should (eq details (get-text-property (pilish-test--hover-pos "Second owned")
+                                                'pilish-details))))
+        (goto-char (pilish-test--hover-pos "Private thinking"))
+        (should (string-prefix-p "Thinking" (pilish--details-at-point)))
+        (dolist (text (append '("Assistant" "bash")
+                             (when (equal reason "error") '("Outcome explanation"))))
+          (goto-char (pilish-test--hover-pos text))
+          (should-not (get-text-property (point) 'pilish-details))
+          (should-error (pilish-describe-reply) :type 'user-error))
+        (when (equal reason "error")
+          (should (get-text-property (point) 'pilish-assistant-outcome)))
+        (goto-char (point-max))
+        (should-error (pilish-describe-reply) :type 'user-error)))))
+
+(ert-deftest pilish-test-reply-details-live-exact-end-and-silent-attachment ()
+  "Completion leaves its separator outside ownership and metadata edits silent."
+  (pilish-test--with-streaming-assistant
+    (let ((message (pilish-test--hover-message [(:type "text" :text "Exact live end")])))
+      (pilish-test--hover-stream-content message)
+      (pilish--handle-display-event `(:type "message_end" :message ,message))
+      (goto-char (+ (pilish-test--hover-pos "Exact live end") (length "Exact live end")))
+      (should-error (pilish-describe-reply) :type 'user-error)
+      (backward-char)
+      (should (pilish--details-at-point))
+      (let ((before 0) (after 0) (saved-point (point))
+            (source (buffer-substring-no-properties (point-min) (point-max))))
+        (set-buffer-modified-p nil)
+        (let ((before-change-functions (cons (lambda (&rest _) (cl-incf before)) before-change-functions))
+              (after-change-functions (cons (lambda (&rest _) (cl-incf after)) after-change-functions)))
+          (pilish--set-details (point) (1+ (point)) "Reply"))
+        (should (equal (list before after (buffer-modified-p)) '(0 0 nil)))
+        (should (= (point) saved-point))
+        (should (equal (buffer-substring-no-properties (point-min) (point-max)) source))
+        (should buffer-read-only)))))
+
+;;; Completed block details
 
 (defun pilish-test--hover-pos (text)
   "Return the first buffer position of TEXT, failing if it is absent."
@@ -26,19 +242,23 @@
     (search-forward text)
     (- (point) (length text))))
 
-(defun pilish-test--hover-help (text)
-  "Return effective native help at the first occurrence of TEXT."
+(defun pilish-test--native-help (text)
+  "Return native help-echo at the first occurrence of TEXT."
   (get-char-property (pilish-test--hover-pos text) 'help-echo))
 
+(defun pilish-test--details (text)
+  "Return literal block details at the first occurrence of TEXT."
+  (get-text-property (pilish-test--hover-pos text) 'pilish-details))
+
 (defun pilish-test--hover-displayed-help (text)
-  "Invoke native local help inside TEXT and return the exact displayed message."
+  "Invoke the effective quick-help command in TEXT and return its displayed message."
   (save-excursion
     (goto-char (+ 2 (pilish-test--hover-pos text)))
     (let (shown)
       (cl-letf (((symbol-function 'message)
                  (lambda (fmt &rest args)
                    (when fmt (setq shown (apply #'format fmt args))))))
-        (display-local-help))
+        (call-interactively (key-binding (kbd "C-h ."))))
       (should (stringp shown))
       (substring-no-properties shown))))
 
@@ -83,7 +303,7 @@
           "\nMessage tokens: input 1,240 · output 386"
           "\nCache: read 8,192 · write 0"))
 
-(ert-deftest pilish-test-hover-static-live-final-message-ownership ()
+(ert-deftest pilish-test-details-static-live-final-message-ownership ()
   "Final payload owns all its blocks, not a shared heading or selected model."
   (with-temp-buffer
     (pilish-chat-mode)
@@ -109,23 +329,24 @@
         (pilish-test--hover-stream-content second)
         (pilish--handle-display-event `(:type "message_end" :message ,second)))
       (should (= 1 (pilish-test--count-matches "Assistant\n===" (buffer-string))))
-      (should (equal (pilish-test--hover-help "First reply")
+      (should (equal (get-text-property (pilish-test--hover-pos "First reply") 'pilish-details)
                      (pilish-test--hover-reply-help)))
-      (should (equal (pilish-test--hover-help "After thought")
+      (should (equal (get-text-property (pilish-test--hover-pos "After thought") 'pilish-details)
                      (pilish-test--hover-reply-help)))
-      (should (equal (pilish-test--hover-help "Second reply")
+      (should (equal (get-text-property (pilish-test--hover-pos "Second reply") 'pilish-details)
                      (concat "Reply · "
                              (pilish--format-message-timestamp
                               (pilish--ms-to-time 1784817180000))
                              "\nother / owned\nMessage tokens: input 0 · output 0")))
-      (should (equal (pilish-test--hover-help "Private thought")
+      (should (equal (pilish-test--details "Private thought")
                      (concat "Thinking · "
                              (pilish--format-message-timestamp
                               (pilish--ms-to-time 1784817120000))
                              " · 2 lines\nanthropic / claude-sonnet-4-6")))
-      (should-not (pilish-test--hover-help "Assistant")))))
+      (should-not (pilish-test--native-help "Assistant"))
+      (should-not (get-text-property (pilish-test--hover-pos "Assistant") 'pilish-details)))))
 
-(ert-deftest pilish-test-hover-static-history-ownership-and-omissions ()
+(ert-deftest pilish-test-details-static-history-ownership-and-omissions ()
   "Replay keeps message-local provenance and distinguishes absent from zero."
   (with-temp-buffer
     (pilish-chat-mode)
@@ -140,19 +361,19 @@
                    :timestamp nil :provider nil :model nil
                    :usage '(:input 0 :cacheWrite 0))))
       (pilish--display-session-history (vector first second third))
-      (should (equal (pilish-test--hover-help "Saved reply")
+      (should (equal (get-text-property (pilish-test--hover-pos "Saved reply") 'pilish-details)
                      (pilish-test--hover-reply-help)))
-      (should (equal (pilish-test--hover-help "Bare reply") "Reply"))
-      (should (equal (pilish-test--hover-help "Zero reply")
+      (should (equal (get-text-property (pilish-test--hover-pos "Bare reply") 'pilish-details) "Reply"))
+      (should (equal (get-text-property (pilish-test--hover-pos "Zero reply") 'pilish-details)
                      "Reply\nMessage tokens: input 0\nCache: write 0"))
-      (should (equal (pilish-test--hover-help "Saved reasoning")
+      (should (equal (pilish-test--details "Saved reasoning")
                      (concat "Thinking · "
                              (pilish--format-message-timestamp
                               (pilish--ms-to-time 1784817120000))
                              " · 1 line\nanthropic / claude-sonnet-4-6"))))))
 
-(ert-deftest pilish-test-hover-static-tools-use-matching-results-and-bounded-hints ()
-  "Tool help uses the matching result timestamp, safe hints, and no nested usage."
+(ert-deftest pilish-test-details-tools-use-matching-results-and-bounded-hints ()
+  "Tool details use the matching result timestamp, safe hints, and no nested usage."
   (with-temp-buffer
     (pilish-chat-mode)
     (let* ((command (concat "printf 'λ\a'\n\t\"quoted\" " (make-string 150 ?x)))
@@ -179,12 +400,12 @@
                                     (make-string 150 ?x)) 80))))
         (should (equal (pilish-test--hover-displayed-help "Output A") expected))
         (should (equal (pilish-test--hover-displayed-help "printf") expected)))
-      (should (equal (pilish-test--hover-help "Output B")
+      (should (equal (pilish-test--details "Output B")
                      (concat "Read · "
                              (pilish--format-message-timestamp
                               (pilish--ms-to-time 1784817180000))
                              "\na.el (offset 4, limit 8)")))
-      (should (equal (pilish-test--hover-help "Output C") "custom_tool"))
+      (should (equal (pilish-test--details "Output C") "custom_tool"))
       (should-not (string-match-p (regexp-quote (make-string 150 ?x))
                                   (buffer-string)))
       (goto-char (pilish-test--hover-pos "printf"))
@@ -195,8 +416,8 @@
                                            :arguments) :command)
                      command)))))
 
-(ert-deftest pilish-test-hover-preserves-thinking-tool-rewrites-and-cooling ()
-  "Native help survives local/global folds, body/header rewrites, and cooling."
+(ert-deftest pilish-test-details-preserve-thinking-tool-rewrites-and-cooling ()
+  "Literal details survive folds, body and header rewrites, and cooling."
   (let ((pilish-bash-preview-lines 2))
     (with-temp-buffer
       (pilish-chat-mode)
@@ -206,38 +427,38 @@
                  (:type "toolCall" :id "A" :name "bash" :arguments (:command "ls"))])
                '(:role "toolResult" :toolCallId "A" :timestamp 1784817120000
                  :content [(:type "text" :text "row1\nrow2\nrow3\nrow4")])) )
-      (let ((thinking-help (pilish-test--hover-help "Folded reasoning"))
-            (tool-help (pilish-test--hover-help "row1"))
+      (let ((thinking-help (pilish-test--details "Folded reasoning"))
+            (tool-help (pilish-test--details "row1"))
             (ov (car (pilish--tool-block-overlays-in-region (point-min) (point-max)))))
         (should (string-prefix-p "Thinking · " thinking-help))
         (should (string-prefix-p "Bash · " tool-help))
         (goto-char (pilish-test--hover-pos "Folded reasoning"))
         (pilish-toggle-tool-section)
-        (should (equal (get-char-property (point) 'help-echo) thinking-help))
+        (should (equal (pilish--details-at-point) thinking-help))
         (let (messages)
           (cl-letf (((symbol-function 'message)
                      (lambda (fmt &rest args) (push (apply #'format fmt args) messages))))
             (pilish--set-chat-thinking-display 'visible))
           (should (equal messages '("Pi: This chat now shows completed thinking"))))
-        (should (equal (pilish-test--hover-help "More reasoning") thinking-help))
+        (should (equal (pilish-test--details "More reasoning") thinking-help))
         (goto-char (pilish-test--hover-pos "row1"))
         (pilish-toggle-tool-section)
-        (should (equal (pilish-test--hover-help "row4") tool-help))
+        (should (equal (pilish-test--details "row4") tool-help))
         (pilish-toggle-tool-section)
         (let ((block (pilish--tool-block-from-overlay ov)))
           (pilish--argument-observe block nil "bash" '(:command "ls --color=never"))
           (pilish--display-tool-update-header
            "bash" '(:command "ls --color=never") block))
-        (should (equal (pilish-test--hover-help "bash ls --color=never") tool-help))
+        (should (equal (pilish-test--details "bash ls --color=never") tool-help))
         (should (pilish--cool-tool-overlay ov))
         (should-not (overlay-buffer ov))
-        (should (equal (pilish-test--hover-help "row1") tool-help))
+        (should (equal (pilish-test--details "row1") tool-help))
         (let ((inhibit-read-only t))
           (goto-char (point-max))
           (insert "Outside metadata"))
-        (should-not (pilish-test--hover-help "Outside metadata"))))))
+        (should-not (pilish-test--details "Outside metadata"))))))
 
-(ert-deftest pilish-test-hover-specific-native-help-and-nonsticky-bounds ()
+(ert-deftest pilish-test-details-preserve-native-help-and-nonsticky-bounds ()
   "Deferred replay and refontification keep native links, images, and buttons."
   (let ((pilish-bash-preview-lines 2))
     (with-temp-buffer
@@ -253,21 +474,21 @@
                     (:type "image" :mimeType "image/png"
                      :data ,(pilish-test--prompt-image-base64 'png))])))
       (font-lock-ensure (point-min) (point-max))
-      (let ((link-help (pilish-test--hover-help "real link"))
-            (thinking-link-help (pilish-test--hover-help "thinking link")))
+      (let ((link-help (pilish-test--native-help "real link"))
+            (thinking-link-help (pilish-test--native-help "thinking link")))
         (should (string-match-p "https://example.org/hover" link-help))
         (should (string-match-p "https://example.org/thought" thinking-link-help))
         (should (button-at (pilish-test--hover-pos "real link")))
         (font-lock-flush)
         (font-lock-ensure)
-        (should (equal link-help (pilish-test--hover-help "real link")))
-        (should (equal thinking-link-help (pilish-test--hover-help "thinking link")))
+        (should (equal link-help (pilish-test--native-help "real link")))
+        (should (equal thinking-link-help (pilish-test--native-help "thinking link")))
         (goto-char (pilish-test--hover-pos "thinking link"))
         (pilish-toggle-tool-section)
         (pilish-toggle-tool-section)
         (font-lock-ensure)
-        (should (equal thinking-link-help (pilish-test--hover-help "thinking link")))
-        (should (equal (pilish-test--hover-help "Before")
+        (should (equal thinking-link-help (pilish-test--native-help "thinking link")))
+        (should (equal (get-text-property (pilish-test--hover-pos "Before") 'pilish-details)
                        (pilish-test--hover-reply-help))))
       (let* ((ov (car (pilish--tool-block-overlays-in-region (point-min) (point-max))))
              (button (pilish--find-toggle-button-in-region
@@ -276,9 +497,6 @@
                          (text-property-any (overlay-start ov) (overlay-end ov)
                                             'pilish-image-preview t))))
         (should button)
-        ;; Put more-specific help over already-owned fallback help, then
-        ;; exercise the real replacement path.  Ownership tags alone must
-        ;; not authorize overwriting a newer specific help value.
         (let* ((start (pilish-test--hover-pos "line1"))
                (overlay-button (make-button start (+ start 5)
                                             'help-echo "Native overlay control"))
@@ -288,7 +506,7 @@
            "bash" '(:command "echo changed") (pilish--tool-block-from-overlay ov))
           (should (equal (get-char-property (button-start button) 'help-echo)
                          "Native text control"))
-          (should (equal (pilish-test--hover-help "line1") "Native overlay control"))
+          (should (equal (pilish-test--native-help "line1") "Native overlay control"))
           (delete-overlay overlay-button))
         (should image-pos)
         (should (string-match-p "image/png"
@@ -298,8 +516,10 @@
         (insert "Outside before\n")
         (goto-char (point-max))
         (insert "Outside after"))
-      (should-not (pilish-test--hover-help "Outside before"))
-      (should-not (pilish-test--hover-help "Outside after")))))
+      (should-not (pilish-test--native-help "Outside before"))
+      (should-not (pilish-test--details "Outside before"))
+      (should-not (pilish-test--native-help "Outside after"))
+      (should-not (pilish-test--details "Outside after")))))
 
 (defun pilish-test--hover-tool-start (id)
   "Send an execution start for ID; A and B deliberately share arguments."
@@ -313,7 +533,7 @@
    `(:type "tool_execution_end" :toolCallId ,id :toolName "bash"
      :result (:content [(:type "text" :text ,(or output (concat "Output " id)))]))))
 
-(ert-deftest pilish-test-hover-stream-clock-is-message-local-and-before-rendering ()
+(ert-deftest pilish-test-details-stream-clock-is-message-local-and-before-rendering ()
   "12.4 seconds and 386 final output tokens give ~31, excluding rendering."
   (with-temp-buffer
     (pilish-chat-mode)
@@ -340,10 +560,10 @@
           (pilish--handle-display-event `(:type "message_end" :message (:role ,role))))
         (setq now 22.4)
         (pilish--handle-display-event `(:type "message_end" :message ,message))
-        (should (equal (pilish-test--hover-help "Measured reply")
+        (should (equal (get-text-property (pilish-test--hover-pos "Measured reply") 'pilish-details)
                        (concat (pilish-test--hover-reply-help)
                                "\nStream: 12.4 s · ~31 output tokens/s")))
-        (should (equal (pilish-test--hover-help "Measured reasoning")
+        (should (equal (pilish-test--details "Measured reasoning")
                        (concat "Thinking · "
                                (pilish--format-message-timestamp
                                 (pilish--ms-to-time 1784817120000))
@@ -357,13 +577,13 @@
           (pilish-test--hover-stream-content second)
           (setq now 52)
           (pilish--handle-display-event `(:type "message_end" :message ,second))
-          (should (equal (pilish-test--hover-help "Next measured reply")
+          (should (equal (get-text-property (pilish-test--hover-pos "Next measured reply") 'pilish-details)
                          (concat (pilish-test--hover-reply-help 1784817180000)
                                  "\nStream: 2.0 s · ~193 output tokens/s")))
           (should (string-suffix-p "Stream: 12.4 s · ~31 output tokens/s"
-                                   (pilish-test--hover-help "Measured reply"))))))))
+                                   (get-text-property (pilish-test--hover-pos "Measured reply") 'pilish-details))))))))
 
-(ert-deftest pilish-test-hover-tool-clocks-exclude-preview-and-late-results ()
+(ert-deftest pilish-test-details-tool-clocks-exclude-preview-and-late-results ()
   "Interleaved A10 B11 B12 A15 belongs to call IDs, including late timestamps."
   (let ((pilish-bash-preview-lines 2))
     (with-temp-buffer
@@ -396,15 +616,15 @@
           (setq now 15)
           (pilish-test--hover-tool-end "A" "A1\nA2\nA3\nA4")
           (should (= 0 (hash-table-count pilish--live-tool-blocks)))
-          (should (equal (pilish-test--hover-help "A1")
+          (should (equal (pilish-test--details "A1")
                          "Bash\nsame command\nExecution time: 5.0 s"))
-          (should (equal (pilish-test--hover-help "Output B")
+          (should (equal (pilish-test--details "Output B")
                          "Bash\nsame command\nExecution time: 1.0 s"))
           (setq now 100)
           (dolist (result (list a b))
             (pilish--handle-display-event `(:type "message_start" :message ,result))
             (pilish--handle-display-event `(:type "message_end" :message ,result)))
-          (should (= 0 (hash-table-count pilish--hover-pending-tool-blocks)))
+          (should (= 0 (hash-table-count pilish--pending-tool-details)))
           (let ((help-a (concat "Bash · "
                                 (pilish--format-message-timestamp
                                  (pilish--ms-to-time 1784817180000))
@@ -413,28 +633,28 @@
                                 (pilish--format-message-timestamp
                                  (pilish--ms-to-time 1784817240000))
                                 "\nsame command\nExecution time: 1.0 s")))
-            (should (equal (pilish-test--hover-help "A1") help-a))
-            (should (equal (pilish-test--hover-help "Output B") help-b))
+            (should (equal (pilish-test--details "A1") help-a))
+            (should (equal (pilish-test--details "Output B") help-b))
             (goto-char (pilish-test--hover-pos "A1"))
             (pilish-toggle-tool-section)
-            (should (equal (pilish-test--hover-help "A4") help-a))
+            (should (equal (pilish-test--details "A4") help-a))
             (pilish-toggle-tool-section)
             (let ((ov (car (pilish--tool-block-overlays-in-region
                             (point) (1+ (point))))))
               (should (pilish--cool-tool-overlay ov))
               (should-not (overlay-buffer ov)))
-            (should (equal (pilish-test--hover-help "A1") help-a))
+            (should (equal (pilish-test--details "A1") help-a))
             (pilish--handle-display-event `(:type "agent_end" :messages ,canonical))
             (pilish--display-session-history canonical)
-            (should (equal (pilish-test--hover-help "Before tools")
+            (should (equal (get-text-property (pilish-test--hover-pos "Before tools") 'pilish-details)
                            (pilish-test--hover-reply-help)))
-            (should (equal (pilish-test--hover-help "A1")
+            (should (equal (pilish-test--details "A1")
                            (string-remove-suffix "\nExecution time: 5.0 s" help-a)))
-            (should (equal (pilish-test--hover-help "Output B")
+            (should (equal (pilish-test--details "Output B")
                            (string-remove-suffix "\nExecution time: 1.0 s" help-b)))))
         (should (equal canonical snapshot))))))
 
-(ert-deftest pilish-test-hover-stream-usage-and-invalid-boundaries ()
+(ert-deftest pilish-test-details-stream-usage-and-invalid-boundaries ()
   "Zero differs from missing, and missing/nonpositive/mismatched starts omit timing."
   (dolist (case '((10 12 (:output 0) "\nStream: 2.0 s · ~0 output tokens/s")
                   (10 12 nil "\nStream: 2.0 s")
@@ -465,9 +685,9 @@
           (pilish-test--hover-stream-content message)
           (setq now (nth 1 case))
           (pilish--handle-display-event `(:type "message_end" :message ,message)))
-        (should (equal (pilish-test--hover-help "Boundary reply") expected))))))
+        (should (equal (get-text-property (pilish-test--hover-pos "Boundary reply") 'pilish-details) expected))))))
 
-(ert-deftest pilish-test-hover-interrupted-and-nonstreamed-replies-have-no-rate ()
+(ert-deftest pilish-test-details-interrupted-and-nonstreamed-replies-have-no-rate ()
   "Abort/error payloads and messages without observed stream events have no rate."
   (dolist (reason '("aborted" "error" "nonstreamed"))
     (with-temp-buffer
@@ -519,7 +739,8 @@
            :delta ,(plist-get thought :thinking)))
         ;; An interrupted stream has no _end event to flush it.
         (pilish--flush-stream-deltas)
-        (should-not (pilish-test--hover-help "Unfinished thought"))
+        (should-not (pilish-test--native-help "Unfinished thought"))
+        (should-not (pilish-test--details "Unfinished thought"))
         (goto-char (+ 2 (pilish-test--hover-pos "Unfinished thought")))
         (let ((source (buffer-substring-no-properties (point-min) (point-max)))
               (saved-point (point)))
@@ -573,15 +794,15 @@
                                 (pilish--ms-to-time 1784817180000))
                                "\nnext / owned\nMessage tokens: input 0 · output 0")))))))
 
-(ert-deftest pilish-test-hover-aborted-thinking-is-not-reply ()
+(ert-deftest pilish-test-details-aborted-thinking-is-not-reply ()
   "An aborted final message without thinking_end must not label thinking Reply."
   (pilish-test--hover-interrupted-thinking "aborted"))
 
-(ert-deftest pilish-test-hover-error-thinking-is-not-reply ()
+(ert-deftest pilish-test-details-error-thinking-is-not-reply ()
   "An error final message without thinking_end must not label thinking Reply."
   (pilish-test--hover-interrupted-thinking "error"))
 
-(ert-deftest pilish-test-hover-tool-missing-and-nonpositive-boundaries ()
+(ert-deftest pilish-test-details-tool-missing-and-nonpositive-boundaries ()
   "Tool execution without both ordered local boundaries never invents time."
   (dolist (start '(nil 12 13))
     (with-temp-buffer
@@ -592,10 +813,10 @@
           (when start (pilish-test--hover-tool-start "A"))
           (setq now 12)
           (pilish-test--hover-tool-end "A")))
-      (should (equal (pilish-test--hover-help "Output A")
+      (should (equal (pilish-test--details "Output A")
                      (if start "Bash\nsame command" "Bash"))))))
 
-(ert-deftest pilish-test-hover-identical-thinking-finalization-keeps-properties ()
+(ert-deftest pilish-test-details-identical-thinking-finalization-keeps-properties ()
   "The unchanged-text thinking-end fast path still acquires final provenance."
   (with-temp-buffer
     (pilish-chat-mode)
@@ -608,37 +829,39 @@
         (pilish-test--send-assistant-message-update '(:type "thinking_start" :contentIndex 0))
         (pilish-test--send-assistant-message-update
          '(:type "thinking_delta" :contentIndex 0 :delta "Identical thinking"))
-        ;; An interrupted stream has no _end event to flush it.
         (pilish--flush-stream-deltas)
         (let ((inhibit-read-only t)
               (pos (pilish-test--hover-pos "Identical thinking")))
           (put-text-property pos (1+ pos) 'pilish-test-sentinel t))
         (pilish-test--send-assistant-message-update '(:type "thinking_end" :contentIndex 0))
+        (goto-char (pilish-test--hover-pos "Identical thinking"))
+        (should (equal (pilish--details-at-point) "Thinking · 1 line"))
+        (should (get-text-property (point) 'pilish-test-sentinel))
         (setq now 22.4)
         (pilish--handle-display-event `(:type "message_end" :message ,message)))
       (should (get-text-property (pilish-test--hover-pos "Identical thinking")
                                 'pilish-test-sentinel))
-      (should (equal (pilish-test--hover-help "Identical thinking")
+      (should (equal (pilish-test--details "Identical thinking")
                      (concat "Thinking · "
                              (pilish--format-message-timestamp
                               (pilish--ms-to-time 1784817120000))
                              " · 1 line\nanthropic / claude-sonnet-4-6"))))))
 
-(ert-deftest pilish-test-hover-no-metadata-work-on-output-deltas ()
-  "Thinking/text deltas and coalesced execution updates do not format hover."
+(ert-deftest pilish-test-details-no-metadata-work-on-output-deltas ()
+  "Thinking and text deltas and coalesced execution updates do not format details."
   (pilish-test--with-streaming-assistant
     (pilish-test--send-assistant-message-update '(:type "thinking_start"))
     (pilish-test--hover-tool-start "A")
-    (cl-letf (((symbol-function 'pilish--set-hover-help)
-               (lambda (&rest _) (ert-fail "Hover write on a delta")))
-              ((symbol-function 'pilish--assistant-hover-help)
+    (cl-letf (((symbol-function 'pilish--set-details)
+               (lambda (&rest _) (ert-fail "Details write on a delta")))
+              ((symbol-function 'pilish--format-reply-details)
                (lambda (&rest _) (ert-fail "Reply formatting on a delta")))
-              ((symbol-function 'pilish--tool-hover-help)
+              ((symbol-function 'pilish--format-tool-details)
                (lambda (&rest _) (ert-fail "Tool formatting on a delta"))))
       (pilish-test--send-assistant-message-update
-       '(:type "thinking_delta" :delta "No hover work"))
+       '(:type "thinking_delta" :delta "No metadata work"))
       (pilish-test--send-assistant-message-update
-       '(:type "text_delta" :delta "No hover work"))
+       '(:type "text_delta" :delta "No metadata work"))
       (pilish--handle-display-event
        '(:type "tool_execution_update" :toolCallId "A"
          :partialResult (:content [(:type "text" :text "Updated output")])) )
@@ -646,7 +869,7 @@
     (pilish--cancel-tool-update-flush)
     (should (string-match-p "Updated output" (buffer-string)))))
 
-(ert-deftest pilish-test-hover-cleanup-clears-pending-and-unfinished-clocks ()
+(ert-deftest pilish-test-details-cleanup-clears-pending-and-unfinished-clocks ()
   "Abort, death and rebuild release associations and do not invent tool ends."
   (dolist (cleanup '(abort death rebuild clear))
     (let ((process (start-process "pilish-hover-cleanup" nil "cat")))
@@ -663,7 +886,7 @@
                 (pilish-test--hover-tool-start "B")
                 (setq now 12)
                 (pilish-test--hover-tool-end "A")
-                (should (= 1 (hash-table-count pilish--hover-pending-tool-blocks)))
+                (should (= 1 (hash-table-count pilish--pending-tool-details)))
                 (pcase cleanup
                   ('abort
                    (setq pilish--aborted t)
@@ -674,18 +897,18 @@
                    (should (string-match-p "Expected death" (buffer-string))))
                   ('rebuild (pilish--display-session-history []))
                   ('clear (pilish--clear-render-artifacts)))
-                (should-not pilish--hover-assistant)
-                (should (= 0 (hash-table-count pilish--hover-pending-tool-blocks)))
+                (should-not pilish--assistant-details-clock)
+                (should (= 0 (hash-table-count pilish--pending-tool-details)))
                 ;; No start in this fresh generation: reused ID B gets no
                 ;; duration from the unfinished execution above.
                 (pilish--handle-display-event '(:type "agent_start"))
                 (setq now 100)
                 (pilish-test--hover-tool-end "B" "New generation B")
-                (should (equal (pilish-test--hover-help "New generation B") "Bash"))
+                (should (equal (pilish-test--details "New generation B") "Bash"))
                 (pilish--handle-display-event '(:type "agent_end" :messages [])))))
         (when (process-live-p process) (delete-process process))))))
 
-(ert-deftest pilish-test-hover-two-buffers-and-reused-call-ids-are-isolated ()
+(ert-deftest pilish-test-details-two-buffers-and-reused-call-ids-are-isolated ()
   "Two concurrent chats and later generations never share pending clocks."
   (let ((a (generate-new-buffer " *pilish-hover-A*"))
         (b (generate-new-buffer " *pilish-hover-B*"))
@@ -700,12 +923,12 @@
             (setq now (1+ now)))
           (with-current-buffer b
             (pilish-test--hover-tool-end "same")
-            (should (equal (pilish-test--hover-help "Output same")
+            (should (equal (pilish-test--details "Output same")
                            "Bash\nsame command\nExecution time: 1.0 s")))
           (setq now 15)
           (with-current-buffer a
             (pilish-test--hover-tool-end "same")
-            (should (equal (pilish-test--hover-help "Output same")
+            (should (equal (pilish-test--details "Output same")
                            "Bash\nsame command\nExecution time: 5.0 s"))
             (pilish--handle-display-event '(:type "agent_end" :messages []))
             (pilish--handle-display-event '(:type "agent_start")))
@@ -713,7 +936,7 @@
             (pilish--handle-display-event
              '(:type "message_end" :message (:role "toolResult" :toolCallId "same"
                                             :timestamp 1784817120000)))
-            (should (equal (pilish-test--hover-help "Output same")
+            (should (equal (pilish-test--details "Output same")
                            (concat "Bash · "
                                    (pilish--format-message-timestamp
                                     (pilish--ms-to-time 1784817120000))
@@ -723,13 +946,13 @@
             (pilish-test--hover-tool-start "same")
             (setq now 102)
             (pilish-test--hover-tool-end "same" "Fresh same")
-            (should (equal (pilish-test--hover-help "Fresh same")
+            (should (equal (pilish-test--details "Fresh same")
                            "Bash\nsame command\nExecution time: 2.0 s"))
-            (should (equal (pilish-test--hover-help "Output same")
+            (should (equal (pilish-test--details "Output same")
                            "Bash\nsame command\nExecution time: 5.0 s"))))
       (pilish-test--kill-live-buffers a b))))
 
-(ert-deftest pilish-test-hover-later-markdown-reference-definition-still-resolves ()
+(ert-deftest pilish-test-details-later-markdown-reference-definition-still-resolves ()
   "Metadata cannot prevent native links when a reference definition arrives later."
   (with-temp-buffer
     (pilish-chat-mode)
@@ -743,10 +966,10 @@
               :timestamp 1784817180000)))
     (font-lock-flush)
     (font-lock-ensure)
-    (should (equal (pilish-test--hover-help "late reference")
+    (should (equal (pilish-test--native-help "late reference")
                    "https://example.org/later"))
     (should (button-at (pilish-test--hover-pos "late reference")))
-    (should (equal (pilish-test--hover-help "Earlier")
+    (should (equal (get-text-property (pilish-test--hover-pos "Earlier") 'pilish-details)
                    (pilish-test--hover-reply-help)))))
 
 (defun pilish-test--hover-complete-and-cool-tool ()
@@ -756,36 +979,37 @@ execution cannot retain a temporary record on this setup's evaluator stack."
   (pilish--handle-display-event '(:type "agent_start"))
   (pilish-test--hover-tool-start "A")
   (pilish-test--hover-tool-end "A")
-  (prog1 (hash-table-count pilish--hover-pending-tool-blocks)
+  (prog1 (hash-table-count pilish--pending-tool-details)
     (pilish--cool-tool-overlay
      (car (pilish--tool-block-overlays-in-region (point-min) (point-max))))))
 
-(ert-deftest pilish-test-hover-pending-result-does-not-retain-cooled-record ()
+(ert-deftest pilish-test-details-pending-result-does-not-retain-cooled-record ()
   "A missing late result must not keep cooled overlays or full output alive."
   (with-temp-buffer
     (pilish-chat-mode)
     (should (= 1 (pilish-test--hover-complete-and-cool-tool)))
     (should-not (pilish--tool-block-overlays-in-region (point-min) (point-max)))
     (garbage-collect)
-    (should (= 0 (hash-table-count pilish--hover-pending-tool-blocks)))
+    (should (= 0 (hash-table-count pilish--pending-tool-details)))
     (should (string-prefix-p "Bash\nsame command"
-                             (pilish-test--hover-help "Output A")))))
+                             (pilish-test--details "Output A")))))
 
-(ert-deftest pilish-test-hover-metadata-update-is-silent ()
+(ert-deftest pilish-test-details-metadata-update-is-silent ()
   "Metadata updates skip content notifications without losing native help."
   (dolist (modified '(nil t))
     (with-temp-buffer
       (pilish-chat-mode)
       (pilish--display-session-history
        (vector (pilish-test--hover-message
-                [(:type "text" :text "Plain [native link](https://example.org/silent) tail.")])))
+                [(:type "thinking" :thinking "Plain [native link](https://example.org/silent) tail.")])))
       (font-lock-ensure)
       (should (button-at (pilish-test--hover-pos "native link")))
       (goto-char (pilish-test--hover-pos "Plain"))
       (set-buffer-modified-p modified)
       (let* ((source (buffer-substring-no-properties (point-min) (point-max)))
              (saved-point (point))
-             (help "Reply\nMessage tokens: input 0")
+             (help "Thinking · 1 line\nupdated / model")
+             (bounds (pilish--thinking-block-bounds-at-pos (point)))
              (before-count 0)
              (after-count 0)
              ;; Keep the mode's actual native change hooks, adding observers.
@@ -793,7 +1017,8 @@ execution cannot retain a temporary record on this setup's evaluator stack."
               (cons (lambda (&rest _) (cl-incf before-count)) before-change-functions))
              (after-change-functions
               (cons (lambda (&rest _) (cl-incf after-count)) after-change-functions)))
-        (pilish--set-hover-help (point) (point-max) help)
+        (should-not (equal (pilish-test--details "Plain") help))
+        (pilish--set-details (car bounds) (cdr bounds) help)
         (should (equal (list before-count after-count (buffer-modified-p))
                        (list 0 0 modified)))
         (should (= (point) saved-point))
@@ -801,7 +1026,7 @@ execution cannot retain a temporary record on this setup's evaluator stack."
         (should buffer-read-only)
         (should (equal (pilish-test--hover-displayed-help "Plain") help))
         (should (equal (get-text-property (pilish-test--hover-pos "native link")
-                                          'pilish-hover-help)
+                                          'pilish-details)
                        help))
         (font-lock-flush)
         (font-lock-ensure)
@@ -817,8 +1042,8 @@ execution cannot retain a temporary record on this setup's evaluator stack."
         (should (> before-count 0))
         (should (> after-count 0))))))
 
-(ert-deftest pilish-test-hover-completion-preserves-source-point-and-exact-boundary ()
-  "Hover changes no Markdown text or point, and is nonsticky at the exact end."
+(ert-deftest pilish-test-details-completion-preserves-source-point-and-exact-boundary ()
+  "Completion changes no Markdown text or point, with exact metadata bounds."
   (pilish-test--with-streaming-assistant
     (let ((message (pilish-test--hover-message
                     [(:type "text" :text "Unchanged **source** body")])))
@@ -831,14 +1056,15 @@ execution cannot retain a temporary record on this setup's evaluator stack."
         ;; Completion already owns adding a newline; metadata adds no text.
         (should (equal (buffer-substring-no-properties (point-min) (point-max))
                        (concat before "\n")))
-        (should (equal (pilish-test--hover-help "body")
+        (should (equal (get-text-property (pilish-test--hover-pos "body") 'pilish-details)
                        (pilish-test--hover-reply-help)))))
     (let ((inhibit-read-only t))
       (goto-char (marker-position pilish--streaming-marker))
       (insert-and-inherit "Immediately outside"))
-    (should-not (pilish-test--hover-help "Immediately outside"))))
+    (should-not (pilish-test--native-help "Immediately outside"))
+    (should-not (pilish-test--details "Immediately outside"))))
 
-(ert-deftest pilish-test-hover-new-agent-start-discards-unfinished-tool-clock ()
+(ert-deftest pilish-test-details-new-agent-start-discards-unfinished-tool-clock ()
   "Even a new agent run after an absent agent_end cannot inherit a tool clock."
   (with-temp-buffer
     (pilish-chat-mode)
@@ -849,10 +1075,10 @@ execution cannot retain a temporary record on this setup's evaluator stack."
         (setq now 100)
         (pilish--handle-display-event '(:type "agent_start"))
         (pilish-test--hover-tool-end "A" "After absent end")))
-    (should (equal (pilish-test--hover-help "After absent end")
+    (should (equal (pilish-test--details "After absent end")
                    "Bash\nsame command"))))
 
-(ert-deftest pilish-test-hover-native-partial-fontification-expands-to-inline-link ()
+(ert-deftest pilish-test-details-native-partial-fontification-expands-to-inline-link ()
   "A tiny fontification request must not shield the rest of its native line."
   (with-temp-buffer
     (pilish-chat-mode)
@@ -867,7 +1093,7 @@ execution cannot retain a temporary record on this setup's evaluator stack."
                    "https://example.org/inline"))
     (should (button-at (pilish-test--hover-pos "inline")))))
 
-(ert-deftest pilish-test-hover-native-split-jit-fontification-multiline-link ()
+(ert-deftest pilish-test-details-native-split-jit-fontification-multiline-link ()
   "Adjacent JIT chunks of one multiline link retain its native button and URL."
   (with-temp-buffer
     (pilish-chat-mode)
@@ -888,7 +1114,7 @@ execution cannot retain a temporary record on this setup's evaluator stack."
                    "https://example.org/target"))
     (should (button-at (pilish-test--hover-pos "multiline link")))))
 
-(ert-deftest pilish-test-hover-native-narrowed-and-full-fontification-contract ()
+(ert-deftest pilish-test-details-native-narrowed-and-full-fontification-contract ()
   "Native expansion beyond narrowing preserves bounds, point, flags and text."
   (dolist (narrow '(nil t))
     (with-temp-buffer
@@ -919,8 +1145,8 @@ execution cannot retain a temporary record on this setup's evaluator stack."
                          "https://example.org/target")))
         (should (equal source (buffer-substring-no-properties (point-min) (point-max))))))))
 
-(ert-deftest pilish-test-hover-native-link-before-completion-regains-fallback ()
-  "A link fontified during streaming regains reply help when folding removes it."
+(ert-deftest pilish-test-details-native-link-priority-preserves-reply-details ()
+  "A streamed native link keeps priority over reply details across folding."
   (with-temp-buffer
     (pilish-chat-mode)
     (let ((message (pilish-test--hover-message
@@ -935,8 +1161,9 @@ execution cannot retain a temporary record on this setup's evaluator stack."
         (should (equal (pilish-test--hover-displayed-help "anchor")
                        "https://example.org/live"))
         (pilish--handle-display-event `(:type "message_end" :message ,message)))
-      (should (equal (get-text-property (pilish-test--hover-pos "anchor") 'pilish-hover-help)
+      (should (equal (get-text-property (pilish-test--hover-pos "anchor") 'pilish-details)
                      (pilish-test--hover-reply-help)))
+      (should-not (get-text-property (pilish-test--hover-pos "anchor") 'pilish-hover-help))
       (should (equal (pilish-test--hover-displayed-help "anchor")
                      "https://example.org/live"))
       (goto-char (pilish-test--hover-pos "[target]:"))
@@ -944,6 +1171,8 @@ execution cannot retain a temporary record on this setup's evaluator stack."
       (font-lock-flush)
       (font-lock-ensure)
       (should-not (button-at (pilish-test--hover-pos "anchor")))
+      (should-not (pilish-test--native-help "anchor"))
+      (should-not (get-text-property (pilish-test--hover-pos "anchor") 'pilish-hover-help))
       (should (equal (pilish-test--hover-displayed-help "anchor")
                      (pilish-test--hover-reply-help)))
       (goto-char (car (pilish--thinking-block-bounds-at-pos
@@ -954,8 +1183,8 @@ execution cannot retain a temporary record on this setup's evaluator stack."
       (should (equal (pilish-test--hover-displayed-help "anchor")
                      "https://example.org/live")))))
 
-(ert-deftest pilish-test-hover-native-literal-command-path-and-provenance ()
-  "Native help must show quotes and backslashes literally, never as commands."
+(ert-deftest pilish-test-details-literal-command-path-and-provenance ()
+  "Quick help shows quotes and backslashes literally, never as commands."
   (dolist (command '("rg \\[WARNING\\] output.log" "printf \\{global-map}"
                      "printf '\\[find-file]' `echo ‘λ’`" "printf \\= \\<global-map>"))
     (with-temp-buffer
@@ -985,7 +1214,7 @@ execution cannot retain a temporary record on this setup's evaluator stack."
       (should (string-match-p (regexp-quote "p\\{global-map} / m'`\\[find-file]")
                               (pilish-test--hover-displayed-help text))))))
 
-(ert-deftest pilish-test-hover-native-process-replacement-clears-live-state ()
+(ert-deftest pilish-test-details-process-replacement-clears-live-state ()
   "The real process setter is a boundary even without agent_start or history."
   (with-temp-buffer
     (pilish-chat-mode)
@@ -1006,18 +1235,18 @@ execution cannot retain a temporary record on this setup's evaluator stack."
                            "{\"type\":\"tool_execution_start\",\"toolCallId\":\"A\",\"toolName\":\"bash\",\"args\":{\"command\":\"old command\"}}\n"
                            "{\"type\":\"tool_execution_end\",\"toolCallId\":\"pending\",\"toolName\":\"bash\",\"result\":{\"content\":[]}}\n"))
             (should (pilish-test-wait-until
-                     (lambda () (and pilish--hover-pending-tool-blocks
-                                     (= 1 (hash-table-count pilish--hover-pending-tool-blocks))))
+                     (lambda () (and pilish--pending-tool-details
+                                     (= 1 (hash-table-count pilish--pending-tool-details))))
                      3 .01 first))
-            (should pilish--hover-assistant)
+            (should pilish--assistant-details-clock)
             ;; Setting the same identity is not a process-generation change.
             (pilish--set-process first)
-            (should pilish--hover-assistant)
-            (should (= 1 (hash-table-count pilish--hover-pending-tool-blocks)))
+            (should pilish--assistant-details-clock)
+            (should (= 1 (hash-table-count pilish--pending-tool-details)))
             (pilish--unregister-display-handler first)
             (pilish--set-process second)
-            (should-not pilish--hover-assistant)
-            (should (= 0 (hash-table-count pilish--hover-pending-tool-blocks)))
+            (should-not pilish--assistant-details-clock)
+            (should (= 0 (hash-table-count pilish--pending-tool-details)))
             (setq now 100)
             (process-send-string
              second "{\"type\":\"tool_execution_end\",\"toolCallId\":\"A\",\"toolName\":\"bash\",\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"New process A\"}]}}\n")
@@ -1027,12 +1256,124 @@ execution cannot retain a temporary record on this setup's evaluator stack."
                      3 .01 second))
             (should (equal (pilish-test--hover-displayed-help "New process A")
                            "Bash\nold command"))
-            (should (= 1 (hash-table-count pilish--hover-pending-tool-blocks)))
+            (should (= 1 (hash-table-count pilish--pending-tool-details)))
             (pilish--set-process nil)
-            (should (= 0 (hash-table-count pilish--hover-pending-tool-blocks))))
+            (should (= 0 (hash-table-count pilish--pending-tool-details))))
         (dolist (proc (list first second))
           (pilish--unregister-display-handler proc)
           (delete-process proc))))))
+
+(ert-deftest pilish-test-details-thinking-provisional-final-and-folds ()
+  "thinking_end materializes details; final provenance survives every fold."
+  (dolist (initial-display '(visible hidden))
+    (with-temp-buffer
+      (pilish-chat-mode)
+      (setq pilish--thinking-display initial-display)
+      (let* ((message (pilish-test--hover-message
+                       [(:type "thinking" :thinking "Private first\nPrivate second")]
+                       :provider "p\\{global-map}" :model "m'`\\[find-file]%"))
+             (provisional "Thinking · 2 lines")
+             (final (concat "Thinking · "
+                            (pilish--format-message-timestamp (pilish--ms-to-time 1784817120000))
+                            " · 2 lines\np\\{global-map} / m'`\\[find-file]%")))
+        (pilish--handle-display-event '(:type "agent_start"))
+        (pilish--handle-display-event `(:type "message_start" :message ,message))
+        (pilish-test--hover-stream-content message)
+        (dolist (expected (list provisional final))
+          (when (equal expected final)
+            (pilish--handle-display-event `(:type "message_end" :message ,message)))
+          (goto-char (plist-get (car (pilish--completed-thinking-blocks)) :start))
+          (should (equal (pilish--details-at-point) expected))
+          (should (equal (pilish-test--hover-displayed-help
+                          (if (eq (plist-get (car (pilish--completed-thinking-blocks)) :display) 'hidden)
+                              "> Thinking" "Private first")) expected))
+          (dotimes (_ 2)
+            (pilish-toggle-tool-section)
+            (should (equal (pilish--details-at-point) expected)))
+          (dolist (display '(hidden visible hidden))
+            (pilish--set-chat-thinking-display display)
+            (goto-char (plist-get (car (pilish--completed-thinking-blocks)) :start))
+            (should (equal (pilish--details-at-point) expected))))))))
+
+(ert-deftest pilish-test-details-completed-blocks-have-no-custom-hover-after-fontification ()
+  "All completed kinds have one literal property without custom hover remnants."
+  (with-temp-buffer
+    (pilish-chat-mode)
+    (pilish--display-session-history
+     (vector (pilish-test--hover-message
+              [(:type "text" :text "Plain reply")
+               (:type "thinking" :thinking "Plain thinking")
+               (:type "toolCall" :id "A" :name "bash" :arguments (:command "printf literal"))])
+             '(:role "toolResult" :toolCallId "A" :timestamp 1784817120000
+               :content [(:type "text" :text "Plain output")])) )
+    (dotimes (_ 2)
+      (font-lock-flush)
+      (font-lock-ensure)
+      (dolist (text '("Plain reply" "Plain thinking" "Plain output" "bash printf"))
+        (let* ((position (pilish-test--hover-pos text))
+               (details (get-text-property position 'pilish-details)))
+          (should (stringp details))
+          (should (equal-including-properties details (substring-no-properties details)))
+          (dolist (property '(help-echo kbd-help pilish-hover-help pilish-thinking-help pilish-reply-details))
+            (should-not (get-text-property position property))))))
+    (let* ((overlay (car (pilish--tool-block-overlays-in-region (point-min) (point-max))))
+           (details (pilish-test--details "Plain output")))
+      (pilish--cool-tool-overlay overlay)
+      (font-lock-flush)
+      (font-lock-ensure)
+      (should (equal (pilish-test--details "Plain output") details))
+      (let ((metadata (get-text-property (pilish-test--hover-pos "Plain output") 'pilish-cold-tool-block)))
+        (should-not (plist-member metadata :help))
+        (should-not (plist-member metadata :details))))))
+
+(ert-deftest pilish-test-details-help-all-kinds-are-detached ()
+  "Thinking and tools use the same selected, literal, source-independent Help."
+  (save-window-excursion
+    (let ((source (generate-new-buffer " *all-details-source*")) reports)
+      (unwind-protect
+          (progn
+            (switch-to-buffer source)
+            (pilish-chat-mode)
+            (pilish--display-session-history
+             (vector (pilish-test--hover-message
+                      [(:type "text" :text "Secret reply")
+                       (:type "thinking" :thinking "Secret reasoning")
+                       (:type "toolCall" :id "A" :name "bash"
+                        :arguments (:command "printf '\\[find-file]' %"))]
+                      :provider "p\\{global-map}" :model "m'`%")
+                     '(:role "toolResult" :toolCallId "A" :timestamp 1784817120000
+                       :content [(:type "text" :text "Secret output")])) )
+            (dolist (text '("Secret reply" "Secret reasoning" "Secret output"))
+              (goto-char (pilish-test--hover-pos text))
+              (let ((expected (pilish--details-at-point)))
+                (call-interactively #'pilish-describe-reply)
+                (set-buffer (window-buffer (selected-window)))
+                (should (derived-mode-p 'help-mode))
+                (should buffer-read-only)
+                (should (equal help-xref-stack-item (list #'pilish--show-details expected)))
+                (should-not (text-properties-at 0 (cadr help-xref-stack-item)))
+                (should (string-prefix-p (concat expected "\n") (buffer-string)))
+                (should-not (string-match-p "Secret" (buffer-string)))
+                (push expected reports)
+                (quit-window)
+                (set-buffer (window-buffer (selected-window)))
+                (should (eq (current-buffer) source))))
+            (kill-buffer source)
+            (switch-to-buffer (get-buffer "*Help*"))
+            (cl-letf (((symbol-function 'pilish--rpc-async) (lambda (&rest _) (ert-fail "Help sent RPC"))))
+              (revert-buffer nil t)
+              (should (string-prefix-p (car reports) (buffer-string)))
+              (help-xref-go-back (current-buffer))
+              (should (string-prefix-p (cadr reports) (buffer-string)))
+              (revert-buffer nil t)
+              (help-xref-go-back (current-buffer))
+              (should (string-prefix-p (nth 2 reports) (buffer-string)))
+              (help-xref-go-forward (current-buffer))
+              (should (string-prefix-p (cadr reports) (buffer-string)))
+              (help-xref-go-forward (current-buffer))
+              (should (string-prefix-p (car reports) (buffer-string)))))
+        (when (buffer-live-p source) (kill-buffer source))
+        (when (get-buffer "*Help*") (kill-buffer "*Help*"))))))
 
 ;;; Nested execution ownership and lifetime
 
