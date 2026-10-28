@@ -200,6 +200,59 @@ Zero keeps the original single-delta tool boundary check.")
 (defvar pilish-sd-bench--probe-timer nil
   "Active benchmark probe timer, or nil.")
 
+(defvar pilish-sd-bench--reader-window nil
+  "Existing chat window used by the cold reader scenario.")
+(defvar pilish-sd-bench--reader-chat-buffer nil
+  "Chat buffer whose JIT timer creations are measured.")
+(defvar pilish-sd-bench--reader-initial nil
+  "Reader state before streaming begins.")
+(defvar pilish-sd-bench--reader-settled nil
+  "Reader state after the measured stream settles.")
+(defvar pilish-sd-bench--jit-created 0
+  "Cumulative chat-owned JIT timer creations during the measured stream.")
+(defvar pilish-sd-bench--thinking-end-rows nil
+  "Thinking-end handler observations, newest first.")
+
+(defun pilish-sd-bench--reader-state ()
+  "Return the reader's exact positions and following status, if live."
+  (when (and (window-live-p pilish-sd-bench--reader-window)
+             (buffer-live-p pilish-sd-bench--reader-chat-buffer)
+             (eq (window-buffer pilish-sd-bench--reader-window)
+                 pilish-sd-bench--reader-chat-buffer))
+    (list :start (window-start pilish-sd-bench--reader-window)
+          :point (window-point pilish-sd-bench--reader-window)
+          :following
+          (pilish-sd-bench--json-bool
+           (with-current-buffer pilish-sd-bench--reader-chat-buffer
+             (pilish--window-following-p pilish-sd-bench--reader-window))))))
+
+(defun pilish-sd-bench--around-run-with-timer
+    (orig secs repeat function &rest args)
+  "Count chat-owned JIT timer creations while calling ORIG with its arguments."
+  (prog1 (apply orig secs repeat function args)
+    (when (and (equal pilish-sd-bench--phase "stream")
+               (eq function 'jit-lock-force-redisplay)
+               (buffer-live-p pilish-sd-bench--reader-chat-buffer)
+               (markerp (car args))
+               (eq (marker-buffer (car args))
+                   pilish-sd-bench--reader-chat-buffer))
+      (cl-incf pilish-sd-bench--jit-created))))
+
+(defun pilish-sd-bench--around-thinking-end (orig content)
+  "Measure thinking-end handler ORIG for CONTENT without forcing redisplay."
+  (let ((before (pilish-sd-bench--reader-state))
+        (jit-before pilish-sd-bench--jit-created)
+        (start (float-time)))
+    (unwind-protect
+        (funcall orig content)
+      (let ((wall-ms (* 1000.0 (- (float-time) start))))
+        (push (list :wallMs wall-ms
+                    :before before :after (pilish-sd-bench--reader-state)
+                    :jitCreatedBefore jit-before
+                    :jitCreatedAfter pilish-sd-bench--jit-created
+                    :jitCreated (- pilish-sd-bench--jit-created jit-before))
+              pilish-sd-bench--thinking-end-rows)))))
+
 (defun pilish-sd-bench--percentile (samples fraction)
   "Return FRACTION percentile of numeric SAMPLES."
   (let* ((sorted (sort (copy-sequence samples) #'<))
@@ -441,7 +494,12 @@ Zero keeps the original single-delta tool boundary check.")
   (advice-add 'pilish--display-thinking-delta
               :around #'pilish-sd-bench--around-display-thinking)
   (advice-add 'pilish--render-toolcall-stream
-              :around #'pilish-sd-bench--around-toolcall-paint))
+              :around #'pilish-sd-bench--around-toolcall-paint)
+  (when (equal pilish-sd-bench-scenario "reader")
+    (advice-add 'run-with-timer
+                :around #'pilish-sd-bench--around-run-with-timer)
+    (advice-add 'pilish--display-thinking-end
+                :around #'pilish-sd-bench--around-thinking-end)))
 
 (defun pilish-sd-bench--remove-advice ()
   "Remove all stream benchmark measurement advice."
@@ -456,7 +514,10 @@ Zero keeps the original single-delta tool boundary check.")
   (advice-remove 'pilish--display-thinking-delta
                  #'pilish-sd-bench--around-display-thinking)
   (advice-remove 'pilish--render-toolcall-stream
-                 #'pilish-sd-bench--around-toolcall-paint))
+                 #'pilish-sd-bench--around-toolcall-paint)
+  (advice-remove 'run-with-timer #'pilish-sd-bench--around-run-with-timer)
+  (advice-remove 'pilish--display-thinking-end
+                 #'pilish-sd-bench--around-thinking-end))
 
 (defun pilish-sd-bench--wait-until (predicate timeout)
   "Wait up to TIMEOUT seconds for PREDICATE to return non-nil."
@@ -595,13 +656,40 @@ other visible line is retained so unexpected text fails projection equality."
   "Return correctness check NAME with OK and DETAIL."
   (list :name name :ok (pilish-sd-bench--json-bool ok) :detail detail))
 
+(defun pilish-sd-bench--reader-checks ()
+  "Return reader-only checks; timer creation and timing remain diagnostic."
+  (let* ((rows (pilish-sd-bench--rows-in-order
+                pilish-sd-bench--thinking-end-rows))
+         (states (append (list pilish-sd-bench--reader-initial)
+                         (cl-loop for row in rows append
+                                  (list (plist-get row :before)
+                                        (plist-get row :after)))
+                         (list pilish-sd-bench--reader-settled))))
+    (list
+     (pilish-sd-bench--check
+      "non-tail-reader-observed"
+      (and (= (length rows) 1)
+           (seq-every-p (lambda (state)
+                         (and state (eq (plist-get state :following) :json-false)))
+                       states))
+      (format "initial=%S thinking-end=%S settled=%S"
+              pilish-sd-bench--reader-initial rows pilish-sd-bench--reader-settled))
+     (pilish-sd-bench--check
+      "reader-start-preserved"
+      (seq-every-p (lambda (state) (equal (plist-get state :start) 1)) states)
+      (format "starts=%S" (mapcar (lambda (state) (plist-get state :start)) states)))
+     (pilish-sd-bench--check
+      "reader-point-preserved"
+      (seq-every-p (lambda (state) (equal (plist-get state :point) 1)) states)
+      (format "points=%S" (mapcar (lambda (state) (plist-get state :point)) states))))))
+
 (defun pilish-sd-bench--collect-checks
     (chat-buf proc history-count history-bytes projection md-ts)
   "Return correctness results for CHAT-BUF and PROC.
 HISTORY-COUNT and HISTORY-BYTES describe replay; PROJECTION and MD-TS describe
 the settled rendered buffer."
-  (let* ((full (equal pilish-sd-bench-scenario "full"))
-         (large-history (member pilish-sd-bench-scenario '("full" "toolcall")))
+  (let* ((full (member pilish-sd-bench-scenario '("full" "reader")))
+         (large-history (member pilish-sd-bench-scenario '("full" "reader" "toolcall")))
          (toolcall-deltas (pilish-sd-bench--toolcall-delta-count))
          (expected-history (* 2 pilish-sd-bench-history-turns))
          (text-events (+ pilish-sd-bench-timer-text-deltas
@@ -795,7 +883,9 @@ the settled rendered buffer."
                    (plist-get md-ts :beforeCount)
                    (plist-get md-ts :afterCount)))
           checks)
-    (nreverse checks)))
+    (append (nreverse checks)
+            (when (equal pilish-sd-bench-scenario "reader")
+              (pilish-sd-bench--reader-checks)))))
 
 (defun pilish-sd-bench--cleanup-session (chat-buf)
   "Kill CHAT-BUF, its input buffer, and its fake process."
@@ -871,13 +961,24 @@ the settled rendered buffer."
                 (error "Timed out replaying synthetic history"))
               (with-current-buffer chat-buf
                 (setq history-bytes (string-bytes (buffer-string)))
-                (font-lock-ensure (point-min) (point-max)))
+                (unless (equal pilish-sd-bench-scenario "reader")
+                  (font-lock-ensure (point-min) (point-max))))
               (when (and pilish-sd-bench-display-buffers
                          (not noninteractive))
                 (pilish--show-session-buffers
                  chat-buf
                  (buffer-local-value 'pilish--input-buffer chat-buf))
+                (when (equal pilish-sd-bench-scenario "reader")
+                  (setq pilish-sd-bench--reader-chat-buffer chat-buf
+                        pilish-sd-bench--reader-window (get-buffer-window chat-buf t))
+                  (unless (window-live-p pilish-sd-bench--reader-window)
+                    (error "Reader scenario has no chat window"))
+                  (with-current-buffer chat-buf
+                    (set-window-start pilish-sd-bench--reader-window (point-min) t)
+                    (set-window-point pilish-sd-bench--reader-window (point-min))))
                 (redisplay t))
+              (setq pilish-sd-bench--reader-initial
+                    (pilish-sd-bench--reader-state))
               (garbage-collect)
               (setq gc-before gcs-done
                     gc-time-before gc-elapsed
@@ -903,6 +1004,10 @@ the settled rendered buffer."
                     measured-gcs (- gcs-done gc-before)
                     measured-gc-seconds (- gc-elapsed gc-time-before))
               (pilish-sd-bench--stop-probe)
+              (when (equal pilish-sd-bench-scenario "reader")
+                (setq pilish-sd-bench--reader-settled
+                      (pilish-sd-bench--reader-state)
+                      pilish-sd-bench--phase "validation"))
               (unless settled
                 (error "Timed out waiting for agent_settled"))
               (with-current-buffer chat-buf
@@ -952,6 +1057,13 @@ the settled rendered buffer."
                    (with-current-buffer chat-buf
                      (count-lines (point-min) (point-max))))
               :projection projection
+              :reader
+              (when (equal pilish-sd-bench-scenario "reader")
+                (list :initial pilish-sd-bench--reader-initial
+                      :settled pilish-sd-bench--reader-settled
+                      :jitCreated pilish-sd-bench--jit-created
+                      :thinkingEnds (vconcat (pilish-sd-bench--rows-in-order
+                                              pilish-sd-bench--thinking-end-rows))))
               :mdTs md-ts
               :checks checks)
       (pilish-sd-bench--cleanup-session chat-buf))))
@@ -994,8 +1106,17 @@ the settled rendered buffer."
         :burstPauseMs pilish-sd-bench-burst-pause-ms
         :seed pilish-sd-bench-seed))
 
+(defun pilish-sd-bench--insert-reader-tsv (phase state jit-created)
+  "Insert reader STATE and cumulative JIT-CREATED TSV rows for PHASE."
+  (dolist (entry `(("start" . ,(plist-get state :start))
+                   ("point" . ,(plist-get state :point))
+                   ("following" . ,(if (eq (plist-get state :following) t) 1 0))
+                   ("jit-created" . ,jit-created)))
+    (insert (format "reader\t1\t%s\t%s\t%s\t\t\t\t\t\t\t\t\n"
+                    phase (car entry) (or (cdr entry) "")))))
+
 (defun pilish-sd-bench--write-times-tsv ()
-  "Write `process-filter', flush, display, and probe rows to timing TSV."
+  "Write filter, flush, display, probe, and reader observations to timing TSV."
   (with-temp-file pilish-sd-bench-times-file
     (insert (concat "series\tindex\tphase\tkind\titems\tbytes\tchars\t"
                     "wall_ms\tgcs\tgc_ms\tfilter_id\tboundary\tbacklog\n"))
@@ -1025,7 +1146,24 @@ the settled rendered buffer."
                                       :latenessMs)
              for index from 1 do
              (insert (format "probe\t%d\tstream\tlateness\t1\t\t\t%.3f\t\t\t\t\t\n"
-                             index sample)))))
+                             index sample)))
+    (when (equal pilish-sd-bench-scenario "reader")
+      (pilish-sd-bench--insert-reader-tsv
+       "initial" pilish-sd-bench--reader-initial 0)
+      (cl-loop for row in (pilish-sd-bench--rows-in-order
+                           pilish-sd-bench--thinking-end-rows)
+               for index from 1 do
+               (insert (format "thinking-end\t%d\tstream\tjit-created\t%d\t\t\t%.3f\t\t\t\t\t\n"
+                               index (plist-get row :jitCreated)
+                               (plist-get row :wallMs)))
+               (pilish-sd-bench--insert-reader-tsv
+                "thinking-end-before" (plist-get row :before)
+                (plist-get row :jitCreatedBefore))
+               (pilish-sd-bench--insert-reader-tsv
+                "thinking-end-after" (plist-get row :after)
+                (plist-get row :jitCreatedAfter)))
+      (pilish-sd-bench--insert-reader-tsv
+       "settled" pilish-sd-bench--reader-settled pilish-sd-bench--jit-created))))
 
 (defun pilish-sd-bench--write-result-json (metrics run-ok)
   "Write METRICS and RUN-OK verdict to the JSON artifact."
@@ -1117,6 +1255,7 @@ the settled rendered buffer."
                  :ratio (/ (float pilish-sd-bench--toolcall-paints)
                            (pilish-sd-bench--toolcall-delta-count)))
            :probe probe
+           :reader (plist-get metrics :reader)
            :mdTs (plist-get metrics :mdTs)
            :projection
            (list :exact (pilish-sd-bench--json-bool
@@ -1216,6 +1355,18 @@ the settled rendered buffer."
                       (plist-get md-ts :beforeCount)
                       (plist-get md-ts :afterCount)
                       (plist-get md-ts :supported)))
+      (when-let* ((reader (plist-get metrics :reader)))
+        (insert "\n## Cold non-tail reader\n\n")
+        (insert "Only the pre-stream whole-history fontification is skipped. Final fontification and exact projection run after timing. JIT counts are cumulative creations attributed through the timer's marker buffer, not outstanding queue sizes.\n\n")
+        (insert (format "- Initial reader: `%S`\n- Settled reader: `%S`\n- Chat-owned JIT timers created through settlement: `%d`\n"
+                        (plist-get reader :initial) (plist-get reader :settled)
+                        (plist-get reader :jitCreated)))
+        (seq-doseq (row (plist-get reader :thinkingEnds))
+          (insert (format "- Thinking-end handler: `%.3f` ms; JIT creations `%d` (`%d` before / `%d` after)\n- Reader before: `%S`; after: `%S`\n"
+                          (plist-get row :wallMs) (plist-get row :jitCreated)
+                          (plist-get row :jitCreatedBefore)
+                          (plist-get row :jitCreatedAfter)
+                          (plist-get row :before) (plist-get row :after)))))
       (insert "\n## Correctness checks\n\n")
       (insert "| check | ok | detail |\n|---|---|---|\n")
       (dolist (check (plist-get metrics :checks))
@@ -1233,6 +1384,10 @@ the settled rendered buffer."
 (defun pilish-sd-bench-run ()
   "Run one stream-delta benchmark and write artifacts.
 Return non-nil only when settlement and every correctness assertion pass."
+  (when (and (equal pilish-sd-bench-scenario "reader")
+             (or noninteractive (not pilish-sd-bench-display-buffers)
+                 (not (display-graphic-p))))
+    (error "Reader scenario requires the GUI lane, not --batch"))
   (when (and pilish-sd-bench-display-buffers
              (not noninteractive)
              (not (display-graphic-p)))
@@ -1260,7 +1415,13 @@ Return non-nil only when settlement and every correctness assertion pass."
         pilish-sd-bench--collector-complete nil
         pilish-sd-bench--probe-expected nil
         pilish-sd-bench--probe-lateness nil
-        pilish-sd-bench--probe-timer nil)
+        pilish-sd-bench--probe-timer nil
+        pilish-sd-bench--reader-window nil
+        pilish-sd-bench--reader-chat-buffer nil
+        pilish-sd-bench--reader-initial nil
+        pilish-sd-bench--reader-settled nil
+        pilish-sd-bench--jit-created 0
+        pilish-sd-bench--thinking-end-rows nil)
   (pilish-sd-bench--install-advice)
   (unwind-protect
       (let* ((metrics (pilish-sd-bench--run-session))
