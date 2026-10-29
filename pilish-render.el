@@ -76,6 +76,7 @@
 (declare-function shell-mode "shell" ())
 (declare-function md-ts--remove-link-button-properties "md-ts-mode" (beg end))
 (defvar sh-shell)
+(defvar treesit-primary-parser)
 
 (defconst pilish--history-replay-gc-threshold (* 64 1024 1024)
   "Minimum `gc-cons-threshold' used while replaying full session history.")

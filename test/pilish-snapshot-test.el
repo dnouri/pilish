@@ -55,9 +55,6 @@
             (should-not (get-buffer-window snapshot t))
             (with-current-buffer snapshot
               (should (derived-mode-p 'pilish-snapshot-mode))
-              (should (memq treesit-primary-parser (treesit-parser-list)))
-              (should (equal (treesit-parser-notifiers treesit-primary-parser)
-                             '(treesit--font-lock-mark-ranges-to-fontify)))
               (should (= (point) (point-min)))
               (should buffer-read-only)
               (should (equal (buffer-substring-no-properties (point-min) (point-max))

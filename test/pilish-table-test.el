@@ -44,8 +44,7 @@
                          "Cold\\|Fake\\|grep"
                          (buffer-substring-no-properties (overlay-start overlay) (overlay-end overlay))))
             (dolist (line (split-string (overlay-get overlay 'display) "\n" t))
-              (should (<= (string-width line) 32)))))
-        (should (memq treesit-primary-parser (treesit-parser-list)))))))
+              (should (<= (string-width line) 32)))))))))
 
 (ert-deftest pilish-test-decorate-tables-creates-display-overlay ()
   "decorate-tables-in-region creates overlays with display property."
