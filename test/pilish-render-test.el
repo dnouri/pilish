@@ -19971,6 +19971,39 @@ parses it as a code block (language injection), not inline markdown."
     (search-forward "__init__")
     (should-not (get-text-property (match-beginning 0) 'invisible))))
 
+(ert-deftest pilish-test-restore-tool-properties-within-restriction ()
+  "Restoring a restricted chunk of a tool block places its prefixes.
+Display-row counting narrows the chat, so jit-lock can restore a chunk
+whose tool block starts before `point-min'.  The hidden wrapper inside the
+restriction gets its row prefix; text before the restriction is unchanged."
+  (with-temp-buffer
+    (pilish-chat-mode)
+    (let ((inhibit-read-only t)
+          (locator '(argument "c" 0))
+          block-start wrapper-start row-start)
+      (insert "before\n")
+      (setq block-start (point))
+      (insert "header\n")
+      (setq wrapper-start (point))
+      (insert (propertize "```\n" 'display "" 'pilish-tool-section 'output
+                          'pilish-argument-address locator))
+      (setq row-start (point))
+      (insert (propertize "value\n" 'line-prefix (pilish--tool-prefix-spaces 2)
+                          'pilish-tool-section 'output
+                          'pilish-argument-address locator))
+      (let ((overlay (make-overlay block-start (point)))
+            (outside (buffer-substring (point-min) wrapper-start)))
+        (overlay-put overlay 'pilish-tool-block t)
+        (overlay-put overlay 'pilish-header-end (copy-marker wrapper-start))
+        (save-restriction
+          (narrow-to-region wrapper-start (point-max))
+          (pilish--restore-tool-properties (point-min) (point-max)))
+        (should (equal-including-properties
+                 (get-text-property wrapper-start 'line-prefix)
+                 (get-text-property row-start 'line-prefix)))
+        (should (equal-including-properties
+                 (buffer-substring (point-min) wrapper-start) outside))))))
+
 (ert-deftest pilish-test-toolcall-delta-survives-restore-tool-properties ()
   "Syntax faces survive restore-tool-properties after fontification.
 In a live session, jit-lock fontifies on redisplay, then calls
