@@ -43,7 +43,7 @@ Keep implementation ownership out of the map. The feature file names user paths,
 
 ## Features
 
-- [Compose and send](./compose-and-send.md) covers session layout and consecutive prompt submission.
+- [Compose and send](./compose-and-send.md) covers session layout, consecutive prompt submission, and input header field toggles.
 - [Read streamed output](./read-output.md) covers streaming, thinking display, scrolling, table resizing, and completed-block inspection.
 - [Work with tool blocks](./tool-blocks.md) covers tool output, explicit tool details, native folds, child arguments, cursor stability, and cooling.
 - [Browse and resume sessions](./sessions.md) covers session and tree browser actions plus browser-based resume.

@@ -205,9 +205,13 @@ The input header line shows the current model, thinking level,
 activity phase, cost and context usage, session name, and extension
 status when available, plus the basename and size of an attached
 prompt image.  The model and thinking fields can be clicked to change
-their values.  After context usage, =queued N= counts the queued
-messages Pilish knows about and hides at zero; hover it for previews
-of pending follow-ups and steering messages.  Pilish includes
+their values.  Set =pilish-header-activity-phase=, =pilish-header-cost=
+or =pilish-header-context-usage= to nil to hide that field, for example
+when a window manager's title bar already shows it; with the phase
+hidden, =waiting for Pi= and the no-output warning still appear.
+After context usage, =queued N= counts the queued messages Pilish
+knows about and hides at zero; hover it for previews of pending
+follow-ups and steering messages.  Pilish includes
 backend queues only after Pi reports their contents, so the count
 can lag, and follow-ups also include text waiting for prompt
 acceptance.  A count that reaches zero does not by itself mean the

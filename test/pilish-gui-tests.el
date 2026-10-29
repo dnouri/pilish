@@ -2924,5 +2924,41 @@ FAILURE permits an expected user error, whose native post hook may not run."
           (dolist (buffer (list snapshot replacement))
             (when (buffer-live-p buffer) (kill-buffer buffer))))))))
 
+(defun pilish-gui-test--input-header ()
+  "Return the input window's displayed header line."
+  (redisplay t)
+  (let ((window (pilish-gui-test-input-window)))
+    (with-selected-window window
+      (format-mode-line header-line-format nil window))))
+
+(ert-deftest pilish-gui-test-input-header-field-toggles ()
+  "Customizing the header toggles hides phase, cost and context usage."
+  (pilish-gui-test-with-fresh-session
+    (:backend fake :fake-scenario "prompt-lifecycle")
+    (let ((chat (plist-get pilish-gui-test--session :chat-buffer))
+          (process (plist-get pilish-gui-test--session :process)))
+      (unwind-protect
+          (progn
+            (pilish-gui-test-send "header toggles")
+            (should (pilish-test-wait-until
+                     (lambda () (buffer-local-value 'pilish--cached-stats chat))
+                     pilish-test-rpc-timeout pilish-test-poll-interval process))
+            (let ((header (pilish-gui-test--input-header)))
+              (pilish-gui-test--large-evidence "header-default" header)
+              (should (string-match-p "• [a-z]+ idle +│ \\$0\\.25 25\\.0%/200k" header)))
+            (setopt pilish-header-activity-phase nil
+                    pilish-header-cost nil
+                    pilish-header-context-usage nil)
+            (let ((header (pilish-gui-test--input-header)))
+              (pilish-gui-test--large-evidence "header-hidden" header)
+              (should-not (string-match-p "idle\\|\\$0\\.25\\|25\\.0%\\|│" header))
+              (should (string-match-p "• [a-z]+\\'" header)))
+            (setopt pilish-header-cost t)
+            (should (string-match-p "• [a-z]+ │ \\$0\\.25\\'"
+                                    (pilish-gui-test--input-header))))
+        (setopt pilish-header-activity-phase t
+                pilish-header-cost t
+                pilish-header-context-usage t)))))
+
 (provide 'pilish-gui-tests)
 ;;; pilish-gui-tests.el ends here
