@@ -4732,6 +4732,544 @@ When PARTIAL-TEXT is supplied it must precede the outcome, never be erased."
                  text))
         (should-not (string-match-p "> Need to double-check\\." text))))))
 
+(defun pilish-test--require-history-parser-restart ()
+  "Require the real grammars and supported native replay layout."
+  (unless (and (= emacs-major-version 30)
+               (treesit-language-available-p 'markdown)
+               (treesit-language-available-p 'markdown-inline))
+    (ert-skip "Native parser restart requires Emacs 30 and Markdown grammars"))
+  (should (pilish--history-parser-restart-plan)))
+
+(ert-deftest pilish-test-replay-replaces-tagged-cache-and-keeps-parser-services ()
+  "Repeated replay removes every old local cache and preserves future edits."
+  (with-temp-buffer
+    (pilish-chat-mode)
+    (pilish-test--require-history-parser-restart)
+    (let ((messages [(:role "assistant" :content "New **bold** and [link](https://example.org).")])
+          (update-ranges (symbol-function 'treesit-update-ranges)))
+      (dotimes (_ 2)
+        (let ((inhibit-read-only t))
+          (insert "Old *paragraph*.\n\nAnother paragraph.\n"))
+        (font-lock-ensure (point-min) (point-max))
+        (dotimes (index 80)
+          (let* ((parser (treesit-parser-create 'markdown-inline nil t 'embedded))
+                 (overlay (make-overlay (point-min) (point-min))))
+            (treesit-parser-set-included-ranges parser '((1 . 1)))
+            (overlay-put overlay 'treesit-parser parser)
+            (overlay-put overlay 'treesit-host-parser treesit-primary-parser)
+            (overlay-put overlay 'treesit-parser-ov-timestamp index)))
+        (treesit-parser-create 'markdown-inline nil t 'embedded)
+        (let ((old (treesit-parser-list nil nil t))
+              (old-overlays (append (car (overlay-lists)) (cdr (overlay-lists))))
+              (languages (mapcar #'treesit-parser-language (treesit-parser-list)))
+              (notifiers (treesit-parser-notifiers treesit-primary-parser)))
+          (pilish--replay-history (current-buffer) messages)
+          (should-not (seq-intersection old (treesit-parser-list nil nil t) #'eq))
+          (should-not (seq-some #'overlay-buffer old-overlays))
+          (should (equal languages (mapcar #'treesit-parser-language (treesit-parser-list))))
+          (should (memq treesit-primary-parser (treesit-parser-list)))
+          (should (equal notifiers (treesit-parser-notifiers treesit-primary-parser)))
+          (should (equal '((1 . 1))
+                         (treesit-parser-included-ranges
+                          (car (treesit-parser-list nil 'markdown-inline)))))
+          (should-not (treesit-parser-list nil nil 'embedded))
+          (let ((updates 0)
+                (inhibit-read-only t))
+            (cl-letf (((symbol-function 'treesit-update-ranges)
+                       (lambda (&rest args)
+                         (cl-incf updates)
+                         (apply update-ranges args))))
+              (goto-char (point-max))
+              (insert "\nLater **streamed** text.\n")
+              (treesit-parser-root-node treesit-primary-parser))
+            (should (> updates 0)))
+          (font-lock-ensure (point-min) (point-max))
+          (goto-char (point-min))
+          (search-forward "streamed")
+          (should (memq 'bold (ensure-list (get-text-property (1- (point)) 'face))))
+          (dolist (overlay (append (car (overlay-lists)) (cdr (overlay-lists))))
+            (when-let* ((parser (overlay-get overlay 'treesit-parser)))
+              (should (memq parser (treesit-parser-list nil nil t)))
+              (should (equal (treesit-parser-included-ranges parser)
+                             (list (cons (overlay-start overlay) (overlay-end overlay))))))))))))
+
+(ert-deftest pilish-test-replay-preserves-unrestricted-optional-parser-ranges ()
+  "Optional unrestricted parsers keep whole-buffer access after hidden replay."
+  (with-temp-buffer
+    (pilish-chat-mode)
+    (pilish-test--require-history-parser-restart)
+    (let ((html (car (treesit-parser-list nil 'html))))
+      (should html)
+      (should-not (treesit-parser-included-ranges html))
+      (pilish--replay-history
+       (current-buffer) [(:role "assistant" :content "Replay **bold**")])
+      (let ((replacement (car (treesit-parser-list nil 'html))))
+        (should replacement)
+        (should-not (treesit-parser-included-ranges replacement))
+        (let ((root (treesit-parser-root-node replacement)))
+          (should (> (treesit-node-end root) (treesit-node-start root)))
+          (should (= (treesit-node-end root) (point-max))))))))
+
+(ert-deftest pilish-test-replay-compound-defers-transcript-but-not-scratch-fontification ()
+  "Compound history never paints partial text; isolated shell paint still works."
+  (with-temp-buffer
+    (pilish-chat-mode)
+    (let ((chat (current-buffer))
+          (pilish-hot-tail-turn-count 100)
+          (ensure (symbol-function 'font-lock-ensure))
+          (scratch-calls 0)
+          (transcript-paints 0)
+          (compound-paints 0)
+          (redraw (symbol-function 'pilish--font-lock-ensure-excluding-property)))
+      (cl-letf (((symbol-function 'font-lock-ensure)
+                 (lambda (&rest args)
+                   (if (eq (current-buffer) chat)
+                       (progn
+                         (should-not pilish--defer-history-postprocessing)
+                         (cl-incf transcript-paints))
+                     (cl-incf scratch-calls))
+                   (apply ensure args)))
+                ((symbol-function 'pilish--font-lock-ensure-excluding-property)
+                 (lambda (&rest args)
+                   (when pilish--defer-history-postprocessing
+                     (cl-incf compound-paints))
+                   (apply redraw args))))
+        (pilish--replay-history (current-buffer) (pilish-test--nested-history-messages))
+        (should (> compound-paints 0))
+        (let ((pilish--defer-history-postprocessing t))
+          (should (text-property-not-all
+                   0 19 'face nil
+                   (pilish--argument-shell-fontify "printf '%s' \"$HOME\";"))))
+        (should (> scratch-calls 0))
+        (let ((before transcript-paints)
+              (overlay (seq-find
+                        (lambda (overlay)
+                          (pilish--tool-block-compound-p
+                           (pilish--tool-block-from-overlay overlay)))
+                        (pilish-test--all-tool-overlays))))
+          (should overlay)
+          (goto-char (overlay-start overlay))
+          (pilish-toggle-tool-section)
+          (should (> transcript-paints before)))))))
+
+(defun pilish-test--replay-before-parser-restart (messages)
+  "Run the c820396 replay body independently of the parser restart wrapper."
+  (let ((inhibit-read-only t)
+        (gc-cons-threshold (max gc-cons-threshold pilish--history-replay-gc-threshold)))
+    (pilish--with-md-ts-change-hooks-suspended #'pilish--md-ts-change-hook-p
+      (pilish--clear-render-artifacts)
+      (erase-buffer)
+      (pilish--with-transcript-construction
+        (let ((pilish--defer-history-postprocessing t))
+          (cl-letf (((symbol-function 'pilish--font-lock-ensure-excluding-property)
+                     (lambda (start end property)
+                       (catch 'font-lock-failed
+                         (dolist (range (pilish--ranges-excluding-property start end property))
+                           (condition-case nil
+                               (font-lock-ensure (car range) (cdr range))
+                             (error (throw 'font-lock-failed nil))))))))
+            (pilish--display-history-messages messages)))
+        (goto-char (point-max))
+        (unless (bolp) (insert "\n"))
+        (pilish--set-message-start-marker nil)
+        (pilish--set-streaming-marker nil)
+        (pilish--update-hot-tail-boundary)
+        (pilish--cool-completed-tool-blocks-outside-hot-tail)
+        (pilish--postprocess-history-buffer)
+        (goto-char (point-max))))))
+
+(defun pilish-test--replay-semantic-state ()
+  "Read rendering, controls and final native ranges without retaining identities."
+  (list
+   (buffer-substring-no-properties (point-min) (point-max))
+   (marker-position pilish--hot-tail-start)
+   (cl-loop
+    for property in '(face font-lock-face invisible display line-prefix wrap-prefix
+                      pilish-details pilish-no-fontify pilish-cold-tool-block
+                      pilish-assistant-outcome pilish-subagent-name
+                      pilish-argument-literal pilish-argument-guard pilish-tool-section
+                      button action md-ts-link-help-echo md-ts-link-static-target)
+    collect
+    (cons property
+          (let ((position (point-min)) spans)
+            (while (< position (point-max))
+              (let ((next (next-single-property-change position property nil (point-max)))
+                    (value (get-text-property position property)))
+                (when value
+                  (push (list position next (if (eq property 'button) t value)) spans))
+                (setq position next)))
+            (nreverse spans))))
+   (sort
+    (mapcar (lambda (overlay)
+              (list (overlay-start overlay) (overlay-end overlay)
+                    (overlay-get overlay 'pilish-table-display)
+                    (overlay-get overlay 'display)
+                    (overlay-get overlay 'face)
+                    (when-let* ((block (pilish--tool-block-from-overlay overlay)))
+                      (list (pilish--tool-block-tool-call-id block)
+                            (pilish--tool-block-compound-p block)
+                            (pilish--completed-tool-overlay-p overlay)))))
+            (seq-filter (lambda (overlay)
+                          (or (overlay-get overlay 'pilish-tool-block)
+                              (overlay-get overlay 'pilish-table-display)))
+                        (overlays-in (point-min) (point-max))))
+    (lambda (a b) (< (car a) (car b))))
+   (sort
+    (mapcar (lambda (parser)
+              (list (treesit-parser-language parser)
+                    (treesit-parser-included-ranges parser)))
+            (treesit-parser-list nil nil t))
+    (lambda (a b) (string< (prin1-to-string a) (prin1-to-string b))))))
+
+(ert-deftest pilish-test-replay-matches-independent-old-semantic-rendering ()
+  "Real grammars preserve old text, hot controls, links, tables and final ranges."
+  (pilish-test--with-snapshot-files
+    (let* ((nested (pilish-test--nested-history-messages))
+           (messages
+            (vconcat
+             nested
+             (vector
+              '(:role "user" :content "Latest question")
+              (list :role "assistant" :stopReason "error" :errorMessage "Saved outcome"
+                    :content
+                    (vector
+                     '(:type "thinking" :thinking "Saved reasoning")
+                     '(:type "toolCall" :id "read-last" :name "read" :arguments (:path "last.txt"))
+                     '(:type "toolCall" :id "write-last" :name "write" :arguments (:path "new.el" :content "(message \"hi\")"))
+                     '(:type "toolCall" :id "edit-last" :name "edit" :arguments (:path "last.txt" :oldText "old" :newText "new"))
+                     '(:type "toolCall" :id "missing-last" :name "read" :arguments (:path "missing.txt"))
+                     (aref (plist-get (aref nested 1) :content) 0)
+                     '(:type "text" :text "\n\nReal **bold** and [link](https://example.org).\n\nUnmatched *left\n\nright* outside\n\n```python\ndef example():\n    return 7\n```\n\n<span>inline HTML</span>\n\n<div>\nblock HTML\n</div>\n\n| *left | right* |\n|---|---|\n| cell | value |")))
+              (list :role "toolResult" :toolCallId "read-last"
+                    :content [(:type "text" :text "Literal **output**")]
+                    :details details)
+              '(:role "toolResult" :toolCallId "write-last" :content [(:type "text" :text "Written")])
+              '(:role "toolResult" :toolCallId "edit-last" :isError t :content [(:type "text" :text "Edit failed")]))))
+           baseline candidate)
+      (dolist (optimized '(nil t))
+        (with-temp-buffer
+          (pilish-chat-mode)
+          (pilish-test--require-history-parser-restart)
+          (pilish--set-snapshot-source-file anchor)
+          (let ((pilish-hot-tail-turn-count 100)
+                (pilish--chat-display-width-override 40))
+            (dotimes (_ 2)
+              (if optimized
+                  (pilish--replay-history (current-buffer) messages nil 40)
+                (pilish-test--replay-before-parser-restart messages))
+              (font-lock-ensure (point-min) (point-max))
+              (goto-char (point-min))
+              (search-forward "Real **bold")
+              (should (memq 'bold (ensure-list (get-text-property (1- (point)) 'face))))
+              (search-forward "[link")
+              (should (get-text-property (1- (point)) 'md-ts-link-button))
+              (should (equal (get-text-property (1- (point)) 'md-ts-link-help-echo)
+                             "https://example.org"))
+              (search-forward "Unmatched *left")
+              (should-not (memq 'italic (ensure-list (get-text-property (1- (point)) 'face))))
+              (search-forward "example():")
+              (should (memq 'md-ts-code (ensure-list (get-text-property (1- (point)) 'face))))
+              (search-forward "| *left")
+              (should-not (memq 'italic (ensure-list (get-text-property (1- (point)) 'face))))
+              (goto-char (point-min))
+              (search-forward "saved child")
+              (should (pilish--snapshot-target-p (get-text-property (1- (point)) 'pilish-subagent-name)))
+              (should (button-at (1- (point))))
+              (should (pilish-test--all-tool-overlays))
+              (if optimized
+                  (push (pilish-test--replay-semantic-state) candidate)
+                (push (pilish-test--replay-semantic-state) baseline))))))
+      (should (equal-including-properties baseline candidate)))))
+
+(ert-deftest pilish-test-replay-cold-table-keeps-final-embedded-coordinates ()
+  "A narrowed hot table cannot shift later inline parsing into the cold prefix."
+  (with-temp-buffer
+    (pilish-chat-mode)
+    (pilish-test--require-history-parser-restart)
+    (let ((pilish-hot-tail-turn-count 2)
+          (messages (vconcat (pilish-test--nested-history-messages)
+                             [(:role "user" :content "Latest question")
+                              (:role "assistant" :content "Real **bold**.\n\n| A | B |\n|---|---|\n| x | y |")])))
+      (dotimes (_ 2)
+        (pilish--replay-history (current-buffer) messages)
+        (font-lock-ensure (point-min) (point-max))
+        (goto-char (point-min))
+        (search-forward "Real **bold")
+        (should (memq 'bold (ensure-list (get-text-property (1- (point)) 'face))))
+        (should (text-property-not-all (point-min) (point-max) 'pilish-cold-tool-block nil))
+        (should (seq-some (lambda (overlay) (overlay-get overlay 'pilish-table-display))
+                          (overlays-in (point-min) (point-max))))
+        (dolist (overlay (append (car (overlay-lists)) (cdr (overlay-lists))))
+          (when-let* ((parser (overlay-get overlay 'treesit-parser)))
+            (let ((root (treesit-parser-root-node parser)))
+              (should (<= (overlay-start overlay) (treesit-node-start root)
+                          (treesit-node-end root) (overlay-end overlay))))))))))
+
+(ert-deftest pilish-test-replay-matches-independent-cold-semantic-rendering ()
+  "Cold ordinary and compound projections retain the old semantic properties."
+  (let ((messages (vconcat (pilish-test--nested-history-messages)
+                           [(:role "user" :content "Latest question")
+                            (:role "assistant" :content "Latest **answer**.")]))
+        baseline candidate)
+    (dolist (optimized '(nil t))
+      (with-temp-buffer
+        (pilish-chat-mode)
+        (pilish-test--require-history-parser-restart)
+        (let ((pilish-hot-tail-turn-count 2))
+          (dotimes (_ 2)
+            (if optimized
+                (pilish--replay-history (current-buffer) messages)
+              (pilish-test--replay-before-parser-restart messages))
+            (font-lock-ensure (point-min) (point-max))
+            (should (text-property-not-all (point-min) (point-max) 'pilish-cold-tool-block nil))
+            (should-not (pilish-test--all-tool-overlays))
+            (if optimized
+                (push (pilish-test--replay-semantic-state) candidate)
+              (push (pilish-test--replay-semantic-state) baseline))))))
+    (should (equal-including-properties baseline candidate))))
+
+(ert-deftest pilish-test-replay-preparation-failure-preserves-originals ()
+  "A preparation error or quit leaves the original cache, text and hooks intact."
+  (dolist (condition '(error quit))
+    (with-temp-buffer
+      (pilish-chat-mode)
+      (pilish-test--require-history-parser-restart)
+      (let ((inhibit-read-only t)) (insert "Old **text**.\n"))
+      (font-lock-ensure)
+      (let ((parsers (treesit-parser-list nil nil t))
+            (overlays (append (car (overlay-lists)) (cdr (overlay-lists))))
+            (primary treesit-primary-parser)
+            (text (buffer-string))
+            (before before-change-functions)
+            (after after-change-functions)
+            (failure (list condition "prepare failure")))
+        (cl-letf (((symbol-function 'treesit-parser-set-included-ranges)
+                   (lambda (&rest _) (signal (car failure) (cdr failure)))))
+          (should (equal failure
+                         (condition-case err
+                             (pilish--replay-history (current-buffer) [])
+                           ((error quit) err)))))
+        (should (equal parsers (treesit-parser-list nil nil t)))
+        (should (eq primary treesit-primary-parser))
+        (should (equal overlays (append (car (overlay-lists)) (cdr (overlay-lists)))))
+        (should (equal-including-properties text (buffer-string)))
+        (should (equal before before-change-functions))
+        (should (equal after after-change-functions))))))
+
+(ert-deftest pilish-test-replay-failure-restores-live-parsers-and-hook-locality ()
+  "Installation, render, cooling, table and seed failures keep a usable mode."
+  (dolist (phase '(install render compound cooling table seed))
+    (dolist (condition '(error quit))
+      (dolist (local (if (memq phase '(render cooling)) '(t nil) '(t)))
+        (with-temp-buffer
+          (pilish-chat-mode)
+          (pilish-test--require-history-parser-restart)
+          (let* ((before (copy-sequence before-change-functions))
+                 (after (copy-sequence after-change-functions))
+                 (default-before (default-value 'before-change-functions))
+                 (default-after (default-value 'after-change-functions))
+                 (failure (list condition "replay failure" phase))
+                 (target (pcase phase
+                           ('install 'treesit-parser-delete)
+                           ('render 'pilish--display-history-messages)
+                           ('compound 'pilish--font-lock-ensure-excluding-property)
+                           ('cooling 'pilish--cool-completed-tool-blocks-outside-hot-tail)
+                           ('table 'pilish--postprocess-history-buffer)
+                           ('seed 'treesit-parser-root-node)))
+                 (original (symbol-function target))
+                 (notifiers (treesit-parser-notifiers treesit-primary-parser))
+                 fired)
+            (unwind-protect
+                (progn
+                  (unless local
+                    (set-default 'before-change-functions before)
+                    (set-default 'after-change-functions after)
+                    (kill-local-variable 'before-change-functions)
+                    (kill-local-variable 'after-change-functions))
+                  (cl-letf (((symbol-function target)
+                             (lambda (&rest args)
+                               (unless fired
+                                 (setq fired t)
+                                 (signal (car failure) (cdr failure)))
+                               (apply original args))))
+                    (should (equal failure
+                                   (condition-case err
+                                       (pilish--replay-history
+                                        (current-buffer)
+                                        (if (eq phase 'seed)
+                                            [(:role "assistant" :content "No table")]
+                                          (pilish-test--nested-history-messages)))
+                                     ((error quit) err)))))
+                  (should fired)
+                  (should (memq treesit-primary-parser (treesit-parser-list)))
+                  (should (equal notifiers (treesit-parser-notifiers treesit-primary-parser)))
+                  (should (equal before before-change-functions))
+                  (should (equal after after-change-functions))
+                  (should (eq local (local-variable-p 'before-change-functions)))
+                  (should (eq local (local-variable-p 'after-change-functions)))
+                  (should-not (seq-some
+                               (lambda (overlay)
+                                 (when-let* ((parser (overlay-get overlay 'treesit-parser)))
+                                   (not (memq parser (treesit-parser-list nil nil t)))))
+                               (append (car (overlay-lists)) (cdr (overlay-lists)))))
+                  (pilish--replay-history (current-buffer) [(:role "assistant" :content "Healthy **again**")])
+                  (font-lock-ensure (point-min) (point-max))
+                  (goto-char (point-min))
+                  (should (search-forward "again" nil t)))
+              (set-default 'before-change-functions default-before)
+              (set-default 'after-change-functions default-after))))))))
+
+(ert-deftest pilish-test-replay-quit-wins-over-secondary-cleanup-error ()
+  "A transient notifier cleanup failure neither replaces quit nor loses service."
+  (with-temp-buffer
+    (pilish-chat-mode)
+    (pilish-test--require-history-parser-restart)
+    (let ((add (symbol-function 'treesit-parser-add-notifier))
+          (notifiers (treesit-parser-notifiers treesit-primary-parser))
+          failed)
+      (cl-letf (((symbol-function 'pilish--display-history-messages)
+                 (lambda (_) (signal 'quit '("original quit"))))
+                ((symbol-function 'treesit-parser-add-notifier)
+                 (lambda (&rest args)
+                   (unless failed
+                     (setq failed t)
+                     (error "secondary cleanup failure"))
+                   (apply add args))))
+        (should (equal '(quit "original quit")
+                       (condition-case err
+                           (pilish--replay-history (current-buffer) [])
+                         ((error quit) err)))))
+      (should failed)
+      (should (memq treesit-primary-parser (treesit-parser-list)))
+      (should (equal notifiers (treesit-parser-notifiers treesit-primary-parser))))))
+
+(ert-deftest pilish-test-replay-failure-does-not-parse-partial-text ()
+  "A nonlocal render exit restores services without an eager partial parse."
+  (with-temp-buffer
+    (pilish-chat-mode)
+    (pilish-test--require-history-parser-restart)
+    (let ((roots 0))
+      (cl-letf (((symbol-function 'pilish--display-history-messages)
+                 (lambda (_)
+                   (insert "partial")
+                   (signal 'quit '("stop"))))
+                ((symbol-function 'treesit-parser-root-node)
+                 (lambda (&rest _) (cl-incf roots) (error "unexpected partial parse"))))
+        (should (equal '(quit "stop")
+                       (condition-case err
+                           (pilish--replay-history (current-buffer) [])
+                         ((error quit) err)))))
+      (should (= roots 0)))))
+
+(ert-deftest pilish-test-replay-killed-buffer-keeps-error-and-other-hooks ()
+  "A failed replay cannot restore dead-buffer hooks into the current buffer."
+  (let ((chat (generate-new-buffer " *replay-killed*")))
+    (unwind-protect
+        (with-temp-buffer
+          (let ((other (current-buffer))
+                (before before-change-functions)
+                (after after-change-functions)
+                (before-local (local-variable-p 'before-change-functions))
+                (after-local (local-variable-p 'after-change-functions)))
+            (with-current-buffer chat (pilish-chat-mode))
+            (cl-letf (((symbol-function 'pilish--display-history-messages)
+                       (lambda (_)
+                         (kill-buffer chat)
+                         (set-buffer other)
+                         (error "killed replay"))))
+              (should (equal '(error "killed replay")
+                             (condition-case err
+                                 (pilish--replay-history chat [])
+                               (error err)))))
+            (should (equal before before-change-functions))
+            (should (equal after after-change-functions))
+            (should (eq before-local (local-variable-p 'before-change-functions)))
+            (should (eq after-local (local-variable-p 'after-change-functions)))))
+      (when (buffer-live-p chat) (kill-buffer chat)))))
+
+(ert-deftest pilish-test-replay-foreign-parser-layout-is-unchanged ()
+  "Foreign tags, duplicates, notifiers, overlays and shared text use compatibility."
+  (dolist (layout '(tag duplicate notifier overlay shared api))
+    (with-temp-buffer
+      (pilish-chat-mode)
+      (pilish-test--require-history-parser-restart)
+      (let (indirect)
+        (unwind-protect
+            (progn
+              (pcase layout
+                ('tag (treesit-parser-create 'markdown nil t 'foreign))
+                ('duplicate (treesit-parser-create 'markdown nil t))
+                ('notifier (treesit-parser-add-notifier treesit-primary-parser 'ignore))
+                ('overlay (overlay-put (make-overlay 1 1) 'treesit-parser treesit-primary-parser))
+                ('shared (setq indirect (make-indirect-buffer (current-buffer) " *replay-shared*"))))
+              (let ((originals (treesit-parser-list nil nil t))
+                    (primary treesit-primary-parser)
+                    (emacs-major-version (if (eq layout 'api) 29 emacs-major-version)))
+                (pilish--replay-history (current-buffer) [(:role "assistant" :content "Compatible")])
+                (should (equal originals (treesit-parser-list nil nil t)))
+                (should (eq primary treesit-primary-parser))
+                (should (string-match-p "Compatible" (buffer-string)))))
+          (when (buffer-live-p indirect) (kill-buffer indirect)))))))
+
+(ert-deftest pilish-test-visible-replay-paint-honors-final-bounds-and-reader-state ()
+  "Only explicit visible ranges are painted, with no hidden or whole-buffer guess."
+  (save-window-excursion
+    (delete-other-windows)
+    (with-temp-buffer
+      (switch-to-buffer (current-buffer))
+      (pilish-chat-mode)
+      (let ((inhibit-read-only t)) (insert (make-string 500 ?x)))
+      (let* ((first (selected-window))
+             (second (split-window-below))
+             (point-before 60)
+             calls)
+        (set-window-buffer second (current-buffer))
+        (goto-char point-before)
+        (set-window-point second 260)
+        (save-restriction
+          (narrow-to-region 50 450)
+          (cl-letf (((symbol-function 'window-start)
+                     (lambda (window) (if (eq window first) 10 240)))
+                    ((symbol-function 'window-end)
+                     (lambda (window &optional _update) (if (eq window first) 100 300)))
+                    ((symbol-function 'font-lock-ensure)
+                     (lambda (start end) (push (cons start end) calls))))
+            (pilish--fontify-visible-transcript-windows))
+          (should (= (point-min) 50))
+          (should (= (point-max) 450)))
+        (should (equal (sort calls (lambda (a b) (< (car a) (car b))))
+                       '((10 . 100) (240 . 300))))
+        (should (= (point) point-before))
+        (should (= (window-point second) 260))
+        (should (eq first (selected-window)))
+        (dolist (visible '(t nil icon))
+          (setq calls nil)
+          (cl-letf (((symbol-function 'frame-visible-p) (lambda (_) visible))
+                    ((symbol-function 'window-end) (lambda (&rest _) nil))
+                    ((symbol-function 'font-lock-ensure)
+                     (lambda (&rest args) (push args calls))))
+            (pilish--fontify-visible-transcript-windows))
+          (should-not calls))))))
+
+(ert-deftest pilish-test-canonical-replay-paints-after-outer-window-restoration ()
+  "Canonical replay ensures the region exposed by its outer restoration."
+  (save-window-excursion
+    (with-temp-buffer
+      (switch-to-buffer (current-buffer))
+      (pilish-chat-mode)
+      (setq pilish--canonical-messages [(:role "assistant" :content "Visible answer")])
+      (let ((restore (symbol-function 'pilish--restore-window-rewrite-states))
+            restored paints)
+        (cl-letf (((symbol-function 'pilish--restore-window-rewrite-states)
+                   (lambda (&rest args)
+                     (prog1 (apply restore args) (setq restored t))))
+                  ((symbol-function 'font-lock-ensure)
+                   (lambda (start end)
+                     (should (and (integerp start) (integerp end)))
+                     (push restored paints))))
+          (pilish--rerender-canonical-history))
+        (should (memq t paints))))))
+
 (ert-deftest pilish-test-replay-empty-history-keeps-unselected-window-neutral ()
   "Empty and ignored-only histories do not acquire viewport settlement."
   (save-window-excursion
@@ -4794,7 +5332,7 @@ When PARTIAL-TEXT is supplied it must precede the outcome, never be erased."
                 (cooling-views 0) (cools 0) (decorations 0) settled-text)
             (cl-letf (((symbol-function 'get-buffer-window-list)
                        (lambda (&rest args)
-                         (cl-incf captures)
+                         (when (zerop restores) (cl-incf captures))
                          (apply capture args)))
                       ((symbol-function 'pilish--restore-tail-window)
                        (lambda (&rest args)
@@ -4830,7 +5368,8 @@ When PARTIAL-TEXT is supplied it must precede the outcome, never be erased."
             (should (> appends 1))
             (should (> edits 0))
             (should (> cooling-views 0))
-            (should (equal-including-properties settled-text (buffer-string)))
+            (should (equal (substring-no-properties settled-text)
+                           (buffer-substring-no-properties (point-min) (point-max))))
             (should (= (point) (point-max)))
             (should (= (window-point (selected-window)) (point-max)))
             (should-not (pilish-test--all-tool-overlays))

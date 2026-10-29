@@ -61,6 +61,8 @@
 (declare-function treesit-parser-list "treesit.c"
                   (&optional buffer language tag))
 (declare-function treesit-parser-language "treesit.c" (parser))
+(declare-function treesit-parser-notifiers "treesit.c" (parser))
+(declare-function treesit-parser-add-notifier "treesit.c" (parser function))
 (declare-function treesit-parser-included-ranges "treesit.c" (parser))
 (declare-function treesit-parser-root-node "treesit.c" (parser))
 (declare-function treesit-parser-set-included-ranges "treesit.c"
@@ -206,7 +208,8 @@ Restores the hook lists afterwards, preserving whether they were
 buffer-local.  `jit-lock-after-change' stays installed, so visible text is
 still marked for fontification at the next redisplay."
   (declare (indent 1) (debug t))
-  `(let ((pilish--saved-before-local
+  `(let ((pilish--hook-buffer (current-buffer))
+         (pilish--saved-before-local
           (local-variable-p 'before-change-functions))
          (pilish--saved-after-local
           (local-variable-p 'after-change-functions))
@@ -223,12 +226,14 @@ still marked for fontification at the next redisplay."
                            (seq-remove ,predicate after-change-functions)
                          after-change-functions))
            ,@body)
-       (if pilish--saved-before-local
-           (setq-local before-change-functions pilish--saved-before)
-         (kill-local-variable 'before-change-functions))
-       (if pilish--saved-after-local
-           (setq-local after-change-functions pilish--saved-after)
-         (kill-local-variable 'after-change-functions)))))
+       (when (buffer-live-p pilish--hook-buffer)
+         (with-current-buffer pilish--hook-buffer
+           (if pilish--saved-before-local
+               (setq-local before-change-functions pilish--saved-before)
+             (kill-local-variable 'before-change-functions))
+           (if pilish--saved-after-local
+               (setq-local after-change-functions pilish--saved-after)
+             (kill-local-variable 'after-change-functions)))))))
 (defvar-local pilish--assistant-details-clock nil
   "Current assistant boundary: saved timestamp, local start time, stream seen.
 The timestamp matches the final message, never a heading/content index.  Local
@@ -6061,15 +6066,17 @@ if none exists, render the result at point without a live overlay."
 
 (defun pilish--font-lock-ensure-excluding-property (start end prop)
   "Fontify START..END while skipping regions where PROP is non-nil.
-Stops after the first font-lock error to avoid repeated failures."
-  (catch 'pilish--font-lock-failed
-    (dolist (range (pilish--ranges-excluding-property start end prop))
-      (condition-case err
-          (font-lock-ensure (car range) (cdr range))
-        (error
-         (when debug-on-error
-           (message "pilish: toggle fontification failed: %S" err))
-         (throw 'pilish--font-lock-failed nil))))))
+Stops after the first font-lock error to avoid repeated failures.
+Full history replay defers transcript fontification until all edits finish."
+  (unless pilish--defer-history-postprocessing
+    (catch 'pilish--font-lock-failed
+      (dolist (range (pilish--ranges-excluding-property start end prop))
+        (condition-case err
+            (font-lock-ensure (car range) (cdr range))
+          (error
+           (when debug-on-error
+             (message "pilish: toggle fontification failed: %S" err))
+           (throw 'pilish--font-lock-failed nil)))))))
 
 (defun pilish--toggle-tool-output (button)
   "Toggle between preview and full content for BUTTON.
@@ -9854,7 +9861,8 @@ when possible."
   (let ((messages pilish--canonical-messages))
     (when (vectorp messages)
       (pilish--with-window-rewrite-preservation
-        (pilish--display-session-history messages (current-buffer))))))
+        (pilish--display-session-history messages (current-buffer)))
+      (pilish--fontify-visible-transcript-windows))))
 
 (defun pilish--set-chat-thinking-display (mode)
   "Set completed-thinking display MODE for the current chat buffer.
@@ -9938,6 +9946,224 @@ Note: When called from async callbacks, pass CHAT-BUF explicitly."
       (pilish--replay-history chat-buf messages
                               (concat (pilish--format-startup-header) "\n")))))
 
+(cl-defstruct (pilish--history-parser-restart
+               (:constructor pilish--make-history-parser-restart))
+  "Operation-local ownership of a full replay's native parser cache.
+ENTRIES are plists with original, language, tag, derived range policy,
+notifiers in registration order, and an explicitly owned replacement."
+  buffer originals overlays entries primary installed-p)
+
+(defun pilish--history-parser-tag (parser)
+  "Return PARSER's tag on Emacs versions that expose parser tags."
+  (funcall (intern "treesit-parser-tag") parser))
+
+(defun pilish--history-parser-restart-plan ()
+  "Inventory a supported md-ts parser layout, or return nil for compatibility.
+Only Emacs 30's known native API and unshared md-ts buffers are supported.
+Inventory does not create, parse, delete, or reconfigure any parser."
+  (cl-block supported
+    (unless (and (= emacs-major-version 30)
+                 (derived-mode-p 'md-ts-mode)
+                 (not (buffer-base-buffer))
+                 (not (seq-some
+                       (lambda (buffer)
+                         (eq (buffer-base-buffer buffer) (current-buffer)))
+                       (buffer-list)))
+                 (seq-every-p #'fboundp
+                              (list (intern "treesit-parser-tag")
+                                    'treesit-parser-notifiers
+                                    'treesit-parser-add-notifier
+                                    'treesit-parser-root-node
+                                    'treesit-parser-included-ranges
+                                    'treesit-parser-set-included-ranges
+                                    'treesit-parser-create 'treesit-parser-delete
+                                    'treesit-parser-list))
+                 (equal (func-arity #'treesit-parser-list) '(0 . 3))
+                 (equal (func-arity #'treesit-parser-create) '(1 . 4)))
+      (cl-return-from supported nil))
+    (let* ((originals (treesit-parser-list nil nil t))
+           (overlays (seq-filter
+                      (lambda (overlay) (overlay-get overlay 'treesit-parser))
+                      (append (car (overlay-lists)) (cdr (overlay-lists)))))
+           (primary treesit-primary-parser)
+           local-parsers languages entries)
+      (dolist (overlay overlays)
+        (let ((parser (overlay-get overlay 'treesit-parser))
+              (host (overlay-get overlay 'treesit-host-parser)))
+          (unless (and (memq parser originals)
+                       (eq (pilish--history-parser-tag parser) 'embedded)
+                       (not (memq parser local-parsers))
+                       (memq host originals)
+                       (null (pilish--history-parser-tag host)))
+            (cl-return-from supported nil))
+          (push parser local-parsers)))
+      (dolist (parser originals)
+        (let ((tag (pilish--history-parser-tag parser))
+              (language (treesit-parser-language parser))
+              (notifiers (treesit-parser-notifiers parser)))
+          (cond
+           ((eq tag 'embedded)
+            (when (or notifiers (eq parser primary))
+              (cl-return-from supported nil)))
+           ((or tag (memq language languages))
+            (cl-return-from supported nil))
+           (t
+            (unless (and
+                     (if (eq parser primary)
+                         (and (eq language 'markdown)
+                              (null (treesit-parser-included-ranges parser))
+                              (equal notifiers
+                                     (list (intern "treesit--font-lock-mark-ranges-to-fontify"))))
+                       (null notifiers))
+                     (pcase language
+                       ('markdown (eq parser primary))
+                       ('markdown-inline
+                        (treesit-parser-included-ranges parser))
+                       (_ (seq-some (lambda (setting)
+                                      (eq (nth 1 setting) language))
+                                    treesit-range-settings))))
+              (cl-return-from supported nil))
+            (push language languages)
+            (push (list :original parser :language language :tag tag
+                        :derived (treesit-parser-included-ranges parser)
+                        :notifiers notifiers :replacement nil)
+                  entries)))))
+      (when (and (memq 'markdown languages)
+                 (memq 'markdown-inline languages))
+        (pilish--make-history-parser-restart
+         :buffer (current-buffer) :originals originals :overlays overlays
+         :entries (nreverse entries) :primary primary)))))
+
+(defun pilish--call-with-history-parser-restart (function)
+  "Call FUNCTION once with fresh, parse-lazy persistent parsers when supported.
+Prepare before discarding old identities.  On failure retain live replacements
+and restore notifiers without parsing partial text or replacing the condition.
+Unsupported layouts call FUNCTION unchanged.  Preserve its return value."
+  (let ((plan (save-restriction
+                (widen)
+                (pilish--history-parser-restart-plan))))
+    (if (not plan)
+        (funcall function)
+      (let ((buffer (pilish--history-parser-restart-buffer plan))
+            result completed primary-error cleanup-error)
+        (cl-labels
+            ((attempt (operation)
+               (condition-case err
+                   (progn (funcall operation) t)
+                 ((error quit)
+                  (unless cleanup-error (setq cleanup-error err))
+                  nil)))
+             (discard-old ()
+               (dolist (overlay (pilish--history-parser-restart-overlays plan))
+                 (attempt (lambda () (delete-overlay overlay))))
+               (let ((live (treesit-parser-list nil nil t)))
+                 (dolist (parser (pilish--history-parser-restart-originals plan))
+                   (when (memq parser live)
+                     (attempt (lambda () (treesit-parser-delete parser))))))))
+          (unwind-protect
+              (condition-case err
+                  (progn
+                    (save-restriction
+                      (widen)
+                      ;; Native creation prepends.  Reverse preparation preserves
+                      ;; persistent lookup order after the originals are removed.
+                      (dolist (entry (reverse (pilish--history-parser-restart-entries plan)))
+                        (let ((parser (treesit-parser-create
+                                       (plist-get entry :language) nil t)))
+                          (setf (plist-get entry :replacement) parser)
+                          (when (plist-get entry :derived)
+                            (treesit-parser-set-included-ranges
+                             parser (list (cons (point-min) (point-min))))))))
+                    (let ((inhibit-quit t))
+                      (setf (pilish--history-parser-restart-installed-p plan) t)
+                      (setq-local treesit-primary-parser
+                                  (plist-get
+                                   (seq-find
+                                    (lambda (entry)
+                                      (eq (plist-get entry :original)
+                                          (pilish--history-parser-restart-primary plan)))
+                                    (pilish--history-parser-restart-entries plan))
+                                   :replacement))
+                      (discard-old)
+                      (when cleanup-error
+                        (signal (car cleanup-error) (cdr cleanup-error))))
+                    (setq result (funcall function))
+                    (when (buffer-live-p buffer)
+                      (with-current-buffer buffer
+                        (save-restriction
+                          (widen)
+                          ;; First-parse notifications otherwise rediscover every
+                          ;; embedded range, including the unvisited cold prefix.
+                          (dolist (entry (pilish--history-parser-restart-entries plan))
+                            (when (plist-get entry :notifiers)
+                              (treesit-parser-root-node
+                               (plist-get entry :replacement)))))))
+                    (setq completed t))
+                ((error quit) (setq primary-error err)))
+            (when (buffer-live-p buffer)
+              (with-current-buffer buffer
+                (let ((inhibit-quit t))
+                  (if (pilish--history-parser-restart-installed-p plan)
+                      (progn
+                        (attempt #'discard-old)
+                        (dolist (entry (pilish--history-parser-restart-entries plan))
+                          (dolist (notifier (plist-get entry :notifiers))
+                            (let ((restore
+                                   (lambda ()
+                                     (treesit-parser-add-notifier
+                                      (plist-get entry :replacement) notifier))))
+                              (unless (attempt restore)
+                                (attempt restore))))))
+                    (dotimes (_ 2)
+                      (let (live)
+                        (attempt (lambda ()
+                                   (setq live (treesit-parser-list nil nil t))))
+                        (dolist (entry (pilish--history-parser-restart-entries plan))
+                          (let ((parser (plist-get entry :replacement)))
+                            (when (memq parser live)
+                              (attempt
+                               (lambda () (treesit-parser-delete parser))))))))))))
+            (when cleanup-error
+              (if (or primary-error (not completed))
+                  (condition-case nil
+                      (message "Pi: history parser cleanup failed: %S" cleanup-error)
+                    ((error quit) nil))
+                (signal (car cleanup-error) (cdr cleanup-error)))))
+          (when primary-error (signal (car primary-error) (cdr primary-error)))
+          result)))))
+
+(defun pilish--fontify-visible-transcript-windows ()
+  "Fontify explicit final bounds of genuinely visible transcript windows.
+Hidden buffers and unavailable window ends wait for normal JIT fontification.
+Preserve point, narrowing, selection, and every reader's window point."
+  (let* ((buffer (current-buffer))
+         (windows (seq-filter
+                   (lambda (window)
+                     (eq (frame-visible-p (window-frame window)) t))
+                   (get-buffer-window-list buffer nil t)))
+         (points (mapcar (lambda (window) (cons window (window-point window))) windows)))
+    (save-excursion
+      (save-selected-window
+        (save-restriction
+          (widen)
+          (unwind-protect
+              (dolist (window windows)
+                (let ((start (window-start window))
+                      (end (window-end window t)))
+                  (when (and (integerp start) (integerp end))
+                    (setq start (max (point-min) (min start (point-max)))
+                          end (max (point-min) (min end (point-max))))
+                    (when (< start end)
+                      (condition-case-unless-debug nil
+                          (font-lock-ensure start end)
+                        (error nil))))))
+            (dolist (view points)
+              (let ((window (car view)) (position (cdr view)))
+                (when (and (window-live-p window)
+                           (eq (window-buffer window) buffer)
+                           (/= (window-point window) position))
+                  (set-window-point window position))))))))))
+
 (defun pilish--replay-history (buffer messages &optional prefix display-width)
   "Replay full MESSAGES into passive transcript BUFFER with optional PREFIX.
 DISPLAY-WIDTH, when non-nil, is the character width of the window BUFFER
@@ -9956,23 +10182,27 @@ hidden.  Callers that omit it get the live window width or the fallback."
         ;; rewrites.  Suspend every known md-ts 0.4 per-change hook for the
         ;; whole rebuild.  This is one untracked epoch, so md-ts records one
         ;; dirty range and jit-lock fontifies visible text at the next redisplay.
-        (pilish--with-md-ts-change-hooks-suspended
-            #'pilish--md-ts-change-hook-p
-          (pilish--clear-render-artifacts)
-          (erase-buffer)
-          (when prefix (insert prefix))
-          (pilish--with-transcript-construction
-            (when (vectorp messages)
-              (let ((pilish--defer-history-postprocessing t))
-                (pilish--display-history-messages messages)))
-            (goto-char (point-max))
-            (unless (bolp) (insert "\n"))
-            (pilish--set-message-start-marker nil)
-            (pilish--set-streaming-marker nil)
-            (pilish--update-hot-tail-boundary)
-            (pilish--cool-completed-tool-blocks-outside-hot-tail)
-            (pilish--postprocess-history-buffer)
-            (goto-char (point-max)))))))
+        (prog1
+            (pilish--with-md-ts-change-hooks-suspended
+                #'pilish--md-ts-change-hook-p
+              (pilish--call-with-history-parser-restart
+               (lambda ()
+                 (pilish--clear-render-artifacts)
+                 (erase-buffer)
+                 (when prefix (insert prefix))
+                 (pilish--with-transcript-construction
+                   (when (vectorp messages)
+                     (let ((pilish--defer-history-postprocessing t))
+                       (pilish--display-history-messages messages)))
+                   (goto-char (point-max))
+                   (unless (bolp) (insert "\n"))
+                   (pilish--set-message-start-marker nil)
+                   (pilish--set-streaming-marker nil)
+                   (pilish--update-hot-tail-boundary)
+                   (pilish--cool-completed-tool-blocks-outside-hot-tail)
+                   (pilish--postprocess-history-buffer)
+                   (goto-char (point-max))))))
+          (pilish--fontify-visible-transcript-windows)))))
 
 (provide 'pilish-render)
 
