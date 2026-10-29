@@ -4800,6 +4800,20 @@ Pi handles command expansion on the server side."
       (should pos)
       (should (equal (substring header pos (+ pos 8)) "running ")))))
 
+(ert-deftest pilish-test-header-line-can-hide-activity-phase ()
+  "`pilish-header-activity-phase' nil omits the phase but keeps warnings."
+  (with-temp-buffer
+    (pilish-chat-mode)
+    (setq pilish--state '(:model "claude-sonnet-4" :thinking-level "high")
+          pilish--activity-phase "running")
+    (let ((pilish-header-activity-phase nil))
+      (should (equal (substring-no-properties (pilish--header-line-string))
+                     "sonnet-4 • high"))
+      (cl-letf (((symbol-function 'pilish--inactivity-status)
+                 (lambda (phase) (concat phase " (no output 5m)"))))
+        (should (string-match-p "high running (no output 5m)"
+                                (pilish--header-line-string)))))))
+
 (ert-deftest pilish-test-header-line-shows-thinking-activity-phase ()
   "Header line shows semantic activity label during streaming."
   (with-temp-buffer
@@ -5384,6 +5398,19 @@ This occurs after compaction before the next assistant message."
          (result (pilish--header-format-stats stats)))
     (should (string-match-p "\\$0.12" result))
     (should (string-match-p "\\?/200k" result))))
+
+(ert-deftest pilish-test-header-format-stats-can-hide-cost-and-context ()
+  "Header stats omit cost and context usage as configured."
+  (let ((stats '(:cost 0.05
+                 :contextUsage (:tokens 3500 :contextWindow 200000 :percent 1.75))))
+    (let ((pilish-header-cost nil))
+      (should (equal (substring-no-properties (pilish--header-format-stats stats))
+                     " │ 1.8%%/200k")))
+    (let ((pilish-header-context-usage nil))
+      (should (equal (pilish--header-format-stats stats) " │ $0.05")))
+    (let ((pilish-header-cost nil)
+          (pilish-header-context-usage nil))
+      (should (null (pilish--header-format-stats stats))))))
 
 ;;; File Reference Completion (@)
 

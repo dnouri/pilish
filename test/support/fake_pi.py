@@ -59,6 +59,12 @@ from typing import Any, BinaryIO, Literal, cast
 JsonDict = dict[str, Any]
 DialogMethod = Literal["confirm", "input", "select", "editor"]
 
+# Deterministic ``get_session_stats`` data, shaped like Pi's response.
+FAKE_SESSION_STATS: JsonDict = {
+    "cost": 0.25,
+    "contextUsage": {"tokens": 50000, "contextWindow": 200000, "percent": 25},
+}
+
 
 @dataclass(frozen=True)
 class SlashCommand:
@@ -421,6 +427,8 @@ class FakePiHarness:
                 self._handle_set_session_name(command)
             case "set_model":
                 self._handle_set_model(command)
+            case "get_session_stats":
+                self._respond(command, data=FAKE_SESSION_STATS)
             case "set_thinking_level":
                 self.state.thinking_level = str(command["level"])
                 self._respond(command)

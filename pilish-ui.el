@@ -161,6 +161,36 @@ Timing uses approximate wall time, including suspend and Emacs delays."
   :type '(choice (const :tag "Disabled" nil) number)
   :group 'pilish)
 
+(defun pilish--set-header-option (symbol value)
+  "Set header option SYMBOL to VALUE and redraw every header line."
+  (set-default symbol value)
+  (force-mode-line-update t))
+
+(defcustom pilish-header-activity-phase t
+  "Whether the input header line shows the session's activity phase.
+When nil, the header omits the phase (\"idle\", \"thinking\",
+\"running\", ...) and shows only exceptional states: \"waiting for Pi\"
+before Pi accepts a prompt and the `pilish-session-inactivity-timeout'
+warning.  Useful when another interface, such as a window manager's
+title bar, already shows whether the session is busy."
+  :type 'boolean
+  :set #'pilish--set-header-option
+  :group 'pilish)
+
+(defcustom pilish-header-cost t
+  "Whether the input header line shows the session's cumulative cost."
+  :type 'boolean
+  :set #'pilish--set-header-option
+  :group 'pilish)
+
+(defcustom pilish-header-context-usage t
+  "Whether the input header line shows context window usage.
+The usage is colored by `pilish-context-warning-threshold' and
+`pilish-context-error-threshold'."
+  :type 'boolean
+  :set #'pilish--set-header-option
+  :group 'pilish)
+
 (defcustom pilish-input-window-height 10
   "Height of the input window.
 An integer specifies an absolute number of lines.
@@ -3059,9 +3089,10 @@ Returns nil if CONTEXT-WINDOW is 0."
 
 (defun pilish--header-format-stats (stats)
   "Format compact header stats from STATS.
-Shows cumulative session cost and server-provided context percentage.
-Returns nil if STATS is nil."
-  (when stats
+Shows cumulative session cost and server-provided context percentage,
+as enabled by `pilish-header-cost' and `pilish-header-context-usage'.
+Returns nil if STATS is nil or both are disabled."
+  (when (and stats (or pilish-header-cost pilish-header-context-usage))
     (let* ((cost (or (plist-get stats :cost) 0))
            (ctx (plist-get stats :contextUsage))
            (raw-tokens (and ctx (plist-get ctx :tokens)))
@@ -3072,8 +3103,9 @@ Returns nil if STATS is nil."
            (context-window (or (and ctx (plist-get ctx :contextWindow)) 0)))
       (concat
        " │"
-       (format " $%.2f" cost)
-       (pilish--header-format-context percent context-window)))))
+       (and pilish-header-cost (format " $%.2f" cost))
+       (and pilish-header-context-usage
+            (pilish--header-format-context percent context-window))))))
 
 (defun pilish--queue-message-preview (message)
   "Return a bounded, single-line plain-text preview of MESSAGE."
@@ -3156,7 +3188,7 @@ Returns extension statuses joined with \" · \", or empty string."
                          'mouse-face 'highlight
                          'help-echo "mouse-1: Cycle thinking level"
                          'local-map pilish--header-thinking-map)))
-   " " activity-phase-str))
+   (if (string-empty-p activity-phase-str) "" (concat " " activity-phase-str))))
 
 (defun pilish--header-format-context-group (session-name)
   "Format context group from SESSION-NAME.
@@ -3223,14 +3255,16 @@ Accesses state from the linked chat buffer."
          (activity-phase (or (and chat-buf
                                   (buffer-local-value 'pilish--activity-phase chat-buf))
                              "idle"))
+         (waiting-for-pi
+          (and chat-buf
+               (with-current-buffer chat-buf
+                 (and (eq pilish--status 'sending)
+                      (pilish--prompt-start-wait-active-p)
+                      (not (pilish--prompt-wait-accepted pilish--prompt-wait))
+                      (not (pilish--prompt-wait-started pilish--prompt-wait))
+                      (not (pilish--prompt-wait-echoed pilish--prompt-wait))))))
          (activity-label
-          (if (and chat-buf
-                   (with-current-buffer chat-buf
-                     (and (eq pilish--status 'sending)
-                          (pilish--prompt-start-wait-active-p)
-                          (not (pilish--prompt-wait-accepted pilish--prompt-wait))
-                          (not (pilish--prompt-wait-started pilish--prompt-wait))
-                          (not (pilish--prompt-wait-echoed pilish--prompt-wait)))))
+          (if waiting-for-pi
               (propertize "waiting for Pi"
                           'help-echo "MCP servers may be connecting during startup.")
             activity-phase))
@@ -3238,8 +3272,10 @@ Accesses state from the linked chat buffer."
           (or (and chat-buf
                    (with-current-buffer chat-buf
                      (pilish--inactivity-status activity-phase)))
-              (propertize (format "%-8s" activity-label)
-                          'face 'pilish-activity-phase))))
+              (if (or pilish-header-activity-phase waiting-for-pi)
+                  (propertize (format "%-8s" activity-label)
+                              'face 'pilish-activity-phase)
+                ""))))
     (concat
      (pilish--header-format-identity model-short thinking activity-phase-str)
      (pilish--header-format-stats stats)

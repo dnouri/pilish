@@ -114,6 +114,8 @@ The current fake supports:
 - `set_session_name`
 - `set_model`
 - `set_thinking_level`
+- `get_session_stats` (fixed cost `0.25` and context usage of 50000 of
+  200000 tokens, 25%)
 - `extension_ui_response`
 
 `follow_up` and queued `prompt` with `streamingBehavior: "followUp"` are
