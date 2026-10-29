@@ -1535,17 +1535,13 @@ interleave during streaming.")
 
 (defvar-local pilish--thinking-start-marker nil
   "Marker for the start of the current thinking block.
-Used to rewrite thinking content in place after whitespace normalization.")
+Bounds the live region and its completed-thinking replacement.")
 
 (defvar-local pilish--thinking-raw nil
-  "Accumulated raw thinking deltas for the current thinking block.
-Normalized and re-rendered incrementally to avoid excess whitespace.")
-
-(defvar-local pilish--thinking-prev-rendered nil
-  "Previously rendered blockquote text for the current thinking block.
-Used for incremental rendering: when the new rendered text extends the
-previous text, only the suffix is inserted instead of replacing the
-entire region.  Reset by `pilish--reset-thinking-state'.")
+  "Materialized raw thinking string, or nil when not cached or inactive.
+Starts as the empty string.  Nonempty deltas invalidate this cache;
+thinking completion or an unfinished assistant message materializes it.
+Reset by `pilish--reset-thinking-state'.")
 
 (defvar-local pilish--line-parse-state 'line-start
   "Parsing state for current line during streaming.
@@ -2433,12 +2429,49 @@ Return nil."
     (set-window-point window end))
   nil)
 
+(defvar pilish--viewport-construction-buffers nil
+  "Buffers whose intermediate viewport updates are deferred in this stack.
+Bound only by `pilish--with-transcript-construction'.")
+
+(defun pilish--viewport-updates-deferred-p ()
+  "Return non-nil when the current buffer has a construction owner."
+  (memq (current-buffer) pilish--viewport-construction-buffers))
+
+(defmacro pilish--with-transcript-construction (&rest body)
+  "Build a transcript suffix in BODY and settle its windows once.
+Enter after reset and prefix insertion.  BODY may rewrite the generated
+suffix, but must not rewrite the prefix, yield, or request redisplay.
+Same-buffer nesting joins the existing scope.  Restore views only on
+normal completion after character edits; always release markers.
+An empty or property-only build leaves windows untouched.  Return BODY's value."
+  (declare (indent 0) (debug t))
+  (let ((result (make-symbol "result"))
+        (buffer (make-symbol "buffer"))
+        (tick (make-symbol "tick"))
+        (unchanged (make-symbol "unchanged")))
+    `(if (pilish--viewport-updates-deferred-p)
+         (progn ,@body)
+       (let ((,buffer (current-buffer))
+             (,tick (buffer-chars-modified-tick))
+             ,result)
+         (catch ',unchanged
+           (pilish--with-scroll-preservation
+             (let ((pilish--viewport-construction-buffers
+                    (cons ,buffer pilish--viewport-construction-buffers)))
+               (setq ,result (progn ,@body)))
+             ;; Skip success-only settlement, but still detach its markers.
+             (when (and (buffer-live-p ,buffer)
+                        (= ,tick (buffer-chars-modified-tick ,buffer)))
+               (throw ',unchanged nil))))
+         ,result))))
+
 (defmacro pilish--with-scroll-preservation (&rest body)
   "Execute BODY preserving reader points and following views.
 Readers track edits with advancing point markers.  Following windows use
 advancing start markers to keep a filled tail after character edits, but
 restore only point after property-only edits.  Restore only when BODY
 completes normally, in live windows still displaying the original buffer.
+During transcript construction, execute BODY without capturing windows.
 Always detach temporary markers.  Return nil."
   (declare (indent 0) (debug t))
   (let ((buffer (make-symbol "buffer"))
@@ -2448,39 +2481,41 @@ Always detach temporary markers.  Return nil."
         (view (make-symbol "view"))
         (tick (make-symbol "tick"))
         (changed (make-symbol "changed")))
-    `(let* ((,buffer (current-buffer))
-            (,tick (buffer-chars-modified-tick))
-            (,windows (get-buffer-window-list ,buffer nil t))
-            (,views nil))
-       (unwind-protect
-           (progn
-             (dolist (,window ,windows)
-               (push (if (pilish--window-following-p ,window)
-                         (list ,window :tail
-                               (copy-marker (window-start ,window) t))
-                       (list ,window :reader
-                             (copy-marker (window-point ,window) t)))
-                     ,views))
-             (setq ,views (nreverse ,views))
-             ,@body
-             (when (buffer-live-p ,buffer)
-               (with-current-buffer ,buffer
-                 (let ((,changed (/= ,tick (buffer-chars-modified-tick))))
-                   (dolist (,view ,views)
-                     (when (and (eq (cadr ,view) :reader)
-                                (window-live-p (car ,view))
-                                (eq (window-buffer (car ,view)) ,buffer))
-                       (set-window-point (car ,view) (nth 2 ,view))))
-                   (dolist (,view ,views)
-                     (when (and (eq (cadr ,view) :tail)
-                                (window-live-p (car ,view))
-                                (eq (window-buffer (car ,view)) ,buffer))
-                       (if ,changed
-                           (pilish--restore-tail-window
-                            (car ,view) (marker-position (nth 2 ,view)))
-                         (set-window-point (car ,view) (point-max)))))))))
-         (dolist (,view ,views)
-           (set-marker (nth 2 ,view) nil))))))
+    `(if (pilish--viewport-updates-deferred-p)
+         (progn ,@body nil)
+       (let* ((,buffer (current-buffer))
+              (,tick (buffer-chars-modified-tick))
+              (,windows (get-buffer-window-list ,buffer nil t))
+              (,views nil))
+         (unwind-protect
+             (progn
+               (dolist (,window ,windows)
+                 (push (if (pilish--window-following-p ,window)
+                           (list ,window :tail
+                                 (copy-marker (window-start ,window) t))
+                         (list ,window :reader
+                               (copy-marker (window-point ,window) t)))
+                       ,views))
+               (setq ,views (nreverse ,views))
+               ,@body
+               (when (buffer-live-p ,buffer)
+                 (with-current-buffer ,buffer
+                   (let ((,changed (/= ,tick (buffer-chars-modified-tick))))
+                     (dolist (,view ,views)
+                       (when (and (eq (cadr ,view) :reader)
+                                  (window-live-p (car ,view))
+                                  (eq (window-buffer (car ,view)) ,buffer))
+                         (set-window-point (car ,view) (nth 2 ,view))))
+                     (dolist (,view ,views)
+                       (when (and (eq (cadr ,view) :tail)
+                                  (window-live-p (car ,view))
+                                  (eq (window-buffer (car ,view)) ,buffer))
+                         (if ,changed
+                             (pilish--restore-tail-window
+                              (car ,view) (marker-position (nth 2 ,view)))
+                           (set-window-point (car ,view) (point-max)))))))))
+           (dolist (,view ,views)
+             (set-marker (nth 2 ,view) nil)))))))
 
 (defun pilish--append-to-chat (text)
   "Append TEXT to the chat buffer.

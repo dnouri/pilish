@@ -118,6 +118,23 @@
     (should (= 0 (hash-table-count pilish--tool-args-cache)))
     (should (= 0 (hash-table-count pilish--live-tool-blocks)))))
 
+(ert-deftest pilish-test-reset-session-state-clears-active-thinking-stream ()
+  "Session reset discards pending normalization and raw fragments."
+  (with-temp-buffer
+    (pilish-chat-mode)
+    (pilish--display-agent-start)
+    (pilish--display-thinking-start)
+    (pilish--display-thinking-delta "pending \n \t")
+    (should pilish--thinking-stream)
+    (pilish--reset-session-state)
+    (should-not pilish--thinking-stream)
+    (should-not pilish--thinking-raw)
+    (should-not pilish--thinking-marker)
+    (should-not pilish--thinking-start-marker)
+    (pilish--handle-display-event
+     '(:type "message_end" :message (:role "assistant" :stopReason "aborted")))
+    (should-not pilish--thinking-raw)))
+
 (ert-deftest pilish-test-clear-chat-buffer-removes-pi-owned-render-overlays ()
   "Clearing chat buffer removes stale pi-owned tool and diff overlays."
   (with-temp-buffer

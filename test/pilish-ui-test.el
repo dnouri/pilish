@@ -2133,6 +2133,176 @@ Buffer is read-only with `inhibit-read-only' used for insertion.
       (kill-buffer chat)
       (kill-buffer input))))
 
+(ert-deftest pilish-test-transcript-construction-settles-once-after-appends ()
+  "Chunk count does not multiply viewport work or disturb independent views."
+  (save-window-excursion
+    (delete-other-windows)
+    (let ((chat (generate-new-buffer " *pilish-construction-chat*"))
+          (input (generate-new-buffer " *pilish-construction-input*")))
+      (unwind-protect
+          (progn
+            (switch-to-buffer chat)
+            (let* ((reader (selected-window))
+                   (tail (split-window-right))
+                   (input-window (split-window reader -5 'below))
+                   (capture (symbol-function 'get-buffer-window-list))
+                   (restore (symbol-function 'pilish--restore-tail-window)))
+              (set-window-buffer tail chat)
+              (set-window-buffer input-window input)
+              (select-window input-window)
+              (insert "unchanged draft")
+              (goto-char 5)
+              (dolist (chunks '(1 80 320))
+                (with-current-buffer chat
+                  (erase-buffer)
+                  (insert "retained prefix\n")
+                  (set-window-point reader 3)
+                  (set-window-point tail (point-max))
+                  (let ((captures 0) (restores 0))
+                    (cl-letf (((symbol-function 'get-buffer-window-list)
+                               (lambda (&rest args)
+                                 (cl-incf captures)
+                                 (apply capture args)))
+                              ((symbol-function 'pilish--restore-tail-window)
+                               (lambda (window start)
+                                 (cl-incf restores)
+                                 (funcall restore window start))))
+                      (should
+                       (eq 'complete
+                           (pilish--with-transcript-construction
+                             (dotimes (_ chunks)
+                               (pilish--append-to-chat "appended line\n"))
+                             (goto-char (point-max))
+                             'complete))))
+                    (should (= captures 1))
+                    (should (= restores 1)))
+                  (should (equal (buffer-string)
+                                 (concat "retained prefix\n"
+                                         (apply #'concat
+                                                (make-list chunks "appended line\n")))))
+                  (should (= (point) (point-max)))
+                  (should (= (window-point reader) 3))
+                  (should (= (window-point tail) (point-max)))
+                  (should (eq (selected-window) input-window))
+                  (should (= (window-point input-window) 5))
+                  (should (equal (with-current-buffer input (buffer-string))
+                                 "unchanged draft"))))))
+        (kill-buffer chat)
+        (kill-buffer input)))))
+
+(ert-deftest pilish-test-transcript-construction-nesting-is-buffer-specific ()
+  "A/B/A nesting coalesces only construction, including caught inner errors."
+  (save-window-excursion
+    (delete-other-windows)
+    (let ((a (generate-new-buffer " *pilish-construction-a*"))
+          (b (generate-new-buffer " *pilish-construction-b*"))
+          (capture (symbol-function 'get-buffer-window-list))
+          captures)
+      (unwind-protect
+          (progn
+            (switch-to-buffer a)
+            (insert "A\n")
+            (let ((b-window (split-window-right)))
+              (set-window-buffer b-window b)
+              (with-current-buffer b (insert "B\n"))
+              (set-window-point b-window (with-current-buffer b (point-max)))
+              (cl-letf (((symbol-function 'get-buffer-window-list)
+                         (lambda (&rest args)
+                           (push (car args) captures)
+                           (apply capture args))))
+                (pilish--with-transcript-construction
+                  (pilish--append-to-chat "outer\n")
+                  (with-current-buffer b
+                    (pilish--append-to-chat "ordinary\n")
+                    (pilish--with-transcript-construction
+                      (pilish--append-to-chat "nested B\n")
+                      (with-current-buffer a
+                        (pilish--with-transcript-construction
+                          (pilish--append-to-chat "nested A\n")))))
+                  (condition-case nil
+                      (pilish--with-transcript-construction
+                        (pilish--append-to-chat "caught\n")
+                        (error "Expected inner error"))
+                    (error nil))
+                  (pilish--append-to-chat "after catch\n"))
+                (should (= (cl-count a captures) 1))
+                (should (= (cl-count b captures) 2))
+                (pilish--append-to-chat "ordinary A\n")
+                (should (= (cl-count a captures) 2)))
+              (should (equal (buffer-string)
+                             "A\nouter\nnested A\ncaught\nafter catch\nordinary A\n"))
+              (should (equal (with-current-buffer b (buffer-string))
+                             "B\nordinary\nnested B\n"))
+              (should (= (window-point b-window)
+                         (with-current-buffer b (point-max))))))
+        (kill-buffer a)
+        (kill-buffer b)))))
+
+(ert-deftest pilish-test-transcript-construction-empty-and-property-only-are-neutral ()
+  "A build with no character edits leaves a final-newline follower untouched."
+  (save-window-excursion
+    (with-temp-buffer
+      (insert "\n")
+      (switch-to-buffer (current-buffer))
+      (goto-char 1)
+      (let ((window (selected-window))
+            (restore (symbol-function 'pilish--restore-tail-window))
+            (restores 0))
+        (cl-letf (((symbol-function 'pilish--restore-tail-window)
+                   (lambda (&rest args)
+                     (cl-incf restores)
+                     (apply restore args))))
+          (should (eq 'empty (pilish--with-transcript-construction 'empty)))
+          (should (= (window-point window) 1))
+          (should (eq 'properties
+                      (pilish--with-transcript-construction
+                        (pilish--with-scroll-preservation
+                          (put-text-property 1 2 'face 'bold))
+                        'properties)))
+          (should (= (window-point window) 1))
+          (should (= (window-start window) 1))
+          (should (= restores 0))
+          (should (null (pilish--with-scroll-preservation 'ordinary)))
+          (should (= (window-point window) 2)))))))
+
+(ert-deftest pilish-test-transcript-construction-unwinds-without-settlement ()
+  "Errors, quits and throws release anchors and leave ordinary appends active."
+  (save-window-excursion
+    (with-temp-buffer
+      (switch-to-buffer (current-buffer))
+      (let ((copy (symbol-function 'copy-marker))
+            (restore (symbol-function 'pilish--restore-tail-window))
+            markers restores)
+        (cl-letf (((symbol-function 'copy-marker)
+                   (lambda (&rest args)
+                     (let ((marker (apply copy args)))
+                       (push marker markers)
+                       marker)))
+                  ((symbol-function 'pilish--restore-tail-window)
+                   (lambda (&rest args)
+                     (push t restores)
+                     (apply restore args))))
+          (dolist (exit '(error quit throw))
+            (setq markers nil restores nil)
+            (condition-case nil
+                (catch 'expected
+                  (pilish--with-transcript-construction
+                    (pilish--append-to-chat "built before failure\n")
+                    (pcase exit
+                      ('error (error "Expected failure"))
+                      ('quit (signal 'quit nil))
+                      ('throw (throw 'expected t)))))
+              (error nil)
+              (quit nil))
+            (should-not restores)
+            (should (= (length markers) 1))
+            (should (cl-every (lambda (marker) (null (marker-buffer marker)))
+                              markers))
+            (goto-char (point-max))
+            (pilish--append-to-chat "ordinary after failure\n")
+            (should (= (length restores) 1))
+            (should (= (window-point (selected-window)) (point-max)))))))))
+
 ;;; Turn Detection
 
 (ert-deftest pilish-test-turn-index-on-first-heading ()

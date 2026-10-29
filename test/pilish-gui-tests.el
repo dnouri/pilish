@@ -2721,9 +2721,69 @@ FAILURE permits an expected user error, whose native post hook may not run."
     (if (eq mode 'pilish-tree-browser-mode)
         (setq pilish--tree-browser-tree (vconcat (nreverse nodes))
               pilish--tree-browser-leaf-id "G1-r099-c18" pilish--tree-browser-filter 'default)
-      (setq pilish--session-browser-items (nreverse items) pilish--session-browser-view 'threaded))
+      (setq pilish--session-browser-items (nreverse items)
+            pilish--session-browser-include-search-text t
+            pilish--session-browser-view 'threaded))
     (funcall (if (eq mode 'pilish-tree-browser-mode)
                  #'pilish--tree-browser-rerender #'pilish--session-browser-rerender))))
+
+(ert-deftest pilish-gui-test-session-browser-first-search-from-disk ()
+  "The / key gathers late saved text after a metadata-only opening."
+  (let* ((root (pilish-test--make-temp-directory "pi-gui-search"))
+         (default-directory (file-name-as-directory root))
+         (process-environment (copy-sequence process-environment))
+         (pilish-gui-test--large-trace nil)
+         browser)
+    (setenv "PI_CODING_AGENT_DIR" root)
+    (let* ((dir (pilish-jsonl-session-dir-for-cwd root))
+           (path (expand-file-name "session.jsonl" dir)))
+      (make-directory dir t)
+      (with-temp-file path
+        (dolist (entry
+                 (list (list :type "session" :version 3 :id "gui-search"
+                             :cwd root :timestamp "2026-01-01T00:00:00Z")
+                       '(:type "message" :id "first"
+                         :message (:role "user" :content "Ordinary opening"))
+                       '(:type "message" :id "late" :parentId "first"
+                         :message (:role "assistant" :content "late-search-token"))))
+          (insert (json-encode entry) "\n")))
+      (unwind-protect
+          (save-window-excursion
+            (cl-letf (((symbol-function 'project-current) (lambda (&rest _) nil)))
+              (pilish-session-browser)
+              (setq browser (current-buffer))
+              (should (pilish-test-wait-until
+                       (lambda () (not pilish--session-browser-loading))))
+              (should-not pilish--session-browser-error)
+              (should (= (length pilish--session-browser-items) 1))
+              (should-not (plist-member (car pilish--session-browser-items) :searchText))
+              (should (string-match-p "Ordinary opening" (buffer-string)))
+              (pilish-gui-test--large-command
+               (vconcat (kbd "/") "late-search-token" (kbd "RET"))
+               'pilish-session-browser-search)
+              (should (pilish-test-wait-until
+                       (lambda () (not pilish--session-browser-loading))))
+              (should-not pilish--session-browser-error)
+              (should pilish--session-browser-include-search-text)
+              (should (string-match-p "late-search-token"
+                                      (plist-get (car pilish--session-browser-items)
+                                                 :searchText)))
+              (should (string-match-p "Ordinary opening" (buffer-string)))
+              (should-not (string-match-p "No matching sessions" (buffer-string)))
+              (pilish-gui-test--large-command
+               (vconcat (kbd "/ C-a C-k") "missing-search-token" (kbd "RET"))
+               'pilish-session-browser-search)
+              (should-not pilish--session-browser-loading)
+              (should (string-match-p "No matching sessions" (buffer-string)))
+              (pilish-gui-test--large-command
+               (kbd "/ C-a C-k RET") 'pilish-session-browser-search)
+              (pilish-gui-test--large-command (kbd "g") 'pilish-browse-refresh)
+              (should (pilish-test-wait-until
+                       (lambda () (not pilish--session-browser-loading))))
+              (should-not pilish--session-browser-error)
+              (should (plist-member (car pilish--session-browser-items) :searchText))
+              (should (string-match-p "Ordinary opening" (buffer-string)))))
+        (when (buffer-live-p browser) (kill-buffer browser))))))
 
 (ert-deftest pilish-gui-test-large-browser-fold-and-copy ()
   "Both broad browsers preserve canonical folds, hidden data and live margin hits."
