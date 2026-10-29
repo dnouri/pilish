@@ -479,8 +479,13 @@ Search matches session names, first messages, and all saved
 user/assistant text, including inactive branches; thinking, tool
 arguments and results, images, and summaries are not searched.
 Tokens are whitespace-separated regexps that must all match.
-Searching a very large archive can pause Emacs while results are
-gathered; =q= hides the browser without cancelling its scan.  When
+Opening and refreshing gather listing metadata until the first valid,
+nonblank search gathers full text asynchronously.  Later searches use
+that text; refreshes and scope changes keep gathering full text until
+the browser buffer is killed or its mode is reinitialized.  Clearing
+the query does not reset this policy.  Very large archives can still
+pause Emacs during scanning; =q= hides the browser without cancelling
+its scan.  When
 an empty listing or search result can be widened, it names up to two
 of the most relevant keys: =t= switches scope, =f= clears named-only,
 and submitting an empty =/= query clears the filter.  An empty
