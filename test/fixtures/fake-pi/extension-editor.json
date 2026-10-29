@@ -1,0 +1,24 @@
+{
+  "description": "Extension multiline editor flow with scenario-owned timeout data.",
+  "commands": [
+    {
+      "name": "test-editor",
+      "description": "Trigger fake extension editor",
+      "source": "extension",
+      "sourceInfo": { "scope": "project", "path": "test-extension.ts" }
+    }
+  ],
+  "prompt": {
+    "type": "extension_dialog",
+    "command_name": "/test-editor",
+    "method": "editor",
+    "title": "Spike Editor",
+    "prefill": "first line\nsecond line",
+    "timeout_ms": 10000,
+    "response_messages": {
+      "value": "EDITOR SUBMITTED",
+      "cancelled": "EDITOR CANCELLED",
+      "timeout": "EDITOR TIMED OUT"
+    }
+  }
+}
