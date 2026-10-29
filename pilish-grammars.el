@@ -42,6 +42,13 @@
 (require 'treesit)
 (require 'seq)
 
+;; These queries exist in Emacs 30 and newer.  Declaring them keeps the
+;; byte-compiler quiet on Emacs 29, where the `fboundp' guards make the
+;; calls unreachable.
+(declare-function treesit-library-abi-version "treesit.c"
+                  (&optional min-compatible))
+(declare-function treesit-language-abi-version "treesit.c" (language))
+
 (defconst pilish--markdown-upstream-source
   '("https://github.com/tree-sitter-grammars/tree-sitter-markdown" "v0.5.4")
   "Upstream Markdown grammar source for tree-sitter ABI 15 and newer.")
