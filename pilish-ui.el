@@ -1535,17 +1535,13 @@ interleave during streaming.")
 
 (defvar-local pilish--thinking-start-marker nil
   "Marker for the start of the current thinking block.
-Used to rewrite thinking content in place after whitespace normalization.")
+Bounds the live region and its completed-thinking replacement.")
 
 (defvar-local pilish--thinking-raw nil
-  "Accumulated raw thinking deltas for the current thinking block.
-Normalized and re-rendered incrementally to avoid excess whitespace.")
-
-(defvar-local pilish--thinking-prev-rendered nil
-  "Previously rendered blockquote text for the current thinking block.
-Used for incremental rendering: when the new rendered text extends the
-previous text, only the suffix is inserted instead of replacing the
-entire region.  Reset by `pilish--reset-thinking-state'.")
+  "Materialized raw thinking string, or nil when not cached or inactive.
+Starts as the empty string.  Nonempty deltas invalidate this cache;
+thinking completion or an unfinished assistant message materializes it.
+Reset by `pilish--reset-thinking-state'.")
 
 (defvar-local pilish--line-parse-state 'line-start
   "Parsing state for current line during streaming.

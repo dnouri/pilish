@@ -369,6 +369,7 @@ Call this when starting a new session to ensure no stale state persists."
         pilish--thinking-marker nil
         pilish--thinking-start-marker nil
         pilish--thinking-raw nil
+        pilish--thinking-stream nil
         pilish--line-parse-state 'line-start
         pilish--pending-tool-overlay nil
         pilish--tool-block-order-counter 0

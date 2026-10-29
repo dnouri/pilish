@@ -626,43 +626,97 @@ non-empty."
             (set-marker pilish--thinking-marker (point))))
         (not (string-empty-p text))))))
 
-(defun pilish--render-thinking-content ()
-  "Render normalized accumulated thinking content in place.
-Returns non-nil when meaningful content remains after normalization."
-  (when (and (markerp pilish--thinking-start-marker)
-             (markerp pilish--thinking-marker)
-             (marker-position pilish--thinking-start-marker)
-             (marker-position pilish--thinking-marker))
-    (let* ((start (marker-position pilish--thinking-start-marker))
-           (end (marker-position pilish--thinking-marker))
-           (normalized (pilish--thinking-normalize-text
-                        pilish--thinking-raw))
-           (rendered (if (string-empty-p normalized)
-                         "> "
-                       (pilish--thinking-blockquote-text normalized)))
-           (prev pilish--thinking-prev-rendered))
-      (when (<= start end)
-        (cond
-         ;; Fast path: new rendered text extends previous — just append suffix.
-         ((and prev
-               (not (string-empty-p prev))
-               (string-prefix-p prev rendered))
-          (let ((suffix (substring rendered (length prev))))
-            (unless (string-empty-p suffix)
-              (goto-char end)
-              (insert suffix)
-              (set-marker pilish--thinking-marker (point)))))
-         ;; Slow path: full rewrite; skip if buffer already matches.
-         (t
-          (let ((existing (buffer-substring-no-properties start end)))
-            (unless (equal existing rendered)
-              (goto-char start)
-              (delete-region start end)
-              (insert rendered)
-              (set-marker pilish--thinking-marker (point))))))
-        (setq pilish--thinking-prev-rendered rendered))
-      (and (<= start end)
-           (not (string-empty-p normalized))))))
+(cl-defstruct (pilish--thinking-stream
+               (:constructor pilish--make-thinking-stream))
+  "Lossless deltas and unresolved whitespace for one thinking block."
+  raw-rev
+  (mode 'leading)
+  (leading-spaces 0)
+  middle-rev
+  tail-rev)
+
+(cl-defstruct (pilish--thinking-edit
+               (:constructor pilish--make-thinking-edit))
+  "One suffix edit and the resulting thinking stream."
+  next-stream
+  (delete-spaces 0)
+  (text ""))
+
+(defvar-local pilish--thinking-stream nil
+  "Incremental normalization state for the active thinking block.
+Only leading spaces before the first content character can retract.
+Gap modes hold one, two, or at least three unresolved newlines.
+Whitespace fragments are newest first and contain only ASCII spaces/tabs.")
+
+(defun pilish--thinking-step (stream delta)
+  "Return the bounded thinking edit for safe string DELTA and STREAM.
+Do not mutate STREAM or its fragment lists.  Scan only DELTA, holding
+unresolved whitespace until content makes its separator visible."
+  (let ((next (copy-pilish--thinking-stream stream))
+        (mode (pilish--thinking-stream-mode stream))
+        (leading-spaces (pilish--thinking-stream-leading-spaces stream))
+        (middle-rev (pilish--thinking-stream-middle-rev stream))
+        (tail-rev (pilish--thinking-stream-tail-rev stream))
+        (index 0)
+        (delete-spaces 0)
+        text-rev)
+    (save-match-data
+      (while (string-match "[ \t]+\\|\n\\|[^ \t\n]+" delta index)
+        (let* ((end (match-end 0))
+               (run (substring delta index end))
+               (first (aref run 0)))
+          (setq index end)
+          (cond
+           ((eq first ?\n)
+            (pcase mode
+              ('leading
+               (setq delete-spaces (pilish--thinking-stream-leading-spaces stream)
+                     leading-spaces 0
+                     text-rev nil))
+              ('line (setq mode 'gap-one))
+              ('gap-one
+               (setq mode 'gap-two middle-rev tail-rev tail-rev nil))
+              ('gap-two
+               (setq mode 'gap-many middle-rev nil tail-rev nil))
+              ('gap-many (setq tail-rev nil))))
+           ((memq first '(?\s ?\t))
+            (pcase mode
+              ('leading
+               (cl-incf leading-spaces (length run))
+               (push run text-rev))
+              ('line (push run text-rev))
+              (_ (push run tail-rev))))
+           (t
+            (when (memq mode '(gap-one gap-two gap-many))
+              (push (concat
+                     (pcase mode
+                       ('gap-one "\n> ")
+                       ('gap-two
+                        (concat "\n> " (mapconcat #'identity (reverse middle-rev) "")
+                                "\n> "))
+                       ('gap-many "\n> \n> "))
+                     (mapconcat #'identity (reverse tail-rev) ""))
+                    text-rev))
+            (push run text-rev)
+            (setq mode 'line leading-spaces 0 middle-rev nil tail-rev nil))))))
+    (setf (pilish--thinking-stream-mode next) mode
+          (pilish--thinking-stream-leading-spaces next) leading-spaces
+          (pilish--thinking-stream-middle-rev next) middle-rev
+          (pilish--thinking-stream-tail-rev next) tail-rev)
+    (unless (string-empty-p delta)
+      (push delta (pilish--thinking-stream-raw-rev next)))
+    (pilish--make-thinking-edit
+     :next-stream next :delete-spaces delete-spaces
+     :text (mapconcat #'identity (nreverse text-rev) ""))))
+
+(defun pilish--materialize-thinking-raw ()
+  "Return the active block's raw string, joining its deltas only when needed."
+  (when (and pilish--thinking-stream (null pilish--thinking-raw))
+    (setq pilish--thinking-raw
+          (mapconcat #'identity
+                     (reverse (pilish--thinking-stream-raw-rev pilish--thinking-stream))
+                     "")))
+  pilish--thinking-raw)
 
 (defun pilish--ensure-blank-line-separator ()
   "Ensure exactly one blank line separator at point.
@@ -699,7 +753,7 @@ separated from preceding content."
   (setq pilish--thinking-marker nil
         pilish--thinking-start-marker nil
         pilish--thinking-raw nil
-        pilish--thinking-prev-rendered nil))
+        pilish--thinking-stream nil))
 
 (defmacro pilish--with-window-rewrite-preservation (&rest body)
   "Execute BODY and keep chat windows useful after a large rewrite.
@@ -734,7 +788,8 @@ clamped so the window remains filled when possible."
           ;; Keep insertion-type nil so inserts at this exact point happen
           ;; after the marker (we then advance it explicitly per delta).
           (pilish--reset-thinking-state)
-          (setq pilish--thinking-raw "")
+          (setq pilish--thinking-raw ""
+                pilish--thinking-stream (pilish--make-thinking-stream))
           (let ((start (point)))
             (insert "> ")
             (setq pilish--thinking-start-marker
@@ -748,14 +803,27 @@ Normalizes boundary and paragraph whitespace while streaming."
   (when (and delta pilish--streaming-marker)
     (let ((delta (pilish--render-safe-string delta))
           (inhibit-read-only t))
-      (if (and pilish--thinking-start-marker
-               pilish--thinking-marker)
-          (progn
-            (setq pilish--thinking-raw
-                  (concat (or pilish--thinking-raw "") delta))
-            (pilish--with-scroll-preservation
-              (save-excursion
-                (pilish--render-thinking-content))))
+      (if (and pilish--thinking-stream
+               (markerp pilish--thinking-start-marker)
+               (markerp pilish--thinking-marker)
+               (eq (marker-buffer pilish--thinking-start-marker) (current-buffer))
+               (eq (marker-buffer pilish--thinking-marker) (current-buffer))
+               (<= pilish--thinking-start-marker pilish--thinking-marker))
+          (let* ((edit (pilish--thinking-step pilish--thinking-stream delta))
+                 (delete-spaces (pilish--thinking-edit-delete-spaces edit))
+                 (text (pilish--thinking-edit-text edit)))
+            (setq pilish--thinking-stream (pilish--thinking-edit-next-stream edit))
+            (unless (string-empty-p delta)
+              (setq pilish--thinking-raw nil))
+            (when (or (> delete-spaces 0) (not (string-empty-p text)))
+              (pilish--with-scroll-preservation
+                (save-excursion
+                  (goto-char pilish--thinking-marker)
+                  (when (> delete-spaces 0)
+                    (delete-region (- (point) delete-spaces) (point)))
+                  (unless (string-empty-p text)
+                    (insert text))
+                  (set-marker pilish--thinking-marker (point))))))
         ;; Fallback for malformed event streams that skip thinking_start.
         (let ((transformed (replace-regexp-in-string "\n" "\n> " delta)))
           (pilish--with-scroll-preservation
@@ -786,7 +854,7 @@ CONTENT is ignored - we use what was already streamed."
                            pilish--thinking-marker)
                       (when (pilish--replace-thinking-region
                              (pilish--completed-thinking-rendered-text
-                              pilish--thinking-raw))
+                              (pilish--materialize-thinking-raw)))
                         (goto-char (pilish--thinking-insert-position))
                         (pilish--ensure-blank-line-separator))
                     ;; Fallback for malformed event streams that skip thinking_start.
@@ -1700,6 +1768,8 @@ Updates buffer-local state and renders display updates."
              (pilish--discard-pending-tool-update id)
              (pilish--redraw-compound-tool block))))
        (when assistant-p
+         (when pilish--thinking-stream
+           (pilish--materialize-thinking-raw))
          (pilish--render-complete-message)
          ;; message_end.message is authoritative; state has already cleared
          ;; :current-message before this handler runs.
@@ -1896,12 +1966,13 @@ Returns a plist with:
   "Delete pi-owned render artifacts in the current chat buffer.
 This removes completed/pending tool overlays, diff overlays, and lightweight
 cold-tool metadata before buffer reset or history rebuild, then clears keyed
-live-tool state, cached execution args, pending coalesced tool updates, and
-the compatibility pending overlay slot so buffer and render state stay
-consistent.  Pending deferred cooling is invalidated first.  Tree-sitter
-overlays are left alone."
+live-tool state, cached execution args, pending coalesced tool updates,
+active thinking anchors, and the compatibility pending overlay slot so
+buffer and render state stay consistent.  Pending deferred cooling is
+invalidated first.  Tree-sitter overlays are left alone."
   (pilish--cancel-tool-update-flush)
   (pilish--cancel-stream-delta-flush)
+  (pilish--reset-thinking-state)
   (pilish--release-nested-tool-state)
   (remove-overlays (point-min) (point-max) 'pilish-tool-block t)
   (remove-overlays (point-min) (point-max) 'pilish-diff-overlay t)

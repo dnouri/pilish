@@ -719,7 +719,8 @@
                          [(:type "thinking" :thinking "Completed thought")
                           (:type "text" :text "Ordinary reply.")]
                        []))
-             (thought '(:type "thinking" :thinking "Unfinished thought\nStill thinking"))
+             (thought '(:type "thinking" :thinking
+                        "\t \n  Unfinished thought \t\n \nStill thinking\r\n\t "))
              (message (pilish-test--hover-message
                        (vconcat prefix (vector thought))
                        :stopReason reason :errorMessage "Expected interruption"))
@@ -4310,6 +4311,326 @@ Models may send \\n\\n before thinking content too."
       (pilish--display-thinking-end "")
       (should (string-match-p "^>   indented thought" (buffer-string))))))
 
+(defun pilish-test--active-thinking-text ()
+  "Return the active thinking region without text properties."
+  (buffer-substring-no-properties pilish--thinking-start-marker
+                                  pilish--thinking-marker))
+
+(defun pilish-test--thinking-prefix-oracle (source)
+  "Render SOURCE with the complete-string thinking policy."
+  (let ((normalized (pilish--thinking-normalize-text source)))
+    (if (string-empty-p normalized)
+        "> "
+      (pilish--thinking-blockquote-text normalized))))
+
+(defun pilish-test--thinking-delta-regions (deltas)
+  "Check every painted prefix of DELTAS and return its region snapshots."
+  (with-temp-buffer
+    (pilish-chat-mode)
+    (pilish--display-agent-start)
+    (pilish--display-thinking-start)
+    (should (equal (pilish-test--active-thinking-text) "> "))
+    (let ((source "") regions)
+      (dolist (delta deltas)
+        (setq source (concat source delta))
+        (pilish--display-thinking-delta delta)
+        (let ((region (pilish-test--active-thinking-text)))
+          (ert-info ((format "Deltas %S, prefix %S" deltas source))
+            (should (equal region (pilish-test--thinking-prefix-oracle source))))
+          (push region regions)))
+      (nreverse regions))))
+
+(ert-deftest pilish-test-thinking-incremental-matches-every-prefix ()
+  "Every split and character paint agrees with complete-string normalization."
+  (dolist (fixture '(("" "> ")
+                     ("\n" "> ")
+                     (" \t" ">  \t")
+                     ("\n  " ">   ")
+                     ("  \n" "> ")
+                     ("\n \t\n  indented" ">   indented")
+                     ("x  " "> x  ")
+                     ("x  \n" "> x  ")
+                     ("x\n  " "> x")
+                     ("x\n  y" "> x\n>   y")
+                     ("x\n\ny" "> x\n> \n> y")
+                     ("x\n \ny" "> x\n>  \n> y")
+                     ("x\n \n\t\ny" "> x\n> \n> y")
+                     ("x\n \n\t\n  \n\t\n  y\n\t " "> x\n> \n>   y")
+                     ("x\r\n y" "> x\r\n>  y")
+                     ("\r\n" "> \r")
+                     ("\f\n y" "> \f\n>  y")
+                     (" \n y" ">  \n>  y")
+                     ("é界\n\t終" "> é界\n> \t終")
+                     ("> literal\n>> quote" "> > literal\n> >> quote")
+                     ("| a | b |\n|---|---|\n| x | y |"
+                      "> | a | b |\n> |---|---|\n> | x | y |")))
+    (let ((source (car fixture))
+          (expected (cadr fixture)))
+      (dotimes (split (1+ (length source)))
+        (should (equal (car (last (pilish-test--thinking-delta-regions
+                                  (list (substring source 0 split)
+                                        (substring source split)))))
+                       expected)))
+      (let ((regions (pilish-test--thinking-delta-regions
+                      (cons "" (mapcar #'char-to-string source)))))
+        (should (equal (car (last regions)) expected))))))
+
+(ert-deftest pilish-test-thinking-incremental-literal-prefixes ()
+  "Provisional spaces retract, while settled spaces and unresolved gaps do not."
+  (dolist (fixture
+           '((("  " "\n" "  x" "\n  " "y")
+              (">   " "> " ">   x" ">   x" ">   x\n>   y"))
+             (("x " "\t" "\n" " \t" "\n" "  y")
+              ("> x " "> x \t" "> x \t" "> x \t" "> x \t"
+               "> x \t\n>  \t\n>   y"))
+             (("x" "\n" " " "\n" "\t" "\n" "  " "\n" "\t" "y")
+              ("> x" "> x" "> x" "> x" "> x" "> x" "> x" "> x" "> x"
+               "> x\n> \n> \ty"))
+             (("" " " "" "\t" "\n" "\n" " \t" "")
+              ("> " ">  " ">  " ">  \t" "> " "> " ">  \t" ">  \t"))
+             (("x" "\r" "\n" "  " "y")
+              ("> x" "> x\r" "> x\r" "> x\r" "> x\r\n>   y"))
+             ((" " "\n" " \t" ">" "\n" "é界")
+              (">  " ">  " ">  " ">  \n>  \t>" ">  \n>  \t>"
+               ">  \n>  \t>\n> é界"))))
+    (should (equal (pilish-test--thinking-delta-regions (car fixture))
+                   (cadr fixture)))))
+
+(ert-deftest pilish-test-thinking-incremental-all-short-partitions ()
+  "All chunk partitions retain the two-LF blank line and leading-space rules."
+  (dolist (source '(" \t\nx" "x\n \ny" "x\n\n\ny" " \n \n "))
+    (dotimes (partition (ash 1 (1- (length source))))
+      (let ((start 0) deltas)
+        (dotimes (index (1- (length source)))
+          (when (not (zerop (logand partition (ash 1 index))))
+            (push (substring source start (1+ index)) deltas)
+            (setq start (1+ index))))
+        (push (substring source start) deltas)
+        (pilish-test--thinking-delta-regions (nreverse deltas))))))
+
+(ert-deftest pilish-test-thinking-incremental-fixed-seed-multipart-prefixes ()
+  "Repeatable multipart paints match the oracle across longer mixed content."
+  (let ((seed 20261028)
+        (source " \t\n\n  é> text \t\n \t\nblank\n \n\t\n\n  | a |\n|---|\n| 界 |\r\n\t "))
+    (dotimes (_ 24)
+      (let ((index 0) deltas)
+        (while (< index (length source))
+          (setq seed (logand #x7fffffff (+ (* seed 1103515245) 12345)))
+          (let ((end (min (length source) (+ index 1 (% seed 9)))))
+            (push (substring source index end) deltas)
+            (when (zerop (% seed 3)) (push "" deltas))
+            (setq index end)))
+        (should (equal (car (last (pilish-test--thinking-delta-regions (nreverse deltas))))
+                       ">   é> text \t\n>  \t\n> blank\n> \n>   | a |\n> |---|\n> | 界 |\r"))))))
+
+(ert-deftest pilish-test-thinking-settled-spaces-preserve-properties-and-readers ()
+  "Resolving a gap never deletes settled trailing spaces under a reader."
+  (with-temp-buffer
+    (pilish-chat-mode)
+    (pilish--display-agent-start)
+    (pilish--display-thinking-start)
+    (pilish--display-thinking-delta "x  \t")
+    (save-window-excursion
+      (switch-to-buffer (current-buffer))
+      (let* ((start (marker-position pilish--thinking-start-marker))
+             (end (marker-position pilish--thinking-marker))
+             (reader (copy-marker (+ start 4) t))
+             (inhibit-read-only t))
+        (put-text-property (+ start 3) end 'pilish-test-settled-space t)
+        (goto-char reader)
+        (set-window-point (selected-window) reader)
+        (dolist (delta '("\n" " \t" "\n" "  " "\n" "tail"))
+          (pilish--display-thinking-delta delta)
+          (should (= (point) (+ start 4)))
+          (should (= (window-point) (+ start 4)))
+          (should (= (marker-position reader) (+ start 4)))
+          (should (equal (buffer-substring-no-properties start end) "> x  \t"))
+          (should-not (text-property-not-all (+ start 3) end
+                                             'pilish-test-settled-space t)))
+        (should (equal (pilish-test--active-thinking-text) "> x  \t\n> \n> tail"))
+        (set-marker reader nil)))))
+
+(ert-deftest pilish-test-thinking-leading-retraction-is-one-suffix-edit ()
+  "One delta retracts only old provisional spaces, then inserts one fragment."
+  (with-temp-buffer
+    (pilish-chat-mode)
+    (pilish--display-agent-start)
+    (pilish--display-thinking-start)
+    (pilish--display-thinking-delta " \t")
+    (let* ((end (marker-position pilish--thinking-marker))
+           changes
+           (before-change-functions
+            (cons (lambda (beg end) (push (list beg end) changes))
+                  before-change-functions)))
+      (pilish--display-thinking-delta "\t\n \n  word\n \n\t\n尾")
+      (should (equal (nreverse changes)
+                     (list (list (- end 2) end) (list (- end 2) (- end 2)))))
+      (should (equal (pilish-test--active-thinking-text)
+                     ">   word\n> \n> 尾")))))
+
+(ert-deftest pilish-test-thinking-live-does-not-render-the-full-prefix ()
+  "Live paints never call complete-string rendering or materialize raw text."
+  (with-temp-buffer
+    (pilish-chat-mode)
+    (pilish--display-agent-start)
+    (pilish--display-thinking-start)
+    (cl-letf (((symbol-function 'pilish--thinking-normalize-text)
+               (lambda (&rest _) (ert-fail "Live full-prefix normalization")))
+              ((symbol-function 'pilish--thinking-blockquote-text)
+               (lambda (&rest _) (ert-fail "Live full-prefix blockquote")))
+              ((symbol-function 'pilish--materialize-thinking-raw)
+               (lambda (&rest _) (ert-fail "Live raw materialization"))))
+      (dolist (delta '(" \t" "\n" "word  " "\n"))
+        (pilish--display-thinking-delta delta))
+      (dotimes (_ 128) (pilish--display-thinking-delta " "))
+      (pilish--display-thinking-delta "tail")
+      (should (equal (pilish-test--active-thinking-text)
+                     (concat "> word  \n> " (make-string 128 ?\s) "tail"))))))
+
+(ert-deftest pilish-test-thinking-completion-keeps-lossless-raw-in-both-modes ()
+  "Visible and hidden completion receive every raw byte, even discarded gaps."
+  (dolist (display '(visible hidden))
+    (let ((pilish-thinking-display display))
+      (with-temp-buffer
+        (pilish-chat-mode)
+        (pilish--handle-display-event '(:type "agent_start"))
+        (pilish--handle-display-event
+         '(:type "message_start" :message (:role "assistant")))
+        (pilish-test--send-assistant-message-update '(:type "thinking_start"))
+        (let ((start (marker-position pilish--thinking-start-marker))
+              (raw "\t \n  é> \t\n \n\t\n終\r\n\t ")
+              (original (symbol-function 'pilish--completed-thinking-rendered-text))
+              captured)
+          (dolist (delta '("\t \n" "  é>" " \t\n \n" "\t\n終\r" "\n\t "))
+            (pilish-test--send-assistant-message-update
+             `(:type "thinking_delta" :delta ,delta))
+            (pilish--flush-stream-deltas))
+          (cl-letf (((symbol-function 'pilish--completed-thinking-rendered-text)
+                     (lambda (text &rest args)
+                       (setq captured text)
+                       (apply original text args))))
+            (pilish-test--send-assistant-message-update
+             '(:type "thinking_end" :content "Ignored content")))
+          (should (equal captured raw))
+          (let ((metadata (pilish--thinking-block-metadata-at-pos start)))
+            (should (equal (plist-get metadata :normalized) "  é> \t\n\n終\r"))
+            (should (eq (plist-get metadata :display) display))
+            (should (equal (buffer-substring-no-properties start (plist-get metadata :end))
+                           (if (eq display 'visible)
+                               ">   é> \t\n> \n> 終\r"
+                             "> Thinking (3 lines)"))))
+          (should-not pilish--thinking-raw)
+          (should-not pilish--thinking-stream)
+          (should-not pilish--thinking-marker)
+          (pilish--handle-display-event
+           `(:type "message_end" :message
+             (:role "assistant" :content [(:type "thinking" :thinking ,raw)])))
+          (should-not pilish--thinking-raw)
+          (should-not pilish--thinking-stream))))))
+
+(ert-deftest pilish-test-thinking-unfinished-raw-cache-and-late-deltas ()
+  "Only assistant completion materializes raw; later safe deltas retain it all."
+  (with-temp-buffer
+    (pilish-chat-mode)
+    (pilish--handle-display-event '(:type "agent_start"))
+    (pilish--handle-display-event
+     '(:type "message_start" :message (:role "assistant")))
+    (pilish--display-thinking-start)
+    (should (equal pilish--thinking-raw ""))
+    (pilish--display-thinking-delta "")
+    (should (equal pilish--thinking-raw ""))
+    (dolist (delta '(" \n" 42 "\r\n\t "))
+      (pilish--display-thinking-delta delta))
+    (should-not pilish--thinking-raw)
+    (let ((marker pilish--thinking-marker)
+          (start pilish--thinking-start-marker))
+      (pilish--handle-display-event '(:type "message_end" :message (:role "toolResult")))
+      (should-not pilish--thinking-raw)
+      (pilish--handle-display-event
+       '(:type "message_end" :message (:role "assistant" :stopReason "aborted")))
+      (should (equal pilish--thinking-raw " \n42\r\n\t "))
+      (should (eq marker pilish--thinking-marker))
+      (should (eq start pilish--thinking-start-marker))
+      (should (equal (pilish-test--active-thinking-text) "> 42\r"))
+      (should-not (get-text-property start 'pilish-thinking-block))
+      (should-not (get-text-property start 'pilish-details))
+      (let ((raw pilish--thinking-raw))
+        (should (eq (pilish--materialize-thinking-raw) raw))
+        (should (eq (pilish--materialize-thinking-raw) raw))
+        (pilish--display-thinking-delta "")
+        (should (eq pilish--thinking-raw raw)))
+      (pilish--display-thinking-delta "終")
+      (should-not pilish--thinking-raw)
+      (pilish--handle-display-event
+       '(:type "message_end" :message (:role "assistant" :stopReason "aborted")))
+      (should (equal pilish--thinking-raw " \n42\r\n\t 終"))
+      (should (equal (pilish-test--active-thinking-text) "> 42\r\n> \t 終"))
+      (should-not (get-text-property start 'pilish-details)))))
+
+(ert-deftest pilish-test-thinking-missing-start-keeps-malformed-stream-fallback ()
+  "A missing thinking_start keeps the literal fallback instead of normalizing."
+  (with-temp-buffer
+    (pilish-chat-mode)
+    (pilish--display-agent-start)
+    (let ((start (point-max)))
+      (pilish--display-thinking-delta 42)
+      (pilish--display-thinking-delta "\n  x\n")
+      (should (equal (buffer-substring-no-properties start (point-max))
+                     "42\n>   x\n> "))
+      (pilish--display-thinking-end "Ignored content")
+      (should (equal (buffer-substring-no-properties start (point-max))
+                     "42\n>   x\n> \n\n"))
+      (should-not pilish--thinking-stream)
+      (should-not pilish--thinking-raw))))
+
+(ert-deftest pilish-test-thinking-teardown-discards-unresolved-whitespace ()
+  "Repeated teardown detaches thinking anchors without materializing old text."
+  (dolist (reset '(pilish--clear-render-artifacts
+                  (lambda () (pilish--display-session-history []))))
+    (with-temp-buffer
+      (pilish-chat-mode)
+      (pilish--display-agent-start)
+      (pilish--display-thinking-start)
+      (pilish--display-thinking-delta " \t\nx\n \t\n\t")
+      (let ((start pilish--thinking-start-marker)
+            (end pilish--thinking-marker))
+        (cl-letf (((symbol-function 'pilish--materialize-thinking-raw)
+                   (lambda () (ert-fail "Discarded thinking was materialized"))))
+          (funcall reset)
+          (funcall reset))
+        (should-not (marker-buffer start))
+        (should-not (marker-buffer end))
+        (should-not pilish--thinking-stream)
+        (should-not pilish--thinking-raw)
+        (pilish--display-agent-start)
+        (pilish--display-thinking-start)
+        (pilish--display-thinking-delta "new\n")
+        (should (equal (pilish-test--active-thinking-text) "> new"))
+        (should (equal (pilish--materialize-thinking-raw) "new\n"))))))
+
+(ert-deftest pilish-test-thinking-streams-are-buffer-local ()
+  "Interleaved buffers retain their own leading spaces, gaps, raw, and reset."
+  (with-temp-buffer
+    (pilish-chat-mode)
+    (pilish--display-agent-start)
+    (pilish--display-thinking-start)
+    (pilish--display-thinking-delta " \t")
+    (let ((first (current-buffer)))
+      (with-temp-buffer
+        (pilish-chat-mode)
+        (pilish--display-agent-start)
+        (pilish--display-thinking-start)
+        (pilish--display-thinking-delta "x\n ")
+        (with-current-buffer first
+          (pilish--display-thinking-delta "\n  A")
+          (should (equal (pilish-test--active-thinking-text) ">   A"))
+          (should (equal (pilish--materialize-thinking-raw) " \t\n  A"))
+          (pilish--display-thinking-end ""))
+        (should-not pilish--thinking-raw)
+        (pilish--display-thinking-delta "\n\t\nB")
+        (should (equal (pilish-test--active-thinking-text) "> x\n> \n> B"))
+        (should (equal (pilish--materialize-thinking-raw) "x\n \n\t\nB"))))))
+
 (ert-deftest pilish-test-thinking-whitespace-only-delta-does-not-rewrite-buffer ()
   "Adding ignorable trailing whitespace should not rewrite rendered thinking."
   (with-temp-buffer
@@ -4319,9 +4640,10 @@ Models may send \\n\\n before thinking content too."
     (pilish--display-thinking-delta "Stable")
     (let ((before (buffer-string))
           (before-tick (buffer-chars-modified-tick)))
-      (pilish--display-thinking-delta "\n")
-      (should (equal before (buffer-string)))
-      (should (= before-tick (buffer-chars-modified-tick))))))
+      (dolist (delta '("\n" " " "\t" "\n" "  " "\n" ""))
+        (pilish--display-thinking-delta delta)
+        (should (equal before (buffer-string)))
+        (should (= before-tick (buffer-chars-modified-tick)))))))
 
 (ert-deftest pilish-test-thinking-incremental-appends-suffix-only ()
   "Consecutive thinking deltas use the fast path: insert suffix, not full rewrite.
@@ -4334,7 +4656,6 @@ because it inserts at the end, while a full rewrite would lose it."
     (pilish--display-agent-start)
     (pilish--display-thinking-start)
     (pilish--display-thinking-delta "First thought.")
-    (should pilish--thinking-prev-rendered)
     ;; Place a marker property inside the rendered thinking region
     (let ((think-start (marker-position pilish--thinking-start-marker))
           (inhibit-read-only t))
@@ -22266,9 +22587,11 @@ Commands with embedded newlines should not have any lines deleted."
     (let ((marker pilish--thinking-marker)
           (start-marker pilish--thinking-start-marker))
       (should (stringp pilish--thinking-raw))
+      (pilish--display-thinking-delta "x\n \t\n\t")
       (pilish--display-agent-end)
       (should-not pilish--thinking-marker)
       (should-not pilish--thinking-start-marker)
+      (should-not pilish--thinking-stream)
       (should-not pilish--thinking-raw)
       (should-not (marker-buffer marker))
       (should-not (marker-buffer start-marker)))))
@@ -22281,9 +22604,11 @@ Commands with embedded newlines should not have any lines deleted."
     (pilish--display-thinking-start)
     (let ((marker pilish--thinking-marker)
           (start-marker pilish--thinking-start-marker))
+      (pilish--display-thinking-delta "x\n \t")
       (pilish--handle-display-event event)
       (should-not pilish--thinking-marker)
       (should-not pilish--thinking-start-marker)
+      (should-not pilish--thinking-stream)
       (should-not pilish--thinking-raw)
       (should-not (marker-buffer marker))
       (should-not (marker-buffer start-marker)))))
