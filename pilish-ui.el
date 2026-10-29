@@ -2297,7 +2297,7 @@ text set by extensions all refit the window once per command."
                    (pilish-fit-input-window win)))))))))
 
 (defun pilish--maybe-rebalance-windows (frame)
-  "Rebalance pi chat/input window pairs after FRAME changes size.
+  "Rebalance pi chat/input window pairs after FRAME is resized.
 Intended for `window-size-change-functions'."
   (when (eq pilish-input-window-height 'fit)
     (pilish--fit-input-windows-on-resize frame))
