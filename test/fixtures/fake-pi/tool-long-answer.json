@@ -1,0 +1,16 @@
+{
+  "description": "Tool execution followed by a final answer taller than the chat window.",
+  "commands": [],
+  "prompt": {
+    "type": "tool_stream",
+    "tool_name": "read",
+    "tool_args": {
+      "path": "/tmp/fake-tool.txt"
+    },
+    "partial_result_text": "Line 01 partial content\n",
+    "result_text": "Line 01 of file\nLine 02 of file\n",
+    "assistant_text": "Answer line 01\nAnswer line 02\nAnswer line 03\nAnswer line 04\nAnswer line 05\nAnswer line 06\nAnswer line 07\nAnswer line 08\nAnswer line 09\nAnswer line 10\nAnswer line 11\nAnswer line 12\nAnswer line 13\nAnswer line 14\nAnswer line 15\nAnswer line 16\nAnswer line 17\nAnswer line 18\nAnswer line 19\nAnswer line 20\nAnswer line 21\nAnswer line 22\nAnswer line 23\nAnswer line 24\nAnswer line 25\nAnswer line 26\nAnswer line 27\nAnswer line 28\nAnswer line 29\nAnswer line 30\nAnswer line 31\nAnswer line 32\nAnswer line 33\nAnswer line 34\nAnswer line 35\nAnswer line 36\nAnswer line 37\nAnswer line 38\nAnswer line 39\nAnswer line 40\nAnswer line 41\nAnswer line 42\nAnswer line 43\nAnswer line 44\nAnswer line 45\nAnswer line 46\nAnswer line 47\nAnswer line 48\nAnswer line 49\nAnswer line 50\nAnswer line 51\nAnswer line 52\nAnswer line 53\nAnswer line 54\nAnswer line 55\nAnswer line 56\nAnswer line 57\nAnswer line 58\nAnswer line 59\nAnswer line 60\nAnswer line 61\nAnswer line 62\nAnswer line 63\nAnswer line 64\nAnswer line 65\nAnswer line 66\nAnswer line 67\nAnswer line 68\nAnswer line 69\nAnswer line 70\nAnswer line 71\nAnswer line 72\nAnswer line 73\nAnswer line 74\nAnswer line 75\nAnswer line 76\nAnswer line 77\nAnswer line 78\nAnswer line 79\nAnswer line 80",
+    "delay_ms": 10,
+    "echo_user": true
+  }
+}

@@ -369,6 +369,18 @@ Press =TAB= on a turn header (=You= or =Assistant=) to fold or unfold
 that turn.  Use =n= and =p= in the chat buffer to jump between user
 messages, and =f= to fork the conversation from the turn at point.
 
+With =pilish-jump-to-answer= non-nil, a turn that ends normally moves
+chat windows following the output to the start of the final assistant
+message, the answer after the last tool call, so a long answer is read
+from its beginning.  Windows where you scrolled elsewhere stay, and an
+answer already visible together with the end of the buffer moves
+nothing.  Stopped turns, and turns followed at once by a queued
+follow-up, do not jump.  A window that is not shown when the turn ends,
+such as one in another tab, lands when it is shown again.  When the
+next turn starts, a landed window whose point you left in place follows
+the output again.  =M-x pilish-toggle-jump-to-answer= toggles the
+setting for the current session only.
+
 The chat header ends with a summary line showing the pi and Pilish
 versions plus skill and prompt-template counts.  Click its caret or
 press =TAB= on the summary to expand sections listing context files,
@@ -902,6 +914,9 @@ Here are some common non-default preferences:
 ;; Make the input window 25% of the session's window pair;
 ;; rebalanced on frame resize:
 (setopt pilish-input-window-height 0.25)
+
+;; When a turn ends, show its final answer from the start:
+(setopt pilish-jump-to-answer t)
 
 ;; Copy source Markdown from the chat buffer instead of only visible text:
 (setopt pilish-copy-raw-markdown t)
