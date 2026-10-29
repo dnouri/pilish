@@ -3302,9 +3302,12 @@ Safely handles dead buffers by checking liveness first."
 (defun pilish--send-abort ()
   "Clear backend queues before aborting the current operation.
 Send both commands in wire order.  Their acknowledgments must not release
-local ownership or mutate a later operation on the same process."
+local ownership or mutate a later operation on the same process.
+Open extension editors are cancelled in between: Pi's RPC editor request
+has no abort signal, so its waiting tool settles only after a response."
   (when-let* ((proc (pilish--get-process)))
     (pilish--rpc-async proc '(:type "clear_queue") #'ignore)
+    (pilish--close-process-editors proc)
     (pilish--rpc-async proc '(:type "abort") #'ignore)))
 
 (defconst pilish--prompt-start-timeout 0.5

@@ -7182,24 +7182,99 @@ See https://github.com/dnouri/pilish/issues/176."
         (should (equal (plist-get response-sent :id) "req-9"))
         (should (eq (plist-get response-sent :cancelled) t))))))
 
-(ert-deftest pilish-test-extension-ui-editor-cancels ()
-  "extension_ui_request editor method sends cancelled (not supported)."
-  (let ((response-sent nil))
-    (cl-letf (((symbol-function 'pilish--send-extension-ui-response)
-               (lambda (_proc msg)
-                 (setq response-sent msg)))
-              ((symbol-function 'message) #'ignore))
-      (with-temp-buffer
-        (pilish-chat-mode)
-        (let ((pilish--process t))
-          (pilish--handle-extension-ui-request
-           '(:type "extension_ui_request"
-             :id "req-10"
-             :method "editor"
-             :title "Edit:"
-             :prefill "some text")))
-        (should response-sent)
-        (should (eq (plist-get response-sent :cancelled) t))))))
+(defun pilish-test--editor-request (id &optional prefill)
+  "Return an editor request with ID and PREFILL."
+  (list :type "extension_ui_request" :id id :method "editor"
+        :title "Edit:" :prefill prefill))
+
+(ert-deftest pilish-test-extension-ui-editor-submits-edited-text ()
+  "An editor request opens a separate prefilled buffer whose text is sent once."
+  (let ((process (make-pipe-process :name "pilish-editor-submit" :noquery t))
+        (draft (generate-new-buffer " *pilish-editor-draft*"))
+        responses editor)
+    (unwind-protect
+        (cl-letf (((symbol-function 'pop-to-buffer) #'ignore)
+                  ((symbol-function 'pilish--send-extension-ui-response)
+                   (lambda (proc response) (push (cons proc response) responses))))
+          (with-current-buffer draft (insert "unsent draft"))
+          (with-temp-buffer
+            (pilish-chat-mode)
+            (setq pilish--process process
+                  pilish--input-buffer draft)
+            (pilish--handle-extension-ui-request
+             (pilish-test--editor-request "req-10" "first\nsecond")))
+          (setq editor (car (process-get process 'pilish-editor-buffers)))
+          (should (buffer-live-p editor))
+          (should (string-prefix-p "*pilish-editor: Edit:*" (buffer-name editor)))
+          (with-current-buffer editor
+            (should (eq major-mode 'pilish-editor-mode))
+            (should (equal (buffer-string) "first\nsecond"))
+            (should (= (point) (point-max)))
+            (should-not responses)
+            (insert "\nthird")
+            (pilish-editor-submit))
+          (should-not (buffer-live-p editor))
+          (should-not (process-get process 'pilish-editor-buffers))
+          (should (equal responses
+                         `((,process :type "extension_ui_response" :id "req-10"
+                                     :value "first\nsecond\nthird"))))
+          (should (equal (with-current-buffer draft (buffer-string)) "unsent draft")))
+      (when (buffer-live-p editor) (kill-buffer editor))
+      (kill-buffer draft)
+      (delete-process process))))
+
+(ert-deftest pilish-test-extension-ui-editor-cancels-once ()
+  "Cancelling or killing an editor sends exactly one cancellation."
+  (let ((process (make-pipe-process :name "pilish-editor-cancel" :noquery t))
+        responses editors)
+    (unwind-protect
+        (cl-letf (((symbol-function 'pop-to-buffer) #'ignore)
+                  ((symbol-function 'pilish--send-extension-ui-response)
+                   (lambda (_proc response) (push response responses))))
+          (let ((cancelled (pilish--extension-ui-editor
+                            (pilish-test--editor-request "cancel" "kept") process))
+                (killed (pilish--extension-ui-editor
+                         (pilish-test--editor-request "kill") process)))
+            (setq editors (list cancelled killed))
+            (with-current-buffer cancelled (pilish-editor-cancel))
+            (kill-buffer killed)
+            (should-not (buffer-live-p cancelled))
+            (should-not (process-get process 'pilish-editor-buffers))
+            (should (equal (reverse responses)
+                           '((:type "extension_ui_response" :id "cancel" :cancelled t)
+                             (:type "extension_ui_response" :id "kill" :cancelled t))))))
+      (dolist (editor editors)
+        (when (buffer-live-p editor) (kill-buffer editor)))
+      (delete-process process))))
+
+(ert-deftest pilish-test-extension-ui-editor-cleanup-is-process-owned ()
+  "Process exit closes only that process's editors; live cleanup cancels."
+  (let ((one (make-pipe-process :name "pilish-editor-one" :noquery t
+                                :sentinel #'pilish--process-sentinel))
+        (two (make-pipe-process :name "pilish-editor-two" :noquery t))
+        editor-one editor-two responses)
+    (unwind-protect
+        (cl-letf (((symbol-function 'pop-to-buffer) #'ignore)
+                  ((symbol-function 'pilish--send-extension-ui-response)
+                   (lambda (process response) (push (cons process response) responses))))
+          (setq editor-one (pilish--extension-ui-editor
+                            (pilish-test--editor-request "one") one)
+                editor-two (pilish--extension-ui-editor
+                            (pilish-test--editor-request "two") two))
+          (delete-process one)
+          (should-not (buffer-live-p editor-one))
+          (should (buffer-live-p editor-two))
+          ;; A dead process cannot receive a cancellation.
+          (should-not responses)
+          (pilish--close-process-editors two)
+          (should-not (buffer-live-p editor-two))
+          (should (equal responses
+                         `((,two :type "extension_ui_response" :id "two" :cancelled t))))
+          (should (process-live-p two)))
+      (when (buffer-live-p editor-one) (kill-buffer editor-one))
+      (when (buffer-live-p editor-two) (kill-buffer editor-two))
+      (when (process-live-p one) (delete-process one))
+      (delete-process two))))
 
 ;; W1 Task 1 fixture: a valid supported-dialog request. File-local to these tests.
 (defun pilish-test--extension-dialog-request (method &optional id)
