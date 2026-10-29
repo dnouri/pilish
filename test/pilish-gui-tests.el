@@ -972,6 +972,42 @@ buffer end so the next streamed turn still follows automatically."
     (should (pilish-gui-test-at-end-p))
     (should (pilish-gui-test-chat-contains "Scroll line 24 for second turn"))))
 
+(defun pilish-gui-test--last-answer-start ()
+  "Return the start of the newest fake answer's first line in the chat."
+  (with-current-buffer (plist-get pilish-gui-test--session :chat-buffer)
+    (save-excursion
+      (goto-char (point-max))
+      (re-search-backward "^Answer line 01$")
+      (line-beginning-position))))
+
+(ert-deftest pilish-gui-test-jump-to-answer-lands-on-final-answer ()
+  "A finished turn shows its long final answer from the first line.
+The answer follows a tool call.  An unmoved landed window follows the
+next turn and lands on that turn's answer.  Toggling the session off
+with its command leaves the next turn's window at the end."
+  (let ((pilish-jump-to-answer t))
+    (pilish-gui-test-with-fresh-session
+      (:backend fake :fake-scenario "tool-long-answer")
+      (dolist (turn '("first" "second"))
+        (pilish-gui-test-send (format "%s turn" turn))
+        (let ((window (pilish-gui-test-chat-window))
+              (start (pilish-gui-test--last-answer-start)))
+          (pilish-gui-test--large-evidence
+           (format "jump-to-answer-%s" turn)
+           (list :answer-start start
+                 :window-start (window-start window)
+                 :window-point (window-point window)
+                 :point-max (with-current-buffer (window-buffer window)
+                              (point-max))))
+          (should (= (window-start window) start))
+          (should (= (window-point window) start))
+          (should (pos-visible-in-window-p start window))))
+      (with-current-buffer (plist-get pilish-gui-test--session :input-buffer)
+        (call-interactively #'pilish-toggle-jump-to-answer))
+      (pilish-gui-test-send "third turn")
+      (should (pilish-gui-test-window-point-at-end-p))
+      (should (pilish-gui-test-at-end-p)))))
+
 (ert-deftest pilish-gui-test-thinking-initial-whitespace-keeps-point ()
   (let ((buf (get-buffer-create "*pi-gui-thinking-initial-point*")))
     (unwind-protect
