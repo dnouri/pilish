@@ -1294,6 +1294,21 @@ To check which grammars are installed or install them later:
 M-x pilish-install-grammars
 #+end_src
 
+Reinstall the two Markdown grammars after upgrading from an earlier
+Pilish release, then restart Emacs:
+
+#+begin_src
+C-u M-x pilish-install-grammars
+#+end_src
+
+Older Markdown builds carry a scanner defect that could crash Emacs
+while deeply nested output was parsed, and an installed grammar is
+never rebuilt automatically.  The prefix argument removes and rebuilds
+both Markdown grammars from the current recipe.  It keeps a grammar that
+is newer than the pinned build instead of downgrading it.  If you manage
+grammars yourself, use the revision in
+=pilish-essential-grammar-recipes=.
+
 If you manage tree-sitter grammars outside of Emacs, for example
 through a system package manager, set
 =pilish-essential-grammar-action= to =warn= to suppress the

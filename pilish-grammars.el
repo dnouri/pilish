@@ -42,13 +42,59 @@
 (require 'treesit)
 (require 'seq)
 
+;; These queries exist in Emacs 30 and newer.  Declaring them keeps the
+;; byte-compiler quiet on Emacs 29, where the `fboundp' guards make the
+;; calls unreachable.
+(declare-function treesit-library-abi-version "treesit.c"
+                  (&optional min-compatible))
+(declare-function treesit-language-abi-version "treesit.c" (language))
+
+(defconst pilish--markdown-upstream-source
+  '("https://github.com/tree-sitter-grammars/tree-sitter-markdown" "v0.5.4")
+  "Upstream Markdown grammar source for tree-sitter ABI 15 and newer.")
+
+(defconst pilish--markdown-backport-source
+  '("https://github.com/dnouri/tree-sitter-markdown" "v0.4.1-pilish.1")
+  "Backport of the scanner fix for tree-sitter ABI 14, based on v0.4.1.")
+
+(defun pilish--treesit-abi-version ()
+  "Return the newest language ABI this Emacs can load, or nil."
+  (and (fboundp 'treesit-library-abi-version)
+       (treesit-library-abi-version)))
+
+(defun pilish--markdown-grammar-source ()
+  "Return the (URL REVISION) pair of Markdown grammars for this Emacs.
+Upstream v0.5.4 is used when this Emacs loads ABI 15.  Otherwise the
+v0.4.1 backport is used, which carries the same scanner fix at ABI 14.
+Both fix the serialization overflow described in
+`pilish-essential-grammar-recipes'."
+  (let ((abi (pilish--treesit-abi-version)))
+    (if (and (integerp abi) (>= abi 15))
+        pilish--markdown-upstream-source
+      pilish--markdown-backport-source)))
+
 (defconst pilish-essential-grammar-recipes
-  '((markdown "https://github.com/tree-sitter-grammars/tree-sitter-markdown"
-              "v0.4.1" "tree-sitter-markdown/src")
-    (markdown-inline "https://github.com/tree-sitter-grammars/tree-sitter-markdown"
-                     "v0.4.1" "tree-sitter-markdown-inline/src"))
+  (let ((source (pilish--markdown-grammar-source)))
+    (list (list 'markdown (nth 0 source) (nth 1 source)
+                "tree-sitter-markdown/src")
+          (list 'markdown-inline (nth 0 source) (nth 1 source)
+                "tree-sitter-markdown-inline/src")))
   "Tree-sitter grammar recipes required for chat rendering.
-Each entry is (LANG URL REVISION [SOURCE-DIR]).")
+Each entry is (LANG URL REVISION [SOURCE-DIR]).
+
+The Markdown scanner in v0.4.1 wrote 5 + 4 bytes per open block into a
+fixed 1024-byte serialization buffer without checking the bound, so
+documents with 255 or more nested blocks overflowed the buffer and
+corrupted the Emacs process.  Upstream fixed that in 2990e5a, released
+in v0.5.4, which requires tree-sitter ABI 15.
+
+Emacs 29 and 30 load at most ABI 14, so they cannot use that release.
+They get a v0.4.1 backport instead, tag v0.4.1-pilish.1 on
+https://github.com/dnouri/tree-sitter-markdown, whose commit is 9a12ff4
+and which carries only the scanner fix.  A build with ABI 15 or newer
+gets upstream v0.5.4 directly.  `treesit-install-language-grammar'
+clones with `git clone -b', so the revisions are tags, not commit
+hashes.")
 
 (defconst pilish-optional-grammar-recipes
   '((python      "https://github.com/tree-sitter/tree-sitter-python"       "v0.23.6")
@@ -172,6 +218,62 @@ Each entry is (LANG URL REVISION [SOURCE-DIR]).")
 
 ;;;; Installation
 
+(defun pilish--grammar-library-file-name (lang)
+  "Return the compiled library file name for LANG."
+  (concat "libtree-sitter-" (symbol-name lang)
+          (or (car dynamic-library-suffixes) ".so")))
+
+(defun pilish--grammar-library-files (lang)
+  "Return installed compiled library files for LANG that Pilish may replace.
+Looks in `treesit-extra-load-path' and the default user grammar
+directory.  System-wide grammar files are never returned."
+  (let ((name (pilish--grammar-library-file-name lang)))
+    (delete-dups
+     (seq-filter
+      #'file-exists-p
+      (mapcar (lambda (dir) (expand-file-name name dir))
+              (append treesit-extra-load-path
+                      (list (locate-user-emacs-file "tree-sitter"))))))))
+
+(defun pilish--delete-grammar-libraries (grammars)
+  "Delete compiled GRAMMARS libraries from user-managed directories.
+Returns the number of files deleted.  Grammar files outside the user's
+grammar directories, such as system packages, are left alone."
+  (let ((deleted 0))
+    (dolist (lang grammars)
+      (dolist (file (pilish--grammar-library-files lang))
+        (when (ignore-errors (delete-file file) t)
+          (cl-incf deleted))))
+    deleted))
+
+(defconst pilish--markdown-grammar-abi-version
+  (if (eq (pilish--markdown-grammar-source) pilish--markdown-upstream-source)
+      15
+    14)
+  "Language ABI version of the pinned Markdown grammar build.")
+
+(defun pilish--newer-markdown-grammar-installed-p (lang)
+  "Return non-nil when LANG's grammar is newer than the pinned build.
+Rebuilding such a grammar from the pinned backport would downgrade it."
+  (and (fboundp 'treesit-language-abi-version)
+       (let ((version (treesit-language-abi-version lang)))
+         (and (integerp version)
+              (> version pilish--markdown-grammar-abi-version)))))
+
+(defun pilish--install-language-grammar (lang)
+  "Install LANG from Pilish's own recipe.
+Another recipe for LANG may come first in
+`treesit-language-source-alist', for example the vulnerable v0.4.1 pin
+that a newer Emacs ships for its built-in Markdown mode.  Put Pilish's
+tested recipe first for this installation so the fixed build is what
+gets installed."
+  (let ((recipe (assq lang pilish-grammar-recipes)))
+    (if recipe
+        (let ((treesit-language-source-alist
+               (cons recipe treesit-language-source-alist)))
+          (treesit-install-language-grammar lang))
+      (treesit-install-language-grammar lang))))
+
 (defun pilish--install-grammars (grammars)
   "Install tree-sitter GRAMMARS, showing progress.
 Returns the number of successfully installed grammars."
@@ -182,7 +284,11 @@ Returns the number of successfully installed grammars."
           (cl-incf idx)
           (message "[pilish] Installing grammar %d/%d: %s..."
                    idx total lang)
-          (treesit-install-language-grammar lang))
+          (pilish--install-language-grammar lang)
+          ;; The installer only warns on failure, so confirm the library
+          ;; exists before reporting the grammar as installed.
+          (unless (pilish--grammar-library-files lang)
+            (error "No grammar library found after installing `%s'" lang)))
       (error
        (display-warning
         'pilish
@@ -295,17 +401,42 @@ Run M-x pilish-install-grammars anytime."))))))
 ;;;; Interactive Command
 
 ;;;###autoload
-(defun pilish-install-grammars ()
+(defun pilish-install-grammars (&optional reinstall)
   "Show grammar status and install missing tree-sitter grammars.
 Displays which grammars are installed and which are missing,
-then offers to install the missing ones."
-  (interactive)
-  (let ((installed (pilish--installed-optional-grammars))
-        (missing (pilish--missing-optional-grammars))
-        (essential-missing (pilish--missing-essential-grammars))
-        (markdown-incompatible
-         (pilish--markdown-grammar-incompatible-p)))
-    (cond
+then offers to install the missing ones.
+
+With prefix argument REINSTALL, delete and rebuild the essential
+Markdown grammars.  Installed grammars are not rebuilt otherwise, so
+use this after upgrading Pilish to pick up grammar fixes.  Restart
+Emacs afterwards so the rebuilt grammar replaces the one already
+loaded in this session."
+  (interactive "P")
+  (if reinstall
+      (let ((kept nil)
+            (deleted 0)
+            (rebuilt 0))
+        (dolist (lang pilish--essential-grammars)
+          (if (pilish--newer-markdown-grammar-installed-p lang)
+              (push lang kept)
+            (cl-incf deleted (pilish--delete-grammar-libraries (list lang)))
+            (cl-incf rebuilt (pilish--install-grammars (list lang)))))
+        (when (> deleted 0)
+          (message "[pilish] Removed %d installed Markdown grammar %s."
+                   deleted (if (= deleted 1) "library" "libraries")))
+        (when kept
+          (message "[pilish] Keeping newer %s grammar; the pinned build is ABI %d."
+                   (mapconcat #'symbol-name kept ", ")
+                   pilish--markdown-grammar-abi-version))
+        (when (= rebuilt (- (length pilish--essential-grammars) (length kept)))
+          (message "[pilish] Markdown grammars rebuilt.  Restart Emacs to load them."))
+        (setq pilish--markdown-grammar-warning-done nil))
+    (let ((installed (pilish--installed-optional-grammars))
+          (missing (pilish--missing-optional-grammars))
+          (essential-missing (pilish--missing-essential-grammars))
+          (markdown-incompatible
+           (pilish--markdown-grammar-incompatible-p)))
+      (cond
      (markdown-incompatible
       (display-warning
        'pilish
@@ -346,7 +477,7 @@ then offers to install the missing ones."
                                    (pilish-install-grammars)))))
           (local-set-key "q" #'quit-window)
           (goto-char (point-min)))
-        (pop-to-buffer buf))))))
+        (pop-to-buffer buf)))))))
 
 (provide 'pilish-grammars)
 ;;; pilish-grammars.el ends here

@@ -2525,38 +2525,60 @@ Buffer is read-only with `inhibit-read-only' used for insertion.
              (lambda (_lang &rest _) t)))
     (should-not (pilish--missing-essential-grammars))))
 
+(defun pilish-test--fake-grammar-install (dir)
+  "Return an installer stub that writes LANG libraries into DIR."
+  (lambda (lang &optional _out-dir)
+    (with-temp-file
+        (expand-file-name
+         (concat "libtree-sitter-" (symbol-name lang)
+                 (or (car dynamic-library-suffixes) ".so"))
+         dir)
+      (insert "test build"))))
+
 (ert-deftest pilish-test-essential-grammars-auto-install ()
   "Auto-install essential grammars without prompting when action is `auto'."
-  (let ((installed-langs nil)
-        (noninteractive nil)
-        (pilish-essential-grammar-action 'auto))
-    (cl-letf (((symbol-function 'treesit-language-available-p)
-               (lambda (lang &rest _)
-                 (not (memq lang '(markdown markdown-inline)))))
-              ((symbol-function 'treesit-install-language-grammar)
-               (lambda (lang &optional _out-dir)
-                 (push lang installed-langs)))
-              ((symbol-function 'message) #'ignore))
-      (pilish--maybe-install-essential-grammars)
-      (should (memq 'markdown installed-langs))
-      (should (memq 'markdown-inline installed-langs)))))
+  (let* ((dir (make-temp-file "pilish-grammars" t))
+         (installed-langs nil)
+         (treesit-extra-load-path (list dir))
+         (noninteractive nil)
+         (pilish-essential-grammar-action 'auto))
+    (unwind-protect
+        (cl-letf (((symbol-function 'treesit-language-available-p)
+                   (lambda (lang &rest _)
+                     (not (memq lang '(markdown markdown-inline)))))
+                  ((symbol-function 'treesit-install-language-grammar)
+                   (lambda (lang &optional out-dir)
+                     (push lang installed-langs)
+                     (funcall (pilish-test--fake-grammar-install dir)
+                              lang out-dir)))
+                  ((symbol-function 'message) #'ignore))
+          (pilish--maybe-install-essential-grammars)
+          (should (memq 'markdown installed-langs))
+          (should (memq 'markdown-inline installed-langs)))
+      (delete-directory dir t))))
 
 (ert-deftest pilish-test-essential-grammars-prompt-accept ()
   "Install essential grammars when action is `prompt' and user accepts."
-  (let ((installed-langs nil)
-        (noninteractive nil)
-        (pilish-essential-grammar-action 'prompt))
-    (cl-letf (((symbol-function 'treesit-language-available-p)
-               (lambda (lang &rest _)
-                 (not (memq lang '(markdown markdown-inline)))))
-              ((symbol-function 'treesit-install-language-grammar)
-               (lambda (lang &optional _out-dir)
-                 (push lang installed-langs)))
-              ((symbol-function 'y-or-n-p) (lambda (_prompt) t))
-              ((symbol-function 'message) #'ignore))
-      (pilish--maybe-install-essential-grammars)
-      (should (memq 'markdown installed-langs))
-      (should (memq 'markdown-inline installed-langs)))))
+  (let* ((dir (make-temp-file "pilish-grammars" t))
+         (installed-langs nil)
+         (treesit-extra-load-path (list dir))
+         (noninteractive nil)
+         (pilish-essential-grammar-action 'prompt))
+    (unwind-protect
+        (cl-letf (((symbol-function 'treesit-language-available-p)
+                   (lambda (lang &rest _)
+                     (not (memq lang '(markdown markdown-inline)))))
+                  ((symbol-function 'treesit-install-language-grammar)
+                   (lambda (lang &optional out-dir)
+                     (push lang installed-langs)
+                     (funcall (pilish-test--fake-grammar-install dir)
+                              lang out-dir)))
+                  ((symbol-function 'y-or-n-p) (lambda (_prompt) t))
+                  ((symbol-function 'message) #'ignore))
+          (pilish--maybe-install-essential-grammars)
+          (should (memq 'markdown installed-langs))
+          (should (memq 'markdown-inline installed-langs)))
+      (delete-directory dir t))))
 
 (ert-deftest pilish-test-essential-grammars-prompt-decline ()
   "Warn without installing when action is `prompt' and user declines."
@@ -2662,6 +2684,179 @@ Buffer is read-only with `inhibit-read-only' used for insertion.
       (should (= 1 (length warnings)))
       (should (string-match-p "Incompatible Markdown" (car warnings)))
       (should (string-match-p "treesit-extra-load-path" (car warnings))))))
+
+;;; Markdown Grammar Runtime Safety
+
+(defun pilish-test--markdown-stress-program (depth)
+  "Return an Elisp program that parses DEPTH nested blockquotes.
+The program runs in a child Emacs: a vulnerable Markdown grammar
+corrupts native parser state and can abort the process, so the parse
+must not run in the test runner itself."
+  (format "(progn
+  (require 'treesit)
+  (dolist (dir (split-string (or (getenv \"PILISH_TEST_GRAMMAR_PATHS\") \"\")
+                             path-separator t))
+    (add-to-list 'treesit-extra-load-path dir))
+  (with-temp-buffer
+    (insert (concat
+             (mapconcat (lambda (_) \">\") (number-sequence 1 %d) \" \")
+             \" text\\n\\n\"
+             \"| a | b |\\n| - | - |\\n| 1 | 2 |\\n\"))
+    (let* ((parser (treesit-parser-create 'markdown))
+           (root (treesit-parser-root-node parser)))
+      (unless (treesit-query-capture root '((pipe_table) @table))
+        (error \"Markdown table query returned nothing\"))))
+  (princ \"PILISH-STRESS-OK\"))"
+          depth))
+
+(ert-deftest pilish-test-markdown-grammar-survives-deep-nesting ()
+  "Deeply nested Markdown must not corrupt the process that parses it.
+The Markdown scanner serialized its open-block stack into a fixed
+1024-byte buffer.  A grammar without the upstream overflow fix aborts
+Emacs once 255 blocks are open, so parse in a child Emacs and require
+a clean exit."
+  (skip-unless (treesit-language-available-p 'markdown))
+  (let* ((emacs (or (and invocation-directory invocation-name
+                         (expand-file-name invocation-name invocation-directory))
+                    (executable-find "emacs")))
+         (paths (mapconcat #'identity treesit-extra-load-path path-separator))
+         (process-environment
+          (cons (concat "PILISH_TEST_GRAMMAR_PATHS=" paths)
+                process-environment))
+         (output (with-temp-buffer
+                   (let ((status (call-process
+                                  emacs nil t nil
+                                  "--batch" "-Q" "--eval"
+                                  (pilish-test--markdown-stress-program 600))))
+                     (list status (buffer-string))))))
+    (pcase-let ((`(,status ,text) output))
+      (unless (and (integerp status) (zerop status)
+                   (string-match-p "PILISH-STRESS-OK" text))
+        (ert-fail
+         (format "Deep Markdown nesting killed the parser process (status %s).\n\
+Reinstall the Markdown grammars with C-u M-x pilish-install-grammars.\n%s"
+                 status text))))))
+
+(ert-deftest pilish-test-reinstall-grammars-replaces-installed-libraries ()
+  "Reinstalling deletes installed Markdown libraries and builds them again.
+Without this, `pilish-install-grammars' would report an outdated
+grammar as installed and never replace it."
+  (let* ((dir (make-temp-file "pilish-grammars" t))
+         (library (expand-file-name
+                   (concat "libtree-sitter-markdown"
+                           (or (car dynamic-library-suffixes) ".so"))
+                   dir))
+         (treesit-extra-load-path (list dir))
+         (installed nil))
+    (unwind-protect
+        (progn
+          (with-temp-file library (insert "old build"))
+          (cl-letf (((symbol-function 'treesit-install-language-grammar)
+                     (lambda (lang &optional _dir)
+                       (push lang installed)
+                       (with-temp-file
+                           (expand-file-name
+                            (concat "libtree-sitter-" (symbol-name lang)
+                                    (or (car dynamic-library-suffixes) ".so"))
+                            dir)
+                         (insert "new build"))))
+                    ;; Keep the real user grammar directory out of the test.
+                    ((symbol-function 'locate-user-emacs-file)
+                     (lambda (&rest _) (expand-file-name "none" dir))))
+            (pilish-install-grammars t))
+          (should (file-exists-p library))
+          (should (memq 'markdown installed))
+          (should (memq 'markdown-inline installed)))
+      (delete-directory dir t))))
+
+(ert-deftest pilish-test-install-grammars-reports-missing-library ()
+  "An installer that only warns must not count as a successful install.
+`treesit-install-language-grammar' reports failures as warnings, so the
+grammar count is only truthful when the built library is checked."
+  (let* ((dir (make-temp-file "pilish-grammars" t))
+         (treesit-extra-load-path (list dir))
+         (warnings nil))
+    (unwind-protect
+        (cl-letf (((symbol-function 'treesit-install-language-grammar)
+                   (lambda (_lang &optional _dir) nil))
+                  ((symbol-function 'locate-user-emacs-file)
+                   (lambda (&rest _) (expand-file-name "none" dir)))
+                  ((symbol-function 'display-warning)
+                   (lambda (_type msg &rest _) (push msg warnings))))
+          (should (= 0 (pilish--install-grammars '(markdown))))
+          (should (= 1 (length warnings)))
+          (should (string-match-p "Failed to install" (car warnings))))
+      (delete-directory dir t))))
+
+(ert-deftest pilish-test-markdown-grammar-source-tracks-abi ()
+  "Use upstream v0.5.4 on ABI 15 and the fixed backport below that."
+  (cl-letf (((symbol-function 'treesit-library-abi-version)
+             (lambda (&rest _) 14)))
+    (should (equal (pilish--markdown-grammar-source)
+                   pilish--markdown-backport-source)))
+  (cl-letf (((symbol-function 'treesit-library-abi-version)
+             (lambda (&rest _) 15)))
+    (should (equal (pilish--markdown-grammar-source)
+                   pilish--markdown-upstream-source))))
+
+(ert-deftest pilish-test-install-grammars-use-pilish-recipes ()
+  "Pilish installs from its own recipe when another one comes first.
+A newer Emacs ships a vulnerable v0.4.1 pin for its built-in Markdown
+mode, and that entry can precede ours in
+`treesit-language-source-alist'."
+  (let* ((dir (make-temp-file "pilish-grammars" t))
+         (treesit-extra-load-path (list dir))
+         (treesit-language-source-alist
+          (cons '(markdown "https://example.invalid/other" "v9.9.9" "src")
+                treesit-language-source-alist))
+         (recipe nil))
+    (unwind-protect
+        (cl-letf (((symbol-function 'treesit-install-language-grammar)
+                   (lambda (lang &optional _dir)
+                     (setq recipe (assoc lang treesit-language-source-alist))
+                     (funcall (pilish-test--fake-grammar-install dir) lang)))
+                  ((symbol-function 'locate-user-emacs-file)
+                   (lambda (&rest _) (expand-file-name "none" dir))))
+          (pilish--install-grammars '(markdown))
+          (should (equal (nth 1 recipe)
+                         (nth 0 (pilish--markdown-grammar-source))))
+          (should (equal (nth 2 recipe)
+                         (nth 1 (pilish--markdown-grammar-source)))))
+      (delete-directory dir t))))
+
+(ert-deftest pilish-test-reinstall-keeps-newer-grammar ()
+  "Reinstalling must not downgrade a grammar newer than the pinned build."
+  (let* ((dir (make-temp-file "pilish-grammars" t))
+         (suffix (or (car dynamic-library-suffixes) ".so"))
+         (markdown-lib (expand-file-name
+                        (concat "libtree-sitter-markdown" suffix) dir))
+         (inline-lib (expand-file-name
+                      (concat "libtree-sitter-markdown-inline" suffix) dir))
+         (treesit-extra-load-path (list dir))
+         (installed nil))
+    (unwind-protect
+        (progn
+          (with-temp-file markdown-lib (insert "newer build"))
+          (with-temp-file inline-lib (insert "old build"))
+          (cl-letf (((symbol-function 'treesit-language-abi-version)
+                     (lambda (lang)
+                       (if (eq lang 'markdown)
+                           (1+ pilish--markdown-grammar-abi-version)
+                         pilish--markdown-grammar-abi-version)))
+                    ((symbol-function 'treesit-install-language-grammar)
+                     (lambda (lang &optional _dir)
+                       (push lang installed)
+                       (funcall (pilish-test--fake-grammar-install dir) lang)))
+                    ((symbol-function 'locate-user-emacs-file)
+                     (lambda (&rest _) (expand-file-name "none" dir))))
+            (pilish-install-grammars t))
+          (should (equal (with-temp-buffer
+                           (insert-file-contents markdown-lib)
+                           (buffer-string))
+                         "newer build"))
+          (should-not (memq 'markdown installed))
+          (should (memq 'markdown-inline installed)))
+      (delete-directory dir t))))
 
 ;;; Grammar Recipe Validation
 
