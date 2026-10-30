@@ -1433,6 +1433,98 @@ rear-advance overlay before assistant text continues after the tool block."
       (pilish-gui-test-send "/test-confirm")
       (should (pilish-gui-test-chat-contains "CONFIRMED")))))
 
+;; The editor scenario answers asynchronously, so these tests drive the editor
+;; buffer with real keys while the fake waits for the response.
+(defun pilish-gui-test--editor-buffer ()
+  "Return the live extension editor buffer, waiting for it to appear."
+  (let (editor)
+    (should (pilish-test-wait-until
+             (lambda ()
+               (setq editor (seq-find
+                             (lambda (buffer)
+                               (eq (buffer-local-value 'major-mode buffer)
+                                   'pilish-editor-mode))
+                             (buffer-list))))
+             pilish-test-gui-timeout pilish-test-poll-interval))
+    editor))
+
+(defmacro pilish-gui-test--with-editor-responses (var &rest body)
+  "Run BODY with VAR collecting the extension UI responses Pilish sends.
+Responses still reach the fake subprocess."
+  (declare (indent 1) (debug (symbolp body)))
+  (let ((advice (make-symbol "advice")))
+    `(let* ((,var nil)
+            (,advice (lambda (orig process response)
+                       (push response ,var)
+                       (funcall orig process response))))
+       (advice-add 'pilish--send-extension-ui-response :around ,advice)
+       (unwind-protect (progn ,@body)
+         (advice-remove 'pilish--send-extension-ui-response ,advice)))))
+
+(defun pilish-gui-test--editor-open-with-draft (draft)
+  "Run the editor command, then type DRAFT into the input while it is open.
+Return the selected editor buffer."
+  (pilish-gui-test-send "/test-editor" t)
+  (let ((editor (pilish-gui-test--editor-buffer))
+        (input-buf (plist-get pilish-gui-test--session :input-buffer)))
+    (with-current-buffer input-buf
+      (insert draft))
+    (should (get-buffer-window editor))
+    (select-window (get-buffer-window editor))
+    (should (eq (current-buffer) editor))
+    (redisplay)
+    editor))
+
+(ert-deftest pilish-gui-test-extension-editor-submits-edited-text ()
+  "The editor opens prefilled, sends the edited text, and keeps the draft."
+  (pilish-gui-test-with-fresh-session
+    (:backend fake :fake-scenario "extension-editor")
+    (pilish-gui-test--with-editor-responses responses
+      (let* ((input-buf (plist-get pilish-gui-test--session :input-buffer))
+             (editor (pilish-gui-test--editor-open-with-draft "unsent draft"))
+             (draft-hash (with-current-buffer input-buf
+                           (secure-hash 'sha256 (buffer-string)))))
+        (should (string-prefix-p "*pilish-editor: Spike Editor*" (buffer-name editor)))
+        (should (equal (with-current-buffer editor (buffer-string))
+                       "first line\nsecond line"))
+        (execute-kbd-macro (kbd "RET e d i t e d"))
+        (execute-kbd-macro (kbd "C-c C-c"))
+        (should-not (buffer-live-p editor))
+        (should (pilish-gui-test-wait-for-idle))
+        (should (pilish-test-wait-until
+                 (lambda () (pilish-gui-test-chat-contains "EDITOR SUBMITTED"))
+                 pilish-test-gui-timeout pilish-test-poll-interval))
+        (should (= (length responses) 1))
+        (should (equal (plist-get (car responses) :value)
+                       "first line\nsecond line\nedited"))
+        (should (equal (with-current-buffer input-buf
+                         (secure-hash 'sha256 (buffer-string)))
+                       draft-hash))))))
+
+(ert-deftest pilish-gui-test-extension-editor-cancel-keeps-draft ()
+  "Cancelling the editor sends one cancellation and keeps the draft."
+  (pilish-gui-test-with-fresh-session
+    (:backend fake :fake-scenario "extension-editor")
+    (pilish-gui-test--with-editor-responses responses
+      (let* ((input-buf (plist-get pilish-gui-test--session :input-buffer))
+             (editor (pilish-gui-test--editor-open-with-draft "unsent draft"))
+             (draft-hash (with-current-buffer input-buf
+                           (secure-hash 'sha256 (buffer-string)))))
+        (execute-kbd-macro (kbd "d i s c a r d e d"))
+        (execute-kbd-macro (kbd "C-c C-k"))
+        (should-not (buffer-live-p editor))
+        (should (pilish-test-wait-until
+                 (lambda () (pilish-gui-test-chat-contains "EDITOR CANCELLED"))
+                 pilish-test-gui-timeout pilish-test-poll-interval))
+        (should (equal responses
+                       (list (list :type "extension_ui_response"
+                                   :id (plist-get (car responses) :id)
+                                   :cancelled t))))
+        (should (string-prefix-p "ext-" (plist-get (car responses) :id)))
+        (should (equal (with-current-buffer input-buf
+                         (secure-hash 'sha256 (buffer-string)))
+                       draft-hash))))))
+
 ;;;; Tool Toggle Tests
 
 (ert-deftest pilish-gui-test-tool-toggle-expand-collapse-cycle ()

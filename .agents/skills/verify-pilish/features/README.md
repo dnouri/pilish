@@ -48,3 +48,4 @@ Keep implementation ownership out of the map. The feature file names user paths,
 - [Work with tool blocks](./tool-blocks.md) covers tool output, explicit tool details, native folds, child arguments, cursor stability, and cooling.
 - [Browse and resume sessions](./sessions.md) covers session and tree browser actions plus browser-based resume.
 - [Open saved conversations](./saved-conversations.md) covers independent observers, completed-block inspection, refresh, failure retention, and observer-only quit.
+- [Answer extension editor prompts](./extension-dialogs.md) covers the multiline editor buffer, submission, cancellation, and draft safety.

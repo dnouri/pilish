@@ -1207,8 +1207,16 @@ marker is added.
 Pilish has basic support for Pi
 extensions.  Extension commands show up in slash completion and the
 transient menu, extension tools run normally, and extensions can use
-notifications, confirm/select/input prompts, prefill the input buffer,
-and show status text.
+notifications, confirm/select/input prompts, multiline editor prompts,
+prefill the input buffer, and show status text.
+
+A multiline editor prompt opens its own =*pilish-editor: TITLE*= buffer
+with the extension's prefilled text, so your prompt draft stays as it
+is.  Press =C-c C-c= to send the text or =C-c C-k= to cancel; killing
+the buffer also cancels.  Emacs stays usable while the editor is open.
+Pi gives editor prompts no timeout, so aborting a response
+(=M-x pilish-abort=) or the Pi process exiting cancels that session's
+open editors.
 
 Rich TUI-specific extension UI is not supported in Emacs yet.
 Custom widgets, custom editor components, custom headers and footers,
