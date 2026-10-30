@@ -714,23 +714,23 @@ The marker lands on the Nth newest `You' or `Assistant' heading, where N is
 `pilish-hot-tail-turn-count'.  If there are at most N headed turns,
 all content stays hot and the marker moves to `point-min'.  A count of 0
 makes the hot region empty by moving the marker to `point-max'."
-  (let ((headings nil)
-        (count pilish-hot-tail-turn-count))
-    (save-excursion
-      (goto-char (point-min))
-      (while (re-search-forward pilish--turn-heading-re nil t)
-        (let ((candidate (match-beginning 0)))
-          (save-excursion
-            (goto-char candidate)
-            (when (pilish--at-turn-heading-p)
-              (push candidate headings))))))
-    (setq headings (nreverse headings))
+  (let ((count pilish-hot-tail-turn-count))
     (move-marker
      pilish--hot-tail-start
-     (cond
-      ((zerop count) (point-max))
-      ((<= (length headings) count) (point-min))
-      (t (nth (- (length headings) count) headings)))
+     (if (zerop count)
+         (point-max)
+       (save-excursion
+         (goto-char (point-max))
+         (let ((seen 0)
+               nth-newest)
+           (while (and (<= seen count)
+                       (re-search-backward pilish--turn-heading-re nil t))
+             (let ((candidate (match-beginning 0)))
+               (when (pilish--at-turn-heading-p)
+                 (setq seen (1+ seen))
+                 (when (= seen count)
+                   (setq nth-newest candidate)))))
+           (if (> seen count) nth-newest (point-min)))))
      (current-buffer))))
 
 (defun pilish--in-hot-tail-p (pos)

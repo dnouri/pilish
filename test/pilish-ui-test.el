@@ -2438,6 +2438,23 @@ Buffer is read-only with `inhibit-read-only' used for insertion.
 
 ;;; Hot Tail
 
+(defun pilish-ui-test--forward-hot-tail-position (count)
+  "Return the boundary selected by a full forward scan for COUNT."
+  (let (headings)
+    (save-excursion
+      (goto-char (point-min))
+      (while (re-search-forward pilish--turn-heading-re nil t)
+        (let ((candidate (match-beginning 0)))
+          (save-excursion
+            (goto-char candidate)
+            (when (pilish--at-turn-heading-p)
+              (push candidate headings))))))
+    (setq headings (nreverse headings))
+    (cond
+     ((zerop count) (point-max))
+     ((<= (length headings) count) (point-min))
+     (t (nth (- (length headings) count) headings)))))
+
 (ert-deftest pilish-test-hot-tail-boundary-keeps-buffer-hot-when-few-turns ()
   "Buffers with at most N headed turns stay entirely hot."
   (with-temp-buffer
@@ -2465,6 +2482,99 @@ Buffer is read-only with `inhibit-read-only' used for insertion.
       (pilish--update-hot-tail-boundary)
       (goto-char (marker-position pilish--hot-tail-start))
       (should (looking-at "You · 10:05")))))
+
+(ert-deftest pilish-test-hot-tail-boundary-exact-count-keeps-preamble-hot ()
+  "Exactly N headings do not separate a preamble from the hot tail."
+  (with-temp-buffer
+    (insert "Banner\n\nYou\n===\nFirst\n\nAssistant\n=========\nSecond\n")
+    (setq-local pilish--hot-tail-start (copy-marker (point-min) nil))
+    (let ((pilish-hot-tail-turn-count 2))
+      (pilish--update-hot-tail-boundary)
+      (should (= (marker-position pilish--hot-tail-start) (point-min))))))
+
+(ert-deftest pilish-test-hot-tail-boundary-zero-and-empty-buffer ()
+  "A zero count selects point-max.  An empty buffer stays hot with a positive count."
+  (with-temp-buffer
+    (insert "You\n===\nBody\n")
+    (setq-local pilish--hot-tail-start (copy-marker (point-min) nil))
+    (let ((pilish-hot-tail-turn-count 0))
+      (pilish--update-hot-tail-boundary)
+      (should (= (marker-position pilish--hot-tail-start) (point-max))))
+    (erase-buffer)
+    (let ((pilish-hot-tail-turn-count 2))
+      (pilish--update-hot-tail-boundary)
+      (should (= (marker-position pilish--hot-tail-start) (point-min))))))
+
+(ert-deftest pilish-test-hot-tail-boundary-matches-forward-scan ()
+  "The boundary matches a full forward scan across deterministic histories."
+  (dolist (preamble '(nil t))
+    (dotimes (heading-count 6)
+      (let ((text
+             (concat
+              (if preamble "Banner\n\n" "")
+              (mapconcat
+               #'identity
+               (cl-loop for i below heading-count
+                        collect (format "%s\n%s\nbody %d\nYou\nnot an underline\n\n"
+                                        (if (zerop (mod i 2)) "You" "Assistant")
+                                        (if (zerop (mod i 2)) "===" "=========")
+                                        i))
+               ""))))
+        (dotimes (count 5)
+          (with-temp-buffer
+            (insert text)
+            (setq-local pilish--hot-tail-start (copy-marker (point-min) nil))
+            (setq-local pilish-hot-tail-turn-count count)
+            (let ((expected (pilish-ui-test--forward-hot-tail-position count))
+                  (marker pilish--hot-tail-start)
+                  (point (point)))
+              (pilish--update-hot-tail-boundary)
+              (should (= (marker-position pilish--hot-tail-start) expected))
+              (should (eq pilish--hot-tail-start marker))
+              (should (= (point) point)))))))))
+
+(ert-deftest pilish-test-hot-tail-boundary-respects-narrowing ()
+  "Only accessible headings and accessible bounds affect the boundary."
+  (with-temp-buffer
+    (insert "You\n===\nOutside\n\n"
+            "Assistant\n=========\nAccessible first\n\n"
+            "You · later\n===\nAccessible second\n")
+    (goto-char (point-min))
+    (search-forward "Assistant\n")
+    (narrow-to-region (match-beginning 0) (point-max))
+    (setq-local pilish--hot-tail-start (copy-marker (point-min) nil))
+    (dolist (count '(1 2 3))
+      (let ((pilish-hot-tail-turn-count count))
+        (let ((expected (pilish-ui-test--forward-hot-tail-position count))
+              (minimum (point-min))
+              (maximum (point-max)))
+          (pilish--update-hot-tail-boundary)
+          (should (= (marker-position pilish--hot-tail-start) expected))
+          (should (= (point-min) minimum))
+          (should (= (point-max) maximum)))))))
+
+(ert-deftest pilish-test-hot-tail-boundary-preserves-marker-contract ()
+  "Updating preserves point, marker identity, and marker insertion behavior."
+  (with-temp-buffer
+    (insert "Banner\n\nYou\n===\nOne\n\nAssistant\n=========\nTwo\n\n"
+            "You\n===\nThree\n")
+    (setq-local pilish--hot-tail-start (copy-marker (point-min) nil))
+    (let ((pilish-hot-tail-turn-count 2)
+          (marker pilish--hot-tail-start))
+      (goto-char (point-max))
+      (let ((original-point (point)))
+        (pilish--update-hot-tail-boundary)
+        (should (= (point) original-point)))
+      (should (eq pilish--hot-tail-start marker))
+      (should (eq (marker-buffer marker) (current-buffer)))
+      (should-not (marker-insertion-type marker))
+      (let ((boundary (marker-position marker)))
+        (goto-char boundary)
+        (insert "Inserted at the boundary\n")
+        (should (= (marker-position marker) boundary))
+        (should (save-excursion
+                  (goto-char boundary)
+                  (looking-at "Inserted at the boundary")))))))
 
 (ert-deftest pilish-test-in-hot-tail-p-respects-boundary ()
   "Positions before the hot-tail marker are cold; marker and later are hot."
