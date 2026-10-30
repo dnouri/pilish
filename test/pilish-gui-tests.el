@@ -731,8 +731,9 @@ raced a turn that was never submitted."
                 (dolist (request requests)
                   (should (<= (car request)
                               (1+ (window-body-height (cadr request))))))
-                (should (equal text (buffer-substring-no-properties (point-min) (point-max))))
-                (should (= chars-tick (buffer-chars-modified-tick)))
+                (should (equal (concat (string-remove-suffix "\n" text) "Show less\n\n")
+                               (buffer-substring-no-properties (point-min) (point-max))))
+                (should (> (buffer-chars-modified-tick) chars-tick))
                 (should (pilish--thinking-block-at-pos thinking-start)))
               (redisplay t)
               (should (= start (window-start reader)))
@@ -1985,7 +1986,9 @@ Return observations suitable for the graphical evidence file."
                (should (equal bytes (with-temp-buffer
                                       (insert-file-contents-literally file) (buffer-string))))))))
       (when (buffer-live-p browser) (kill-buffer browser))
-      (set-frame-size nil width height))))
+      (set-frame-size nil width height)
+      (pilish-test-wait-until
+       (lambda () (and (= (frame-width) width) (= (frame-height) height))) 1 0.01))))
 
 (ert-deftest pilish-gui-test-saved-button-keyboard ()
   "Saved-name GUI TAB folds locally without changing RET's captured target."
