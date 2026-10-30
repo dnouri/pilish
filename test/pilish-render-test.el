@@ -2695,6 +2695,75 @@ execution cannot retain a temporary record on this setup's evaluator stack."
    :result '(:content [(:type "text" :text "PARENT-OUTPUT")]))
   (pilish--tool-block-overlay (pilish--nested-tool-owner "literal-root")))
 
+(defmacro pilish-test--with-compound-changes (block changes &rest body)
+  "Run BODY with BLOCK a compound tool and CHANGES a log of its change hooks.
+Each hook call pushes (before BEG END) or (after BEG END LENGTH) on CHANGES.
+Fontification stays out of the log."
+  (declare (indent 2) (debug t))
+  `(with-temp-buffer
+     (pilish-chat-mode)
+     (pilish-test--nested-markup-summary)
+     (let ((,block (pilish--nested-tool-owner "literal-root"))
+           (,changes nil))
+       (add-hook 'before-change-functions
+                 (lambda (&rest args) (push (cons 'before args) ,changes)) nil t)
+       (add-hook 'after-change-functions
+                 (lambda (&rest args) (push (cons 'after args) ,changes)) nil t)
+       (cl-letf (((symbol-function 'pilish--font-lock-ensure-excluding-property)
+                  #'ignore))
+         ,@body))))
+
+(ert-deftest pilish-test-compound-redraw-is-one-change ()
+  "One compound rewrite is one edit for change hooks."
+  ;; md-ts change hooks read the parse tree, so exposing each insertion
+  ;; costs one reparse of the whole chat per insertion.
+  (pilish-test--with-compound-changes block changes
+    (let ((start (marker-position (pilish--tool-block-header-end block)))
+          (end (marker-position (pilish--tool-block-end-marker block)))
+          (text (buffer-string)))
+      (pilish--redraw-compound-tool block)
+      (should (equal text (buffer-string)))
+      (should (equal (reverse changes)
+                     `((before ,start ,end) (after ,start ,end ,(- end start))))))))
+
+(ert-deftest pilish-test-compound-redraw-change-spans-the-new-body ()
+  "The combined change ends where a grown or shrunk body ends."
+  ;; A stale end leaves part of a grown body unnoticed by jit-lock and md-ts.
+  (pilish-test--with-compound-changes block changes
+    (let ((start (marker-position (pilish--tool-block-header-end block)))
+          (end (pilish--tool-block-end-marker block)))
+      (dolist (body (list (make-string 400 ?x) ""))
+        (let ((old-length (- end start)))
+          (setq changes nil)
+          (cl-letf (((symbol-function 'pilish--insert-compound-tool-body)
+                     (lambda (&rest _) (insert body))))
+            (pilish--redraw-compound-tool block))
+          (should (= end (+ start (length body))))
+          (should (equal (car changes)
+                         `(after ,start ,(marker-position end) ,old-length))))))))
+
+(ert-deftest pilish-test-compound-redraw-failure-still-reports-the-change ()
+  "A failed rewrite restores change hooks and reports what changed."
+  ;; `combine-change-calls' skips its final notification on a non-local exit,
+  ;; which would leave observers of the before-change call waiting.
+  (pilish-test--with-compound-changes block changes
+    (let ((start (marker-position (pilish--tool-block-header-end block)))
+          (hooks after-change-functions))
+      (dolist (condition '(error quit))
+        (let ((old-length (- (pilish--tool-block-end-marker block) start)))
+          (setq changes nil)
+          (cl-letf (((symbol-function 'pilish--insert-compound-tool-body)
+                     (lambda (&rest _)
+                       (insert "partial")
+                       (signal condition nil))))
+            (should (eq condition
+                        (condition-case err
+                            (pilish--redraw-compound-tool block)
+                          (t (car err))))))
+          (should (equal (car changes)
+                         `(after ,start ,(+ start 7) ,old-length)))
+          (should (eq hooks after-change-functions)))))))
+
 (ert-deftest pilish-test-nested-summary-arguments-decode-json-utf8 ()
   "Native JSON bytes must display as the received Unicode argument characters."
   ;; Passing json-serialize's unibyte UTF-8 output to character escaping
