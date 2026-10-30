@@ -17,7 +17,7 @@ The chat renders streamed Markdown and changes thinking display without losing t
 - Read write-tool content as it streams into the chat.
 - Run `M-x pilish-toggle-thinking-display` to change completed thinking display.
 - Press `TAB` or `RET` on a thinking or tool footer, or click its left-margin caret.
-- Watch `Elapsed Ns` advance during bash or subagent execution and change to `Took …` on completion.
+- Watch `Elapsed` advance during bash or subagent execution and change to `Took …` on completion. Live labels use whole seconds below a minute and minutes or hours above it.
 - Scroll back with ordinary Emacs scrolling commands while new output arrives.
 - Stay at the stream tail across consecutive turns.
 - Resize the frame while viewing a table in recent history.

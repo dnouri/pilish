@@ -1837,6 +1837,131 @@ Return observations suitable for the graphical evidence file."
       (set-frame-size nil original-width original-height)
       (sit-for 0.1))))
 
+(ert-deftest pilish-gui-test-live-duration-formats-long-values ()
+  "Real scheduled ticks paint intact minute/hour labels beside collapsed output."
+  (let ((width (frame-width)) (height (frame-height))
+        (pilish-bash-preview-lines 2)
+        (buffer (generate-new-buffer " *pilish-long-live-duration*")))
+    (unwind-protect
+        (save-window-excursion
+          (delete-other-windows)
+          (set-frame-size nil 104 45)
+          (should (pilish-test-wait-until
+                   (lambda () (and (= (frame-width) 104) (= (frame-height) 45))) 1 0.01))
+          (switch-to-buffer buffer)
+          (pilish-chat-mode)
+          (let* ((window (selected-window))
+                 (block (pilish--display-tool-start "bash" '(:command "long duration observation")
+                                                   "long-live-clock"))
+                 (overlay (pilish--tool-block-overlay block))
+                 (duration-label (symbol-function 'pilish--tool-duration-label)))
+            ;; Prepare a real collapsed output control before starting execution.
+            ;; Ordinary bash streaming has a tail hint rather than a fold button.
+            (let ((inhibit-read-only t))
+              (goto-char (pilish--tool-block-header-end block))
+              (pilish--insert-tool-output-section
+               block nil (pilish--tool-result-presentation
+                          "bash" nil [(:type "text" :text "FIRST\nSECOND\nTHIRD\nFOURTH\nFIFTH\nSIXTH")]
+                          nil nil))
+              (set-marker (pilish--tool-block-end-marker block) (point))
+              (pilish--tool-block-refresh-overlay block))
+            (pilish--handle-display-event
+             '(:type "tool_execution_start" :toolCallId "long-live-clock" :toolName "bash"
+               :args (:command "long duration observation")))
+            (let* ((started (pilish--running-tool-time-started-at (pilish--tool-block-timing block)))
+                   (clock (seconds-to-time started))
+                   (view (pilish--tool-block-output-view block))
+                   (snapshot (pilish--tool-output-view-snapshot view))
+                   (selection (pilish--tool-output-view-selection view))
+                   (button (pilish--find-toggle-button-in-region (overlay-start overlay) (overlay-end overlay)))
+                   (control-label (and button (button-label button))))
+              (should button)
+              (should (eq selection 'head))
+              (should (equal control-label "Show output"))
+              (cl-labels
+                  ((label ()
+                     (let* ((footer (pilish--tool-output-view-footer-start view))
+                            (end (overlay-end overlay))
+                            (start (text-property-any footer end 'pilish-tool-duration block)))
+                       (should start)
+                       (buffer-substring-no-properties
+                        start (next-single-property-change start 'pilish-tool-duration nil end))))
+                   (capture (name expected &optional narrow)
+                     (goto-char (point-min))
+                     (set-window-start window (point-min) t)
+                     (when narrow
+                       (set-window-start narrow (point-min) t)
+                       (set-window-point narrow (point-min)))
+                     (font-lock-ensure)
+                     (redisplay t)
+                     (should (equal (label) expected))
+                     (should (eq view (pilish--tool-block-output-view block)))
+                     (should (eq snapshot (pilish--tool-output-view-snapshot view)))
+                     (should (eq selection (pilish--tool-output-view-selection view)))
+                     (should (= (button-start button)
+                                (button-start (pilish--find-toggle-button-in-region
+                                               (overlay-start overlay) (overlay-end overlay)))))
+                     (should (equal control-label (button-label button)))
+                     (pilish-gui-test--large-evidence
+                      name (list :label (label) :local-elapsed (- (float-time clock) started)
+                                 :timer-armed (timerp pilish--tool-time-timer)
+                                 :running-owners (length pilish--running-tool-blocks)
+                                 :snapshot-identical (eq snapshot (pilish--tool-output-view-snapshot view))
+                                 :selection (pilish--tool-output-view-selection view)
+                                 :control-label (button-label button)
+                                 :wide (pilish-gui-test--duration-geometry window block narrow)
+                                 :narrow (and narrow (pilish-gui-test--duration-geometry narrow block t))
+                                 :raw (buffer-substring-no-properties (point-min) (point-max))
+                                 :package-user-dir package-user-dir :window-system window-system
+                                 :render-library (symbol-file 'pilish--refresh-tool-duration)))))
+                ;; Change only the clock used by duration calculation.  In
+                ;; particular, run-at-time and its one-shot deadlines stay real.
+                (cl-letf (((symbol-function 'pilish--tool-duration-label)
+                           (lambda (owner)
+                             (cl-letf (((symbol-function 'current-time) (lambda () clock)))
+                               (funcall duration-label owner)))))
+                  (dolist (case '((268 "Elapsed 4m 28s" "elapsed-minutes")
+                                  (3661 "Elapsed 1h 1m 1s" "elapsed-hours")))
+                    (let ((before (label)) (timer pilish--tool-time-timer)
+                          (expected (cadr case)) (name (caddr case)))
+                      (should (timerp timer))
+                      (setq clock (seconds-to-time (+ started (car case) 0.25)))
+                      ;; Moving the clock alone must not paint a label.  Only
+                      ;; real timer delivery may change it and rearm the clock.
+                      (should (equal before (label)))
+                      (should (pilish-test-wait-until
+                               (lambda () (and (equal (label) expected)
+                                               (timerp pilish--tool-time-timer)
+                                               (not (eq timer pilish--tool-time-timer)))) 3 0.01))
+                      (capture name expected)
+                      (set-frame-size nil 54 45)
+                      (should (pilish-test-wait-until (lambda () (= (frame-width) 54)) 1 0.01))
+                      (capture (concat name "-54") expected)
+                      (set-frame-size nil 104 45)
+                      (should (pilish-test-wait-until (lambda () (= (frame-width) 104)) 1 0.01))
+                      (let* ((overhead (- (window-total-width window) (window-body-width window)))
+                             (narrow (split-window window (- (+ 24 overhead)) 'right)))
+                        (unwind-protect
+                            (progn
+                              (set-window-buffer narrow buffer)
+                              (redisplay t)
+                              (window-resize narrow (- 24 (window-body-width narrow)) t)
+                              (redisplay t)
+                              (should (= (window-body-width narrow) 24))
+                              (should (= pilish--tool-footer-min-columns 24))
+                              (capture (concat name "-narrow") expected narrow))
+                          (when (window-live-p narrow) (delete-window narrow)))))))))))
+      (when (buffer-live-p buffer)
+        (with-current-buffer buffer
+          (pilish--cancel-tool-times)
+          (should-not pilish--tool-time-timer)
+          (should-not pilish--running-tool-blocks)
+          (set-buffer-modified-p nil))
+        (kill-buffer buffer))
+      (set-frame-size nil width height)
+      (should (pilish-test-wait-until
+               (lambda () (and (= (frame-width) width) (= (frame-height) height))) 1 0.01)))))
+
 (ert-deftest pilish-gui-test-fake-duration-live-reload-and-resume ()
   "Fake RPC drives real ticks, bottom-control keys, browser resume and reload."
   (let ((pilish-bash-preview-lines 2)
