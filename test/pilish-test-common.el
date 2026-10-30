@@ -39,6 +39,16 @@ redisplay, and subprocess event delivery.")
   "Format SECONDS as a human-readable duration with millisecond precision."
   (format "%.3fs" (float seconds)))
 
+(defun pilish-test--output-view (button)
+  "Return the retained output view addressed by BUTTON."
+  (save-excursion
+    (goto-char (button-start button))
+    (let* ((block (pilish--tool-block-from-overlay (pilish--tool-overlay-at-point)))
+           (section (button-get button 'pilish-tool-section)))
+      (if (consp section)
+          (pilish--nested-call-output-view (pilish--nested-call-get block (cdr section)))
+        (pilish--tool-block-output-view block)))))
+
 ;;;; JSON Fixtures
 
 (defvar pilish-test--fixture-dir

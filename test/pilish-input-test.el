@@ -2438,7 +2438,8 @@ message_start role=assistant displays the 'Assistant' header."
     (pilish--display-tool-end "bash" nil
                           '((:type "text" :text "L1\nL2\nL3\nL4\nL5\nL6\nL7\nL8\nL9\nL10"))
                           nil nil)
-    (should-not (button-get (next-button (point-min)) 'pilish-expanded))
+    (should (eq 'head (pilish--tool-output-view-selection
+                       (pilish-test--output-view (next-button (point-min))))))
     (should-not (string-match-p "L10" (buffer-string)))
     ;; Find and click the button
     (goto-char (point-min))
@@ -2447,7 +2448,8 @@ message_start role=assistant displays the 'Assistant' header."
     (pilish-toggle-tool-section)
     ;; Now should show all lines
     (should (string-match-p "L10" (buffer-string)))
-    (should (button-get (next-button (point-min)) 'pilish-expanded))))
+    (should (eq 'all (pilish--tool-output-view-selection
+                      (pilish-test--output-view (next-button (point-min))))))))
 
 (ert-deftest pilish-test-tool-toggle-collapses-content ()
   "Toggle button collapses expanded tool output."
@@ -2468,7 +2470,8 @@ message_start role=assistant displays the 'Assistant' header."
     (search-forward "Output")
     (backward-char 1)
     (pilish-toggle-tool-section)
-    (should-not (button-get (next-button (point-min)) 'pilish-expanded))
+    (should (eq 'head (pilish--tool-output-view-selection
+                       (pilish-test--output-view (next-button (point-min))))))
     (should-not (string-match-p "L10" (buffer-string)))))
 
 (ert-deftest pilish-test-tool-toggle-re-expand-after-collapse-from-button ()
@@ -2495,7 +2498,8 @@ button position in the expanded state exceeds the collapsed overlay end."
     (beginning-of-line)
     ;; Collapse from the button position
     (pilish-toggle-tool-section)
-    (should-not (button-get (next-button (point-min)) 'pilish-expanded))
+    (should (eq 'head (pilish--tool-output-view-selection
+                       (pilish-test--output-view (next-button (point-min))))))
     ;; Verify cursor landed inside the tool block overlay, not at its boundary
     (should (seq-find (lambda (o) (overlay-get o 'pilish-tool-block))
                       (overlays-at (point))))
@@ -2515,7 +2519,8 @@ the markdown grammar.  Tool output face also applies."
     (pilish--display-tool-end "read" '(:path "test.py")
                           '((:type "text" :text "line1\nline2\nline3\nline4\nline5\nline6\nline7\nline8\nline9\nline10\ndef hello():\n    return 42"))
                           nil nil)
-    (should-not (button-get (next-button (point-min)) 'pilish-expanded))
+    (should (eq 'head (pilish--tool-output-view-selection
+                       (pilish-test--output-view (next-button (point-min))))))
     (should-not (string-match-p "def hello" (buffer-string)))
     ;; Expand
     (goto-char (point-min))

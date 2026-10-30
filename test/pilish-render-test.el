@@ -2634,7 +2634,8 @@ execution cannot retain a temporary record on this setup's evaluator stack."
             (should-not (text-property-not-all (point-min) (point-max) 'button nil))
             (should-not (pilish-test--all-tool-overlays))
             (should-not (pilish--tool-block-args root))
-            (should-not (pilish--tool-block-displayed-output root))
+            (should-not (pilish--tool-block-output-view root))
+            (should-not (pilish--nested-call-output-view child))
             (should-not (pilish--nested-call-args-preview child))
             (should-not (pilish--nested-call-error child))
             (should (= 0 (hash-table-count pilish--nested-tool-owners))))))))
@@ -3419,6 +3420,8 @@ literal LATEST-PREVIEW without losing the closed fold."
           (pilish-test--nested-tab "pending-root" 'output)
           (let* ((root (pilish--nested-tool-owner "pending-root"))
                  (overlay (pilish--tool-block-overlay root))
+                 (output-view (pilish--tool-block-output-view root))
+                 (snapshot (pilish--tool-output-view-snapshot output-view))
                  (start (marker-position (pilish--tool-block-header-end root)))
                  (selected (selected-window))
                  (other (split-window-right)))
@@ -3437,12 +3440,17 @@ literal LATEST-PREVIEW without losing the closed fold."
                 (should (equal displayed (buffer-substring-no-properties start (overlay-end overlay))))
                 (should (equal latest-output
                                (pilish--extract-text-from-content
-                                (plist-get (pilish--tool-block-result root) :content)))))
+                                (plist-get (pilish--tool-block-result root) :content))))
+                (should (eq snapshot (pilish--tool-output-view-snapshot output-view))))
               (let ((timer pilish--tool-update-flush-timer))
                 (should (timerp timer))
                 (button-activate
                  (pilish--find-toggle-button-in-region start (overlay-end overlay) 'output))
                 ;; A fold acts on the displayed snapshot, not unpainted facts.
+                (should (eq output-view (pilish--tool-block-output-view root)))
+                (should (eq snapshot (pilish--tool-output-view-snapshot output-view)))
+                (should (eq 'head (pilish--tool-output-view-selection output-view)))
+                (should-not (member 'output (pilish--tool-block-folds root)))
                 (should (string-match-p "FIRST" (buffer-string)))
                 (should (= (point) (+ (position "FIRST") 2)))
                 (should (= (window-point selected) (point)))
@@ -3457,6 +3465,9 @@ literal LATEST-PREVIEW without losing the closed fold."
                 (cancel-timer timer)
                 (cl-letf (((symbol-function 'input-pending-p) (lambda () nil)))
                   (pilish--flush-tool-updates buffer)))
+              (should (eq output-view (pilish--tool-block-output-view root)))
+              (should-not (eq snapshot (pilish--tool-output-view-snapshot output-view)))
+              (should (eq 'head (pilish--tool-output-view-selection output-view)))
               (should (string-match-p (regexp-quote latest-preview) (buffer-string)))
               (unless (equal latest-preview "FIRST")
                 (should-not (string-match-p "FIRST" (buffer-string))))
@@ -3608,7 +3619,10 @@ The caller saves the window configuration; queued paints need a visible chat."
          "tool_execution_end" "rich-child" "lazy-root" :toolName name :isError :false :result result)
         (pilish-test--nested-event
          "tool_execution_start" "progress-child" "lazy-root" :toolName "runner" :args '(:job "progress"))
-        (let* ((overlay (pilish--tool-block-overlay (pilish--nested-tool-owner "lazy-root")))
+        (let* ((root (pilish--nested-tool-owner "lazy-root"))
+               (call (pilish--nested-call-get root "rich-child"))
+               (view (pilish--nested-call-output-view call))
+               (overlay (pilish--tool-block-overlay root))
                (closed (buffer-substring-no-properties (point-min) (point-max))))
           (cl-labels ((button ()
                         (pilish--find-toggle-button-in-region
@@ -3623,6 +3637,8 @@ The caller saves the window configuration; queued paints need a visible chat."
                           (pilish--flush-tool-updates (current-buffer)))
                         (should-not pilish--pending-tool-updates)))
             (should (equal "Output" (button-label (button))))
+            (should (eq 'concealed (pilish--tool-output-view-selection view)))
+            (should-not (plist-get (pilish--tool-output-view-snapshot view) :images))
             (should-not (pilish-test--image-preview-positions))
             (dotimes (_ 2) (repaint))
             (should (equal closed (buffer-substring-no-properties (point-min) (point-max))))
@@ -3632,6 +3648,9 @@ The caller saves the window configuration; queued paints need a visible chat."
             (pilish-test--nested-tab "lazy-root" '(child . "rich-child"))
             (should (equal "Output" (button-label (button))))
             (should (> (if read-svg-p scan-count decode-count) 0))
+            (should (eq view (pilish--nested-call-output-view call)))
+            (should (eq 'all (pilish--tool-output-view-selection view)))
+            (should-not (member '(child . "rich-child") (pilish--tool-block-folds root)))
             (let* ((positions (pilish-test--image-preview-positions))
                    (position (car positions)))
               (should (= 1 (length positions)))
@@ -3649,6 +3668,9 @@ The caller saves the window configuration; queued paints need a visible chat."
               (dotimes (_ 2) (repaint))
               (should (= opened-decodes decode-count))
               (should (= opened-scans scan-count)))
+            (should (eq view (pilish--nested-call-output-view call)))
+            (should (eq 'concealed (pilish--tool-output-view-selection view)))
+            (should-not (plist-get (pilish--tool-output-view-snapshot view) :images))
             (should (equal "Output" (button-label (button))))
             (should-not (pilish-test--image-preview-positions))
             (should (equal closed (buffer-substring-no-properties (point-min) (point-max))))))))))
@@ -3768,8 +3790,11 @@ The caller saves the window configuration; queued paints need a visible chat."
                                   (overlays-in (point-min) (point-max)))))
             (should (= 6 (length diffs)))
             (dolist (overlay diffs)
-              (let ((section (get-text-property (overlay-start overlay) 'pilish-tool-section)))
-                (when section (should (equal section '(child . "edit-child")))))))
+              (let* ((root (pilish--tool-block-overlay (pilish--nested-tool-owner "rich-root")))
+                     (start (overlay-start overlay)))
+                (when (and (<= (overlay-start root) start) (< start (overlay-end root)))
+                  (should (equal (get-text-property start 'pilish-tool-section)
+                                 '(child . "edit-child")))))))
           (pilish-test--nested-event
            "tool_execution_update" "ongoing" "rich-root" :toolName "read"
            :args '(:path "ongoing.el") :partialResult '(:content []))
@@ -3832,7 +3857,7 @@ The caller saves the window configuration; queued paints need a visible chat."
                (body-start (marker-position header))
                (displayed (buffer-substring-no-properties body-start (marker-position end))))
           (should (pilish--tool-block-last-tail root))
-          (should (pilish--tool-block-displayed-output root))
+          (should (pilish--tool-block-output-view root))
           (should (string-match-p "PARENT-B" displayed))
           (should (string-match-p "OPEN-VISIBLE" displayed))
           (should-not (string-match-p (regexp-opt '("PARENT-HIDDEN" "CLOSED-SECRET")) displayed))
@@ -3866,8 +3891,9 @@ The caller saves the window configuration; queued paints need a visible chat."
           (should-not (pilish--tool-block-nested-calls root))
           (should-not (pilish--tool-block-args root))
           (should-not (pilish--tool-block-result root))
-          (should-not (pilish--tool-block-displayed-output root))
+          (should-not (pilish--tool-block-output-view root))
           (dolist (call calls)
+            (should-not (pilish--nested-call-output-view call))
             (should-not (pilish--nested-call-arguments call))
             (should-not (pilish--nested-call-result call))))))))
 
@@ -9105,6 +9131,95 @@ no payload at all."
       ;; Should NOT have more-lines indicator
       (should-not (string-match-p "more lines" (buffer-string))))))
 
+(ert-deftest pilish-test-tool-output-view-owns-folds-and-releases-cold-payloads ()
+  "Root output views own frozen excerpts and folds, never their heading buttons."
+  (dolist (compound '(nil t))
+    (with-temp-buffer
+      (pilish-chat-mode)
+      (let* ((pilish-tool-preview-lines 2)
+             (name (if compound "codemode" "read"))
+             (args '(:path "/tmp/owned.el" :code "1+1"))
+             (block (pilish--display-tool-start name args "owned-output"))
+             (overlay (pilish--tool-block-overlay block))
+             (images 0))
+        (cl-letf (((symbol-function 'display-images-p) (lambda (&rest _) t))
+                  ((symbol-function 'image-type-available-p) (lambda (_) t))
+                  ((symbol-function 'create-image)
+                   (lambda (&rest _) (cl-incf images) 'owned-image)))
+          (pilish--display-tool-end
+           name args (list '(:type "text" :text "\nFIRST\n\nSECOND\nHIDDEN")
+                           (list :type "image" :mimeType "image/png" :data pilish-test--png-base64))
+           nil nil block)
+          (let* ((view (pilish--tool-block-output-view block))
+                 (snapshot (pilish--tool-output-view-snapshot view))
+                 (excerpt (pilish--tool-output-view-excerpt view)))
+            (should (eq 'head (pilish--tool-output-view-selection view)))
+            (should (equal (plist-get excerpt :content) "FIRST\nSECOND"))
+            (should (equal (plist-get excerpt :line-map) [2 4]))
+            (should (= 1 (plist-get excerpt :hidden-lines)))
+            (dotimes (toggle 2)
+              (let ((button (pilish--find-toggle-button-in-region
+                             (overlay-start overlay) (overlay-end overlay) 'output)))
+                (should (eq view (pilish-test--output-view button)))
+                (should (eq (button-get button 'action) #'pilish--toggle-tool-output))
+                (dolist (property '(pilish-full-content pilish-preview-content pilish-lang
+                                   pilish-is-edit-diff pilish-expanded hidden-count))
+                  (should-not (button-get button property)))
+                (button-activate button))
+              (should (eq (pilish--tool-output-view-selection view)
+                          (if (= toggle 0) 'all 'head)))
+              (should (eq snapshot (pilish--tool-output-view-snapshot view)))
+              (should (eq view (pilish--tool-block-output-view block)))
+              (should-not (memq 'output (pilish--tool-block-folds block))))
+            (should (= 1 images))
+            (should-not (string-match-p "HIDDEN" (buffer-string)))
+            (cl-letf (((symbol-function 'pilish--tool-result-presentation)
+                       (lambda (&rest _) (ert-fail "Cooling selected rich output")))
+                      ((symbol-function 'pilish--truncate-to-visual-lines)
+                       (lambda (&rest _) (ert-fail "Cooling recomputed its excerpt"))))
+              (should (pilish--cool-tool-overlay overlay)))
+            (should (= 1 images))
+            (should-not (pilish--tool-block-output-view block))
+            (should-not (pilish--tool-block-result block))
+            (should-not (marker-buffer (pilish--tool-block-header-end block)))
+            (should-not (marker-buffer (pilish--tool-block-end-marker block)))
+            (should-not (string-match-p "HIDDEN" (buffer-string)))
+            (should-not (text-property-not-all (point-min) (point-max) 'pilish-tool-toggle nil))
+            (should-not (text-property-not-all (point-min) (point-max) 'pilish-disclosure-hit nil))
+            (should (= 1 (length (pilish-test--image-preview-positions))))))))))
+
+(ert-deftest pilish-test-tool-output-view-keeps-only-the-painted-stream-tail ()
+  "Unpainted updates cannot replace the bounded tail view or its earlier notice."
+  (with-temp-buffer
+    (pilish-chat-mode)
+    (let ((pilish-bash-preview-lines 2))
+      (pilish--handle-display-event
+       '(:type "tool_execution_start" :toolCallId "tail-owner" :toolName "bash" :args (:command "emit")))
+      (pilish--handle-display-event
+       (list :type "tool_execution_update" :toolCallId "tail-owner" :toolName "bash"
+             :partialResult (list :content (vector (list :type "text" :text
+                                                         (concat (make-string 65536 ?x) "\nONE\nTWO\n"))))))
+      (pilish-test--flush-tool-updates)
+      (let* ((block (pilish--tool-block-get "tail-owner"))
+             (view (pilish--tool-block-output-view block))
+             (snapshot (pilish--tool-output-view-snapshot view)))
+        (should (eq 'tail (pilish--tool-output-view-selection view)))
+        (should (equal (plist-get snapshot :text) "ONE\nTWO"))
+        (should (equal (plist-get (pilish--tool-output-view-excerpt view) :content) "ONE\nTWO"))
+        (should (string-match-p (regexp-quote "... (earlier output)") (buffer-string)))
+        (pilish--handle-display-event
+         '(:type "tool_execution_update" :toolCallId "tail-owner" :toolName "bash"
+           :partialResult (:content [(:type "text" :text "NEW\n")])))
+        (should (eq snapshot (pilish--tool-output-view-snapshot view)))
+        (should-not (string-match-p "NEW" (buffer-string)))
+        (pilish-test--flush-tool-updates)
+        (should (eq view (pilish--tool-block-output-view block)))
+        (should (equal (plist-get (pilish--tool-output-view-snapshot view) :text) "NEW"))
+        (should-not (string-match-p "earlier output" (buffer-string)))
+        (pilish--display-tool-end "bash" nil [(:type "text" :text "done")] nil nil block)
+        (should (eq view (pilish--tool-block-output-view block)))
+        (should (eq 'plain (pilish--tool-output-view-selection view)))))))
+
 ;;; Generic Tool Details in Output
 
 (defun pilish-test--insert-generic-tool (content-text &optional details)
@@ -9241,7 +9356,8 @@ Call inside `with-temp-buffer' after `pilish-chat-mode'."
       (should (re-search-forward "Output" nil t))
       (let ((btn (button-at (match-beginning 0))))
         (should btn)
-        (let ((full-content (button-get btn 'pilish-full-content)))
+        (let ((full-content (plist-get (pilish--tool-output-view-snapshot
+                                        (pilish-test--output-view btn)) :text)))
           (should (string-match-p "\\*\\*Details\\*\\*" full-content))
           (should (let ((match-pos (string-match "\\*\\*Details\\*\\*" full-content)))
                     (and match-pos
@@ -9278,13 +9394,9 @@ Call inside `with-temp-buffer' after `pilish-chat-mode'."
     (pilish-chat-mode)
     (pilish-test--insert-generic-tool
      "Done" '(:items [(:name "a") (:name "b")]))
-    ;; Output may be collapsed if long; check via button's full content
-    ;; or directly in buffer for short output
-    (let* ((text (buffer-string))
-           (button (progn (goto-char (point-min)) (next-button (point))))
-           (full (if button
-                     (button-get button 'pilish-full-content)
-                   text)))
+    (when-let* ((button (next-button (point-min))))
+      (button-activate button))
+    (let ((full (buffer-string)))
       (should (string-match-p "\"items\"" full))
       (should (string-match-p "\"name\": \"a\"" full))
       (should (string-match-p "\"name\": \"b\"" full)))))
@@ -9312,14 +9424,12 @@ Call inside `with-temp-buffer' after `pilish-chat-mode'."
            (details '(:errors [(:task "foo" :error "timeout")])))
       (pilish-test--insert-generic-tool long-output details)
       (should (string-match-p "Output" (buffer-string)))
-      ;; Details should be in the full content accessible via TAB
-      ;; Find the toggle button and check its full-content property
       (goto-char (point-min))
       (let ((button (next-button (point))))
         (should button)
-        (let ((full (button-get button 'pilish-full-content)))
-          (should (string-match-p "\\*\\*Details\\*\\*" full))
-          (should (string-match-p "\"error\": \"timeout\"" full)))))))
+        (button-activate button)
+        (should (string-match-p "\\*\\*Details\\*\\*" (buffer-string)))
+        (should (string-match-p "\"error\": \"timeout\"" (buffer-string)))))))
 
 ;;; Cooling Completed Tool Blocks
 
@@ -10295,7 +10405,7 @@ When EXPANDED is non-nil, expand its preview before returning the overlay."
               (should (eq root (cdr (assoc "reused-root" pilish--pending-tool-updates))))
               (should (marker-buffer header))
               (should (marker-buffer end))
-              (should (pilish--tool-block-displayed-output root))
+              (should (pilish--tool-block-output-view root))
               (pcase boundary
                 ('clear (pilish--clear-render-artifacts))
                 ('history
@@ -10313,7 +10423,8 @@ When EXPANDED is non-nil, expand its preview before returning the overlay."
               (should-not (pilish--tool-block-folds root))
               (should-not (pilish--tool-block-args root))
               (should-not (pilish--tool-block-result root))
-              (should-not (pilish--tool-block-displayed-output root))
+              (should-not (pilish--tool-block-output-view root))
+              (should-not (pilish--nested-call-output-view completed))
               (should-not (pilish--tool-block-nested-calls root))
               (should-not (pilish--nested-call-result completed))
               (should-not (pilish--nested-call-arguments completed))
@@ -18961,10 +19072,7 @@ When full output is visible, line numbers must follow rendered blank lines."
         (should (string-match-p "a6" content))
         (should-not (string-match-p "b6" content))
         (should (= 1 (cl-count-if
-                      (lambda (overlay)
-                        (let ((button (pilish--find-toggle-button-in-region
-                                       (overlay-start overlay) (overlay-end overlay))))
-                          (and button (not (button-get button 'pilish-expanded)))))
+                      #'pilish--tool-overlay-collapsed-p
                       (pilish-test--all-tool-overlays))))))))
 
 (ert-deftest pilish-test-visit-file-write-ignores-offset ()
@@ -23710,7 +23818,7 @@ events where the header text hasn't changed."
                 (should-not (get-text-property (1- hidden) 'pilish-disclosure-hit))
                 (should (= (button-start (button-at heading)) (button-start button)))
                 (should (eq (button-get (button-at heading) 'action)
-                            #'pilish--toggle-compound-tool-section))
+                            #'pilish--toggle-tool-output))
                 (should (eq (button-get (button-at heading) 'keymap) pilish--tool-button-map))
                 (should (eq (get-text-property hidden 'pilish-tool-section) 'script))
                 (should (eq (get-text-property heading 'pilish-tool-section) 'output))

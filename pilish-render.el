@@ -2008,6 +2008,16 @@ null and malformed values are terminally untimed, never local estimates."
       (pilish--make-recorded-tool-time milliseconds)
     'untimed))
 
+(cl-defstruct (pilish--tool-output-view
+               (:constructor pilish--make-tool-output-view))
+  "One output section's last painted representation, not pending result facts.
+SNAPSHOT holds selected domain content and prepared images.  EXCERPT freezes
+its preview content, hidden count and source-line map.  SELECTION is `tail',
+`plain', `head', `all', or a received child's `concealed'."
+  snapshot
+  excerpt
+  selection)
+
 (cl-defstruct (pilish--tool-block
                (:constructor pilish--make-tool-block))
   "One root tool's rendering and execution state.
@@ -2025,13 +2035,12 @@ Untimed completion never falls back to the local running clock."
   offset
   line-map
   last-tail
-  image-previews
   timing
   details
   compound-p
   args
   result
-  displayed-output                   ; Parent presentation used by the last paint.
+  output-view
   script-line-map                    ; Painted preview's source rows; nil when full.
   nested-calls
   folds
@@ -2054,6 +2063,7 @@ Untimed completion never falls back to the local running clock."
   started-at
   pending-end-p
   result
+  output-view
   saved-labels
   argument-rows
   argument-charge)
@@ -2376,14 +2386,15 @@ section's contiguous hidden closing wrapper, never preceding visible content."
     map)
   "Keymap for tool buttons, with TAB reserved for section folding.")
 
-(defun pilish--insert-compound-tool-heading (label section expanded &optional suffix)
+(defun pilish--insert-compound-tool-heading (label section expanded &optional suffix action)
   "Insert LABEL before SECTION's content with its existing fold authority.
-EXPANDED selects display.  SUFFIX is the existing collapsed diagnostic."
+EXPANDED selects display.  SUFFIX is the existing collapsed diagnostic.
+ACTION defaults to the script/list toggle; output supplies its own action."
   (let* ((start (point))
          (text (concat label (and (not expanded) suffix))))
     (insert-text-button text
                         'face 'pilish-collapsed-indicator
-                        'action #'pilish--toggle-compound-tool-section
+                        'action (or action #'pilish--toggle-compound-tool-section)
                         'keymap pilish--tool-button-map
                         'follow-link t 'pilish-tool-toggle t
                         'pilish-tool-section section)
@@ -2399,14 +2410,17 @@ EXPANDED selects display.  SUFFIX is the existing collapsed diagnostic."
     (let ((code (pilish--tool-arg-get (pilish--tool-block-args block) :code)))
       (and (stringp code) (not (string-empty-p code)) code))))
 
-(defun pilish--insert-compound-tool-body (block &optional output-presentation)
+(defun pilish--insert-compound-tool-body (block &optional toggled-section output-selection)
   "Insert BLOCK's compound body at point without child tool overlays.
-Reuse ordinary result selection and rich-output insertion directly.
-OUTPUT-PRESENTATION folds a displayed snapshot; otherwise select current facts."
+An output TOGGLED-SECTION reuses the root output's last painted snapshot.
+OUTPUT-SELECTION is the requested output fold, published only after insertion.
+Other repaints select retained facts through the existing update ordering."
   (let* ((folds (pilish--tool-block-folds block))
          script-line-map
          (presentation
-          (or output-presentation
+          (or (and (eq toggled-section 'output)
+                   (when-let* ((view (pilish--tool-block-output-view block)))
+                     (pilish--tool-output-view-snapshot view)))
               (when-let* ((result (pilish--tool-block-result block)))
                 (pilish--tool-result-presentation
                  (overlay-get (pilish--tool-block-overlay block) 'pilish-tool-name)
@@ -2430,29 +2444,9 @@ OUTPUT-PRESENTATION folds a displayed snapshot; otherwise select current facts."
         (setq script-line-map
               (when (and (not expanded) (> hidden 0)) (plist-get truncation :line-map)))
         (add-text-properties start (point) '(pilish-tool-section script))))
-    (when (and presentation
-               (or (not (string-empty-p (plist-get presentation :text)))
-                   (plist-get presentation :images)))
-      (let* ((start (point))
-             (text (plist-get presentation :text))
-             (truncation (pilish--truncate-to-visual-lines
-                          text (plist-get presentation :preview-limit)
-                          (pilish--chat-display-width)))
-             (hidden (plist-get truncation :hidden-lines))
-             (expanded (member 'output folds)))
-        (when (> hidden 0)
-          (pilish--insert-compound-tool-heading "Output" 'output expanded))
-        (unless (string-empty-p text)
-          (pilish--insert-rendered-tool-content
-           (if (or expanded (= hidden 0))
-               (string-trim-right text "\n+")
-             (plist-get truncation :content))
-           (plist-get presentation :lang) (plist-get presentation :is-edit-diff)))
-        (pilish--insert-image-previews (plist-get presentation :images))
-        (setf (pilish--tool-block-offset block) (plist-get presentation :offset)
-              (pilish--tool-block-line-map block)
-              (when (and (not expanded) (> hidden 0)) (plist-get truncation :line-map)))
-        (add-text-properties start (point) '(pilish-tool-section output))))
+    (when presentation
+      (pilish--insert-tool-output-section
+       block nil presentation (and (eq toggled-section 'output) output-selection)))
     (when-let* (((equal (overlay-get (pilish--tool-block-overlay block) 'pilish-tool-name) "codemode"))
                 (path (pilish--tool-arg-get (plist-get (pilish--tool-block-result block) :details)
                                             :fullOutputPath))
@@ -2473,7 +2467,10 @@ OUTPUT-PRESENTATION folds a displayed snapshot; otherwise select current facts."
         (dolist (call (nthcdr hidden calls))
           (let* ((child-start (point))
                  (section (cons 'child (pilish--nested-call-id call)))
-                 (open (member section folds))
+                 (open (eq (or (and (equal section toggled-section) output-selection)
+                               (when-let* ((view (pilish--nested-call-output-view call)))
+                                 (pilish--tool-output-view-selection view)))
+                           'all))
                  (child-result (pilish--nested-call-result call))
                  (presentation
                   (when child-result
@@ -2482,8 +2479,6 @@ OUTPUT-PRESENTATION folds a displayed snapshot; otherwise select current facts."
                      (plist-get child-result :content) (plist-get child-result :details)
                      (not (null (memq (pilish--nested-call-status call) '(error cancelled))))
                      (not open) (pilish--nested-call-saved-labels call))))
-                 (text (plist-get presentation :text))
-                 (images (plist-get presentation :images))
                  (rendered (pilish--tool-call-text block call width))
                  (summary (car rendered))
                  (rows-text (cdr rendered)))
@@ -2496,17 +2491,9 @@ OUTPUT-PRESENTATION folds a displayed snapshot; otherwise select current facts."
               (insert (propertize (format " saved arguments omitted (%d bytes)" bytes)
                                   'pilish-no-fontify t)))
             (insert "\n")
-            (when (or (plist-get presentation :image-content-p)
-                      images (and text (not (string-empty-p text))))
-              (pilish--insert-compound-tool-heading "Output" section open))
-            (when open
-              (let ((output-start (point)))
-                (when (and text (not (string-empty-p text)))
-                  (pilish--insert-rendered-tool-content
-                   (string-trim-right text "\n+") (plist-get presentation :lang)
-                   (plist-get presentation :is-edit-diff)))
-                (pilish--insert-image-previews images)
-                (add-text-properties output-start (point) '(pilish-child-output t))))
+            (when presentation
+              (pilish--insert-tool-output-section
+               block call presentation (and (equal section toggled-section) output-selection)))
             (add-text-properties child-start (point) (list 'pilish-tool-section section))))
         (when (pilish--tool-block-history-p block)
           (insert (propertize "Child outputs are not saved in sessions.\n"
@@ -2514,18 +2501,18 @@ OUTPUT-PRESENTATION folds a displayed snapshot; otherwise select current facts."
     (when (pilish--tool-block-summary-incomplete-p block)
       (insert (propertize "Incomplete saved call summary\n"
                           'pilish-no-fontify t 'pilish-tool-section 'children)))
-    (setf (pilish--tool-block-displayed-output block) presentation
-          (pilish--tool-block-script-line-map block) script-line-map)))
+    (setf (pilish--tool-block-script-line-map block) script-line-map)))
 
 (defun pilish--toggle-compound-tool-section (button)
-  "Toggle only BUTTON's compound fold key."
+  "Toggle only BUTTON's compound script or child-list fold key."
   (when-let* ((overlay (save-excursion
                         (goto-char (button-start button))
                         (pilish--tool-overlay-at-point)))
               (block (pilish--tool-block-from-overlay overlay))
-              ((pilish--tool-block-compound-p block)))
-    (let* ((section (button-get button 'pilish-tool-section))
-           (folds (pilish--tool-block-folds block))
+              ((pilish--tool-block-compound-p block))
+              (section (button-get button 'pilish-tool-section))
+              ((memq section '(script children))))
+    (let* ((folds (pilish--tool-block-folds block))
            (collapsing (member section folds)))
       (setf (pilish--tool-block-folds block)
             (if collapsing (remove section folds) (cons section folds)))
@@ -2624,10 +2611,11 @@ Decoration in TOGGLED-SECTION also clamps, never impersonating source text."
         (or (nth 1 (assq 'children new-sections)) start))
     (pilish--map-tool-rewrite-position position start old-end new-end)))
 
-(defun pilish--redraw-compound-tool (block &optional toggled-section)
+(defun pilish--redraw-compound-tool (block &optional toggled-section output-selection)
   "Rewrite compound BLOCK within retained bounds and preserve each reader's view.
 Script and output coordinates always use the actual old and new painted
 line maps.  TOGGLED-SECTION identifies an explicit fold in either direction.
+OUTPUT-SELECTION requests the next output selection without changing old paint.
 Parent output folds use the last painted presentation so captured row spans
 and preview line maps share one source.  Pending updates still paint newer
 retained facts through the existing queue."
@@ -2643,15 +2631,13 @@ retained facts through the existing queue."
              start old-end
              (list (cons 'script (pilish--tool-block-script-line-map block))
                    (cons 'output (pilish--tool-block-line-map block)))))
-           (displayed-output (and (eq toggled-section 'output)
-                                  (pilish--tool-block-displayed-output block)))
            (view (pilish--capture-tool-rewrite-view))
            (inhibit-read-only t))
       (save-excursion
         (remove-overlays start old-end 'pilish-diff-overlay t)
         (delete-region start old-end)
         (goto-char start)
-        (pilish--insert-compound-tool-body block displayed-output)
+        (pilish--insert-compound-tool-body block toggled-section output-selection)
         (set-marker header start)
         (set-marker end (point))
         (pilish--tool-block-refresh-overlay block)
@@ -2681,6 +2667,7 @@ retained facts through the existing queue."
           (pilish--nested-call-args-preview call) nil
           (pilish--nested-call-error call) nil
           (pilish--nested-call-result call) nil
+          (pilish--nested-call-output-view call) nil
           (pilish--nested-call-started-at call) nil
           (pilish--nested-call-pending-end-p call) nil
           (pilish--nested-call-argument-rows call) nil
@@ -2688,14 +2675,13 @@ retained facts through the existing queue."
   (setf (pilish--tool-block-args block) nil
         (pilish--tool-block-result block) nil
         (pilish--tool-block-argument-view block) nil
-        (pilish--tool-block-displayed-output block) nil
+        (pilish--tool-block-output-view block) nil
         (pilish--tool-block-script-line-map block) nil
         (pilish--tool-block-nested-calls block) nil
         (pilish--tool-block-folds block) nil
         (pilish--tool-block-history-p block) nil
         (pilish--tool-block-summary-incomplete-p block) nil
         (pilish--tool-block-last-tail block) nil
-        (pilish--tool-block-image-previews block) nil
         (pilish--tool-block-compound-p block) nil)
   (set-marker (pilish--tool-block-header-end block) nil)
   (set-marker (pilish--tool-block-end-marker block) nil)
@@ -4215,31 +4201,11 @@ path/error metadata for `pilish-visit-file'."
     (pilish--tool-block-refresh-overlay block))
   block)
 
-(defun pilish--tool-block-set-offset (block offset)
-  "Store OFFSET metadata on BLOCK and its overlay."
-  (when block
-    (setf (pilish--tool-block-offset block) offset)
-    (pilish--tool-block-refresh-overlay block))
-  block)
-
-(defun pilish--tool-block-set-line-map (block line-map)
-  "Store LINE-MAP metadata on BLOCK and its overlay."
-  (when block
-    (setf (pilish--tool-block-line-map block) line-map)
-    (pilish--tool-block-refresh-overlay block))
-  block)
-
 (defun pilish--tool-block-set-last-tail (block last-tail)
   "Store LAST-TAIL preview cache metadata on BLOCK and its overlay."
   (when block
     (setf (pilish--tool-block-last-tail block) last-tail)
     (pilish--tool-block-refresh-overlay block))
-  block)
-
-(defun pilish--tool-block-set-image-previews (block previews)
-  "Store rendered image PREVIEWS on BLOCK for toggling and cooling."
-  (when block
-    (setf (pilish--tool-block-image-previews block) previews))
   block)
 
 (defun pilish--image-type-for-mime (mime-type)
@@ -5463,6 +5429,7 @@ Each element is a plist `(:content-index N :tool-call TOOL-CALL)'."
   "Clear stale streamed body state from unexecuted tool preview BLOCK."
   (unless (pilish--tool-block-execution-backed-p block)
     (pilish--tool-block-set-last-tail block nil)
+    (setf (pilish--tool-block-output-view block) nil)
     (pilish--tool-block-replace-body block "" nil nil)))
 
 (defun pilish--reconcile-toolcall-preview-block
@@ -5853,6 +5820,12 @@ shows complete lines only)."
         (unless (equal-including-properties cache-key last-tail)
           (pilish--tool-block-replace-body
            block display-content show-hidden-indicator lang)
+          (let ((view (or (pilish--tool-block-output-view block)
+                          (pilish--make-tool-output-view))))
+            (setf (pilish--tool-output-view-snapshot view) (list :text display-content :lang lang)
+                  (pilish--tool-output-view-excerpt view) truncation
+                  (pilish--tool-output-view-selection view) 'tail
+                  (pilish--tool-block-output-view block) view))
           (pilish--tool-block-set-last-tail block cache-key))))))
 
 ;;;; Coalesced tool update rendering
@@ -6112,16 +6085,8 @@ if none exists, render the result at point without a live overlay."
           (pilish--redraw-compound-tool block)
           (pilish--tool-overlay-finalize
            (if is-error 'pilish-tool-block-error 'pilish-tool-block) block))
-      (let* ((presentation (pilish--tool-result-presentation tool-name args content details is-error nil labels))
-             (image-previews (plist-get presentation :images))
-             (lang (plist-get presentation :lang))
-             (is-edit-diff (plist-get presentation :is-edit-diff))
-             (display-content (plist-get presentation :text))
-             (truncation (pilish--truncate-to-visual-lines
-                          display-content (plist-get presentation :preview-limit)
-                          (pilish--chat-display-width)))
-             (hidden-count (plist-get truncation :hidden-lines))
-             (needs-collapse (> hidden-count 0)))
+      (let ((presentation (pilish--tool-result-presentation
+                           tool-name args content details is-error nil labels)))
         (pilish--annotate-saved-conversation-header block labels)
         (if block
             (let* ((header-end (pilish--tool-block-header-end block))
@@ -6134,37 +6099,17 @@ if none exists, render the result at point without a live overlay."
                  (save-excursion
                    (goto-char body-start)
                    (delete-region body-start old-end)
-                   (if needs-collapse
-                       ;; Long output: show preview with toggle button.
-                       (let ((preview-content (plist-get truncation :content)))
-                         (pilish--insert-tool-content-with-toggle
-                          preview-content display-content lang is-edit-diff hidden-count nil))
-                     (unless (string-empty-p display-content)
-                       (pilish--insert-rendered-tool-content
-                        (string-trim-right display-content "\n+") lang is-edit-diff)))
-                   (pilish--insert-image-previews image-previews)
-                   (pilish--tool-block-set-image-previews block image-previews)
+                   (pilish--insert-tool-output-section block nil presentation)
                    (set-marker end-marker (point))
                    (pilish--tool-block-refresh-overlay block)
                    ;; Error content and the overlay face suffice; no error badge.
-                   (when-let* ((offset (plist-get presentation :offset)))
-                     (pilish--tool-block-set-offset block offset))
-                   (when-let* ((line-map (plist-get truncation :line-map)))
-                     (pilish--tool-block-set-line-map block line-map))
                    (pilish--tool-overlay-finalize
                     (if is-error 'pilish-tool-block-error 'pilish-tool-block) block)
                    (when (eobp) (insert "\n"))))))
           (pilish--with-scroll-preservation
             (save-excursion
               (goto-char (point-max))
-              (if needs-collapse
-                  (let ((preview-content (plist-get truncation :content)))
-                    (pilish--insert-tool-content-with-toggle
-                     preview-content display-content lang is-edit-diff hidden-count nil))
-                (unless (string-empty-p display-content)
-                  (pilish--insert-rendered-tool-content
-                   (string-trim-right display-content "\n+") lang is-edit-diff)))
-              (pilish--insert-image-previews image-previews)
+              (pilish--insert-tool-output-section nil nil presentation)
               (insert "\n"))))))))
 
 (defun pilish--ranges-excluding-property (start end prop)
@@ -6195,42 +6140,44 @@ Full history replay defers transcript fontification until all edits finish."
            (throw 'pilish--font-lock-failed nil)))))))
 
 (defun pilish--toggle-tool-output (button)
-  "Toggle between preview and full content for BUTTON.
-Preserves window scroll position during the toggle."
-  (let* ((inhibit-read-only t)
-         (expanded (button-get button 'pilish-expanded))
-         (full-content (button-get button 'pilish-full-content))
-         (preview-content (button-get button 'pilish-preview-content))
-         (lang (button-get button 'pilish-lang))
-         (is-edit-diff (button-get button 'pilish-is-edit-diff))
-         (hidden-count (button-get button 'hidden-count))
-         (btn-start (button-start button)))
-    (when-let* ((ov (save-excursion (goto-char btn-start) (pilish--tool-overlay-at-point)))
-                (header-end (overlay-get ov 'pilish-header-end)))
-      (let* ((start (marker-position header-end))
-             (old-end (overlay-end ov))
-             (record (pilish--tool-block-from-overlay ov))
-             (line-map (overlay-get ov 'pilish-line-map))
-             (old-sections (pilish--tool-section-bounds
-                            start old-end (and (not expanded) (list (cons 'output line-map)))))
-             (view (pilish--capture-tool-rewrite-view))
-             (image-previews (and record (pilish--tool-block-image-previews record))))
+  "Toggle BUTTON's exact output section through its owner's painted view.
+Preserve source-row and image positions without applying pending updates."
+  (when-let* ((overlay (save-excursion
+                        (goto-char (button-start button))
+                        (pilish--tool-overlay-at-point)))
+              (block (pilish--tool-block-from-overlay overlay))
+              (section (button-get button 'pilish-tool-section))
+              (output (if (consp section)
+                          (when-let* ((call (pilish--nested-call-get block (cdr section))))
+                            (pilish--nested-call-output-view call))
+                        (pilish--tool-block-output-view block))))
+    (let* ((call (and (consp section) (pilish--nested-call-get block (cdr section))))
+           (start (marker-position (pilish--tool-block-header-end block)))
+           (old-end (overlay-end overlay))
+           (old-sections (unless (pilish--tool-block-compound-p block)
+                           (pilish--tool-section-bounds
+                            start old-end
+                            (list (cons 'output (pilish--tool-output-line-map output))))))
+           (view (unless (pilish--tool-block-compound-p block)
+                   (pilish--capture-tool-rewrite-view)))
+           (selection (if (eq (pilish--tool-output-view-selection output) 'all)
+                          (if call 'concealed 'head)
+                        'all))
+           (inhibit-read-only t))
+      (if (pilish--tool-block-compound-p block)
+          (pilish--redraw-compound-tool block section selection)
         (save-excursion
           (remove-overlays start old-end 'pilish-diff-overlay t)
           (delete-region start old-end)
           (goto-char start)
-          (pilish--insert-tool-content-with-toggle
-           preview-content full-content lang is-edit-diff hidden-count (not expanded))
-          (pilish--insert-image-previews image-previews)
-          (if record
-              (progn
-                (set-marker (pilish--tool-block-end-marker record) (point))
-                (pilish--tool-block-refresh-overlay record))
-            (move-overlay ov (overlay-start ov) (point)))
+          (pilish--insert-tool-output-section block nil nil selection)
+          (set-marker (pilish--tool-block-end-marker block) (point))
+          (pilish--tool-block-refresh-overlay block)
           (pilish--font-lock-ensure-excluding-property start (point) 'pilish-no-fontify))
-        (let* ((new-end (overlay-end ov))
+        (let* ((new-end (overlay-end overlay))
                (new-sections (pilish--tool-section-bounds
-                              start new-end (and expanded (list (cons 'output line-map))))))
+                              start new-end
+                              (list (cons 'output (pilish--tool-output-line-map output))))))
           (pilish--restore-tool-rewrite-view
            view start old-end new-end
            (lambda (position)
@@ -6467,34 +6414,67 @@ When IS-EDIT-DIFF is non-nil, apply diff overlays to the inserted block."
 Cold text keeps this inert historical hint."
   (format "... (%d more lines)" hidden-count))
 
-(defun pilish--insert-tool-content-with-toggle
-    (preview-content full-content lang is-edit-diff hidden-count expanded)
-  "Insert the real Output button before its selected content.
-EXPANDED selects FULL-CONTENT or PREVIEW-CONTENT.  LANG and IS-EDIT-DIFF
-retain rich rendering.  HIDDEN-COUNT is the existing cold excerpt diagnostic."
-  (let* ((start (point))
-         (display-content (if expanded
-                              (string-trim-right full-content "\n+")
-                            preview-content))
-         (button-label (propertize "Output" 'face 'pilish-collapsed-indicator)))
-    (insert-text-button
-     button-label
-     'action #'pilish--toggle-tool-output
-     'keymap pilish--tool-button-map
-     'follow-link t
-     'pilish-tool-toggle t
-     'pilish-full-content full-content
-     'pilish-preview-content preview-content
-     'pilish-lang lang
-     'pilish-is-edit-diff is-edit-diff
-     'pilish-expanded expanded
-     'hidden-count hidden-count)
-    (insert "\n")
-    (put-text-property start (point) 'pilish-tool-fold-heading t)
-    (pilish--put-disclosure start (point) expanded
-                           #'pilish--toggle-tool-fold-button-at-point)
-    (pilish--insert-rendered-tool-content display-content lang is-edit-diff)
-    (put-text-property start (point) 'pilish-tool-section 'output)))
+(defun pilish--tool-output-line-map (view)
+  "Return VIEW's painted head-preview source rows, or nil for full output."
+  (when (and view (eq (pilish--tool-output-view-selection view) 'head))
+    (plist-get (pilish--tool-output-view-excerpt view) :line-map)))
+
+(defun pilish--insert-tool-output-section (block &optional call presentation selection)
+  "Insert BLOCK's output, or received CALL's output, at point.
+PRESENTATION supplies newly painted domain facts; nil reuses the last snapshot.
+The owned view alone selects full output, a head preview, or concealed child
+output.  SELECTION requests a fold change without altering the old paint.
+Ordinary folds reuse their frozen excerpt; compound repaints measure
+their new excerpt at the current width, as do script and child-list repaints.
+With no BLOCK, insert the existing unowned result-only presentation."
+  (let* ((view (or (if call (pilish--nested-call-output-view call)
+                    (and block (pilish--tool-block-output-view block)))
+                   (pilish--make-tool-output-view)))
+         (snapshot (or presentation (pilish--tool-output-view-snapshot view)))
+         (text (or (plist-get snapshot :text) ""))
+         (excerpt
+          (unless call
+            (if (or presentation
+                    (and block (pilish--tool-block-compound-p block)))
+                (pilish--truncate-to-visual-lines
+                 text (plist-get snapshot :preview-limit) (pilish--chat-display-width))
+              (pilish--tool-output-view-excerpt view))))
+         (hidden (or (plist-get excerpt :hidden-lines) 0))
+         (selection (or selection (pilish--tool-output-view-selection view)))
+         (section (if call (cons 'child (pilish--nested-call-id call)) 'output))
+         (available (or (not (string-empty-p text)) (plist-get snapshot :images)
+                        (and call (plist-get snapshot :image-content-p))))
+         (start (point)))
+    (setq selection
+          (cond (call (if (eq selection 'all) 'all 'concealed))
+                ((eq selection 'all) 'all)
+                ((> hidden 0) 'head)
+                (t 'plain)))
+    (when (and available (or call (> hidden 0)))
+      (pilish--insert-compound-tool-heading
+       "Output" section (eq selection 'all) nil #'pilish--toggle-tool-output))
+    (unless (eq selection 'concealed)
+      (let ((output-start (point)))
+        (unless (string-empty-p text)
+          (pilish--insert-rendered-tool-content
+           (if (eq selection 'head) (plist-get excerpt :content)
+             (string-trim-right text "\n+"))
+           (plist-get snapshot :lang) (plist-get snapshot :is-edit-diff)))
+        (pilish--insert-image-previews (plist-get snapshot :images))
+        (when call
+          (add-text-properties output-start (point) '(pilish-child-output t)))))
+    (add-text-properties start (point) (list 'pilish-tool-section section))
+    ;; Keep the previous view authoritative until insertion succeeds.
+    (setf (pilish--tool-output-view-snapshot view) snapshot
+          (pilish--tool-output-view-excerpt view) excerpt
+          (pilish--tool-output-view-selection view) selection)
+    (if call
+        (setf (pilish--nested-call-output-view call) view)
+      (when block
+        (setf (pilish--tool-block-output-view block) view
+              (pilish--tool-block-offset block) (plist-get snapshot :offset)
+              (pilish--tool-block-line-map block) (pilish--tool-output-line-map view))))
+    view))
 
 (defun pilish--find-tool-block-bounds ()
   "Find the bounds of the tool block at point.
@@ -6658,18 +6638,6 @@ Exclude the wrapper newline immediately before the closing fence."
                     (1- closing-start)
                   closing-start)))))))
 
-(defun pilish--tool-visible-body (bounds)
-  "Return visible body text within BOUNDS, retaining subagent-name properties."
-  (let* ((source (buffer-substring (car bounds) (cdr bounds)))
-         (cold (substring-no-properties source))
-         (position 0))
-    (while (< position (length source))
-      (let ((next (next-single-property-change position 'pilish-subagent-name source (length source)))
-            (value (get-text-property position 'pilish-subagent-name source)))
-        (when value (put-text-property position next 'pilish-subagent-name value cold))
-        (setq position next)))
-    cold))
-
 (defun pilish--cold-tool-target-metadata
     (overlay header-end collapsed)
   "Return lightweight target metadata for cold tool OVERLAY.
@@ -6686,7 +6654,7 @@ buttons, full content, markers, and absolute buffer positions."
                        (overlay-get overlay 'pilish-line-map))
         :header-length (- header-end (overlay-start overlay))))
 
-(defun pilish--compound-tool-cold-projection (overlay)
+(defun pilish--tool-cold-projection (overlay)
   "Project OVERLAY's displayed body to language-free cold text.
 Return :cold-body and transient absolute :deleted-spans for view mapping."
   (let* ((start (marker-position (overlay-get overlay 'pilish-header-end)))
@@ -6750,53 +6718,32 @@ Return :cold-body and transient absolute :deleted-spans for view mapping."
                                  language-spans))))
 
 (defun pilish--tool-overlay-cold-metadata (overlay)
-  "Return cold-history metadata for completed tool OVERLAY.
-The result carries its visible body, lightweight target metadata and, for a
-currently collapsed block, its hidden count.  Expanded blocks return no hidden
-count because cold history must stay preview-only.  Header-only blocks keep
-an empty :cold-body without inventing output.  Compound blocks instead freeze
-their entire currently displayed body in :cold-body."
-  (if-let* ((block (pilish--tool-block-from-overlay overlay))
-            ((pilish--tool-block-compound-p block)))
-      (append (pilish--compound-tool-cold-projection overlay)
+  "Freeze completed OVERLAY's actual paint and its view's excerpt metadata.
+Read selection when cooling executes, not when the overlay enters its queue.
+Never reconstruct rich results or derive fold state from a button or fence.
+Ordinary collapsed output retains its existing inert hidden-line notice;
+compound output freezes all displayed sections without adding new notices."
+  (when-let* ((header-end (marker-position (overlay-get overlay 'pilish-header-end))))
+    (let* ((block (pilish--tool-block-from-overlay overlay))
+           (view (and block (pilish--tool-block-output-view block)))
+           (collapsed (and view (eq (pilish--tool-output-view-selection view) 'head)))
+           (hidden (and collapsed
+                        (not (pilish--tool-block-compound-p block))
+                        (plist-get (pilish--tool-output-view-excerpt view) :hidden-lines)))
+           (projection (pilish--tool-cold-projection overlay)))
+      ;; The separator newline can sit outside the overlay.
+      (when (and block (not (pilish--tool-block-compound-p block))
+                 (not (string-empty-p (plist-get projection :cold-body)))
+                 (not (string-suffix-p "\n" (plist-get projection :cold-body))))
+        (setf (plist-get projection :cold-body)
+              (concat (plist-get projection :cold-body) "\n")))
+      (when (and hidden (> hidden 0))
+        (setf (plist-get projection :cold-body)
+              (concat (plist-get projection :cold-body)
+                      (pilish--tool-hidden-line-label hidden) "\n")))
+      (append projection
               (list :target-metadata
-                    (pilish--cold-tool-target-metadata
-                     overlay (marker-position (pilish--tool-block-header-end block))
-                     (not (member 'output (pilish--tool-block-folds block))))))
-    (if-let* ((header-end (marker-position (overlay-get overlay 'pilish-header-end)))
-              (end (overlay-end overlay)))
-        (let ((bounds (and (< header-end end)
-                           (pilish--tool-fenced-content-bounds header-end end))))
-          (if (or (= header-end end)
-                  (and block (pilish--tool-block-image-previews block)
-                       (not bounds)))
-              (list :cold-body (or (and block (pilish--image-previews-text
-                                              (pilish--tool-block-image-previews block))) "")
-                    :target-metadata (pilish--cold-tool-target-metadata overlay header-end nil))
-            (when-let* ((visible-body (and bounds (pilish--tool-visible-body bounds))))
-              (let* ((record (pilish--tool-block-from-overlay overlay))
-                     (image-previews (and record (pilish--tool-block-image-previews record)))
-                     (button (pilish--find-toggle-button-in-region header-end end))
-                     (collapsed (and button (not (button-get button 'pilish-expanded))))
-                     (hidden-count (and collapsed (button-get button 'hidden-count))))
-                (list :visible-body visible-body
-                      :deleted-spans
-                      (save-excursion
-                        (goto-char (car bounds))
-                        (forward-line -1)
-                        (let ((length (length (plist-get (pilish--fence-line-info-at-point) :trailing))))
-                          (when (> length 0)
-                            (list (cons (- (line-end-position) length) (line-end-position))))))
-                      :heading (when (get-text-property header-end 'pilish-tool-fold-heading)
-                                 (propertize
-                                  (buffer-substring-no-properties
-                                   header-end (next-single-property-change
-                                               header-end 'pilish-tool-fold-heading nil end))
-                                  'pilish-tool-fold-heading t 'pilish-tool-section 'output))
-                      :image-previews image-previews
-                      :target-metadata
-                      (pilish--cold-tool-target-metadata overlay header-end collapsed)
-                      :hidden-count (and (integerp hidden-count) (> hidden-count 0) hidden-count)))))))))
+                    (pilish--cold-tool-target-metadata overlay header-end collapsed))))))
 
 (defun pilish--cool-tool-overlay (overlay)
   "Rewrite completed tool OVERLAY into its cold plain-history form.
@@ -6809,17 +6756,8 @@ Return the applied projection metadata, or nil if ineligible."
                 (header-end (marker-position
                              (overlay-get overlay 'pilish-header-end))))
       (let* ((inhibit-read-only t)
-             (hidden-count (plist-get metadata :hidden-count))
-             (image-previews (plist-get metadata :image-previews))
              (target-metadata (plist-get metadata :target-metadata))
-             (cold-body (or (plist-get metadata :cold-body)
-                            (concat
-                             (plist-get metadata :heading)
-                             (pilish--wrap-in-src-block (plist-get metadata :visible-body) nil)
-                             "\n"
-                             (pilish--image-previews-text image-previews)
-                             (when hidden-count
-                               (concat (pilish--tool-hidden-line-label hidden-count) "\n")))))
+             (cold-body (plist-get metadata :cold-body))
              (ov-start (overlay-start overlay))
              (ov-end (overlay-end overlay))
              (record (pilish--tool-block-from-overlay overlay))
@@ -6839,7 +6777,7 @@ Return the applied projection metadata, or nil if ineligible."
           (when details
             (pilish--set-details ov-start (point) details))
           (pilish--restore-subagent-buttons ov-start (point)))
-        (when (and record (pilish--tool-block-compound-p record))
+        (when record
           (pilish--release-nested-tool-block record))
         metadata))))
 
@@ -7081,14 +7019,10 @@ FENCE and LINE-INFO are plists from
        (string-match-p "^[ \t]*$" (plist-get line-info :trailing))))
 
 (defun pilish--tool-overlay-collapsed-p (overlay)
-  "Return non-nil when OVERLAY is currently collapsed.
-Collapsed tool blocks contain a toggle button whose
-`pilish-expanded' property is nil.  Expanded blocks and
-non-collapsible blocks return nil."
-  (when-let* ((btn (pilish--find-toggle-button-in-region
-                   (overlay-start overlay)
-                   (overlay-end overlay))))
-    (not (button-get btn 'pilish-expanded))))
+  "Return non-nil for a head-preview selection in OVERLAY's root output view."
+  (when-let* ((block (pilish--tool-block-from-overlay overlay))
+              (view (pilish--tool-block-output-view block)))
+    (eq (pilish--tool-output-view-selection view) 'head)))
 
 (defun pilish--tool-line-from-metadata
     (tool-name stored-offset line-map header-end body-end use-line-map)

@@ -2018,7 +2018,12 @@ keep their recovery keys on screen too."
                 (let ((hit (pilish-gui-test--tool-margin-position (selected-window) (point))))
                   (should hit)
                   (pilish--disclosure-click (list 'mouse-1 hit)))
-                (should (member section (pilish--tool-block-folds block)))))
+                (if (memq section '(script children))
+                    (should (member section (pilish--tool-block-folds block)))
+                  (should (eq 'all (pilish--tool-output-view-selection
+                                    (pilish-test--output-view
+                                     (pilish--find-toggle-button-in-region
+                                      (overlay-start overlay) (overlay-end overlay) section))))))))
             (should (= 1 (pilish-test--count-matches "^Child calls" (buffer-string))))
             (should-not (string-match-p "[▸▾]" (buffer-string)))
             (pilish--cool-completed-tool-blocks (list (pilish--tool-block-overlay block)))
@@ -2154,14 +2159,21 @@ keep their recovery keys on screen too."
                                          (text-property-any (overlay-start overlay) (overlay-end overlay) 'pilish-argument-value t)
                                        (button-start (pilish--find-toggle-button-in-region
                                                       (overlay-start overlay) (overlay-end overlay) section))))
-                           (hit (pilish-gui-test--tool-margin-position (selected-window) position)))
+                           (hit (pilish-gui-test--tool-margin-position (selected-window) position))
+                           (output (when (or (eq section 'output) (eq (car-safe section) 'child))
+                                     (pilish-test--output-view (button-at position))))
+                           (selection (and output (pilish--tool-output-view-selection output))))
                       (pilish--disclosure-click (list 'mouse-1 hit))
-                      (should-not (equal before (pilish--tool-block-folds block)))
+                      (if output
+                          (should-not (eq selection (pilish--tool-output-view-selection output)))
+                        (should-not (equal before (pilish--tool-block-folds block))))
                       (if (eq (car-safe section) 'argument)
                           (pilish--argument-toggle block section)
                         (button-activate
                          (pilish--find-toggle-button-in-region (overlay-start overlay) (overlay-end overlay) section)))
-                      (should (equal before (pilish--tool-block-folds block))))))))))
+                      (should (equal before (pilish--tool-block-folds block)))
+                      (when output
+                        (should (eq selection (pilish--tool-output-view-selection output)))))))))))
       (set-frame-size nil width height)
       (sit-for 0.1)
       (when (buffer-live-p chat)
