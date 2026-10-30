@@ -5644,7 +5644,7 @@ When PARTIAL-TEXT is supplied it must precede the outcome, never be erased."
              (restore (symbol-function 'pilish--restore-tail-window))
              (append-text (symbol-function 'pilish--append-to-chat))
              (edit-body (symbol-function 'pilish--call-with-tool-body-edit))
-             (cooling-view (symbol-function 'pilish--capture-tool-cooling-view))
+             (cooling-view (symbol-function 'pilish--capture-tool-rewrite-view))
              (cool (symbol-function 'pilish--cool-tool-overlay))
              (decorate (symbol-function 'pilish--decorate-tables-in-region))
              first-text first-appends)
@@ -5670,7 +5670,7 @@ When PARTIAL-TEXT is supplied it must precede the outcome, never be erased."
                        (lambda (&rest args)
                          (cl-incf edits)
                          (apply edit-body args)))
-                      ((symbol-function 'pilish--capture-tool-cooling-view)
+                      ((symbol-function 'pilish--capture-tool-rewrite-view)
                        (lambda ()
                          (cl-incf cooling-views)
                          (funcall cooling-view)))
@@ -10283,19 +10283,19 @@ When EXPANDED is non-nil, expand its preview before returning the overlay."
           (should-not (plist-get (car jobs) :repeat))
           (should-not (plist-get (car jobs) :owner)))))))
 
-(ert-deftest pilish-test-deferred-tool-cooling-position-map-boundaries ()
-  "Cooling position mapping is continuous at replacement boundaries."
+(ert-deftest pilish-test-tool-rewrite-position-map-boundaries ()
+  "Tool-rewrite position mapping is continuous at replacement boundaries."
   ;; Shrinking [10, 20) to [10, 15).
-  (should (= 9 (pilish--map-tool-cooling-position 9 10 20 15)))
-  (should (= 10 (pilish--map-tool-cooling-position 10 10 20 15)))
-  (should (= 12 (pilish--map-tool-cooling-position 12 10 20 15)))
-  (should (= 15 (pilish--map-tool-cooling-position 19 10 20 15)))
-  (should (= 15 (pilish--map-tool-cooling-position 20 10 20 15)))
-  (should (= 20 (pilish--map-tool-cooling-position 25 10 20 15)))
+  (should (= 9 (pilish--map-tool-rewrite-position 9 10 20 15)))
+  (should (= 10 (pilish--map-tool-rewrite-position 10 10 20 15)))
+  (should (= 12 (pilish--map-tool-rewrite-position 12 10 20 15)))
+  (should (= 15 (pilish--map-tool-rewrite-position 19 10 20 15)))
+  (should (= 15 (pilish--map-tool-rewrite-position 20 10 20 15)))
+  (should (= 20 (pilish--map-tool-rewrite-position 25 10 20 15)))
   ;; Expanding preserves inside offsets and shifts the old end and suffix.
-  (should (= 19 (pilish--map-tool-cooling-position 19 10 20 25)))
-  (should (= 25 (pilish--map-tool-cooling-position 20 10 20 25)))
-  (should (= 30 (pilish--map-tool-cooling-position 25 10 20 25))))
+  (should (= 19 (pilish--map-tool-rewrite-position 19 10 20 25)))
+  (should (= 25 (pilish--map-tool-rewrite-position 20 10 20 25)))
+  (should (= 30 (pilish--map-tool-rewrite-position 25 10 20 25))))
 
 (ert-deftest pilish-test-deferred-tool-cooling-view-after-body-stays-logical ()
   "One slice keeps selected and other windows on sentinels after the body."
@@ -10809,6 +10809,30 @@ When EXPANDED is non-nil, expand its preview before returning the overlay."
           (should (get-text-property
                    (1- (point)) 'pilish-cold-tool-block)))))))
 
+(ert-deftest pilish-test-deferred-tool-cooling-queue-preserves-identity-and-order ()
+  "Queue merging keeps first occurrences by overlay identity in stable order."
+  (with-temp-buffer
+    (let ((fresh-a (make-overlay 1 1))
+          (fresh-b (make-overlay 1 1))
+          (equal-a (make-overlay 1 1))
+          (equal-b (make-overlay 1 1))
+          (stale (make-overlay 1 1)))
+      (should (equal equal-a equal-b))
+      (should-not (eq equal-a equal-b))
+      (let ((pilish--tool-cooling-queue (list stale fresh-a equal-b)))
+        (cl-letf (((symbol-function 'pilish--completed-tool-overlays-outside-hot-tail)
+                   (lambda () (list fresh-b fresh-a fresh-b equal-a)))
+                  ((symbol-function 'pilish--schedule-tool-cooling) #'ignore))
+          (pilish--queue-tool-cooling-outside-hot-tail))
+        (should (= 5 (length pilish--tool-cooling-queue)))
+        (should (eq (nth 0 pilish--tool-cooling-queue) fresh-b))
+        (should (eq (nth 1 pilish--tool-cooling-queue) fresh-a))
+        (should (eq (nth 2 pilish--tool-cooling-queue) equal-a))
+        (should (eq (nth 3 pilish--tool-cooling-queue) stale))
+        (should (eq (nth 4 pilish--tool-cooling-queue) equal-b))
+        (should (= 1 (cl-count fresh-a pilish--tool-cooling-queue :test #'eq)))
+        (should (= 1 (cl-count fresh-b pilish--tool-cooling-queue :test #'eq)))))))
+
 (ert-deftest pilish-test-deferred-tool-cooling-second-enqueue-deduplicates ()
   "A merged second enqueue drains once each from newest to oldest."
   (with-temp-buffer
@@ -11104,6 +11128,45 @@ When EXPANDED is non-nil, expand its preview before returning the overlay."
         (let ((after (pilish--file-target-at-point)))
           (dolist (key '(:source :raw :display :emacs-path :shell-path :line))
             (should (equal (plist-get before key) (plist-get after key)))))))))
+
+(ert-deftest pilish-test-cooled-identical-tools-keep-independent-bounds ()
+  "Repeated tools retain separate cold ranges and file-target authority."
+  (with-temp-buffer
+    (pilish-chat-mode)
+    (dotimes (_ 2)
+      (pilish--display-tool-start "read" '(:path "/tmp/same.el"))
+      (pilish--display-tool-end
+       "read" '(:path "/tmp/same.el")
+       '((:type "text" :text "src/fallback.el")) nil nil))
+    (pilish--cool-completed-tool-blocks (pilish-test--all-tool-overlays))
+    (let (positions)
+      (goto-char (point-min))
+      (while (search-forward "src/fallback.el" nil t)
+        (push (match-beginning 0) positions))
+      (setq positions (nreverse positions))
+      (should (= 2 (length positions)))
+      (let ((cold-blocks
+             (mapcar (lambda (position)
+                       (goto-char position)
+                       (pilish--cold-tool-block-at-point))
+                     positions)))
+        (should (cl-every #'identity cold-blocks))
+        (should (= 2 (length (cl-delete-duplicates
+                              (mapcar (lambda (block) (plist-get block :bounds))
+                                      cold-blocks)
+                              :test #'equal))))
+        (let ((first-metadata (plist-get (car cold-blocks) :metadata))
+              (second-metadata (plist-get (cadr cold-blocks) :metadata)))
+          (should (equal first-metadata second-metadata))
+          (should-not (eq first-metadata second-metadata)))
+        (dolist (block cold-blocks)
+          (should (equal "/tmp/same.el"
+                         (plist-get (plist-get block :metadata) :path)))
+          (goto-char (car (plist-get block :bounds)))
+          (let ((target (pilish--file-target-at-point)))
+            (should (eq :tool (plist-get target :source)))
+            (should (equal (plist-get block :bounds)
+                           (plist-get target :bounds)))))))))
 
 (ert-deftest pilish-test-cooled-file-target-boundaries-do-not-bleed ()
   "Cold authority has hot half-open bounds and does not stick to new text."

@@ -2579,7 +2579,7 @@ width cannot change output coordinates.  The list keeps its heading."
     (position old-sections new-sections start old-end new-end &optional toggled-section)
   "Map POSITION through transient OLD-SECTIONS and NEW-SECTIONS.
 START, OLD-END and NEW-END delimit the body rewrite.  Outside positions
-use the existing cooling mapper.  Content follows its source row and
+use the tool-rewrite mapper.  Content follows its source row and
 character offset in either fold direction.  Vanished characters clamp to
 their section anchor, or the list header when the list hides that child.
 Decoration in TOGGLED-SECTION also clamps, never impersonating source text."
@@ -2600,7 +2600,7 @@ Decoration in TOGGLED-SECTION also clamps, never impersonating source text."
               (let ((offset (- position (nth 1 old))))
                 (+ (nth 1 new) (if (< offset (- (nth 2 new) (nth 1 new))) offset 0)))))
         (or (nth 1 (assq 'children new-sections)) start))
-    (pilish--map-tool-cooling-position position start old-end new-end)))
+    (pilish--map-tool-rewrite-position position start old-end new-end)))
 
 (defun pilish--redraw-compound-tool (block &optional toggled-section)
   "Rewrite compound BLOCK within retained bounds and preserve each reader's view.
@@ -2623,7 +2623,7 @@ retained facts through the existing queue."
                    (cons 'output (pilish--tool-block-line-map block)))))
            (displayed-output (and (eq toggled-section 'output)
                                   (pilish--tool-block-displayed-output block)))
-           (view (pilish--capture-tool-cooling-view))
+           (view (pilish--capture-tool-rewrite-view))
            (inhibit-read-only t))
       (save-excursion
         (remove-overlays start old-end 'pilish-diff-overlay t)
@@ -2640,7 +2640,7 @@ retained facts through the existing queue."
                start new-end
                (list (cons 'script (pilish--tool-block-script-line-map block))
                      (cons 'output (pilish--tool-block-line-map block))))))
-        (pilish--restore-tool-cooling-view
+        (pilish--restore-tool-rewrite-view
          view start old-end new-end
          (lambda (position)
            (pilish--map-tool-section-position
@@ -3544,7 +3544,7 @@ new position, keeping surviving row positions when feasible."
          (old-end (marker-position header-end))
          (tool-name (overlay-get ov 'pilish-tool-name))
          (old-spans (pilish--argument--locator-spans start old-end))
-         (view (pilish--capture-tool-cooling-view)))
+         (view (pilish--capture-tool-rewrite-view)))
     (dolist (window (plist-get view :windows))
       (setf (plist-get window :following) nil))
     (pilish--replace-tool-header
@@ -3553,7 +3553,7 @@ new position, keeping surviving row positions when feasible."
            (new-spans (pilish--argument--locator-spans start new-end))
            (anchor (pilish--argument--find-locator-position
                     anchor-locator start new-end)))
-      (pilish--restore-tool-cooling-view
+      (pilish--restore-tool-rewrite-view
        view start old-end new-end
        (lambda (position)
          (pilish--argument--map-toggle-position
@@ -3577,7 +3577,7 @@ Output, diff overlays and markers outside this address span stay in place."
       (let* ((start position)
              (old-end (next-single-property-change start 'pilish-argument-address nil end))
              (old-spans (pilish--argument--locator-spans start old-end))
-             (view (pilish--capture-tool-cooling-view))
+             (view (pilish--capture-tool-rewrite-view))
              (width (max 24 (pilish--chat-display-width)))
              (folds (pilish--tool-block-folds block))
              (text (if (eq (pilish--argument-row-role row) 'primary)
@@ -3606,7 +3606,7 @@ Output, diff overlays and markers outside this address span stay in place."
           (pilish--font-lock-ensure-excluding-property start new-end 'pilish-no-fontify))
         (let ((new-spans (pilish--argument--locator-spans start new-end))
               (anchor (pilish--argument--find-locator-position locator start new-end)))
-          (pilish--restore-tool-cooling-view
+          (pilish--restore-tool-rewrite-view
            view start old-end new-end
            (lambda (point)
              (pilish--argument--map-toggle-position
@@ -6169,7 +6169,7 @@ Preserves window scroll position during the toggle."
              (line-map (overlay-get ov 'pilish-line-map))
              (old-sections (pilish--tool-section-bounds
                             start old-end (and (not expanded) (list (cons 'output line-map)))))
-             (view (pilish--capture-tool-cooling-view))
+             (view (pilish--capture-tool-rewrite-view))
              (image-previews (and record (pilish--tool-block-image-previews record))))
         (save-excursion
           (remove-overlays start old-end 'pilish-diff-overlay t)
@@ -6187,7 +6187,7 @@ Preserves window scroll position during the toggle."
         (let* ((new-end (overlay-end ov))
                (new-sections (pilish--tool-section-bounds
                               start new-end (and expanded (list (cons 'output line-map))))))
-          (pilish--restore-tool-cooling-view
+          (pilish--restore-tool-rewrite-view
            view start old-end new-end
            (lambda (position)
              (pilish--map-tool-section-position
@@ -6614,25 +6614,17 @@ Exclude the wrapper newline immediately before the closing fence."
                     (1- closing-start)
                   closing-start)))))))
 
-(defun pilish--tool-overlay-visible-body (overlay)
-  "Return the currently visible body text for completed tool OVERLAY.
-Extracts the text between the outer fence lines, removing only the
-wrapper newline inserted before the closing fence.  Collapsed blocks
-therefore cool into their visible preview only."
-  (when-let* ((header-end-marker (overlay-get overlay 'pilish-header-end))
-              (header-end (and (markerp header-end-marker)
-                               (marker-position header-end-marker)))
-              (overlay-end (overlay-end overlay))
-              (bounds (pilish--tool-fenced-content-bounds header-end overlay-end)))
-    (let* ((source (buffer-substring (car bounds) (cdr bounds)))
-           (cold (substring-no-properties source))
-           (position 0))
-      (while (< position (length source))
-        (let ((next (next-single-property-change position 'pilish-subagent-name source (length source)))
-              (value (get-text-property position 'pilish-subagent-name source)))
-          (when value (put-text-property position next 'pilish-subagent-name value cold))
-          (setq position next)))
-      cold)))
+(defun pilish--tool-visible-body (bounds)
+  "Return visible body text within BOUNDS, retaining subagent-name properties."
+  (let* ((source (buffer-substring (car bounds) (cdr bounds)))
+         (cold (substring-no-properties source))
+         (position 0))
+    (while (< position (length source))
+      (let ((next (next-single-property-change position 'pilish-subagent-name source (length source)))
+            (value (get-text-property position 'pilish-subagent-name source)))
+        (when value (put-text-property position next 'pilish-subagent-name value cold))
+        (setq position next)))
+    cold))
 
 (defun pilish--cold-tool-target-metadata
     (overlay header-end collapsed)
@@ -6640,17 +6632,15 @@ therefore cool into their visible preview only."
 HEADER-END is the current absolute end of its header.  COLLAPSED is non-nil
 when the visible body is a mapped preview.  The result deliberately excludes
 buttons, full content, markers, and absolute buffer positions."
-  (let ((record (pilish--tool-block-from-overlay overlay)))
-    (list :order (and record (pilish--tool-block-order record))
-          :tool-name (overlay-get overlay 'pilish-tool-name)
-          :path (overlay-get overlay 'pilish-tool-path)
-          :raw-path (overlay-get overlay 'pilish-tool-raw-path)
-          :path-error (overlay-get overlay 'pilish-tool-path-error)
-          :offset (overlay-get overlay 'pilish-tool-offset)
-          ;; Only collapsed previews need the small visible-line map.
-          :line-map (and collapsed
-                         (overlay-get overlay 'pilish-line-map))
-          :header-length (- header-end (overlay-start overlay)))))
+  (list :tool-name (overlay-get overlay 'pilish-tool-name)
+        :path (overlay-get overlay 'pilish-tool-path)
+        :raw-path (overlay-get overlay 'pilish-tool-raw-path)
+        :path-error (overlay-get overlay 'pilish-tool-path-error)
+        :offset (overlay-get overlay 'pilish-tool-offset)
+        ;; Only collapsed previews need the small visible-line map.
+        :line-map (and collapsed
+                       (overlay-get overlay 'pilish-line-map))
+        :header-length (- header-end (overlay-start overlay))))
 
 (defun pilish--compound-tool-cold-projection (overlay)
   "Project OVERLAY's displayed body to language-free cold text.
@@ -6730,39 +6720,39 @@ their entire currently displayed body in :cold-body."
                      overlay (marker-position (pilish--tool-block-header-end block))
                      (not (member 'output (pilish--tool-block-folds block))))))
     (if-let* ((header-end (marker-position (overlay-get overlay 'pilish-header-end)))
-              (end (overlay-end overlay))
-              ((or (= header-end end)
-                   (and block (pilish--tool-block-image-previews block)
-                        (not (pilish--tool-fenced-content-bounds header-end end))))))
-        (list :cold-body (or (and block (pilish--image-previews-text
-                                        (pilish--tool-block-image-previews block))) "")
-              :target-metadata (pilish--cold-tool-target-metadata overlay header-end nil))
-      (when-let* ((visible-body (pilish--tool-overlay-visible-body overlay))
-                  (header-end (marker-position
-                               (overlay-get overlay 'pilish-header-end))))
-        (let* ((record (pilish--tool-block-from-overlay overlay))
-               (image-previews (and record (pilish--tool-block-image-previews record)))
-               (button (pilish--find-toggle-button-in-region header-end (overlay-end overlay)))
-               (collapsed (and button (not (button-get button 'pilish-expanded))))
-               (hidden-count (and collapsed (button-get button 'hidden-count))))
-          (list :visible-body visible-body
-                :deleted-spans
-                (save-excursion
-                  (goto-char (car (pilish--tool-fenced-content-bounds header-end (overlay-end overlay))))
-                  (forward-line -1)
-                  (let ((length (length (plist-get (pilish--fence-line-info-at-point) :trailing))))
-                    (when (> length 0)
-                      (list (cons (- (line-end-position) length) (line-end-position))))))
-                :heading (when (get-text-property header-end 'pilish-tool-fold-heading)
-                           (propertize
-                            (buffer-substring-no-properties
-                             header-end (next-single-property-change
-                                         header-end 'pilish-tool-fold-heading nil (overlay-end overlay)))
-                            'pilish-tool-fold-heading t 'pilish-tool-section 'output))
-                :image-previews image-previews
-                :target-metadata
-                (pilish--cold-tool-target-metadata overlay header-end collapsed)
-                :hidden-count (and (integerp hidden-count) (> hidden-count 0) hidden-count)))))))
+              (end (overlay-end overlay)))
+        (let ((bounds (and (< header-end end)
+                           (pilish--tool-fenced-content-bounds header-end end))))
+          (if (or (= header-end end)
+                  (and block (pilish--tool-block-image-previews block)
+                       (not bounds)))
+              (list :cold-body (or (and block (pilish--image-previews-text
+                                              (pilish--tool-block-image-previews block))) "")
+                    :target-metadata (pilish--cold-tool-target-metadata overlay header-end nil))
+            (when-let* ((visible-body (and bounds (pilish--tool-visible-body bounds))))
+              (let* ((record (pilish--tool-block-from-overlay overlay))
+                     (image-previews (and record (pilish--tool-block-image-previews record)))
+                     (button (pilish--find-toggle-button-in-region header-end end))
+                     (collapsed (and button (not (button-get button 'pilish-expanded))))
+                     (hidden-count (and collapsed (button-get button 'hidden-count))))
+                (list :visible-body visible-body
+                      :deleted-spans
+                      (save-excursion
+                        (goto-char (car bounds))
+                        (forward-line -1)
+                        (let ((length (length (plist-get (pilish--fence-line-info-at-point) :trailing))))
+                          (when (> length 0)
+                            (list (cons (- (line-end-position) length) (line-end-position))))))
+                      :heading (when (get-text-property header-end 'pilish-tool-fold-heading)
+                                 (propertize
+                                  (buffer-substring-no-properties
+                                   header-end (next-single-property-change
+                                               header-end 'pilish-tool-fold-heading nil end))
+                                  'pilish-tool-fold-heading t 'pilish-tool-section 'output))
+                      :image-previews image-previews
+                      :target-metadata
+                      (pilish--cold-tool-target-metadata overlay header-end collapsed)
+                      :hidden-count (and (integerp hidden-count) (> hidden-count 0) hidden-count)))))))))
 
 (defun pilish--cool-tool-overlay (overlay)
   "Rewrite completed tool OVERLAY into its cold plain-history form.
@@ -6864,21 +6854,18 @@ from leaving a retry loop or wedged timer slot."
 
 (defun pilish--queue-tool-cooling-outside-hot-tail ()
   "Merge the current outside-hot-tail cohort into deferred cooling.
-Existing candidates are deduplicated and retain one buffer-local timer owner.
+Existing candidates are deduplicated by `eq' and retain one timer owner.
 Newly eligible overlays take their normal reverse-buffer order; stale queued
 entries remain at the end for execution-time revalidation."
   (let ((candidates
-         (pilish--completed-tool-overlays-outside-hot-tail))
-        merged)
-    (dolist (overlay (append candidates pilish--tool-cooling-queue))
-      (unless (memq overlay merged)
-        (push overlay merged)))
-    (setq pilish--tool-cooling-queue (nreverse merged))
+         (pilish--completed-tool-overlays-outside-hot-tail)))
+    (setq pilish--tool-cooling-queue
+          (seq-uniq (append candidates pilish--tool-cooling-queue) #'eq))
     (pilish--schedule-tool-cooling)))
 
-(defun pilish--map-tool-cooling-position
+(defun pilish--map-tool-rewrite-position
     (position old-start old-end new-end)
-  "Map POSITION through one tool-body replacement.
+  "Map POSITION through one tool-body rewrite.
 OLD-START and OLD-END delimit the old half-open body range; NEW-END is the
 new body end and the body start is unchanged.  Positions before the body stay
 fixed.  Positions in the old body retain their relative offset, clamped to the
@@ -6893,8 +6880,8 @@ new body end.  Positions at or after OLD-END shift by the actual length delta."
    (t
     (+ position (- new-end old-end)))))
 
-(defun pilish--capture-tool-cooling-view ()
-  "Capture buffer point and visible-window positions before tool cooling.
+(defun pilish--capture-tool-rewrite-view ()
+  "Capture buffer point and visible-window positions before a tool-body rewrite.
 Every position is mapped through explicit replacement bounds.
 During transcript construction, capture only buffer point."
   (list
@@ -6909,9 +6896,9 @@ During transcript construction, capture only buffer point."
               :point (window-point window)))
       (get-buffer-window-list (current-buffer) nil t)))))
 
-(defun pilish--restore-tool-cooling-view
+(defun pilish--restore-tool-rewrite-view
     (view old-start old-end new-end &optional map-position)
-  "Restore cooling VIEW through the body replacement bounds.
+  "Restore VIEW through the tool-body rewrite bounds.
 OLD-START and OLD-END are the old body bounds and NEW-END is its new end.
 Every live window still showing the current buffer gets mapped start and point;
 a window that was following the tail instead gets point at the new buffer end.
@@ -6920,7 +6907,7 @@ section-aware old-position to new-position mapping."
   (let ((map-position
          (or map-position
              (lambda (position)
-               (pilish--map-tool-cooling-position
+               (pilish--map-tool-rewrite-position
                 position old-start old-end new-end)))))
     ;; Restore buffer point first.  A selected chat window restored below then
     ;; establishes the same mapped point, or point-max when it was following.
@@ -6942,12 +6929,8 @@ section-aware old-position to new-position mapping."
 
 (defun pilish--cool-tool-overlay-preserving-view (overlay)
   "Cool completed tool OVERLAY while mapping visible view positions.
-Argument controls are released before the viewport snapshot so captured
-positions describe the final cold text.  The header stays in place, so
-only the replaced body bounds participate in the mapping.  Return
-non-nil when the rewrite succeeds."
-  (when (pilish--completed-tool-overlay-p overlay)
-    (pilish--argument-release-cold (pilish--tool-block-from-overlay overlay)))
+The header stays in place, so only the replaced body bounds participate
+in the mapping.  Return non-nil when the rewrite succeeds."
   (let* ((header-end-marker
           (overlay-get overlay 'pilish-header-end))
          (old-start (and (markerp header-end-marker)
@@ -6955,7 +6938,7 @@ non-nil when the rewrite succeeds."
          (old-end (overlay-end overlay)))
     (if (not (and old-start old-end (<= old-start old-end)))
         (pilish--cool-tool-overlay overlay)
-      (let ((view (pilish--capture-tool-cooling-view))
+      (let ((view (pilish--capture-tool-rewrite-view))
             ;; The primitive deletes at OLD-START, then inserts there.  This
             ;; rear-advancing marker stays at the deletion boundary and moves
             ;; across exactly the newly inserted body.
@@ -6963,12 +6946,12 @@ non-nil when the rewrite succeeds."
         (unwind-protect
             (when-let* ((metadata (pilish--cool-tool-overlay overlay)))
               (let ((spans (plist-get metadata :deleted-spans)))
-                (pilish--restore-tool-cooling-view
+                (pilish--restore-tool-rewrite-view
                  view old-start old-end (marker-position new-end-marker)
                  (when spans
                    (lambda (position)
                      (if (>= position old-end)
-                         (pilish--map-tool-cooling-position
+                         (pilish--map-tool-rewrite-position
                           position old-start old-end (marker-position new-end-marker))
                        (- position
                           (cl-loop for (beg . end) in spans
@@ -6981,7 +6964,7 @@ non-nil when the rewrite succeeds."
 This is the ordinary one-shot timer callback.  Current input wins without
 queue progress.  Otherwise one candidate is removed, revalidated as completed,
 current-buffer-owned, and still outside the live hot-tail boundary, then passed
-to the unchanged cold rewrite primitive with cooling-specific view mapping.
+to the shared cold rewrite primitive with cooling-specific view mapping.
 Timer ownership is cleared before input checks, mutation, or rearming."
   (when (buffer-live-p buffer)
     (with-current-buffer buffer

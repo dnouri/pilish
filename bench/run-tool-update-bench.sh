@@ -306,11 +306,31 @@ for result_path in sorted(out.glob("*/iter-*/result.json")):
          if row.get("type") == "tool_execution_update"),
         {},
     )
-    failed_checks = [
-        check.get("name")
-        for check in result.get("checks", [])
-        if check.get("ok") is not True
-    ]
+    failed_checks: list[str] = []
+    not_applicable_checks: list[str] = []
+    checks = result.get("checks")
+    if not isinstance(checks, list) or not checks:
+        failed_checks.append("missing-or-empty-checks")
+        checks = []
+    for check in checks:
+        if not isinstance(check, dict):
+            failed_checks.append("malformed-check")
+            continue
+        name = check.get("name")
+        category = check.get("category")
+        status = check.get("status")
+        valid_name = isinstance(name, str) and bool(name)
+        valid_category = category in (
+            "behavior", "cooling-policy", "scheduler-contract", "viewport"
+        )
+        allowed_na = mode == "batch" and category == "viewport"
+        if (not valid_name or not valid_category
+                or status not in ("pass", "fail", "not-applicable")
+                or status == "fail"
+                or (status == "not-applicable" and not allowed_na)):
+            failed_checks.append(name if valid_name else "malformed-check")
+        elif status == "not-applicable":
+            not_applicable_checks.append(name)
     derived_ok = result.get("settled") is True and not failed_checks
     if result.get("ok") is not derived_ok:
         failed_checks.append("result-ok-verdict-mismatch")
@@ -345,6 +365,7 @@ for result_path in sorted(out.glob("*/iter-*/result.json")):
         "overlays": result.get("overlays"),
         "seconds": result.get("seconds"),
         "failedChecks": ";".join(failed_checks),
+        "notApplicableChecks": ";".join(not_applicable_checks),
         "error": result.get("error") or "",
         "resultPath": str(result_path),
     })
@@ -460,6 +481,14 @@ summary_lines.append("- Per-run timing TSV: `SCENARIO/iter-NN/times.tsv`")
 if cooling_rows:
     summary_lines.append("- Per-callback cooling TSV: `SCENARIO/iter-NN/cooling-slices.tsv`")
     summary_lines.append("- Per-command heartbeat TSV: `SCENARIO/iter-NN/commands.tsv`")
+
+not_applicable = [row for row in rows if row["notApplicableChecks"]]
+if not_applicable:
+    summary_lines.extend(["", "## Not applicable checks", ""])
+    for row in not_applicable:
+        summary_lines.append(
+            f"- {row['scenario']} iter {row['iteration']}: {row['notApplicableChecks']}"
+        )
 
 if failed:
     summary_lines.append("")

@@ -37,10 +37,19 @@
     "exact-cold-tool-cohort-composition" "current-inside-hot-tail-stays-hot"
     "semantic-sentinel-projection-hash-holds"
     "adjacent-hot-tail-table-remains-usable"
+    "adjacent-hot-tail-table-overlay-present"
     "no-stale-buttons-diffs-or-tool-overlays"
     "cooling-scheduler-and-live-registry-clean"
     "parser-root-and-font-lock-usable" "command-loop-scroll-heartbeats-routed"
-    "cooling-wire-event-counts"))
+    "command-and-cooling-viewport-preserved"
+    "cooling-wire-event-counts" "gui-frame-is-120x40"))
+
+(defconst pilish-benchmark-test--cooling-categories
+  '("behavior" "cooling-policy" "cooling-policy" "scheduler-contract"
+    "cooling-policy" "scheduler-contract" "scheduler-contract" "cooling-policy"
+    "cooling-policy" "cooling-policy" "behavior" "behavior" "viewport"
+    "cooling-policy" "scheduler-contract" "behavior" "behavior" "viewport"
+    "behavior" "viewport"))
 
 (defconst pilish-benchmark-test--command
   "echo SD-BOUNDARY-TOOL; echo SD-CMD-0000; echo SD-CMD-0001; ")
@@ -119,9 +128,10 @@
         "| COOLING-SEMANTIC-HOT-TABLE | hot | remains decorated and outside the completed cooling cohort |"
         (concat prefix pilish-benchmark-test--live-command)))
 
-(defun pilish-benchmark-test--cooling-metrics (post final &optional gui file)
+(defun pilish-benchmark-test--cooling-metrics (post final &optional gui file mutate)
   "Collect both real semantic projections from POST and FINAL line lists.
-GUI includes its additional check.  Write the actual artifact to FILE if given."
+GUI makes viewport rows required.  Write the actual artifact to FILE if given.
+MUTATE can damage the collected drain and final state before checks run."
   (let* ((pilish-tu-bench-scenario "agent-end-cooling-smoke")
          (pilish-tu-bench-fill-bash 1) (pilish-tu-bench-fill-read 1)
          (pilish-tu-bench-fill-write 0) (pilish-tu-bench-fill-edit 0)
@@ -139,15 +149,19 @@ GUI includes its additional check.  Write the actual artifact to FILE if given."
                     :collapsedToolOverlaysBefore 1
                     :semanticLinesAfter (car summary) :semanticHashAfter (cdr summary)))))
          (pilish-tu-bench--cooling-slice-log
-          '((:queueDelta 1 :candidateEligible t :candidateOverlayAliveAfter :json-false
-             :window (:viewOk t) :treeRoots (:count 0 :totalMs 0 :maxMs 0))
-            (:queueDelta 1 :candidateEligible t :candidateOverlayAliveAfter :json-false
-             :window (:viewOk t) :treeRoots (:count 0 :totalMs 0 :maxMs 0))))
+          (copy-tree
+           '((:queueDelta 1 :candidateEligible t :candidateOverlayAliveAfter :json-false
+              :window (:available t :status "pass")
+              :treeRoots (:count 0 :totalMs 0 :maxMs 0))
+             (:queueDelta 1 :candidateEligible t :candidateOverlayAliveAfter :json-false
+              :window (:available t :status "pass")
+              :treeRoots (:count 0 :totalMs 0 :maxMs 0)))))
          (pilish-tu-bench--command-log
-          '((:route "sentinel" :preHook t :postHook t :error nil :window (:viewOk t)
-             :latenessMs 0 :durationMs 0)
-            (:route "follow" :preHook t :postHook t :error nil :window (:viewOk t)
-             :latenessMs 0 :durationMs 0)))
+          (copy-tree
+           '((:route "sentinel" :preHook t :postHook t :error nil
+              :window (:available t :status "pass") :latenessMs 0 :durationMs 0)
+             (:route "follow" :preHook t :postHook t :error nil
+              :window (:available t :status "pass") :latenessMs 0 :durationMs 0))))
          (pilish-tu-bench--scheduler-errors nil)
          (pilish-tu-bench--event-log
           '(("tool_execution_start" . 0) ("tool_execution_start" . 0)
@@ -155,7 +169,8 @@ GUI includes its additional check.  Write the actual artifact to FILE if given."
             ("tool_execution_end" . 0) ("agent_end" . 0)))
          (pilish-tu-bench--render-log (make-hash-table :test 'equal))
          (pilish-tu-bench-result-file file)
-         (drain '(:settled t :wallMs 0 :activeMs 0 :timeoutSeconds 30 :finalWindow (:viewOk t))))
+         (drain (copy-tree '(:settled t :wallMs 0 :activeMs 0 :timeoutSeconds 30
+                            :finalWindow (:available t :status "pass")))))
     (with-temp-buffer
       (insert (string-join final "\n"))
       (let* ((summary (pilish-tu-bench--semantic-summary))
@@ -165,6 +180,7 @@ GUI includes its additional check.  Write the actual artifact to FILE if given."
                     :toolOverlayIds (vector pilish-tu-bench-cooling-live-id)
                     :currentInsideHotTail t :currentColdProperty :json-false
                     :currentOverlayStart (point-max) :tableOverlays 1
+                    :window '(:available t :status "pass")
                     :buttons 0 :diffOverlays 0 :queueLength 0 :timerOwned :json-false
                     :liveToolRegistry 0 :pendingToolOverlay :json-false
                     :parser '(:parserOk t :fontLockOk t)
@@ -173,8 +189,10 @@ GUI includes its additional check.  Write the actual artifact to FILE if given."
              (metrics
               (pilish-tu-bench--metrics-with-verdict
                (list :settled t :drain drain :final state
-                     :checks (pilish-tu-bench--collect-cooling-checks
-                              (current-buffer) drain state)))))
+                     :checks (progn
+                               (when mutate (funcall mutate drain state))
+                               (pilish-tu-bench--collect-cooling-checks
+                                (current-buffer) drain state))))))
         (when file (pilish-tu-bench--write-result-json metrics))
         metrics))))
 
@@ -184,7 +202,9 @@ STREAM chooses the stream engine rather than the tool engine."
   (let ((check (seq-find (lambda (row) (equal (plist-get row :name) name))
                          (plist-get metrics :checks))))
     (should check)
-    (should (eq (plist-get check :ok) (if good t :json-false)))
+    (if stream
+        (should (eq (plist-get check :ok) (if good t :json-false)))
+      (should (equal (plist-get check :status) (if good "pass" "fail"))))
     (should (eq (and (if stream (pilish-sd-bench--metrics-ok-p metrics)
                        (pilish-tu-bench--metrics-ok-p metrics)) t) good))
     (unless stream
@@ -350,15 +370,21 @@ STREAM chooses the stream engine rather than the tool engine."
       (delete-file file))))
 
 (ert-deftest pilish-test-benchmark-check-inventory ()
-  "Freeze full collector inventories, including the GUI-only cooling row."
+  "Keep the full inventories and their categories in both lanes."
   (dolist (gui '(nil t))
     (let* ((lines (pilish-benchmark-test--cooling-lines "bash "))
            (metrics (pilish-benchmark-test--cooling-metrics lines lines gui)))
       (should (pilish-tu-bench--metrics-ok-p metrics))
       (should (equal (mapcar (lambda (row) (plist-get row :name))
                              (plist-get metrics :checks))
-                     (append pilish-benchmark-test--cooling-names
-                             (when gui '("gui-frame-is-120x40")))))))
+                     pilish-benchmark-test--cooling-names))
+      (should (equal (mapcar (lambda (row) (plist-get row :category))
+                            (plist-get metrics :checks))
+                     pilish-benchmark-test--cooling-categories))
+      (dolist (row (plist-get metrics :checks))
+        (should (equal (plist-get row :status)
+                       (if (and (not gui) (equal (plist-get row :category) "viewport"))
+                           "not-applicable" "pass"))))))
   (with-temp-buffer
     (pilish-chat-mode)
     (let ((pilish-tu-bench-fill-bash 0) (pilish-tu-bench-fill-read 0)
@@ -377,7 +403,11 @@ STREAM chooses the stream engine rather than the tool engine."
         (should (pilish-tu-bench--metrics-ok-p metrics))
         (should (equal (mapcar (lambda (row) (plist-get row :name))
                                (plist-get metrics :checks))
-                       pilish-benchmark-test--tool-names))))))
+                       pilish-benchmark-test--tool-names))
+        (should (seq-every-p (lambda (row)
+                              (and (equal (plist-get row :category) "behavior")
+                                   (equal (plist-get row :status) "pass")))
+                            (plist-get metrics :checks)))))))
 
 (ert-deftest pilish-test-benchmark-production-stream-canary ()
   "Project a real rendered stream against an independent full-title oracle."
@@ -426,6 +456,7 @@ STREAM chooses the stream engine rather than the tool engine."
   "Actual constructors and writers distinguish null, false, arrays and data."
   (let* ((file (make-temp-file "pilish-tool-json-" nil ".json"))
          (pilish-tu-bench-result-file file)
+         (pilish-tu-bench-report-file (concat file ".md"))
          (pilish-tu-bench-cooling-slices-file (concat file ".slices.tsv"))
          (pilish-tu-bench-commands-file (concat file ".commands.tsv"))
          (pilish-tu-bench-scenario "agent-end-cooling-smoke")
@@ -458,20 +489,33 @@ STREAM chooses the stream engine rather than the tool engine."
           (pilish-tu-bench--write-cooling-tsv)
           (with-temp-buffer
             (insert-file-contents pilish-tu-bench-commands-file)
+            (should (string-match-p "window_status" (buffer-string)))
+            (should (string-match-p "\tnot-applicable\t" (buffer-string)))
             (should (equal (car (last (split-string
                                       (nth 1 (split-string (buffer-string) "\n" t))
                                       "\t" nil))) "")))
+          (with-temp-buffer
+            (insert-file-contents pilish-tu-bench-cooling-slices-file)
+            (should (string-match-p "window_status" (buffer-string)))
+            (should (string-match-p "\tnot-applicable\n" (buffer-string))))
           (setq-local pilish--hot-tail-start nil)
           (let* ((parser (pilish-tu-bench--parser-font-lock-state (current-buffer)))
                  (state (pilish-tu-bench--cooling-final-state (current-buffer) parser))
                  (metrics (pilish-tu-bench--metrics-with-verdict
                            (list :settled t :wallMs 0 :seconds 0 :error nil :final state
-                                 :checks (list (pilish-tu-bench--check "writer-contract" t ""))))))
+                                 :checks (list (pilish-tu-bench--check "writer-contract" "behavior" t "")
+                                               (pilish-tu-bench--check "batch-view" "viewport" nil "not observed"))))))
             (should-not (plist-get parser :parserError))
             (should-not (plist-get parser :fontLockError))
             (dolist (key '(:currentOverlayStart :currentOverlayEnd :hotTailBoundary :geometry))
               (should-not (plist-get state key)))
             (pilish-tu-bench--write-result-json metrics)
+            (pilish-tu-bench--write-report metrics t)
+            (with-temp-buffer
+              (insert-file-contents pilish-tu-bench-report-file)
+              (should (string-match-p "| check | category | status | detail |" (buffer-string)))
+              (should (string-match-p "| `writer-contract` | behavior | pass |" (buffer-string)))
+              (should (string-match-p "| `batch-view` | viewport | not-applicable |" (buffer-string))))
             (let* ((json (pilish-benchmark-test--read-json file))
                    (cooling (plist-get json :cooling))
                    (final (plist-get cooling :final)))
@@ -490,7 +534,13 @@ STREAM chooses the stream engine rather than the tool engine."
               (should (eq (plist-get final :timerOwned) :false))
               (should (eq (plist-get json :display) :false))
               (should (= (plist-get json :wallMs) 0))
-              (should (equal (plist-get (aref (plist-get json :checks) 0) :detail) "")))
+              (should (equal (plist-get (aref (plist-get json :checks) 0) :detail) ""))
+              (should (equal (plist-get (aref (plist-get json :checks) 0) :category) "behavior"))
+              (should (equal (plist-get (aref (plist-get json :checks) 0) :status) "pass"))
+              (should-not (plist-member (aref (plist-get json :checks) 0) :ok))
+              (should (equal (plist-get (aref (plist-get json :checks) 1) :status) "not-applicable"))
+              (let ((window (plist-get (aref (plist-get cooling :slices) 0) :window)))
+                (should (equal (plist-get window :status) "not-applicable"))))
             (setf (plist-get metrics :wallMs) nil)
             (pilish-tu-bench--write-result-json metrics)
             (should (eq (plist-get (pilish-benchmark-test--read-json file) :wallMs) :null))
@@ -503,7 +553,7 @@ STREAM chooses the stream engine rather than the tool engine."
             (setq metrics (pilish-tu-bench--metrics-with-verdict
                            (list :settled t :error "json-null" :final state
                                  :checks (list (pilish-tu-bench--check
-                                                "parser-contract" (eq (plist-get parser :parserOk) t) "")))))
+                                                "parser-contract" "behavior" (eq (plist-get parser :parserOk) t) "")))))
             (should-not (pilish-tu-bench--metrics-ok-p metrics))
             (pilish-tu-bench--write-result-json metrics)
             (let* ((json (pilish-benchmark-test--read-json file))
@@ -518,8 +568,185 @@ STREAM chooses the stream engine rather than the tool engine."
               (should (eq (plist-get (pilish-benchmark-test--read-json file) :cooling) :null)))
             (pilish-tu-bench--validate-verdict-contract)))
       (delete-file file)
-      (dolist (artifact (list pilish-tu-bench-cooling-slices-file pilish-tu-bench-commands-file))
+      (dolist (artifact (list pilish-tu-bench-cooling-slices-file pilish-tu-bench-commands-file
+                              pilish-tu-bench-report-file))
         (when (file-exists-p artifact) (delete-file artifact))))))
+
+(ert-deftest pilish-test-benchmark-status-verdict-matrix ()
+  "Reject absent or invalid required rows, including forged exemptions."
+  (dolist (gui '(nil t))
+    (let ((pilish-tu-bench-display-buffers gui))
+      (dolist (category '("behavior" "cooling-policy" "scheduler-contract" "viewport"))
+        (dolist (status '("pass" "fail" "not-applicable" nil "" "unknown" t ["pass"]))
+          (let* ((row (list :name "matrix" :category category :status status))
+                 (metrics (pilish-tu-bench--metrics-with-verdict
+                           (list :settled t :checks (list row))))
+                 (expected (or (equal status "pass")
+                               (and (not gui) (equal category "viewport")
+                                    (equal status "not-applicable")))))
+            (should (eq (eq (plist-get metrics :ok) t) expected))
+            (should-not (pilish-tu-bench--metrics-ok-p
+                         (list :settled :json-false :checks (list row)))))))
+      (dolist (checks '(nil [] "checks" (nil) (garbage) (42)
+                           ((:name "old-schema" :ok t))
+                           ((:name "unknown" :category "other" :status "pass"))
+                           ((:name "" :category "behavior" :status "pass"))
+                           ((:category "behavior" :status "pass"))))
+        (should-not (pilish-tu-bench--metrics-ok-p (list :settled t :checks checks)))))))
+
+(ert-deftest pilish-test-benchmark-missing-window-evidence ()
+  "A missing GUI window fails; a batch observation never invents view success."
+  (dolist (gui '(nil t))
+    (let* ((pilish-tu-bench-display-buffers gui)
+           (pilish-tu-bench--cooling-chat-buffer nil)
+           (window (pilish-tu-bench--capture-window-state)))
+      (should (eq (plist-get window :available) :json-false))
+      (should (equal (plist-get window :status) (if gui "fail" "not-applicable")))))
+  (save-window-excursion
+    (with-temp-buffer
+      (insert "COOLING-WINDOW-SENTINEL\nnot a sentinel\n")
+      (let ((pilish-tu-bench-display-buffers t)
+            (pilish-tu-bench--cooling-chat-buffer (current-buffer))
+            (pilish-tu-bench--command-last-route "sentinel")
+            (window (selected-window)))
+        (set-window-buffer window (current-buffer))
+        (set-window-start window (point-min))
+        (set-window-point window (point-min))
+        (let ((state (pilish-tu-bench--capture-window-state)))
+          (should (eq (plist-get state :available) t))
+          (should (equal (plist-get state :status) "pass"))
+          (should (equal (plist-get state :startLine) "COOLING-WINDOW-SENTINEL")))
+        (set-window-point window (point-max))
+        (should (equal (plist-get (pilish-tu-bench--capture-window-state) :status) "fail"))))))
+
+(ert-deftest pilish-test-benchmark-viewport-and-routing-independent ()
+  "Require nonempty GUI view observations without weakening command routing."
+  (let ((lines (pilish-benchmark-test--cooling-lines "$ ")))
+    (dolist (case '(missing-window missing-geometry wrong-geometry malformed-geometry missing-table
+                   missing-commands missing-slices missing-final-window
+                   bad-command-window bad-slice-window bad-hook))
+      (dolist (gui '(nil t))
+        (let* ((metrics
+                (pilish-benchmark-test--cooling-metrics
+                 lines lines gui nil
+                 (lambda (drain state)
+                   (pcase case
+                     ('missing-window (setf (plist-get state :window) nil))
+                     ('missing-geometry (setf (plist-get state :geometry) nil))
+                     ('wrong-geometry (setf (plist-get state :geometry)
+                                            '(:frameColumns 119 :frameLines 40)))
+                     ('malformed-geometry (setf (plist-get state :geometry)
+                                                '(:frameColumns "120" :frameLines 40)))
+                     ('missing-table (setf (plist-get state :tableOverlays) 0))
+                     ('missing-commands (setq pilish-tu-bench--command-log nil))
+                     ('missing-slices (setq pilish-tu-bench--cooling-slice-log nil))
+                     ('missing-final-window (setf (plist-get drain :finalWindow) nil))
+                     ('bad-command-window
+                      (setf (plist-get (car pilish-tu-bench--command-log) :window)
+                            '(:available t :status "unknown")))
+                     ('bad-slice-window
+                      (setf (plist-get (car pilish-tu-bench--cooling-slice-log) :window)
+                            '(:available t :status "not-applicable")))
+                     ('bad-hook
+                      (setf (plist-get (car pilish-tu-bench--command-log) :preHook) nil))))))
+               (checks (plist-get metrics :checks))
+               (routing (seq-find (lambda (row) (equal (plist-get row :name)
+                                                        "command-loop-scroll-heartbeats-routed")) checks))
+               (table (seq-find (lambda (row) (equal (plist-get row :name)
+                                                      "adjacent-hot-tail-table-remains-usable")) checks)))
+          (should (equal (plist-get routing :status)
+                         (if (memq case '(missing-commands bad-hook)) "fail" "pass")))
+          (should (equal (plist-get table :status) "pass"))
+          (let* ((name (pcase case
+                         ((or 'missing-window 'missing-geometry 'wrong-geometry 'malformed-geometry)
+                          "gui-frame-is-120x40")
+                         ('missing-table "adjacent-hot-tail-table-overlay-present")
+                         ('bad-hook "command-loop-scroll-heartbeats-routed")
+                         (_ "command-and-cooling-viewport-preserved")))
+                 (row (seq-find (lambda (entry) (equal (plist-get entry :name) name)) checks)))
+            (should (equal (plist-get row :status)
+                           (if (or gui (eq case 'bad-hook)) "fail" "not-applicable"))))
+          (dolist (row checks)
+            (when (equal (plist-get row :category) "viewport")
+              (when (not gui) (should (equal (plist-get row :status) "not-applicable")))))
+          (should (eq (eq (plist-get metrics :ok) t)
+                      (and (not gui) (not (memq case '(missing-commands missing-slices bad-hook)))))))))
+    (dolist (evidence '(nil 42 "bad" [nil] (:status "pass")
+                           (:available t) (:available t :status "")
+                           (:available t :status "fail")
+                           (:available :json-false :status "pass")))
+      (should-not (pilish-tu-bench--window-passed-p evidence)))))
+
+(defun pilish-benchmark-test--shell-summary (result mode)
+  "Run the runner's actual Python summary on RESULT in MODE.
+Return the exit status, CSV text and Markdown text.  No benchmark is run."
+  (let* ((directory (make-temp-file "pilish-summary-" t))
+         (run (expand-file-name "smoke/iter-01" directory))
+         (script (expand-file-name "bench/run-tool-update-bench.sh"
+                                   pilish-tu-bench-repo-root)))
+    (unwind-protect
+        (progn
+          (make-directory run t)
+          (with-temp-file (expand-file-name "result.json" run)
+            (let ((json-false :json-false) (json-null nil)) (insert (json-encode result))))
+          (let ((status
+                 (with-temp-buffer
+                   (insert-file-contents script)
+                   (goto-char (point-min))
+                   (search-forward "<<'PY'\n")
+                   (delete-region (point-min) (point))
+                   (goto-char (point-max))
+                   (search-backward "\nPY")
+                   (delete-region (point) (point-max))
+                   (call-process-region (point-min) (point-max) "python3" nil nil nil
+                                        "-" directory mode "1" "smoke"))))
+            (list status
+                  (with-temp-buffer
+                    (insert-file-contents (expand-file-name "summary.csv" directory))
+                    (buffer-string))
+                  (with-temp-buffer
+                    (insert-file-contents (expand-file-name "summary.md" directory))
+                    (buffer-string)))))
+      (delete-directory directory t))))
+
+(ert-deftest pilish-test-benchmark-shell-summary-status-contract ()
+  "The shell independently rejects invalid rows and contradictory verdicts."
+  (dolist (mode '("batch" "gui-xvfb"))
+    (dolist (category '("behavior" "cooling-policy" "scheduler-contract" "viewport" "unknown"))
+      (dolist (status '("pass" "fail" "not-applicable" nil "" "unknown" t []))
+        (let* ((expected (and (not (equal category "unknown"))
+                              (or (equal status "pass")
+                                  (and (equal mode "batch") (equal category "viewport")
+                                       (equal status "not-applicable")))))
+               (result (list :scenario "smoke" :iteration 1 :settled t :ok
+                             (if expected t :json-false)
+                             :checks (vector (list :name "summary-row" :category category :status status)))))
+          (should (= (car (pilish-benchmark-test--shell-summary result mode))
+                     (if expected 0 1)))
+          (setf (plist-get result :ok) (if expected :json-false t))
+          (let ((summary (pilish-benchmark-test--shell-summary result mode)))
+            (should (= (car summary) 1))
+            (should (string-match-p "result-ok-verdict-mismatch" (nth 1 summary)))))))
+    (dolist (checks '(nil [] "bad" [nil] [42] [(:name "legacy" :ok t)]
+                         [(:name "unknown-category" :status "pass")]
+                         [(:category "behavior" :status "pass")]))
+      (should (= (car (pilish-benchmark-test--shell-summary
+                      (list :scenario "smoke" :iteration 1 :settled t :ok t :checks checks) mode)) 1))))
+  (dolist (result '((:scenario "smoke" :iteration 1 :settled t :ok t)
+                    (:scenario "smoke" :iteration 1 :settled :json-false :ok t
+                     :checks [(:name "required" :category "behavior" :status "pass")])
+                    (:scenario "smoke" :iteration 1 :ok t
+                     :checks [(:name "required" :category "behavior" :status "pass")])))
+    (should (= (car (pilish-benchmark-test--shell-summary result "batch")) 1)))
+  (let ((summary (pilish-benchmark-test--shell-summary
+                  '(:scenario "smoke" :iteration 1 :settled t :ok t
+                    :checks [(:name "batch-view" :category "viewport" :status "not-applicable")])
+                  "batch")))
+    (should (= (car summary) 0))
+    (should (string-match-p "notApplicableChecks" (nth 1 summary)))
+    (should (string-match-p "batch-view" (nth 1 summary)))
+    (should (string-match-p "Not applicable checks" (nth 2 summary)))
+    (should (string-match-p "batch-view" (nth 2 summary)))))
 
 (provide 'pilish-benchmark-test)
 ;;; pilish-benchmark-test.el ends here
