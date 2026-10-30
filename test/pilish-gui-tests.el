@@ -1836,6 +1836,157 @@ Return observations suitable for the graphical evidence file."
       (set-frame-size nil original-width original-height)
       (sit-for 0.1))))
 
+(ert-deftest pilish-gui-test-fake-duration-live-reload-and-resume ()
+  "Fake RPC drives real ticks, bottom-control keys, browser resume and reload."
+  (let ((pilish-bash-preview-lines 2)
+        (pilish-gui-test--large-trace nil)
+        (width (frame-width)) (height (frame-height))
+        browser)
+    (unwind-protect
+        (progn
+          (set-frame-size nil 104 45)
+          (pilish-gui-test-with-fresh-session
+           (:backend fake :fake-scenario "tool-duration")
+           (let* ((backend (plist-get pilish-gui-test--session :backend))
+                  ;; Startup's bindings end when the helper returns.  Reload must
+                  ;; keep this journey at the same fake executable boundary.
+                  (pilish-executable (plist-get backend :executable))
+                  (pilish-extra-args (plist-get backend :extra-args))
+                  (chat (plist-get pilish-gui-test--session :chat-buffer))
+                  (proc (plist-get pilish-gui-test--session :process))
+                  (handler (process-get proc 'pilish-display-handler))
+                  (started (float-time))
+                  block file bytes wire)
+             (process-put proc 'pilish-display-handler
+                          (lambda (event) (push event wire) (funcall handler event)))
+             (cl-labels
+                 ((wait (predicate)
+                    (unless (pilish-test-wait-until predicate 8 0.01)
+                      (ert-fail (list :wait-failed
+                                      :messages (with-current-buffer "*Messages*" (buffer-string))
+                                      :processes (mapcar (lambda (p) (list (process-name p) (process-command p)))
+                                                         (process-list))))))
+                  (capture (phase)
+                    (select-window (get-buffer-window chat))
+                    (goto-char (point-min))
+                    (search-forward "bash printf")
+                    (beginning-of-line)
+                    (set-window-start (selected-window) (point) t)
+                    (font-lock-ensure)
+                    (redisplay t)
+                    (pilish-gui-test--large-evidence
+                     (concat "fake-duration-" phase)
+                     (list :backend "fake/tool-duration" :phase phase
+                           :seconds-since-send (- (float-time) started)
+                           :visible (pilish--visible-text (point-min) (point-max))
+                           :raw (buffer-substring-no-properties (point-min) (point-max))
+                           :timer-armed (timerp pilish--tool-time-timer)
+                           :running-owners (length pilish--running-tool-blocks)
+                           :session-file (plist-get pilish--state :session-file)
+                           :wire (reverse wire) :commands (reverse pilish-gui-test--large-trace)
+                           :package-user-dir package-user-dir :window-system window-system
+                           :render-library (symbol-file 'pilish--refresh-tool-duration)
+                           :process-command (process-command proc))))
+                  (quiet ()
+                    (with-current-buffer chat
+                      (should-not pilish--tool-time-timer)
+                      (should-not pilish--running-tool-blocks)
+                      (should-not (string-match-p "Elapsed" (buffer-string)))
+                      (should (= 1 (pilish-test--count-matches "Took 2m 5s" (buffer-string))))))
+                  (bottom (key selection)
+                    (select-window (get-buffer-window chat))
+                    (let* ((overlay (pilish--tool-block-overlay block))
+                           (button (pilish--find-toggle-button-in-region
+                                    (overlay-start overlay) (overlay-end overlay) 'output)))
+                      (should button)
+                      (goto-char (button-start button))
+                      (pilish-gui-test--large-command
+                       (kbd key) (if (equal key "RET") 'pilish--dispatch-button 'pilish-toggle-tool-section))
+                      (should (eq (pilish--tool-output-view-selection
+                                   (pilish--tool-block-output-view block)) selection))
+                      (quiet))))
+               (wait (lambda () (with-current-buffer chat
+                                  (not (pilish--session-transition-active-p)))))
+               (should (member "tool-duration" (process-command proc)))
+               (select-window (pilish-gui-test-input-window))
+               (insert "Observe the scripted duration")
+               (pilish-gui-test--large-command (kbd "C-c C-c") 'pilish-send)
+               (wait (lambda () (with-current-buffer chat
+                                  (setq block (car pilish--running-tool-blocks))
+                                  (and block (equal (pilish--tool-duration-label block) "Elapsed 0s")))))
+               (capture "elapsed-0")
+               (wait (lambda () (with-current-buffer chat
+                                  (string-match-p "Elapsed 1s" (buffer-string)))))
+               (capture "elapsed-1")
+               (capture "running-tail")
+               (wait (lambda () (with-current-buffer chat (eq pilish--status 'idle))))
+               (quiet)
+               (capture "recorded")
+               (bottom "TAB" 'all)
+               (capture "recorded-expanded")
+               (bottom "TAB" 'head)
+               (capture "recorded-collapsed")
+               (bottom "RET" 'all)
+               (capture "recorded-ret-expanded")
+               (with-current-buffer chat
+                 (let ((text (buffer-string)) (tick (buffer-chars-modified-tick)))
+                   (sit-for 1.2)
+                   (should (= tick (buffer-chars-modified-tick)))
+                   (should (equal-including-properties text (buffer-string)))))
+               (quiet)
+               (capture "settled")
+               (setq file (with-current-buffer chat (plist-get pilish--state :session-file))
+                     bytes (with-temp-buffer (insert-file-contents-literally file) (buffer-string)))
+               (should (string-match-p "\"durationMs\":[[:space:]]*125000" bytes))
+               ;; Keep the saved JSONL as evidence outside the disposable fake root.
+               (when-let ((directory (getenv "G1_CAPTURE")))
+                 (copy-file file (expand-file-name "duration-session.jsonl" directory) t))
+               (select-window (get-buffer-window chat))
+               (pilish-gui-test--large-command (kbd "C-c C-n") 'pilish-new-session)
+               (wait (lambda () (with-current-buffer chat
+                                  (and (not (pilish--session-transition-active-p))
+                                       (not (equal file (plist-get pilish--state :session-file)))))))
+               (should-not (with-current-buffer chat (string-match-p "Took" (buffer-string))))
+               (pilish-gui-test--large-command (kbd "C-c C-r") 'pilish-session-browser)
+               (setq browser (current-buffer))
+               (should (derived-mode-p 'pilish-session-browser-mode))
+               (wait (lambda () (with-current-buffer browser
+                                  (goto-char (point-min))
+                                  (search-forward "Observe the scripted duration" nil t))))
+               (beginning-of-line)
+               (pilish-gui-test--large-evidence "fake-duration-browser"
+                                                (list :browser (buffer-string)))
+               (pilish-gui-test--large-command (kbd "RET") 'pilish-session-browser-switch)
+               (wait (lambda () (with-current-buffer chat
+                                  (and (not (pilish--session-transition-active-p))
+                                       (equal file (plist-get pilish--state :session-file))
+                                       (string-match-p "Took 2m 5s" (buffer-string))))))
+               (quiet)
+               (capture "resumed")
+               (select-window (get-buffer-window chat))
+               (execute-kbd-macro (kbd "M-x pilish-reload RET"))
+               (wait (lambda () (with-current-buffer chat
+                                  (and (not (eq pilish--process proc))
+                                       (not (pilish--session-transition-active-p))
+                                       (string-match-p "Took 2m 5s" (buffer-string))))))
+               (should-not (process-live-p proc))
+               (setq proc (buffer-local-value 'pilish--process chat))
+               (setf (plist-get pilish-gui-test--session :process) proc)
+               (should (member "tool-duration" (process-command proc)))
+               (let ((reload-handler (process-get proc 'pilish-display-handler)))
+                 (process-put proc 'pilish-display-handler
+                              (lambda (event) (push event wire) (funcall reload-handler event))))
+               (let* ((response (pilish--rpc-sync proc '(:type "get_messages") 5))
+                      (message (seq-find (lambda (item) (equal (plist-get item :role) "toolResult"))
+                                         (plist-get (plist-get response :data) :messages))))
+                 (should (= (plist-get message :durationMs) 125000)))
+               (quiet)
+               (capture "reloaded")
+               (should (equal bytes (with-temp-buffer
+                                      (insert-file-contents-literally file) (buffer-string))))))))
+      (when (buffer-live-p browser) (kill-buffer browser))
+      (set-frame-size nil width height))))
+
 (ert-deftest pilish-gui-test-saved-button-keyboard ()
   "Saved-name GUI TAB folds locally without changing RET's captured target."
   (require 'pilish-arguments-test)
