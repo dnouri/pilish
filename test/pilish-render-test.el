@@ -10809,6 +10809,30 @@ When EXPANDED is non-nil, expand its preview before returning the overlay."
           (should (get-text-property
                    (1- (point)) 'pilish-cold-tool-block)))))))
 
+(ert-deftest pilish-test-deferred-tool-cooling-queue-preserves-identity-and-order ()
+  "Queue merging keeps first occurrences by overlay identity in stable order."
+  (with-temp-buffer
+    (let ((fresh-a (make-overlay 1 1))
+          (fresh-b (make-overlay 1 1))
+          (equal-a (make-overlay 1 1))
+          (equal-b (make-overlay 1 1))
+          (stale (make-overlay 1 1)))
+      (should (equal equal-a equal-b))
+      (should-not (eq equal-a equal-b))
+      (let ((pilish--tool-cooling-queue (list stale fresh-a equal-b)))
+        (cl-letf (((symbol-function 'pilish--completed-tool-overlays-outside-hot-tail)
+                   (lambda () (list fresh-b fresh-a fresh-b equal-a)))
+                  ((symbol-function 'pilish--schedule-tool-cooling) #'ignore))
+          (pilish--queue-tool-cooling-outside-hot-tail))
+        (should (= 5 (length pilish--tool-cooling-queue)))
+        (should (eq (nth 0 pilish--tool-cooling-queue) fresh-b))
+        (should (eq (nth 1 pilish--tool-cooling-queue) fresh-a))
+        (should (eq (nth 2 pilish--tool-cooling-queue) equal-a))
+        (should (eq (nth 3 pilish--tool-cooling-queue) stale))
+        (should (eq (nth 4 pilish--tool-cooling-queue) equal-b))
+        (should (= 1 (cl-count fresh-a pilish--tool-cooling-queue :test #'eq)))
+        (should (= 1 (cl-count fresh-b pilish--tool-cooling-queue :test #'eq)))))))
+
 (ert-deftest pilish-test-deferred-tool-cooling-second-enqueue-deduplicates ()
   "A merged second enqueue drains once each from newest to oldest."
   (with-temp-buffer

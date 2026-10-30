@@ -6854,16 +6854,13 @@ from leaving a retry loop or wedged timer slot."
 
 (defun pilish--queue-tool-cooling-outside-hot-tail ()
   "Merge the current outside-hot-tail cohort into deferred cooling.
-Existing candidates are deduplicated and retain one buffer-local timer owner.
+Existing candidates are deduplicated by `eq' and retain one timer owner.
 Newly eligible overlays take their normal reverse-buffer order; stale queued
 entries remain at the end for execution-time revalidation."
   (let ((candidates
-         (pilish--completed-tool-overlays-outside-hot-tail))
-        merged)
-    (dolist (overlay (append candidates pilish--tool-cooling-queue))
-      (unless (memq overlay merged)
-        (push overlay merged)))
-    (setq pilish--tool-cooling-queue (nreverse merged))
+         (pilish--completed-tool-overlays-outside-hot-tail)))
+    (setq pilish--tool-cooling-queue
+          (seq-uniq (append candidates pilish--tool-cooling-queue) #'eq))
     (pilish--schedule-tool-cooling)))
 
 (defun pilish--map-tool-rewrite-position
