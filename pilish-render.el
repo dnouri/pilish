@@ -2041,14 +2041,15 @@ null and malformed values are terminally untimed, never local estimates."
 SNAPSHOT holds selected domain content and prepared images.  EXCERPT freezes
 its preview content, hidden count and source-line map.  SELECTION is `tail',
 `plain', `head', `all', or a received child's `concealed'.
-FOOTER-START is a paint marker for the continuation row, never source content."
+FOOTER-START marks the bottom row, including duration-only rows, never source
+content."
   snapshot
   excerpt
   selection
   footer-start)
 
 (defun pilish--detach-tool-output-footer (view)
-  "Release VIEW's continuation-row marker before repaint or owner release."
+  "Release VIEW's footer marker before repaint or owner release."
   (when view
     (when-let* ((marker (pilish--tool-output-view-footer-start view)))
       (set-marker marker nil))
@@ -6462,6 +6463,62 @@ When IS-EDIT-DIFF is non-nil, apply diff overlays to the inserted block."
     (when is-edit-diff
       (pilish--apply-diff-overlays content-start (point)))))
 
+(defvar-local pilish--tool-footer-min-columns 0
+  "Smallest displaying text width in tool-duration face cells.
+A narrow sibling intentionally stacks shared footers in wider windows too.
+Only this scalar changes on resize; historical output is never repainted.")
+
+(defun pilish--tool-duration-cell-width (window)
+  "Return the rendered duration-space width in WINDOW, including face remapping."
+  ;; `window-font-width' with an explicit face misses inherited default-face
+  ;; text scaling.  Include the remapped base face when resolving the same
+  ;; space that the alignment display uses, without searching buffer text.
+  (or (when-let* (((display-graphic-p (window-frame window)))
+                  (font (font-at 0 window (propertize " " 'face '(pilish-tool-duration default))))
+                  (name (font-xlfd-name font))
+                  (info (font-info name (window-frame window))))
+        (let ((average-width (aref info 11)))
+          (if (> average-width 0) average-width (aref info 10))))
+      (window-font-width window)))
+
+(defun pilish--update-tool-footer-geometry ()
+  "Refresh the minimum displaying width without editing transcript text."
+  (let ((columns
+         (cl-loop for window in (get-buffer-window-list (current-buffer) nil t)
+                  minimize (floor (/ (float (window-body-width window t))
+                                     (max 1 (pilish--tool-duration-cell-width window)))))))
+    (unless (eql columns pilish--tool-footer-min-columns)
+      (setq pilish--tool-footer-min-columns (or columns 0))
+      (force-window-update (current-buffer)))))
+
+(defun pilish--setup-tool-footer-geometry ()
+  "Install transcript-local window and text-scale geometry maintenance."
+  (add-hook 'window-configuration-change-hook #'pilish--update-tool-footer-geometry t t)
+  (add-hook 'text-scale-mode-hook #'pilish--update-tool-footer-geometry nil t)
+  (pilish--update-tool-footer-geometry))
+
+(add-hook 'pilish-transcript-mode-hook #'pilish--setup-tool-footer-geometry)
+
+(defun pilish--tool-footer-align-display (width)
+  "Return a redisplay-relative spacer for WIDTH duration cells and edge inset."
+  `(space :align-to (- right (,width . width))))
+
+(defun pilish--tool-footer-break-display (width)
+  "Hide an internal footer newline only when WIDTH cells fit in every window."
+  `(when (>= pilish--tool-footer-min-columns ,width) . ""))
+
+(defun pilish--timed-tool-name-p (name)
+  "Return non-nil for exact tool NAMEs permitted an inline duration."
+  (member name '("bash" "subagent")))
+
+(defun pilish--tool-duration-label (block)
+  "Return BLOCK's final inline label, or nil without eligible recorded timing."
+  (when (and block
+             (pilish--timed-tool-name-p
+              (overlay-get (pilish--tool-block-overlay block) 'pilish-tool-name))
+             (pilish--recorded-tool-time-p (pilish--tool-block-timing block)))
+    (concat "Took " (pilish--format-recorded-tool-time (pilish--tool-block-timing block)))))
+
 (defun pilish--tool-hidden-line-label (hidden-count)
   "Return the continuation label for HIDDEN-COUNT hidden lines."
   (concat "… " (pilish--more-lines-label hidden-count)))
@@ -6475,7 +6532,8 @@ When IS-EDIT-DIFF is non-nil, apply diff overlays to the inserted block."
   "Insert BLOCK's output, or received CALL's output, at point.
 PRESENTATION supplies newly painted domain facts; nil reuses the last snapshot.
 The owned view alone selects full output, a head preview, or concealed child
-output, followed by its real continuation control when needed.
+output, followed by an optional control and independent root duration.
+A duration-only row owns a footer marker, but never a disclosure caret.
 SELECTION requests a fold change without altering the old paint.
 Ordinary folds reuse their frozen excerpt; compound repaints measure
 their new excerpt at the current width, as do script and child-list repaints.
@@ -6497,6 +6555,8 @@ With no BLOCK, insert the existing unowned result-only presentation."
          (section (if call (cons 'child (pilish--nested-call-id call)) 'output))
          (available (or (not (string-empty-p text)) (plist-get snapshot :images)
                         (and call (plist-get snapshot :image-content-p))))
+         (control (and available (or call (> hidden 0))))
+         (duration (and (not call) (pilish--tool-duration-label block)))
          (start (point)))
     (setq selection
           (cond (call (if (eq selection 'all) 'all 'concealed))
@@ -6514,31 +6574,46 @@ With no BLOCK, insert the existing unowned result-only presentation."
         (pilish--insert-image-previews (plist-get snapshot :images))
         (when call
           (add-text-properties output-start (point) '(pilish-child-output t)))))
-    (when (and available (or call (> hidden 0)))
+    (when (or control duration)
       (let ((footer (point))
-            (label (cond
-                    ((eq selection 'all) "Show less")
-                    ((eq selection 'concealed)
-                     (if (string-empty-p text) "Show output"
-                       (pilish--tool-hidden-line-label
-                        (length (split-string (string-trim-right text "\n+") "\n" nil)))))
-                    ;; Compound partial previews keep their existing folds,
-                    ;; but have no completed-head count while the root runs.
-                    ((and block
-                          (or (null (pilish--tool-block-timing block))
-                              (pilish--running-tool-time-p (pilish--tool-block-timing block))))
-                     "Show output")
-                    (t (pilish--tool-hidden-line-label hidden)))))
-        (insert-text-button label
-                            'face 'pilish-collapsed-indicator
-                            'action #'pilish--toggle-tool-output
-                            'keymap pilish--tool-button-map
-                            'follow-link t 'pilish-tool-toggle t
-                            'pilish-tool-section section)
+            (label
+             (and control
+                  (cond
+                   ((eq selection 'all) "Show less")
+                   ((eq selection 'concealed)
+                    (if (string-empty-p text) "Show output"
+                      (pilish--tool-hidden-line-label
+                       (length (split-string (string-trim-right text "\n+") "\n" nil)))))
+                   ;; Compound partial previews keep their existing folds,
+                   ;; but have no completed-head count while the root runs.
+                   ((and block
+                         (or (null (pilish--tool-block-timing block))
+                             (pilish--running-tool-time-p (pilish--tool-block-timing block))))
+                    "Show output")
+                   (t (pilish--tool-hidden-line-label hidden))))))
+        (when label
+          (insert-text-button label
+                              'face 'pilish-collapsed-indicator
+                              'action #'pilish--toggle-tool-output
+                              'keymap pilish--tool-button-map
+                              'follow-link t 'pilish-tool-toggle t
+                              'pilish-tool-section section))
+        (when duration
+          (when label
+            (let ((fit-width (+ (string-width label) (string-width duration) 2)))
+              (insert (propertize "\n" 'pilish-tool-footer-break-width fit-width
+                                  'display (pilish--tool-footer-break-display fit-width)))))
+          (let ((align-width (1+ (string-width duration))))
+            (insert (propertize " " 'pilish-tool-footer-align-width align-width
+                                'face 'pilish-tool-duration
+                                'display (pilish--tool-footer-align-display align-width))))
+          (insert (propertize duration 'pilish-tool-duration block
+                              'face 'pilish-tool-duration 'font-lock-face 'pilish-tool-duration)))
         (insert "\n")
         (put-text-property footer (point) 'pilish-tool-output-footer selection)
-        (pilish--put-disclosure footer (point) (eq selection 'all)
-                               #'pilish--toggle-tool-fold-button-at-point)
+        (when label
+          (pilish--put-disclosure footer (if duration (+ footer (length label)) (point))
+                                 (eq selection 'all) #'pilish--toggle-tool-fold-button-at-point))
         (when block
           (setf (pilish--tool-output-view-footer-start view) (copy-marker footer)))))
     (add-text-properties start (point) (list 'pilish-tool-section section))
@@ -6744,14 +6819,34 @@ Return :cold-body and transient absolute :deleted-spans for view mapping."
                        pilish-nested-call-id pilish-image-preview pilish-tool-diagnostic-guard
                        pilish-no-fontify pilish-subagent-name pilish-tool-fold-heading
                        pilish-tool-output-footer
+                       pilish-tool-footer-align-width pilish-tool-footer-break-width
                        pilish-argument-guard pilish-argument-value pilish-argument-literal
                        line-prefix wrap-prefix))
       (let ((position 0))
         (while (< position (length body))
           (let ((next (next-single-property-change position property body (length body)))
                 (value (get-text-property position property body)))
-            (when value (put-text-property position next property value cold))
+            (when value
+              (put-text-property position next property value cold)
+              ;; Derive only our two layout displays, never retain arbitrary
+              ;; display properties from tool output or active controls.
+              (pcase property
+                ('pilish-tool-footer-align-width
+                 (add-text-properties position next
+                                      (list 'face 'pilish-tool-duration
+                                            'display (pilish--tool-footer-align-display value)) cold))
+                ('pilish-tool-footer-break-width
+                 (put-text-property position next 'display
+                                    (pilish--tool-footer-break-display value) cold))))
             (setq position next)))))
+    ;; Keep only the duration's known face, not its hot owner pointer.
+    (let ((position 0))
+      (while (< position (length body))
+        (let ((next (next-single-property-change position 'pilish-tool-duration body (length body))))
+          (when (get-text-property position 'pilish-tool-duration body)
+            (add-text-properties position next '(face pilish-tool-duration
+                                                font-lock-face pilish-tool-duration) cold))
+          (setq position next))))
     (dolist (property '(pilish-argument-guard pilish-tool-diagnostic-guard pilish-argument-literal))
       (let ((position 0))
         (while (< position (length body))
@@ -6788,13 +6883,16 @@ Return :cold-body and transient absolute :deleted-spans for view mapping."
                   (push (cons (- (line-end-position) language-length start)
                               (- (line-end-position) start)) deleted-spans))))))
           (forward-line 1))))
-    ;; Expanded content survives cooling, but its active collapse row does not.
+    ;; Expanded content keeps its duration-only row.  Remove the active
+    ;; control and its internal newline, or the whole row when untimed.
     (let ((position 0))
       (while (< position (length body))
         (let ((next (next-single-property-change position 'pilish-tool-output-footer
                                                  body (length body))))
           (when (eq (get-text-property position 'pilish-tool-output-footer body) 'all)
-            (push (cons position next) deleted-spans))
+            (let ((alignment (text-property-not-all position next 'pilish-tool-footer-align-width nil body)))
+              (when (< position (or alignment next))
+                (push (cons position (or alignment next)) deleted-spans))))
           (setq position next))))
     ;; Delete from the end so all offsets still name the original paint.
     (setq deleted-spans (sort deleted-spans (lambda (a b) (> (car a) (car b)))))
@@ -6810,7 +6908,7 @@ Return :cold-body and transient absolute :deleted-spans for view mapping."
 Read selection when cooling executes, not when the overlay enters its queue.
 Never reconstruct rich results or derive fold state from a button or fence.
 Collapsed output retains its one inert continuation label.  Expanded output
-keeps its visible content without the active collapse control."
+keeps its visible content and recorded duration without the active control."
   (when-let* ((header-end (marker-position (overlay-get overlay 'pilish-header-end))))
     (let* ((block (pilish--tool-block-from-overlay overlay))
            (view (and block (pilish--tool-block-output-view block)))
@@ -9550,7 +9648,7 @@ Display-only table decoration is applied after the content is stable."
 Strip Markdown hiding, faces and link buttons from literal argument text,
 saved assistant outcomes, child summaries and full-output paths, including
 cold text without overlays.
-Preserve image preview display properties and the outcome notice face.
+Preserve image previews, footer alignment and the duration/outcome faces.
 Restore `font-lock-face' values for all
 overlapping tool headers, live or finalized."
   (let ((inhibit-read-only t)
@@ -9561,7 +9659,11 @@ overlapping tool headers, live or finalized."
                          (next-single-property-change pos 'pilish-argument-literal nil end)
                          (next-single-property-change pos 'pilish-argument-guard nil end)
                          (next-single-property-change pos 'pilish-tool-diagnostic-guard nil end)
-                         (next-single-property-change pos 'pilish-assistant-outcome nil end)))
+                         (next-single-property-change pos 'pilish-assistant-outcome nil end)
+                         (next-single-property-change pos 'pilish-tool-output-footer nil end)
+                         (next-single-property-change pos 'pilish-tool-footer-align-width nil end)
+                         (next-single-property-change pos 'pilish-tool-footer-break-width nil end)
+                         (next-single-property-change pos 'pilish-tool-duration nil end)))
              (outcome (get-text-property pos 'pilish-assistant-outcome))
              (argument-p (get-text-property pos 'pilish-argument-literal)))
         (when (or outcome argument-p (get-text-property pos 'pilish-nested-summary)
@@ -9581,6 +9683,14 @@ overlapping tool headers, live or finalized."
                       (face (get-text-property face-pos 'font-lock-face)))
                   (when face (put-text-property face-pos next 'face face))
                   (setq face-pos next))))))
+        (when (get-text-property pos 'pilish-tool-output-footer)
+          (when-let* ((width (get-text-property pos 'pilish-tool-footer-align-width)))
+            (put-text-property pos limit 'display (pilish--tool-footer-align-display width))
+            (put-text-property pos limit 'face 'pilish-tool-duration))
+          (when-let* ((width (get-text-property pos 'pilish-tool-footer-break-width)))
+            (put-text-property pos limit 'display (pilish--tool-footer-break-display width)))
+          (when (eq (get-text-property pos 'font-lock-face) 'pilish-tool-duration)
+            (put-text-property pos limit 'face 'pilish-tool-duration)))
         (setq pos limit)))
     (dolist (ov (pilish--tool-block-overlays-in-region beg end))
       (when-let* ((ov-start (overlay-start ov))

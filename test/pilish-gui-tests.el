@@ -1547,6 +1547,169 @@ Capture text/image ordering, completed thinking and both cold projections."
       (set-frame-size nil width height)
       (sit-for 0.1))))
 
+(defun pilish-gui-test--duration-geometry (window block &optional stacked)
+  "Assert BLOCK's actual footer coordinates in WINDOW, expecting STACKED rows.
+With nil BLOCK, inspect the buffer's inert cold footer instead.
+Return observations suitable for the graphical evidence file."
+  (let* ((footer (if block
+                     (marker-position (pilish--tool-output-view-footer-start
+                                       (pilish--tool-block-output-view block)))
+                   (text-property-not-all (point-min) (point-max) 'pilish-tool-output-footer nil)))
+         (end (next-single-property-change footer 'pilish-tool-output-footer nil (point-max)))
+         (duration-property (if block 'pilish-tool-duration 'font-lock-face))
+         (duration (text-property-any footer end duration-property (or block 'pilish-tool-duration)))
+         (duration-end (next-single-property-change duration duration-property nil end))
+         (button (button-at footer))
+         (control-end (if button (button-end button)
+                        (text-property-not-all footer end 'pilish-tool-footer-break-width nil)))
+         (first (posn-at-point duration window))
+         (last (posn-at-point (1- duration-end) window))
+         (control (and control-end (posn-at-point (1- control-end) window)))
+         (cell (and last (car (posn-object-width-height last))))
+         (right-gap (and last (- (window-body-width window t)
+                                (+ (car (posn-x-y last)) (car (posn-object-width-height last)))))))
+    (should first)
+    (should last)
+    ;; The duration remains intact, with one face cell at the text area's edge.
+    (should (= (cdr (posn-x-y first)) (cdr (posn-x-y last))))
+    (should (<= (abs (- right-gap cell)) 1))
+    (when control-end
+      (should control)
+      (if stacked
+          (should (> (cdr (posn-x-y first)) (cdr (posn-x-y control))))
+        (should (= (cdr (posn-x-y first)) (cdr (posn-x-y control)))))
+      (when (not stacked)
+        (should (>= (car (posn-x-y first))
+                    (+ (car (posn-x-y control)) (car (posn-object-width-height control)) cell)))))
+    (list :body-columns (window-body-width window) :body-pixels (window-body-width window t)
+          :minimum-columns pilish--tool-footer-min-columns :face-cell cell
+          :duration-start (posn-x-y first) :duration-last (posn-x-y last)
+          :control-last (and control (posn-x-y control)) :right-gap right-gap
+          :stacked stacked :margins (window-margins window))))
+
+(ert-deftest pilish-gui-test-recorded-duration-responsive-footer-geometry ()
+  "Final footer text aligns at both standard widths and across unequal windows."
+  (let ((original-width (frame-width)) (original-height (frame-height))
+        (pilish-bash-preview-lines 2))
+    (unwind-protect
+        (dolist (shape '(collapsed expanded short empty))
+          (let ((buffer (generate-new-buffer " *pilish-duration-geometry*")))
+            (unwind-protect
+                (save-window-excursion
+                  (delete-other-windows)
+                  (set-frame-size nil 104 45)
+                  (switch-to-buffer buffer)
+                  (pilish-chat-mode)
+                  (let* ((window (selected-window))
+                         (block (pilish--display-tool-start "bash" '(:command "geometry") "geometry"))
+                         (output (pcase shape
+                                   ((or 'collapsed 'expanded) "FIRST\nSECOND\nTHIRD\nFOURTH\nFIFTH\nSIXTH")
+                                   ('short "SHORT") (_ ""))))
+                    (pilish--display-tool-end "bash" nil (list (list :type "text" :text output))
+                                              nil nil block (pilish--recorded-tool-time 3400))
+                    (when (eq shape 'expanded)
+                      (goto-char (pilish--tool-output-view-footer-start (pilish--tool-block-output-view block)))
+                      (execute-kbd-macro (kbd "TAB")))
+                    (font-lock-ensure)
+                    (dolist (columns '(104 54))
+                      (let ((tick (buffer-chars-modified-tick))
+                            (snapshot (pilish--tool-output-view-snapshot (pilish--tool-block-output-view block))))
+                        (set-frame-size nil columns 45)
+                        (goto-char (point-min))
+                        (set-window-start window (point-min) t)
+                        (sit-for 0.15)
+                        (redisplay t)
+                        (should (= (frame-width) columns))
+                        (should (<= (- columns 6) (window-body-width window) columns))
+                        (should (= tick (buffer-chars-modified-tick)))
+                        (should (eq snapshot (pilish--tool-output-view-snapshot (pilish--tool-block-output-view block))))
+                        (pilish-gui-test--large-evidence
+                         (format "duration-%d-%s" columns shape)
+                         (list :geometry (pilish-gui-test--duration-geometry window block)
+                               :shape shape :frame-columns (frame-width)
+                               :raw (buffer-substring-no-properties (point-min) (point-max))
+                               :package-user-dir package-user-dir :window-system window-system
+                               :render-library (symbol-file 'pilish--insert-tool-output-section)))))
+                    (when (eq shape 'collapsed)
+                      ;; Redisplay must stack in both siblings when either cannot
+                      ;; fit the labels, without a body rewrite or per-window paint.
+                      (set-frame-size nil 104 45)
+                      (sit-for 0.15)
+                      (let* ((overhead (- (window-total-width window) (window-body-width window)))
+                             (narrow (split-window window (- (+ 24 overhead)) 'right))
+                             (tick (buffer-chars-modified-tick))
+                             (snapshot (pilish--tool-output-view-snapshot
+                                        (pilish--tool-block-output-view block))))
+                        (set-window-buffer narrow buffer)
+                        (goto-char (point-min))
+                        (set-window-start window (point-min) t)
+                        (set-window-start narrow (point-min) t)
+                        (set-window-point narrow (point-min))
+                        (sit-for 0.15)
+                        (window-resize narrow (- 24 (window-body-width narrow)) t)
+                        (sit-for 0.15)
+                        (redisplay t)
+                        (should (= (window-body-width narrow) 24))
+                        (should (= pilish--tool-footer-min-columns 24))
+                        (should (> (window-body-width window) 54))
+                        (should (= tick (buffer-chars-modified-tick)))
+                        (should (eq snapshot (pilish--tool-output-view-snapshot
+                                              (pilish--tool-block-output-view block))))
+                        (pilish-gui-test--large-evidence
+                         "duration-narrow-sibling"
+                         (list :wide (pilish-gui-test--duration-geometry window block t)
+                               :narrow (pilish-gui-test--duration-geometry narrow block t)
+                               :raw (buffer-substring-no-properties (point-min) (point-max))))
+                        ;; Both now fit, but each stretch space uses its own edge.
+                        (set-frame-size nil 166 45)
+                        (sit-for 0.15)
+                        (window-resize narrow (- 54 (window-body-width narrow)) t)
+                        (sit-for 0.15)
+                        (redisplay t)
+                        (should (= (window-body-width narrow) 54))
+                        (should (> (window-body-width window) 100))
+                        (should (= pilish--tool-footer-min-columns 54))
+                        (let ((wide (pilish-gui-test--duration-geometry window block))
+                              (small (pilish-gui-test--duration-geometry narrow block)))
+                          (should (> (car (plist-get wide :duration-start))
+                                     (car (plist-get small :duration-start))))
+                          (pilish-gui-test--large-evidence "duration-independent-edges"
+                                                         (list :wide wide :narrow small)))
+                        (text-scale-increase 2)
+                        (sit-for 0.15)
+                        (redisplay t)
+                        (should (< pilish--tool-footer-min-columns 54))
+                        (pilish-gui-test--large-evidence
+                         "duration-text-scale"
+                         (list :scale text-scale-mode-amount
+                               :wide (pilish-gui-test--duration-geometry window block)
+                               :narrow (pilish-gui-test--duration-geometry narrow block)))
+                        (should (= tick (buffer-chars-modified-tick)))
+                        (text-scale-set 0)
+                        (delete-window narrow)
+                        (sit-for 0.15)
+                        (should (= pilish--tool-footer-min-columns (window-body-width window)))))
+                    (pilish--cool-tool-overlay (pilish--tool-block-overlay block))
+                    (should-not (pilish--tool-block-output-view block))
+                    (should-not (text-property-not-all (point-min) (point-max) 'pilish-tool-duration nil))
+                    (font-lock-ensure)
+                    (dolist (columns '(104 54))
+                      (set-frame-size nil columns 45)
+                      (goto-char (point-min))
+                      (set-window-start window (point-min) t)
+                      (sit-for 0.15)
+                      (redisplay t)
+                      (should (= (frame-width) columns))
+                      (pilish-gui-test--large-evidence
+                       (format "duration-%d-%s-cold" columns shape)
+                       (list :geometry (pilish-gui-test--duration-geometry window nil)
+                             :raw (buffer-substring-no-properties (point-min) (point-max)))))))
+              (when (buffer-live-p buffer)
+                (with-current-buffer buffer (set-buffer-modified-p nil))
+                (kill-buffer buffer)))))
+      (set-frame-size nil original-width original-height)
+      (sit-for 0.1))))
+
 (ert-deftest pilish-gui-test-saved-button-keyboard ()
   "Saved-name GUI TAB folds locally without changing RET's captured target."
   (require 'pilish-arguments-test)

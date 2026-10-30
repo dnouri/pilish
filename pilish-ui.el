@@ -382,6 +382,11 @@ still operate on the raw table source."
   "Face for tool output text."
   :group 'pilish)
 
+(defface pilish-tool-duration
+  '((t :inherit (shadow fixed-pitch)))
+  "Face for tool durations in output footers."
+  :group 'pilish)
+
 (defface pilish-tool-block
   '((t :extend t))
   "Face for tool blocks.

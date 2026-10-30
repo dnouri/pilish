@@ -1833,6 +1833,33 @@
                 (should (eq (pilish--find-session directory) parent))))
           (pilish-test--kill-live-buffers replacement snapshot))))))
 
+(ert-deftest pilish-test-snapshot-duration-rows-replay-without-live-execution ()
+  "Saved long, short, empty and zero results use final rows; old saves stay quiet."
+  (pilish-test--with-snapshot-files
+    (dolist (output '("FIRST\nSECOND\nTHIRD\nFOURTH" "SHORT" ""))
+      (dolist (milliseconds '(nil 0 3723000))
+        (pilish-test--snapshot-write child (pilish-test--snapshot-tool-entries header output milliseconds))
+        (save-window-excursion
+          (let ((pilish-bash-preview-lines 1) snapshot)
+            (unwind-protect
+                (cl-letf (((symbol-function 'pilish--tool-block-start-execution)
+                           (lambda (&rest _) (ert-fail "Saved duration started a live clock"))))
+                  (setq snapshot (pilish-open-subagent-snapshot target))
+                  (let* ((overlay (car (pilish--tool-block-overlays-in-region (point-min) (point-max))))
+                         (block (pilish--tool-block-from-overlay overlay)))
+                    (dolist (cold '(nil t))
+                      (when cold (pilish--cool-tool-overlay overlay))
+                      (if milliseconds
+                          (progn
+                            (should (string-match-p (if (= milliseconds 0) "Took 0.0s" "Took 1h 2m 3s")
+                                                    (buffer-string)))
+                            (should (= 2 (length (split-string (buffer-string) "Took ")))))
+                        (should-not (string-match-p "Took\\|Elapsed" (buffer-string))))
+                      (when (and (not cold) milliseconds)
+                        (should (pilish--tool-output-view-footer-start (pilish--tool-block-output-view block))))
+                      (should-not (string-match-p "Elapsed" (buffer-string))))))
+              (pilish-test--kill-live-buffers snapshot))))))))
+
 (ert-deftest pilish-test-snapshot-refresh-preserves-and-replaces-recorded-tool-time ()
   "Unchanged and failed refreshes keep time; a changed saved value replaces it."
   (pilish-test--with-snapshot-files
@@ -1851,6 +1878,12 @@
                        (timing (pilish--tool-block-timing (pilish--tool-block-from-overlay overlay))))
                   (should (string-suffix-p "\nExecution time: 0.0s" details))
                   (should (= (pilish--recorded-tool-time-milliseconds timing) 0))
+                  (should (string-match-p "Took 0.0s" (buffer-string)))
+                  (let ((footer (pilish--tool-output-view-footer-start
+                                 (pilish--tool-block-output-view (pilish--tool-block-from-overlay overlay)))))
+                    (should (eq (pilish-test--snapshot-refresh "Saved conversation unchanged") snapshot))
+                    (should (eq footer (pilish--tool-output-view-footer-start
+                                        (pilish--tool-block-output-view (pilish--tool-block-from-overlay overlay))))))
                   (should (eq (pilish-test--snapshot-refresh "Saved conversation unchanged") snapshot))
                   (should (eq (pilish--details-at-point) details))
                   (should (eq (pilish--tool-block-timing (pilish--tool-block-from-overlay overlay)) timing))
@@ -1863,11 +1896,14 @@
                     (search-forward "Timed saved output")
                     (let ((updated (pilish--details-at-point)))
                       (should (string-suffix-p "\nExecution time: 1.3s" updated))
+                      (should (string-match-p "Took 1.3s" (buffer-string)))
+                      (should-not (string-match-p "Took 0.0s" (buffer-string)))
                       (should-not (string-match-p "Stream:" updated))
                       (pilish-test--snapshot-write
                        child (list (plist-put (copy-sequence header) :id "wrong")))
                       (should-error (pilish-snapshot-refresh) :type 'user-error)
                       (should (eq (pilish--details-at-point) updated))
+                      (should (string-match-p "Took 1.3s" (buffer-string)))
                       (should pilish--snapshot-refresh-note)))))
             (pilish-test--kill-live-buffers replacement snapshot)))))))
 

@@ -1353,6 +1353,36 @@ established file actions keep authority over real path references only."
         (should (= 2 (length (split-string (pilish-arguments-test--visible-text)
                                            "… 4 more lines"))))))))
 
+(ert-deftest pilish-test-arguments-duration-copy-is-real-text-outside-the-control ()
+  "Copy includes the actual newline and duration, never a caret or alignment stretch."
+  (pilish-arguments-test--with-chat
+    (let* ((pilish-bash-preview-lines 1)
+           (block (pilish--display-tool-start "bash" '(:command "echo duration") "copy-duration"))
+           (overlay (pilish--tool-block-overlay block)))
+      (pilish--display-tool-end "bash" nil [(:type "text" :text "ONE\nTWO\nTHREE")]
+                                nil nil block (pilish--recorded-tool-time 1234))
+      (dolist (state '(head all cold))
+        (when (eq state 'all)
+          (button-activate (pilish--find-toggle-button-in-region (overlay-start overlay) (overlay-end overlay))))
+        (when (eq state 'cold) (pilish--cool-tool-overlay overlay))
+        (let* ((footer (text-property-not-all (point-min) (point-max) 'pilish-tool-output-footer nil))
+               (end (next-single-property-change footer 'pilish-tool-output-footer nil (point-max)))
+               (duration (save-excursion (goto-char footer) (search-forward "Took 1.2s") (match-beginning 0)))
+               (expected (pcase state ('head "… 2 more lines\n Took 1.2s\n")
+                                          ('all "Show less\n Took 1.2s\n") (_ " Took 1.2s\n"))))
+          (font-lock-flush)
+          (font-lock-ensure)
+          (should-not (button-at duration))
+          (should-not (get-text-property duration 'pilish-tool-toggle))
+          (dolist (pilish-copy-raw-markdown '(nil t))
+            (let ((copy (pilish--filter-buffer-substring footer end)))
+              (should (equal copy expected))
+              (should (equal-including-properties copy (substring-no-properties copy)))))
+          (unless (eq state 'cold)
+            (let ((button (pilish--find-toggle-button-in-region (overlay-start overlay) (overlay-end overlay))))
+              (should (equal (button-label button) (if (eq state 'head) "… 2 more lines" "Show less")))
+              (should (< (button-end button) duration)))))))))
+
 (defun pilish-arguments-test--output-button-keyboard (kind key)
   "Check KIND's Output button through KEY and RET in a displayed buffer."
   (let ((chat (generate-new-buffer " *arguments-button-keyboard*"))
