@@ -832,7 +832,8 @@ Each row is a plist with :type :count :totalMs :meanMs and :maxMs."
     (if (not (and (buffer-live-p buffer) (window-live-p window)))
         (list :available :json-false
               :expectedRoute pilish-tu-bench--command-last-route
-              :viewOk t)
+              :status (if pilish-tu-bench-display-buffers
+                          "fail" "not-applicable"))
       (with-current-buffer buffer
         (let* ((start (window-start window))
                (window-point-position (window-point window))
@@ -861,8 +862,10 @@ Each row is a plist with :type :count :totalMs :meanMs and :maxMs."
                 (pilish-tu-bench--json-bool following)
                 :sentinel
                 (pilish-tu-bench--json-bool sentinel-p)
-                :viewOk
-                (pilish-tu-bench--json-bool view-ok)))))))
+                :status (cond ((not pilish-tu-bench-display-buffers)
+                               "not-applicable")
+                              (view-ok "pass")
+                              (t "fail"))))))))
 
 (defun pilish-tu-bench--command-pre-hook ()
   "Record entry through the benchmark command's pre-command hook."
@@ -1351,15 +1354,26 @@ Each row is a plist with :type :count :totalMs :meanMs and :maxMs."
                          slice-rows))
                0.0)))))
 
-(defun pilish-tu-bench--check (name ok detail)
-  "Return a correctness check entry for NAME with OK flag and DETAIL text."
-  (list :name name
-        :ok (pilish-tu-bench--json-bool ok)
+(defun pilish-tu-bench--check (name category evidence detail)
+  "Return NAME's CATEGORY row from predicate EVIDENCE and DETAIL.
+Only viewport rows in the configured batch lane are not applicable."
+  (list :name name :category category
+        :status (cond ((and (equal category "viewport")
+                            (not pilish-tu-bench-display-buffers))
+                       "not-applicable")
+                      ((and evidence (not (eq evidence :json-false))) "pass")
+                      (t "fail"))
         :detail detail))
+
+(defun pilish-tu-bench--window-passed-p (window)
+  "Return non-nil when WINDOW contains applicable successful view evidence."
+  (and (proper-list-p window)
+       (eq (plist-get window :available) t)
+       (equal (plist-get window :status) "pass")))
 
 (defun pilish-tu-bench--collect-checks (chat-buf)
   "Return correctness check entries for the settled run in CHAT-BUF.
-Every entry must have a true :ok for the benchmark run to pass."
+Every entry must have status pass for the benchmark run to pass."
   (let* ((storm-ids (pilish-tu-bench--storm-tool-ids))
          (expected-executions (+ (pilish-tu-bench--fill-tool-count)
                                  pilish-tu-bench-parallel-tools))
@@ -1370,24 +1384,24 @@ Every entry must have a true :ok for the benchmark run to pass."
                         "tool_execution_update"))
          (checks nil))
     (push (pilish-tu-bench--check
-           "agent-end-received"
+           "agent-end-received" "behavior"
            (and pilish-tu-bench--agent-end-time t)
            (if pilish-tu-bench--agent-end-time
                "agent_end handled"
              "agent_end never handled"))
           checks)
     (push (pilish-tu-bench--check
-           "tool-execution-start-count"
+           "tool-execution-start-count" "behavior"
            (= start-count expected-executions)
            (format "expected %d, handled %d" expected-executions start-count))
           checks)
     (push (pilish-tu-bench--check
-           "tool-execution-end-count"
+           "tool-execution-end-count" "behavior"
            (= end-count expected-executions)
            (format "expected %d, handled %d" expected-executions end-count))
           checks)
     (push (pilish-tu-bench--check
-           "tool-execution-update-count"
+           "tool-execution-update-count" "behavior"
            (= update-count pilish-tu-bench-updates)
            (format "expected %d, handled %d"
                    pilish-tu-bench-updates update-count))
@@ -1399,7 +1413,7 @@ Every entry must have a true :ok for the benchmark run to pass."
                      chat-buf tool-call-id)))
             storm-ids)))
       (push (pilish-tu-bench--check
-             "subagent-blocks-present-once"
+             "subagent-blocks-present-once" "behavior"
              (null bad-blocks)
              (if bad-blocks
                  (format "ids without exactly one finalized block: %s"
@@ -1414,7 +1428,7 @@ Every entry must have a true :ok for the benchmark run to pass."
                      chat-buf (format "STORM-FINAL-RESULT %s" tool-call-id))))
             storm-ids)))
       (push (pilish-tu-bench--check
-             "subagent-final-text-exactly-once"
+             "subagent-final-text-exactly-once" "behavior"
              (null bad-texts)
              (if bad-texts
                  (format "ids whose final text is not exactly once: %s"
@@ -1424,7 +1438,7 @@ Every entry must have a true :ok for the benchmark run to pass."
     (let ((live-count (pilish-tu-bench--live-tool-block-count
                        chat-buf)))
       (push (pilish-tu-bench--check
-             "no-live-tool-blocks-remain"
+             "no-live-tool-blocks-remain" "behavior"
              (= live-count 0)
              (format "%d live tool block registry entries remain" live-count))
             checks))
@@ -1453,7 +1467,7 @@ Every entry must have a true :ok for the benchmark run to pass."
          checks)
     (push
      (pilish-tu-bench--check
-      "agent-end-real-process-filter-path"
+      "agent-end-real-process-filter-path" "behavior"
       (and pilish-tu-bench--agent-end-time
            observation
            pilish-tu-bench--agent-end-filter)
@@ -1466,7 +1480,7 @@ Every entry must have a true :ok for the benchmark run to pass."
      checks)
     (push
      (pilish-tu-bench--check
-      "hot-tail-boundary-advances-only-at-agent-end"
+      "hot-tail-boundary-advances-only-at-agent-end" "cooling-policy"
       (and (= (or (plist-get observation :boundaryBefore) -1) 1)
            (> (or (plist-get observation :boundaryAfter) 0) 1))
       (format "boundary %s -> %s"
@@ -1475,7 +1489,7 @@ Every entry must have a true :ok for the benchmark run to pass."
      checks)
     (push
      (pilish-tu-bench--check
-      "current-tool-live-on-agent-end-entry"
+      "current-tool-live-on-agent-end-entry" "cooling-policy"
       (and (= (or (plist-get observation :liveRegistryBefore) -1) 1)
            (= (or (plist-get observation :currentOverlayBefore) -1) 1))
       (format "live registry %s; current overlays %s"
@@ -1484,7 +1498,7 @@ Every entry must have a true :ok for the benchmark run to pass."
      checks)
     (push
      (pilish-tu-bench--check
-      "agent-end-returns-with-whole-cohort-deferred"
+      "agent-end-returns-with-whole-cohort-deferred" "scheduler-contract"
       (and (= (or (plist-get observation :queueAfter) -1) expected)
            (eq (plist-get observation :timerAfter) t)
            (= (or (plist-get observation :coldAfter) -1) 0)
@@ -1499,7 +1513,7 @@ Every entry must have a true :ok for the benchmark run to pass."
      checks)
     (push
      (pilish-tu-bench--check
-      "cohort-has-collapsed-and-short-tools"
+      "cohort-has-collapsed-and-short-tools" "cooling-policy"
       (let ((collapsed
              (or (plist-get observation :collapsedToolOverlaysBefore) 0)))
         (and (> collapsed 0) (< collapsed expected)))
@@ -1508,7 +1522,7 @@ Every entry must have a true :ok for the benchmark run to pass."
      checks)
     (push
      (pilish-tu-bench--check
-      "one-candidate-maximum-per-natural-callback"
+      "one-candidate-maximum-per-natural-callback" "scheduler-contract"
       (and (>= (length slices) expected)
            (cl-every (lambda (delta)
                        (and (integerp delta) (memq delta '(0 1))))
@@ -1526,7 +1540,7 @@ Every entry must have a true :ok for the benchmark run to pass."
      checks)
     (push
      (pilish-tu-bench--check
-      "natural-drain-settles-before-timeout"
+      "natural-drain-settles-before-timeout" "scheduler-contract"
       (eq (plist-get drain :settled) t)
       (format "wall %.3f ms, active %.3f ms, timeout %s s"
               (or (plist-get drain :wallMs) 0.0)
@@ -1535,7 +1549,7 @@ Every entry must have a true :ok for the benchmark run to pass."
      checks)
     (push
      (pilish-tu-bench--check
-      "exact-final-cold-hot-counts"
+      "exact-final-cold-hot-counts" "cooling-policy"
       (and (= (or (plist-get final-state :coldTools) -1) expected)
            (= (or (plist-get final-state :toolOverlays) -1) 1)
            (equal (plist-get final-state :toolOverlayIds)
@@ -1547,7 +1561,7 @@ Every entry must have a true :ok for the benchmark run to pass."
      checks)
     (push
      (pilish-tu-bench--check
-      "exact-cold-tool-cohort-composition"
+      "exact-cold-tool-cohort-composition" "cooling-policy"
       (and (= (or (plist-get names :bash) -1)
               pilish-tu-bench-fill-bash)
            (= (or (plist-get names :read) -1)
@@ -1564,7 +1578,7 @@ Every entry must have a true :ok for the benchmark run to pass."
      checks)
     (push
      (pilish-tu-bench--check
-      "current-inside-hot-tail-stays-hot"
+      "current-inside-hot-tail-stays-hot" "cooling-policy"
       (and (eq (plist-get final-state :currentInsideHotTail) t)
            (eq (plist-get final-state :currentColdProperty) :json-false)
            (= 1 (pilish-tu-bench--count-occurrences
@@ -1577,7 +1591,7 @@ Every entry must have a true :ok for the benchmark run to pass."
      checks)
     (push
      (pilish-tu-bench--check
-      "semantic-sentinel-projection-hash-holds"
+      "semantic-sentinel-projection-hash-holds" "behavior"
       (and (= (or (plist-get observation :semanticLinesAfter) -1)
               expected-semantic-lines)
            (= (or (plist-get final-state :semanticLineCount) -1)
@@ -1601,19 +1615,24 @@ Every entry must have a true :ok for the benchmark run to pass."
               (setq table-pos (match-beginning 0))))))
       (push
        (pilish-tu-bench--check
-        "adjacent-hot-tail-table-remains-usable"
+        "adjacent-hot-tail-table-remains-usable" "behavior"
         (and table-pos
              (integerp current-pos)
-             (< table-pos current-pos)
-             (or (not pilish-tu-bench-display-buffers)
-                 (> (or (plist-get final-state :tableOverlays) 0) 0)))
+             (< table-pos current-pos))
         (format "table-pos=%s current-pos=%s display-overlays=%s"
                 table-pos current-pos
                 (plist-get final-state :tableOverlays)))
        checks))
     (push
      (pilish-tu-bench--check
-      "no-stale-buttons-diffs-or-tool-overlays"
+      "adjacent-hot-tail-table-overlay-present" "viewport"
+      (and (pilish-tu-bench--window-passed-p (plist-get final-state :window))
+           (> (or (plist-get final-state :tableOverlays) 0) 0))
+      (format "table overlays=%s" (plist-get final-state :tableOverlays)))
+     checks)
+    (push
+     (pilish-tu-bench--check
+      "no-stale-buttons-diffs-or-tool-overlays" "cooling-policy"
       (and (= (or (plist-get final-state :buttons) -1) 0)
            (= (or (plist-get final-state :diffOverlays) -1) 0)
            (= (or (plist-get final-state :toolOverlays) -1) 1))
@@ -1624,7 +1643,7 @@ Every entry must have a true :ok for the benchmark run to pass."
      checks)
     (push
      (pilish-tu-bench--check
-      "cooling-scheduler-and-live-registry-clean"
+      "cooling-scheduler-and-live-registry-clean" "scheduler-contract"
       (and (= (or (plist-get final-state :queueLength) -1) 0)
            (eq (plist-get final-state :timerOwned) :json-false)
            (= (or (plist-get final-state :liveToolRegistry) -1) 0)
@@ -1639,7 +1658,7 @@ Every entry must have a true :ok for the benchmark run to pass."
      checks)
     (push
      (pilish-tu-bench--check
-      "parser-root-and-font-lock-usable"
+      "parser-root-and-font-lock-usable" "behavior"
       (and (eq (plist-get parser :parserOk) t)
            (eq (plist-get parser :fontLockOk) t))
       (format "parser=%s font-lock=%s root=%s parser-error=%s font-lock-error=%s"
@@ -1651,7 +1670,7 @@ Every entry must have a true :ok for the benchmark run to pass."
      checks)
     (push
      (pilish-tu-bench--check
-      "command-loop-scroll-heartbeats-routed"
+      "command-loop-scroll-heartbeats-routed" "behavior"
       (and (>= (length commands) 2)
            (seq-some (lambda (row)
                        (equal (plist-get row :route) "sentinel"))
@@ -1663,28 +1682,32 @@ Every entry must have a true :ok for the benchmark run to pass."
             (lambda (row)
               (and (eq (plist-get row :preHook) t)
                    (eq (plist-get row :postHook) t)
-                   (null (plist-get row :error))
-                   (eq (plist-get (plist-get row :window) :viewOk) t)))
-            commands)
-           (seq-every-p
-            (lambda (row)
-              (eq (plist-get (plist-get row :window) :viewOk) t))
-            slices)
-           (eq (plist-get (plist-get drain :finalWindow) :viewOk) t))
-      (format "%d commands (%d sentinel/%d follow); final route=%s view-ok=%s"
+                   (null (plist-get row :error))))
+            commands))
+      (format "%d commands (%d sentinel/%d follow)"
               (length commands)
               (cl-count "sentinel" commands
                         :key (lambda (row) (plist-get row :route))
                         :test #'equal)
               (cl-count "follow" commands
                         :key (lambda (row) (plist-get row :route))
-                        :test #'equal)
-              (plist-get (plist-get drain :finalWindow) :expectedRoute)
-              (plist-get (plist-get drain :finalWindow) :viewOk)))
+                        :test #'equal)))
      checks)
     (push
      (pilish-tu-bench--check
-      "cooling-wire-event-counts"
+      "command-and-cooling-viewport-preserved" "viewport"
+      (and commands slices
+           (seq-every-p
+            (lambda (row)
+              (pilish-tu-bench--window-passed-p (plist-get row :window)))
+            (append commands slices))
+           (pilish-tu-bench--window-passed-p (plist-get drain :finalWindow)))
+      (format "commands=%d slices=%d final-window=%S"
+              (length commands) (length slices) (plist-get drain :finalWindow)))
+     checks)
+    (push
+     (pilish-tu-bench--check
+      "cooling-wire-event-counts" "behavior"
       (and (= (pilish-tu-bench--event-count
                "tool_execution_start")
               (1+ expected))
@@ -1704,20 +1727,19 @@ Every entry must have a true :ok for the benchmark run to pass."
                "tool_execution_update")
               (pilish-tu-bench--event-count "agent_end")))
      checks)
-    (when (and pilish-tu-bench-display-buffers
-               (not noninteractive))
-      (let ((geometry (plist-get final-state :geometry)))
-        (push
-         (pilish-tu-bench--check
-          "gui-frame-is-120x40"
-          (and (= (or (plist-get geometry :frameColumns) -1) 120)
-               (= (or (plist-get geometry :frameLines) -1) 40))
-          (format "frame=%sx%s chat=%sx%s"
-                  (plist-get geometry :frameColumns)
-                  (plist-get geometry :frameLines)
-                  (plist-get geometry :chatColumns)
-                  (plist-get geometry :chatLines)))
-         checks)))
+    (let ((geometry (plist-get final-state :geometry)))
+      (push
+       (pilish-tu-bench--check
+        "gui-frame-is-120x40" "viewport"
+        (and (eq (plist-get (plist-get final-state :window) :available) t)
+             (equal (plist-get geometry :frameColumns) 120)
+             (equal (plist-get geometry :frameLines) 40))
+        (format "frame=%sx%s chat=%sx%s"
+                (plist-get geometry :frameColumns)
+                (plist-get geometry :frameLines)
+                (plist-get geometry :chatColumns)
+                (plist-get geometry :chatLines)))
+       checks))
     (nreverse checks)))
 
 (defun pilish-tu-bench--cleanup-session-directory (session-dir)
@@ -1961,7 +1983,7 @@ all scenarios await agent_settled before declaring the session complete."
                "index\tqueue_before\tqueue_after\tqueue_delta\t"
                "candidate_id\teligible\toverlay_alive_after\twall_ms\t"
                "tree_root_count\ttree_root_ms\tgcs\tgc_ms\ttimer_after\t"
-               "window_route\twindow_ok\n"))
+               "window_route\twindow_status\n"))
       (dolist (row (pilish-tu-bench--cooling-slices-in-order))
         (let ((tree (plist-get row :treeRoots))
               (window (plist-get row :window)))
@@ -1981,12 +2003,12 @@ all scenarios await agent_settled before declaring the session complete."
                    (plist-get row :gcMs)
                    (if (eq (plist-get row :timerAfter) t) 1 0)
                    (plist-get window :expectedRoute)
-                   (if (eq (plist-get window :viewOk) t) 1 0))))))
+                   (or (plist-get window :status) "fail"))))))
     (with-temp-file pilish-tu-bench-commands-file
       (insert (concat
                "sequence\troute\tdue_at\tenqueued_at\tstarted_at\tended_at\t"
                "lateness_ms\tqueue_delay_ms\tduration_ms\tpre_hook\tpost_hook\t"
-               "window_route\twindow_ok\terror\n"))
+               "window_route\twindow_status\terror\n"))
       (dolist (row (pilish-tu-bench--commands-in-order))
         (let ((window (plist-get row :window)))
           (insert
@@ -2003,7 +2025,7 @@ all scenarios await agent_settled before declaring the session complete."
                    (if (eq (plist-get row :preHook) t) 1 0)
                    (if (eq (plist-get row :postHook) t) 1 0)
                    (plist-get window :expectedRoute)
-                   (if (eq (plist-get window :viewOk) t) 1 0)
+                   (or (plist-get window :status) "fail")
                    (if (null (plist-get row :error))
                        ""
                      (plist-get row :error)))))))))
@@ -2013,7 +2035,8 @@ all scenarios await agent_settled before declaring the session complete."
   (vconcat
    (mapcar (lambda (check)
              (list :name (plist-get check :name)
-                   :ok (plist-get check :ok)
+                   :category (plist-get check :category)
+                   :status (plist-get check :status)
                    :detail (plist-get check :detail)))
            entries)))
 
@@ -2306,12 +2329,13 @@ all scenarios await agent_settled before declaring the session complete."
                            "display-tool-end" tool-call-id)))))
       (insert "\nThe full per-tool-call-id breakdown (including fill phase ids) is in `result.json` and `times.tsv`.\n")
       (insert "\n## Correctness checks\n\n")
-      (insert "| check | ok | detail |\n")
-      (insert "|---|---|---|\n")
+      (insert "| check | category | status | detail |\n")
+      (insert "|---|---|---|---|\n")
       (dolist (check (plist-get metrics :checks))
-        (insert (format "| `%s` | %s | %s |\n"
+        (insert (format "| `%s` | %s | %s | %s |\n"
                         (plist-get check :name)
-                        (if (eq (plist-get check :ok) t) "yes" "NO")
+                        (plist-get check :category)
+                        (plist-get check :status)
                         (plist-get check :detail))))
       (insert "\n## Raw artifacts\n\n")
       (insert (format "- Result JSON: `%s`\n"
@@ -2327,10 +2351,23 @@ all scenarios await agent_settled before declaring the session complete."
                       pilish-tu-bench-fake-log)))))
 
 (defun pilish-tu-bench--metrics-ok-p (metrics)
-  "Return non-nil when METRICS settled with every structural check green."
-  (and (eq (plist-get metrics :settled) t)
-       (seq-every-p (lambda (check) (eq (plist-get check :ok) t))
-                    (plist-get metrics :checks))))
+  "Return non-nil when METRICS settled with every applicable check passing."
+  (let ((checks (plist-get metrics :checks)))
+    (and (eq (plist-get metrics :settled) t)
+         (consp checks)
+         (proper-list-p checks)
+         (seq-every-p
+          (lambda (check)
+            (and (proper-list-p check)
+                 (stringp (plist-get check :name))
+                 (not (string-empty-p (plist-get check :name)))
+                 (member (plist-get check :category)
+                         '("behavior" "cooling-policy" "scheduler-contract" "viewport"))
+                 (or (equal (plist-get check :status) "pass")
+                     (and (equal (plist-get check :status) "not-applicable")
+                          (equal (plist-get check :category) "viewport")
+                          (not pilish-tu-bench-display-buffers)))))
+          checks))))
 
 (defun pilish-tu-bench--metrics-with-verdict (metrics)
   "Return METRICS with :ok set from its complete structural verdict."
@@ -2354,8 +2391,8 @@ benchmark scenario.  It prevents settled-only JSON success from regressing."
           (pilish-tu-bench--metrics-with-verdict
            (list :settled t
                  :checks
-                 (list (list :name "synthetic-failed-cooling-check"
-                             :ok :json-false)))))
+                 (list (pilish-tu-bench--check
+                        "synthetic-failed-cooling-check" "cooling-policy" nil "")))))
          (run-ok (eq (plist-get metrics :ok) t))
          (encoded (let ((json-null nil) (json-false :json-false))
                     (json-encode
