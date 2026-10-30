@@ -1987,8 +1987,8 @@ Return observations suitable for the graphical evidence file."
                                       (insert-file-contents-literally file) (buffer-string))))))))
       (when (buffer-live-p browser) (kill-buffer browser))
       (set-frame-size nil width height)
-      (pilish-test-wait-until
-       (lambda () (and (= (frame-width) width) (= (frame-height) height))) 1 0.01))))
+      (should (pilish-test-wait-until
+               (lambda () (and (= (frame-width) width) (= (frame-height) height))) 1 0.01)))))
 
 (ert-deftest pilish-gui-test-saved-button-keyboard ()
   "Saved-name GUI TAB folds locally without changing RET's captured target."
