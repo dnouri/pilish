@@ -6614,25 +6614,17 @@ Exclude the wrapper newline immediately before the closing fence."
                     (1- closing-start)
                   closing-start)))))))
 
-(defun pilish--tool-overlay-visible-body (overlay)
-  "Return the currently visible body text for completed tool OVERLAY.
-Extracts the text between the outer fence lines, removing only the
-wrapper newline inserted before the closing fence.  Collapsed blocks
-therefore cool into their visible preview only."
-  (when-let* ((header-end-marker (overlay-get overlay 'pilish-header-end))
-              (header-end (and (markerp header-end-marker)
-                               (marker-position header-end-marker)))
-              (overlay-end (overlay-end overlay))
-              (bounds (pilish--tool-fenced-content-bounds header-end overlay-end)))
-    (let* ((source (buffer-substring (car bounds) (cdr bounds)))
-           (cold (substring-no-properties source))
-           (position 0))
-      (while (< position (length source))
-        (let ((next (next-single-property-change position 'pilish-subagent-name source (length source)))
-              (value (get-text-property position 'pilish-subagent-name source)))
-          (when value (put-text-property position next 'pilish-subagent-name value cold))
-          (setq position next)))
-      cold)))
+(defun pilish--tool-visible-body (bounds)
+  "Return visible body text within BOUNDS, retaining subagent-name properties."
+  (let* ((source (buffer-substring (car bounds) (cdr bounds)))
+         (cold (substring-no-properties source))
+         (position 0))
+    (while (< position (length source))
+      (let ((next (next-single-property-change position 'pilish-subagent-name source (length source)))
+            (value (get-text-property position 'pilish-subagent-name source)))
+        (when value (put-text-property position next 'pilish-subagent-name value cold))
+        (setq position next)))
+    cold))
 
 (defun pilish--cold-tool-target-metadata
     (overlay header-end collapsed)
@@ -6730,39 +6722,39 @@ their entire currently displayed body in :cold-body."
                      overlay (marker-position (pilish--tool-block-header-end block))
                      (not (member 'output (pilish--tool-block-folds block))))))
     (if-let* ((header-end (marker-position (overlay-get overlay 'pilish-header-end)))
-              (end (overlay-end overlay))
-              ((or (= header-end end)
-                   (and block (pilish--tool-block-image-previews block)
-                        (not (pilish--tool-fenced-content-bounds header-end end))))))
-        (list :cold-body (or (and block (pilish--image-previews-text
-                                        (pilish--tool-block-image-previews block))) "")
-              :target-metadata (pilish--cold-tool-target-metadata overlay header-end nil))
-      (when-let* ((visible-body (pilish--tool-overlay-visible-body overlay))
-                  (header-end (marker-position
-                               (overlay-get overlay 'pilish-header-end))))
-        (let* ((record (pilish--tool-block-from-overlay overlay))
-               (image-previews (and record (pilish--tool-block-image-previews record)))
-               (button (pilish--find-toggle-button-in-region header-end (overlay-end overlay)))
-               (collapsed (and button (not (button-get button 'pilish-expanded))))
-               (hidden-count (and collapsed (button-get button 'hidden-count))))
-          (list :visible-body visible-body
-                :deleted-spans
-                (save-excursion
-                  (goto-char (car (pilish--tool-fenced-content-bounds header-end (overlay-end overlay))))
-                  (forward-line -1)
-                  (let ((length (length (plist-get (pilish--fence-line-info-at-point) :trailing))))
-                    (when (> length 0)
-                      (list (cons (- (line-end-position) length) (line-end-position))))))
-                :heading (when (get-text-property header-end 'pilish-tool-fold-heading)
-                           (propertize
-                            (buffer-substring-no-properties
-                             header-end (next-single-property-change
-                                         header-end 'pilish-tool-fold-heading nil (overlay-end overlay)))
-                            'pilish-tool-fold-heading t 'pilish-tool-section 'output))
-                :image-previews image-previews
-                :target-metadata
-                (pilish--cold-tool-target-metadata overlay header-end collapsed)
-                :hidden-count (and (integerp hidden-count) (> hidden-count 0) hidden-count)))))))
+              (end (overlay-end overlay)))
+        (let ((bounds (and (< header-end end)
+                           (pilish--tool-fenced-content-bounds header-end end))))
+          (if (or (= header-end end)
+                  (and block (pilish--tool-block-image-previews block)
+                       (not bounds)))
+              (list :cold-body (or (and block (pilish--image-previews-text
+                                              (pilish--tool-block-image-previews block))) "")
+                    :target-metadata (pilish--cold-tool-target-metadata overlay header-end nil))
+            (when-let* ((visible-body (and bounds (pilish--tool-visible-body bounds))))
+              (let* ((record (pilish--tool-block-from-overlay overlay))
+                     (image-previews (and record (pilish--tool-block-image-previews record)))
+                     (button (pilish--find-toggle-button-in-region header-end end))
+                     (collapsed (and button (not (button-get button 'pilish-expanded))))
+                     (hidden-count (and collapsed (button-get button 'hidden-count))))
+                (list :visible-body visible-body
+                      :deleted-spans
+                      (save-excursion
+                        (goto-char (car bounds))
+                        (forward-line -1)
+                        (let ((length (length (plist-get (pilish--fence-line-info-at-point) :trailing))))
+                          (when (> length 0)
+                            (list (cons (- (line-end-position) length) (line-end-position))))))
+                      :heading (when (get-text-property header-end 'pilish-tool-fold-heading)
+                                 (propertize
+                                  (buffer-substring-no-properties
+                                   header-end (next-single-property-change
+                                               header-end 'pilish-tool-fold-heading nil end))
+                                  'pilish-tool-fold-heading t 'pilish-tool-section 'output))
+                      :image-previews image-previews
+                      :target-metadata
+                      (pilish--cold-tool-target-metadata overlay header-end collapsed)
+                      :hidden-count (and (integerp hidden-count) (> hidden-count 0) hidden-count)))))))))
 
 (defun pilish--cool-tool-overlay (overlay)
   "Rewrite completed tool OVERLAY into its cold plain-history form.
