@@ -2579,7 +2579,7 @@ width cannot change output coordinates.  The list keeps its heading."
     (position old-sections new-sections start old-end new-end &optional toggled-section)
   "Map POSITION through transient OLD-SECTIONS and NEW-SECTIONS.
 START, OLD-END and NEW-END delimit the body rewrite.  Outside positions
-use the existing cooling mapper.  Content follows its source row and
+use the tool-rewrite mapper.  Content follows its source row and
 character offset in either fold direction.  Vanished characters clamp to
 their section anchor, or the list header when the list hides that child.
 Decoration in TOGGLED-SECTION also clamps, never impersonating source text."
@@ -2600,7 +2600,7 @@ Decoration in TOGGLED-SECTION also clamps, never impersonating source text."
               (let ((offset (- position (nth 1 old))))
                 (+ (nth 1 new) (if (< offset (- (nth 2 new) (nth 1 new))) offset 0)))))
         (or (nth 1 (assq 'children new-sections)) start))
-    (pilish--map-tool-cooling-position position start old-end new-end)))
+    (pilish--map-tool-rewrite-position position start old-end new-end)))
 
 (defun pilish--redraw-compound-tool (block &optional toggled-section)
   "Rewrite compound BLOCK within retained bounds and preserve each reader's view.
@@ -2623,7 +2623,7 @@ retained facts through the existing queue."
                    (cons 'output (pilish--tool-block-line-map block)))))
            (displayed-output (and (eq toggled-section 'output)
                                   (pilish--tool-block-displayed-output block)))
-           (view (pilish--capture-tool-cooling-view))
+           (view (pilish--capture-tool-rewrite-view))
            (inhibit-read-only t))
       (save-excursion
         (remove-overlays start old-end 'pilish-diff-overlay t)
@@ -2640,7 +2640,7 @@ retained facts through the existing queue."
                start new-end
                (list (cons 'script (pilish--tool-block-script-line-map block))
                      (cons 'output (pilish--tool-block-line-map block))))))
-        (pilish--restore-tool-cooling-view
+        (pilish--restore-tool-rewrite-view
          view start old-end new-end
          (lambda (position)
            (pilish--map-tool-section-position
@@ -3544,7 +3544,7 @@ new position, keeping surviving row positions when feasible."
          (old-end (marker-position header-end))
          (tool-name (overlay-get ov 'pilish-tool-name))
          (old-spans (pilish--argument--locator-spans start old-end))
-         (view (pilish--capture-tool-cooling-view)))
+         (view (pilish--capture-tool-rewrite-view)))
     (dolist (window (plist-get view :windows))
       (setf (plist-get window :following) nil))
     (pilish--replace-tool-header
@@ -3553,7 +3553,7 @@ new position, keeping surviving row positions when feasible."
            (new-spans (pilish--argument--locator-spans start new-end))
            (anchor (pilish--argument--find-locator-position
                     anchor-locator start new-end)))
-      (pilish--restore-tool-cooling-view
+      (pilish--restore-tool-rewrite-view
        view start old-end new-end
        (lambda (position)
          (pilish--argument--map-toggle-position
@@ -3577,7 +3577,7 @@ Output, diff overlays and markers outside this address span stay in place."
       (let* ((start position)
              (old-end (next-single-property-change start 'pilish-argument-address nil end))
              (old-spans (pilish--argument--locator-spans start old-end))
-             (view (pilish--capture-tool-cooling-view))
+             (view (pilish--capture-tool-rewrite-view))
              (width (max 24 (pilish--chat-display-width)))
              (folds (pilish--tool-block-folds block))
              (text (if (eq (pilish--argument-row-role row) 'primary)
@@ -3606,7 +3606,7 @@ Output, diff overlays and markers outside this address span stay in place."
           (pilish--font-lock-ensure-excluding-property start new-end 'pilish-no-fontify))
         (let ((new-spans (pilish--argument--locator-spans start new-end))
               (anchor (pilish--argument--find-locator-position locator start new-end)))
-          (pilish--restore-tool-cooling-view
+          (pilish--restore-tool-rewrite-view
            view start old-end new-end
            (lambda (point)
              (pilish--argument--map-toggle-position
@@ -6169,7 +6169,7 @@ Preserves window scroll position during the toggle."
              (line-map (overlay-get ov 'pilish-line-map))
              (old-sections (pilish--tool-section-bounds
                             start old-end (and (not expanded) (list (cons 'output line-map)))))
-             (view (pilish--capture-tool-cooling-view))
+             (view (pilish--capture-tool-rewrite-view))
              (image-previews (and record (pilish--tool-block-image-previews record))))
         (save-excursion
           (remove-overlays start old-end 'pilish-diff-overlay t)
@@ -6187,7 +6187,7 @@ Preserves window scroll position during the toggle."
         (let* ((new-end (overlay-end ov))
                (new-sections (pilish--tool-section-bounds
                               start new-end (and expanded (list (cons 'output line-map))))))
-          (pilish--restore-tool-cooling-view
+          (pilish--restore-tool-rewrite-view
            view start old-end new-end
            (lambda (position)
              (pilish--map-tool-section-position
@@ -6868,9 +6868,9 @@ entries remain at the end for execution-time revalidation."
     (setq pilish--tool-cooling-queue (nreverse merged))
     (pilish--schedule-tool-cooling)))
 
-(defun pilish--map-tool-cooling-position
+(defun pilish--map-tool-rewrite-position
     (position old-start old-end new-end)
-  "Map POSITION through one tool-body replacement.
+  "Map POSITION through one tool-body rewrite.
 OLD-START and OLD-END delimit the old half-open body range; NEW-END is the
 new body end and the body start is unchanged.  Positions before the body stay
 fixed.  Positions in the old body retain their relative offset, clamped to the
@@ -6885,8 +6885,8 @@ new body end.  Positions at or after OLD-END shift by the actual length delta."
    (t
     (+ position (- new-end old-end)))))
 
-(defun pilish--capture-tool-cooling-view ()
-  "Capture buffer point and visible-window positions before tool cooling.
+(defun pilish--capture-tool-rewrite-view ()
+  "Capture buffer point and visible-window positions before a tool-body rewrite.
 Every position is mapped through explicit replacement bounds.
 During transcript construction, capture only buffer point."
   (list
@@ -6901,9 +6901,9 @@ During transcript construction, capture only buffer point."
               :point (window-point window)))
       (get-buffer-window-list (current-buffer) nil t)))))
 
-(defun pilish--restore-tool-cooling-view
+(defun pilish--restore-tool-rewrite-view
     (view old-start old-end new-end &optional map-position)
-  "Restore cooling VIEW through the body replacement bounds.
+  "Restore VIEW through the tool-body rewrite bounds.
 OLD-START and OLD-END are the old body bounds and NEW-END is its new end.
 Every live window still showing the current buffer gets mapped start and point;
 a window that was following the tail instead gets point at the new buffer end.
@@ -6912,7 +6912,7 @@ section-aware old-position to new-position mapping."
   (let ((map-position
          (or map-position
              (lambda (position)
-               (pilish--map-tool-cooling-position
+               (pilish--map-tool-rewrite-position
                 position old-start old-end new-end)))))
     ;; Restore buffer point first.  A selected chat window restored below then
     ;; establishes the same mapped point, or point-max when it was following.
@@ -6943,7 +6943,7 @@ in the mapping.  Return non-nil when the rewrite succeeds."
          (old-end (overlay-end overlay)))
     (if (not (and old-start old-end (<= old-start old-end)))
         (pilish--cool-tool-overlay overlay)
-      (let ((view (pilish--capture-tool-cooling-view))
+      (let ((view (pilish--capture-tool-rewrite-view))
             ;; The primitive deletes at OLD-START, then inserts there.  This
             ;; rear-advancing marker stays at the deletion boundary and moves
             ;; across exactly the newly inserted body.
@@ -6951,12 +6951,12 @@ in the mapping.  Return non-nil when the rewrite succeeds."
         (unwind-protect
             (when-let* ((metadata (pilish--cool-tool-overlay overlay)))
               (let ((spans (plist-get metadata :deleted-spans)))
-                (pilish--restore-tool-cooling-view
+                (pilish--restore-tool-rewrite-view
                  view old-start old-end (marker-position new-end-marker)
                  (when spans
                    (lambda (position)
                      (if (>= position old-end)
-                         (pilish--map-tool-cooling-position
+                         (pilish--map-tool-rewrite-position
                           position old-start old-end (marker-position new-end-marker))
                        (- position
                           (cl-loop for (beg . end) in spans
