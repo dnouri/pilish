@@ -1305,7 +1305,7 @@ execution cannot retain a temporary record on this setup's evaluator stack."
       (should (equal (pilish-test--hover-displayed-help "anchor")
                      (pilish-test--hover-reply-help)))
       (goto-char (car (pilish--thinking-block-bounds-at-pos
-                      (pilish-test--hover-pos "Thinking ("))))
+                      (pilish-test--hover-pos "Thinking\n"))))
       (pilish-toggle-tool-section)
       (font-lock-flush)
       (font-lock-ensure)
@@ -2795,13 +2795,19 @@ execution cannot retain a temporary record on this setup's evaluator stack."
         (should (string-match-p "SECRET-00" (buffer-string)))
         (pilish-test--nested-tab "fold-root" '(child . "call-00"))
         (should-not (string-match-p "SECRET-00" (buffer-string)))
-        (pilish-test--nested-tab "fold-root" 'children)
+        (let* ((root (pilish--nested-tool-owner "fold-root"))
+               (view (pilish--nested-call-output-view (pilish--nested-call-get root "call-00")))
+               (footer (pilish--tool-output-view-footer-start view)))
+          (should (marker-buffer footer))
+          (pilish-test--nested-tab "fold-root" 'children)
+          (should-not (marker-buffer footer))
+          (should-not (pilish--tool-output-view-footer-start view)))
         (let ((pilish-tool-preview-lines 0))
           (pilish-test--nested-event
            "tool_execution_start" "pending" "fold-root" :toolName "read" :args '(:path "pending.el"))
           (should-not (pilish-test--nested-summary-lines "fold-root"))
           (should (string-match-p (regexp-quote "Child calls (14 earlier calls)") (buffer-string)))
-          (should (string-match-p (regexp-quote "Output") (buffer-string)))
+          (should (string-match-p "^… 15 more lines$" (buffer-string)))
           (pilish-test--nested-tab "fold-root" 'children)
           (should (= 14 (length (pilish-test--nested-summary-lines "fold-root"))))
           (let ((text (buffer-string)))
@@ -3349,7 +3355,7 @@ section anchor.  Preview text and an expanded sibling retain their views."
               (set-window-start other (position "UNCHANGED-OFFSET") t)
               (collapse)
               (let ((button (pilish--find-toggle-button-in-region start (overlay-end overlay) 'output)))
-                (should (equal (button-label button) "Output")))
+                (should (equal (button-label button) "… 1 more line")))
               (let ((expected (if retained-p (position "FIRST") start)))
                 (should (= (point) expected))
                 (should (= (window-point selected) expected)))
@@ -3636,7 +3642,8 @@ The caller saves the window configuration; queued paints need a visible chat."
                         (cl-letf (((symbol-function 'input-pending-p) (lambda () nil)))
                           (pilish--flush-tool-updates (current-buffer)))
                         (should-not pilish--pending-tool-updates)))
-            (should (equal "Output" (button-label (button))))
+            (should (equal (if read-svg-p "… 1 more line" "Show output")
+                           (button-label (button))))
             (should (eq 'concealed (pilish--tool-output-view-selection view)))
             (should-not (plist-get (pilish--tool-output-view-snapshot view) :images))
             (should-not (pilish-test--image-preview-positions))
@@ -3646,7 +3653,7 @@ The caller saves the window configuration; queued paints need a visible chat."
             (should (= 0 scan-count))
             ;; Opening runs the normal selector and real image preparation.
             (pilish-test--nested-tab "lazy-root" '(child . "rich-child"))
-            (should (equal "Output" (button-label (button))))
+            (should (equal "Show less" (button-label (button))))
             (should (> (if read-svg-p scan-count decode-count) 0))
             (should (eq view (pilish--nested-call-output-view call)))
             (should (eq 'all (pilish--tool-output-view-selection view)))
@@ -3654,6 +3661,7 @@ The caller saves the window configuration; queued paints need a visible chat."
             (let* ((positions (pilish-test--image-preview-positions))
                    (position (car positions)))
               (should (= 1 (length positions)))
+              (should (< position (button-start (button))))
               (should (string-match-p
                        (regexp-quote (if read-svg-p "Image: image/svg+xml" "Image: image/png"))
                        (buffer-string)))
@@ -3671,9 +3679,25 @@ The caller saves the window configuration; queued paints need a visible chat."
             (should (eq view (pilish--nested-call-output-view call)))
             (should (eq 'concealed (pilish--tool-output-view-selection view)))
             (should-not (plist-get (pilish--tool-output-view-snapshot view) :images))
-            (should (equal "Output" (button-label (button))))
+            (should (equal (if read-svg-p "… 1 more line" "Show output")
+                           (button-label (button))))
             (should-not (pilish-test--image-preview-positions))
-            (should (equal closed (buffer-substring-no-properties (point-min) (point-max))))))))))
+            (should (equal closed (buffer-substring-no-properties (point-min) (point-max))))
+            (pilish-test--nested-event
+             "tool_execution_end" "progress-child" "lazy-root" :toolName "runner"
+             :isError nil :result '(:content []))
+            (pilish-test--nested-event
+             "tool_execution_end" "lazy-root" nil :toolName "runner" :isError nil
+             :result '(:content [(:type "text" :text "ROOT")]))
+            (let ((marker (pilish--tool-output-view-footer-start view)))
+              (should (pilish--cool-tool-overlay overlay))
+              (should-not (marker-buffer marker))
+              (should-not (pilish--nested-call-output-view call))
+              (should-not (pilish--nested-call-result call))
+              (should-not (text-property-not-all (point-min) (point-max) 'button nil))
+              (should-not (pilish-test--image-preview-positions))
+              (should (string-match-p (if read-svg-p "^… 1 more line$" "^Show output$")
+                                      (buffer-string))))))))))
 
 (ert-deftest pilish-test-nested-closed-image-only-output-prepares-on-demand ()
   "Closed image-only children keep output buttons without decoding on repaint."
@@ -3720,18 +3744,18 @@ The caller saves the window configuration; queued paints need a visible chat."
               (pilish-test--nested-tab "availability-root" section)
               (if (null expected)
                   (should (equal closed (buffer-substring-no-properties (point-min) (point-max))))
-                (should (equal "Output" (button-label (button))))
-                ;; Search below the summary: write arguments also name the
-                ;; output, but the body must really be inserted on opening.
-                (goto-char (button-end (button)))
-                (forward-line 1)
+                (should (equal "Show less" (button-label (button))))
+                ;; Search below the summary, not below the footer.  Write
+                ;; arguments can also name the output.
+                (goto-char (text-property-any (overlay-start overlay) (overlay-end overlay)
+                                              'pilish-child-output t))
                 (should (search-forward expected (overlay-end overlay) t))
                 (when (equal name "edit")
                   (should (= 4 (length (seq-filter
                                         (lambda (ov) (overlay-get ov 'pilish-diff-overlay))
                                         (overlays-in (point-min) (point-max)))))))
                 (pilish-test--nested-tab "availability-root" section)
-                (should (equal "Output" (button-label (button))))
+                (should (string-match-p "^… [0-9]+ more lines?$" (button-label (button))))
                 (should (equal closed (buffer-substring-no-properties (point-min) (point-max))))
                 (should-not (seq-filter (lambda (ov) (overlay-get ov 'pilish-diff-overlay))
                                         (overlays-in (point-min) (point-max))))))))))))
@@ -3864,11 +3888,13 @@ The caller saves the window configuration; queued paints need a visible chat."
           (should (= 1 (length (pilish-test--image-preview-positions))))
           (setq width 1 pilish-tool-preview-lines 0)
           (should (pilish--cool-tool-overlay overlay))
-          ;; Language tags are the only text removed: the exact displayed
-          ;; preview, inert fold labels and open child selection are frozen.
+          ;; Cooling removes language tags and the expanded child's control,
+          ;; but freezes visible text, images and concealed omission labels.
           (should (equal (replace-regexp-in-string
-                          "~~~emacs-lisp" "~~~"
-                          (replace-regexp-in-string "```emacs-lisp" "```" displayed))
+                          "^Show less\n" ""
+                          (replace-regexp-in-string
+                           "~~~emacs-lisp" "~~~"
+                           (replace-regexp-in-string "```emacs-lisp" "```" displayed)))
                          (buffer-substring-no-properties
                           body-start (next-single-property-change
                                       body-start 'pilish-cold-tool-block nil (point-max)))))
@@ -4308,7 +4334,7 @@ Models may send \\n\\n before thinking content too."
       (let ((text (buffer-string)))
         (should (string-match-p
                  (regexp-quote
-                  "> Thinking: Crafting response style… (2 more lines)")
+                  "> Thinking: Crafting response style…\n… 2 more lines")
                  text))
         (should-not (string-match-p "> Crafting response style" text))))))
 
@@ -4325,7 +4351,7 @@ Models may send \\n\\n before thinking content too."
       (pilish--display-thinking-end "")
       (let ((text (buffer-string)))
         (should (string-match-p
-                 (regexp-quote "> Thinking (2 lines)")
+                 (regexp-quote "> Thinking\n… 2 more lines")
                  text))
         (should-not (string-match-p long-line text))))))
 
@@ -4339,7 +4365,7 @@ Models may send \\n\\n before thinking content too."
       (pilish--display-thinking-delta "ok\nSecond line")
       (pilish--display-thinking-end "")
       (should (string-match-p
-               (regexp-quote "> Thinking (2 lines)")
+               (regexp-quote "> Thinking\n… 2 more lines")
                (buffer-string))))))
 
 (ert-deftest pilish-test-hidden-thinking-preview-can-be-disabled ()
@@ -4355,9 +4381,39 @@ Models may send \\n\\n before thinking content too."
       (pilish--display-thinking-end "")
       (let ((text (buffer-string)))
         (should (string-match-p
-                 (regexp-quote "> Thinking (3 lines)")
+                 (regexp-quote "> Thinking\n… 3 more lines")
                  text))
         (should-not (string-match-p "Thinking: Crafting response style" text))))))
+
+(ert-deftest pilish-test-thinking-bottom-control-counts-normalized-source-lines ()
+  "Only normalized source lines count, never wraps, wrappers or footer rows."
+  (dolist (case `(("\n\nConsider this\n\n\n\nCheck that\n\n" t "… 2 more lines")
+                  ("\n\nConsider this\n\n\n\nCheck that\n\n" nil "… 3 more lines")
+                  ("One thought" t "… 1 more line")
+                  (,(make-string 300 ?x) t "… 1 more line")))
+    (pcase-let ((`(,raw ,preview ,label) case))
+      (let ((pilish-thinking-hidden-preview preview))
+        (with-temp-buffer
+          (pilish-chat-mode)
+          (setq pilish--thinking-display 'hidden)
+          (pilish--render-history-thinking raw)
+          (let* ((normalized (pilish--thinking-normalize-text raw))
+                 (footer (text-property-any (point-min) (point-max) 'pilish-thinking-footer t))
+                 (button (button-at footer)))
+            (should (equal (button-label button) label))
+            (should (get-text-property footer 'pilish-disclosure-hit))
+            (should-not (get-text-property (point-min) 'pilish-disclosure-hit))
+            (goto-char footer)
+            (should-not (pilish--file-target-at-point))
+            (button-activate button)
+            (should (string-prefix-p (concat (pilish--thinking-blockquote-text normalized)
+                                             "\nShow less")
+                                     (buffer-string)))
+            (goto-char (text-property-any (point-min) (point-max) 'pilish-thinking-footer t))
+            (should (looking-at-p "Show less"))
+            (button-activate (button-at (point)))
+            (should (string-match-p (concat "^" (regexp-quote label) "$")
+                                    (buffer-string)))))))))
 
 (ert-deftest pilish-test-visible-thinking-stays-expanded-on-end ()
   "Visible mode keeps the completed thinking block expanded."
@@ -4671,8 +4727,8 @@ Models may send \\n\\n before thinking content too."
             (should (eq (plist-get metadata :display) display))
             (should (equal (buffer-substring-no-properties start (plist-get metadata :end))
                            (if (eq display 'visible)
-                               ">   é> \t\n> \n> 終\r"
-                             "> Thinking (3 lines)"))))
+                               ">   é> \t\n> \n> 終\r\nShow less"
+                             "> Thinking\n… 3 more lines"))))
           (should-not pilish--thinking-raw)
           (should-not pilish--thinking-stream)
           (should-not pilish--thinking-marker)
@@ -4861,7 +4917,7 @@ because it inserts at the end, while a full rewrite would lose it."
        '(:type "message_update"
          :assistantMessageEvent (:type "thinking_end" :content "")))
       (let ((text (buffer-string)))
-        (should (string-match-p "Reviewing docs\n\nread /tmp/AGENTS\\.md" text))
+        (should (string-match-p "Reviewing docs\nShow less\n\nread /tmp/AGENTS\\.md" text))
         (should-not (string-match-p "Reviewing docs\n\n\n" text))))))
 
 (ert-deftest pilish-test-thinking-after-text-has-blank-line-separator ()
@@ -6693,6 +6749,7 @@ and DISPLAY controls how completed thinking is rendered."
                        "Need to double-check.\n\nSecond paragraph."))
       (beginning-of-line)
       (pilish-toggle-tool-section)
+      (goto-char (point-min))
       (search-forward "Second paragraph.")
       (beginning-of-line)
       (pilish-toggle-tool-section)
@@ -6726,7 +6783,7 @@ and DISPLAY controls how completed thinking is rendered."
           (should (string-match-p "Answer first\\." text))
           (should (string-match-p "Final answer\\." text))
           (should (string-match-p "^> Need to double-check\\.$" text))
-          (should (string-match-p "Output" text))
+          (should (string-match-p "^… 2 more lines$" text))
           (should-not (string-match-p "L12" text)))))))
 
 (ert-deftest pilish-test-rerender-clears-temporary-thinking-expansion ()
@@ -9114,7 +9171,7 @@ no payload at all."
       ;; Should have first 5 preview lines (bash limit)
       (should (string-match-p "line1" (buffer-string)))
       (should (string-match-p "line5" (buffer-string)))
-      (should (string-match-p "Output" (buffer-string))))))
+      (should (string-match-p "\n```\n… 5 more lines\n" (buffer-string))))))
 
 (ert-deftest pilish-test-tool-output-short-shows-all ()
   "Short tool output shows all lines without truncation."
@@ -9157,6 +9214,8 @@ no payload at all."
             (should (equal (plist-get excerpt :content) "FIRST\nSECOND"))
             (should (equal (plist-get excerpt :line-map) [2 4]))
             (should (= 1 (plist-get excerpt :hidden-lines)))
+            (should (> (pilish--tool-output-view-footer-start view)
+                       (car (pilish-test--image-preview-positions))))
             (dotimes (toggle 2)
               (let ((button (pilish--find-toggle-button-in-region
                              (overlay-start overlay) (overlay-end overlay) 'output)))
@@ -9165,7 +9224,10 @@ no payload at all."
                 (dolist (property '(pilish-full-content pilish-preview-content pilish-lang
                                    pilish-is-edit-diff pilish-expanded hidden-count))
                   (should-not (button-get button property)))
-                (button-activate button))
+                (let ((old-footer (pilish--tool-output-view-footer-start view)))
+                  (button-activate button)
+                  (should-not (marker-buffer old-footer))
+                  (should (marker-buffer (pilish--tool-output-view-footer-start view)))))
               (should (eq (pilish--tool-output-view-selection view)
                           (if (= toggle 0) 'all 'head)))
               (should (eq snapshot (pilish--tool-output-view-snapshot view)))
@@ -9188,6 +9250,61 @@ no payload at all."
             (should-not (text-property-not-all (point-min) (point-max) 'pilish-disclosure-hit nil))
             (should (= 1 (length (pilish-test--image-preview-positions))))))))))
 
+(ert-deftest pilish-test-tool-output-footer-defers-count-until-compound-root-completion ()
+  "Running compound folds keep working without a completed-head count."
+  (with-temp-buffer
+    (pilish-chat-mode)
+    (let ((pilish-tool-preview-lines 2)
+          (content [(:type "text" :text "FIRST\nSECOND\nTHIRD\nFOURTH\nFIFTH")]))
+      (pilish-test--nested-event
+       "tool_execution_start" "running-root" nil :toolName "runner" :args '(:job "work"))
+      (pilish-test--nested-event
+       "tool_execution_start" "received-child" "running-root" :toolName "read" :args '(:path "child.el"))
+      (pilish-test--nested-event
+       "tool_execution_end" "received-child" "running-root" :toolName "read"
+       :isError nil :result '(:content [(:type "text" :text "CHILD")]))
+      (pilish-test--nested-event
+       "tool_execution_update" "running-root" nil :toolName "runner"
+       :partialResult (list :content content))
+      (pilish-test--flush-tool-updates)
+      (let* ((block (pilish--nested-tool-owner "running-root"))
+             (overlay (pilish--tool-block-overlay block)))
+        (let ((button (pilish--find-toggle-button-in-region
+                       (overlay-start overlay) (overlay-end overlay) 'output)))
+          (should (equal "Show output" (button-label button)))
+          (button-activate button)
+          (should (string-match-p "^FIFTH$" (buffer-string)))
+          (setq button (pilish--find-toggle-button-in-region
+                        (overlay-start overlay) (overlay-end overlay) 'output))
+          (should (equal "Show less" (button-label button)))
+          (button-activate button))
+        (should (equal "… 1 more line"
+                       (button-label (pilish--find-toggle-button-in-region
+                                      (overlay-start overlay) (overlay-end overlay)
+                                      '(child . "received-child")))))
+        (pilish-test--nested-event
+         "tool_execution_end" "running-root" nil :toolName "runner"
+         :isError nil :result (list :content content))
+        (should (equal "… 3 more lines"
+                       (button-label (pilish--find-toggle-button-in-region
+                                      (overlay-start overlay) (overlay-end overlay) 'output))))))))
+
+(ert-deftest pilish-test-tool-output-footer-detaches-on-render-reset ()
+  "Ordinary and compound footer markers never survive transcript teardown."
+  (dolist (compound '(nil t))
+    (with-temp-buffer
+      (pilish-chat-mode)
+      (let* ((pilish-tool-preview-lines 1)
+             (name (if compound "codemode" "read"))
+             (block (pilish--display-tool-start name nil "footer-reset")))
+        (pilish--display-tool-end name nil [(:type "text" :text "ONE\nTWO")] nil nil block)
+        (let* ((view (pilish--tool-block-output-view block))
+               (marker (pilish--tool-output-view-footer-start view)))
+          (should (marker-buffer marker))
+          (pilish--clear-render-artifacts)
+          (should-not (marker-buffer marker))
+          (should-not (pilish--tool-output-view-footer-start view)))))))
+
 (ert-deftest pilish-test-tool-output-view-keeps-only-the-painted-stream-tail ()
   "Unpainted updates cannot replace the bounded tail view or its earlier notice."
   (with-temp-buffer
@@ -9207,6 +9324,8 @@ no payload at all."
         (should (equal (plist-get snapshot :text) "ONE\nTWO"))
         (should (equal (plist-get (pilish--tool-output-view-excerpt view) :content) "ONE\nTWO"))
         (should (string-match-p (regexp-quote "... (earlier output)") (buffer-string)))
+        (should-not (text-property-not-all (point-min) (point-max) 'pilish-tool-output-footer nil))
+        (should-not (string-match-p "more lines" (buffer-string)))
         (pilish--handle-display-event
          '(:type "tool_execution_update" :toolCallId "tail-owner" :toolName "bash"
            :partialResult (:content [(:type "text" :text "NEW\n")])))
@@ -9319,8 +9438,8 @@ Call inside `with-temp-buffer' after `pilish-chat-mode'."
            (font-lock-calls nil))
       (pilish-test--insert-generic-tool content details)
       (goto-char (point-min))
-      (should (re-search-forward "Output" nil t))
-      (let ((btn (button-at (match-beginning 0))))
+      (pilish-test--search-output-control)
+      (let ((btn (button-at (1- (point)))))
         (should btn)
         (cl-letf (((symbol-function 'font-lock-ensure)
                    (lambda (start end)
@@ -9353,8 +9472,8 @@ Call inside `with-temp-buffer' after `pilish-chat-mode'."
        (list (list :type "text" :text content))
        details nil)
       (goto-char (point-min))
-      (should (re-search-forward "Output" nil t))
-      (let ((btn (button-at (match-beginning 0))))
+      (pilish-test--search-output-control)
+      (let ((btn (button-at (1- (point)))))
         (should btn)
         (let ((full-content (plist-get (pilish--tool-output-view-snapshot
                                         (pilish-test--output-view btn)) :text)))
@@ -9423,7 +9542,7 @@ Call inside `with-temp-buffer' after `pilish-chat-mode'."
                                    "\n"))
            (details '(:errors [(:task "foo" :error "timeout")])))
       (pilish-test--insert-generic-tool long-output details)
-      (should (string-match-p "Output" (buffer-string)))
+      (should (string-match-p "^… [0-9]+ more lines$" (buffer-string)))
       (goto-char (point-min))
       (let ((button (next-button (point))))
         (should button)
@@ -10613,7 +10732,7 @@ When EXPANDED is non-nil, expand its preview before returning the overlay."
         (kill-buffer buffer)))))
 
 (ert-deftest pilish-test-deferred-tool-cooling-view-inside-body-maps-and-clamps ()
-  "One slice preserves an inside row and a surviving closing-wrapper point."
+  "One slice preserves an inside row and maps a deleted footer to its end."
   (let ((buffer (generate-new-buffer " *pi-cooling-view-inside*"))
         (pilish-quit-without-confirmation t))
     (unwind-protect
@@ -10667,7 +10786,7 @@ When EXPANDED is non-nil, expand its preview before returning the overlay."
                         (+ body-start (min start-offset new-body-length)))
                        (expected-point
                         (+ body-start (min point-offset new-body-length))))
-                  (should (= expected-point (1- new-body-end)))
+                  (should (= expected-point new-body-end))
                   (should (= expected-start (window-start window)))
                   (should (= expected-point (window-point window)))
                   (should (= expected-point (point)))
@@ -11244,8 +11363,9 @@ When EXPANDED is non-nil, expand its preview before returning the overlay."
         (push (line-beginning-position) positions)
         (re-search-forward "^```$")
         (push (line-beginning-position) positions)
-        (re-search-forward "^\\.\\.\\. (1 more lines)$")
-        (push (line-beginning-position) positions)
+        (re-search-forward "^… 1 more line$")
+        (beginning-of-line)
+        (should-not (pilish--file-target-at-point))
         (dolist (position positions)
           (goto-char position)
           (let ((target (pilish--file-target-at-point)))
@@ -11537,17 +11657,17 @@ When EXPANDED is non-nil, expand its preview before returning the overlay."
        '((:type "text" :text "wrote file"))
        nil nil)
       (should (string-match-p "```python" (buffer-string)))
-      (should (string-match-p "Output" (buffer-string)))
+      (should (string-match-p "^… 5 more lines$" (buffer-string)))
       (should-not (string-match-p "\nline4\n" (buffer-string)))
       (pilish--cool-completed-tool-blocks (pilish-test--all-tool-overlays))
       (let ((text (buffer-string)))
         (should (string-match-p
                  (regexp-quote
-                  (concat "write /tmp/example.py\nOutput\n"
+                  (concat "write /tmp/example.py\n"
                           "```\n"
                           "line1\nline2\nline3\n"
                           "```\n"
-                          "... (5 more lines)"))
+                          "… 5 more lines"))
                  text))
         (should-not (string-match-p
                      (regexp-quote "write /tmp/example.py\n```python")
@@ -11611,7 +11731,7 @@ When EXPANDED is non-nil, expand its preview before returning the overlay."
        '((:type "text" :text "done"))
        (list :diff diff)
        nil)
-      (should (string-match-p "Output" (buffer-string)))
+      (should (string-match-p "^… 3 more lines$" (buffer-string)))
       (should (> (pilish-test--count-overlays-with-prop
                   'pilish-diff-overlay)
                  0))
@@ -11619,13 +11739,13 @@ When EXPANDED is non-nil, expand its preview before returning the overlay."
       (let ((text (buffer-string)))
         (should (string-match-p
                  (regexp-quote
-                  (concat "edit /tmp/example.py\nOutput\n"
+                  (concat "edit /tmp/example.py\n"
                           "```\n"
                           "+ 1     def alpha():\n"
                           "- 2     def beta():\n"
                           "  3     def gamma():\n"
                           "```\n"
-                          "... (3 more lines)"))
+                          "… 3 more lines"))
                  text))
         (should-not (string-match-p "```python" text))
         (should-not (string-match-p "return 4" text))
@@ -11657,12 +11777,12 @@ When EXPANDED is non-nil, expand its preview before returning the overlay."
       (let ((button (next-button (point))))
         (should button)
         (pilish--toggle-tool-output button))
-      (should (string-match-p "Output" (buffer-string)))
+      (should (string-match-p "^Show less$" (buffer-string)))
       (pilish--cool-completed-tool-blocks (pilish-test--all-tool-overlays))
       (let ((text (buffer-string)))
         (should (string-match-p
                  (regexp-quote
-                  (concat "read /tmp/example.py\nOutput\n"
+                  (concat "read /tmp/example.py\n"
                           "```\n"
                           body
                           "\n```"))
@@ -11771,11 +11891,11 @@ With hot-tail-turn-count 1, only the most recent headed turn stays hot."
       (let ((text (buffer-string)))
         (should (string-match-p
                  (regexp-quote
-                  (concat "write /tmp/old.py\nOutput\n"
+                  (concat "write /tmp/old.py\n"
                           "```\n"
                           "line1\nline2\nline3\n"
                           "```\n"
-                          "... (4 more lines)"))
+                          "… 4 more lines"))
                  text))
         (should-not (string-match-p "\nline4\n" text))
         ;; Newer read block stays hot with typed fence
@@ -11824,11 +11944,11 @@ With hot-tail-turn-count 1, only the most recent headed turn stays hot."
       (let ((text (buffer-string)))
         (should (string-match-p
                  (regexp-quote
-                  (concat "write /tmp/old.py\nOutput\n"
+                  (concat "write /tmp/old.py\n"
                           "```\n"
                           "line1\nline2\nline3\n"
                           "```\n"
-                          "... (4 more lines)"))
+                          "… 4 more lines"))
                  text))
         (should-not (string-match-p "\nline4\n" text))
         (should (string-match-p
@@ -16121,9 +16241,9 @@ text properties, overlays, point, and the exact restriction were preserved."
          '((:type "text" :text "r100\n\nr102\nr103\nr104\nr105")) nil nil))
       (when expanded
         (goto-char (point-min))
-        (re-search-forward "Output")
+        (pilish-test--search-output-control)
         (pilish--toggle-tool-output
-         (button-at (match-beginning 0))))
+         (button-at (1- (point)))))
       (pcase-let* ((`(,header ,fence ,body)
                     (pilish-test--tool-row-positions "r103"))
                    (overlay (car (pilish-test--all-tool-overlays)))
@@ -16228,7 +16348,7 @@ text properties, overlays, point, and the exact restriction were preserved."
                 (should (equal message (error-message-string err)))))))))))
 
 (ert-deftest pilish-test-file-target-narrowed-non-content-is-authoritative ()
-  "Narrowed hot/cold headers, fences, and hints keep the tool-line error."
+  "Narrowed headers and fences keep authority; footers have no file target."
   (dolist (cooled '(nil t))
     (with-temp-buffer
       (pilish-chat-mode)
@@ -16241,8 +16361,7 @@ text properties, overlays, point, and the exact restriction were preserved."
         (pilish--cool-completed-tool-blocks
          (pilish-test--all-tool-overlays)))
       (dolist (regexp (list "^read /tmp/tool\\.el$" "^```$"
-                            (if cooled "^\\.\\.\\. (2 more lines)$"
-                              "^Output$")))
+                            "^… 2 more lines$"))
         (let ((position
                (save-excursion
                  (goto-char (point-min))
@@ -16259,7 +16378,8 @@ text properties, overlays, point, and the exact restriction were preserved."
                        position (1- (point-max)) position
                        #'pilish-visit-file))
                     :type 'user-error)))
-              (should (equal "No file line at point"
+              (should (equal (if (equal regexp "^… 2 more lines$")
+                                 "No file at point" "No file line at point")
                              (error-message-string err))))))))))
 
 (ert-deftest pilish-test-visit-file-tool-location-validation-is-authoritative ()
@@ -16566,10 +16686,10 @@ fixture; a test may dynamically override it inside FUNCTION."
       (should (equal "/tmp/edit.el" (plist-get result :path)))
       (should (= 9 (plist-get result :line))))))
 
-(ert-deftest pilish-test-visit-file-cold-tool-non-content-keeps-line-error ()
-  "A cooled tool header, fence, and hint remain authoritative non-file rows."
+(ert-deftest pilish-test-visit-file-cold-tool-chrome-rejects-file-navigation ()
+  "Cooled chrome rejects file navigation with the row-specific error."
   (dolist (line-regexp '("^read /tmp/tool\\.el$" "^```$"
-                         "^\\.\\.\\. (2 more lines)$"))
+                         "^… 2 more lines$"))
     (with-temp-buffer
       (pilish-chat-mode)
       (let ((pilish-tool-preview-lines 2))
@@ -16584,7 +16704,8 @@ fixture; a test may dynamically override it inside FUNCTION."
       (re-search-forward line-regexp)
       (let ((err (should-error (pilish-visit-file)
                                :type 'user-error)))
-        (should (equal "No file line at point"
+        (should (equal (if (equal line-regexp "^… 2 more lines$")
+                           "No file at point" "No file line at point")
                        (error-message-string err)))))))
 
 (ert-deftest pilish-test-visit-file-hot-and-cold-tool-errors-stay-authoritative ()
@@ -18016,8 +18137,8 @@ fixture; a test may dynamically override it inside FUNCTION."
           (delete-other-windows)
           (switch-to-buffer chat)
           (goto-char (point-min))
-          (re-search-forward "Output")
-          (goto-char (match-beginning 0))
+          (pilish-test--search-output-control)
+          (beginning-of-line)
           (should (button-at (point)))
           (should (eq #'pilish-visit-file
                       (lookup-key pilish-chat-mode-map (kbd "RET"))))
@@ -18058,8 +18179,8 @@ fixture; a test may dynamically override it inside FUNCTION."
           (goto-char (point-min))
           (should (search-forward "four" nil t))
           (goto-char (point-min))
-          (search-forward "Output")
-          (goto-char (match-beginning 0))
+          (pilish-test--search-output-control)
+          (beginning-of-line)
           (should (button-at (point)))
           (should (eq #'pilish--dispatch-button
                       (key-binding (kbd "<return>"))))
@@ -18180,8 +18301,8 @@ Edit diffs include unchanged context rows with a leading space marker."
        '((:type "text" :text "line 1\nline 2\nline 3\nline 4\nline 5\nline 6\n"))
        nil nil)
       (goto-char (point-min))
-      (re-search-forward "Output" nil t)
-      (let ((btn (button-at (match-beginning 0))))
+      (pilish-test--search-output-control)
+      (let ((btn (button-at (1- (point)))))
         (should btn)
         (pilish--toggle-tool-output btn))
       (goto-char (point-min))
@@ -18922,8 +19043,8 @@ When full output is visible, line numbers must follow rendered blank lines."
        '((:type "text" :text "line1\n\nline3\nline4\nline5\nline6\nline7\nline8\nline9\nline10\nline11\nline12\nline13"))
        nil nil)
       (goto-char (point-min))
-      (re-search-forward "Output" nil t)
-      (let ((btn (button-at (match-beginning 0))))
+      (pilish-test--search-output-control)
+      (let ((btn (button-at (1- (point)))))
         (should btn)
         (pilish--toggle-tool-output btn))
       (goto-char (point-min))
@@ -18959,7 +19080,7 @@ When full output is visible, line numbers must follow rendered blank lines."
        '((:type "text" :text "line01\nline02\nline03\nline04\nline05\nline06"))
        nil nil)
       (goto-char (point-min))
-      (re-search-forward "Output" nil t)
+      (pilish-test--search-output-control)
       (beginning-of-line)
       (should-error (pilish-visit-file) :type 'user-error))))
 
@@ -19064,8 +19185,8 @@ When full output is visible, line numbers must follow rendered blank lines."
        '((:type "text" :text "b1\nb2\nb3\nb4\nb5\nb6"))
        nil nil)
       (goto-char (point-min))
-      (re-search-forward "Output" nil t)
-      (let ((btn (button-at (match-beginning 0))))
+      (pilish-test--search-output-control)
+      (let ((btn (button-at (1- (point)))))
         (should btn)
         (pilish--toggle-tool-output btn))
       (let ((content (buffer-string)))
@@ -19123,8 +19244,8 @@ When full output is visible, line numbers must follow rendered blank lines."
          :result (:content [(:type "text" :text "done")])
          :isError :json-false))
       (goto-char (point-min))
-      (re-search-forward "Output" nil t)
-      (let ((btn (button-at (match-beginning 0))))
+      (pilish-test--search-output-control)
+      (let ((btn (button-at (1- (point)))))
         (should btn)
         (pilish--toggle-tool-output btn))
       (goto-char (point-min))
@@ -19245,7 +19366,7 @@ Regression test: single lines should respect byte limit even with no newlines."
                               nil nil))
       ;; Long line should be present
       (should (string-match-p "xxxx" (buffer-string)))
-      (should (string-match-p "Output" (buffer-string))))))
+      (should (string-match-p "^… 1 more line$" (buffer-string))))))
 
 (ert-deftest pilish-test-tab-bound-to-toggle-tool-section ()
   "TAB is bound to pilish-toggle-tool-section for tool block handling."
@@ -23036,7 +23157,7 @@ Inner backtick fences in read output must not affect later wrappers."
          "read" '(:path "/tmp/TODO-RPC-enhancements.md")
          `((:type "text" :text ,long-content))
          nil nil)
-        (should (string-match-p "Output" (buffer-string)))
+        (should (string-match-p "^… 130 more lines$" (buffer-string)))
 
         (pilish--display-agent-start)
         (pilish--display-thinking-start)
@@ -23668,15 +23789,20 @@ events where the header text hasn't changed."
       (let ((before (buffer-string)))
         (pilish--replace-thinking-region
          (pilish--completed-thinking-rendered-from-normalized "first\n\nlast" 0 'visible))
-        (should (equal (substring-no-properties before) (buffer-substring-no-properties (point-min) (point-max))))
-        (should (get-text-property (point-min) 'pilish-disclosure-hit))
+        (should (equal (concat (substring-no-properties before) "\nShow less")
+                       (buffer-substring-no-properties (point-min) (point-max))))
+        (should-not (get-text-property (point-min) 'pilish-disclosure-hit))
         (goto-char (point-min))
+        (search-forward "Show less")
+        (beginning-of-line)
+        (should (button-at (point)))
+        (should (get-text-property (point) 'pilish-disclosure-hit))
         (pilish-toggle-tool-section)
         (should-not (string-match-p "[▸▾]\\|hidden" (buffer-string)))
         (should (eq pilish--thinking-display pilish-thinking-display))))))
 
-(ert-deftest pilish-test-unified-output-heading-precedes-content-and-keeps-file-rows ()
-  "Moved Output is not source line one, before or after cooling."
+(ert-deftest pilish-test-unified-output-footer-follows-content-and-keeps-file-rows ()
+  "Bottom controls are not file targets or source rows, hot or cold."
   (dolist (expanded '(nil t))
     (dolist (cold '(nil t))
       (with-temp-buffer
@@ -23689,11 +23815,26 @@ events where the header text hasn't changed."
           (when expanded
             (button-activate (pilish--find-toggle-button-in-region (overlay-start ov) (overlay-end ov))))
           (goto-char (point-min))
-          (re-search-forward "^Output$")
-          (let ((heading (match-beginning 0)))
-            (should (< heading (save-excursion (re-search-forward "^first$") (match-beginning 0))))
-            (should (get-text-property heading 'pilish-tool-fold-heading)))
-          (when cold (pilish--cool-completed-tool-blocks (list ov)))
+          (pilish-test--search-output-control)
+          (let* ((footer (line-beginning-position))
+                 (marker (pilish--tool-output-view-footer-start
+                          (pilish--tool-block-output-view block)))
+                 (sections (pilish--tool-section-bounds
+                            (marker-position (pilish--tool-block-header-end block))
+                            (overlay-end ov))))
+            (should (= footer marker))
+            (should (> footer (save-excursion
+                                (goto-char (point-min))
+                                (re-search-forward "^third$") (match-beginning 0))))
+            (should (equal (button-label (button-at footer))
+                           (if expanded "Show less" "… 2 more lines")))
+            (should-not (pilish--file-target-at-point))
+            (should-not (seq-some (lambda (row) (<= (nth 1 row) footer (1- (nth 2 row))))
+                                  (nth 3 (assq 'output sections))))
+            (when cold
+              (pilish--cool-completed-tool-blocks (list ov))
+              (should-not (marker-buffer marker))
+              (should-not (pilish--tool-block-output-view block))))
           (goto-char (point-min))
           (re-search-forward "^third$")
           (beginning-of-line)
@@ -23701,9 +23842,12 @@ events where the header text hasn't changed."
           (when cold
             (should-not (text-property-not-all (point-min) (point-max) 'pilish-disclosure-hit nil)))
           (goto-char (point-min))
-          (re-search-forward "^Output$")
-          (beginning-of-line)
-          (should-not (plist-get (pilish--file-target-at-point) :line)))))))
+          (if (and cold expanded)
+              (should-not (search-forward "Show less" nil t))
+            (re-search-forward (if expanded "^Show less$" "^… 2 more lines$"))
+            (beginning-of-line)
+            (should-not (pilish--file-target-at-point)))
+          (should-not (string-match-p "^Output$" (buffer-string))))))))
 
 (ert-deftest pilish-test-unified-simple-output-keeps-two-readers-on-source-rows ()
   "Simple folds and cooling preserve surviving source rows in both readers."
@@ -23820,7 +23964,7 @@ events where the header text hasn't changed."
                 (should (eq (button-get (button-at heading) 'action)
                             #'pilish--toggle-tool-output))
                 (should (eq (button-get (button-at heading) 'keymap) pilish--tool-button-map))
-                (should (eq (get-text-property hidden 'pilish-tool-section) 'script))
+                (should (eq (get-text-property hidden 'pilish-tool-section) 'output))
                 (should (eq (get-text-property heading 'pilish-tool-section) 'output))
                 (should (equal (substring-no-properties copy) "```\n"))
                 (dotimes (offset (- heading hidden))
@@ -23833,7 +23977,7 @@ events where the header text hasn't changed."
                     (should (eq (get-text-property offset 'wrap-prefix copy) wrap))
                     (should-not (get-text-property offset 'pilish-disclosure-hit copy))
                     (should (eq (get-text-property (+ hidden offset) 'pilish-disclosure-hit) hit))
-                    (should (eq (get-text-property (+ hidden offset) 'pilish-tool-section) 'script))
+                    (should (eq (get-text-property (+ hidden offset) 'pilish-tool-section) 'output))
                     (dolist (property '(pilish-argument-address pilish-argument-locator
                                        pilish-argument-literal pilish-argument-guard))
                       (should-not (get-text-property (+ hidden offset) property)))
@@ -23846,9 +23990,9 @@ events where the header text hasn't changed."
             (should (equal data (pilish--tool-block-result block)))
             (pilish--cool-completed-tool-blocks (list ov))
             (goto-char (point-min))
-            (search-forward "const two = 2;\n")
+            (search-forward "two\n")
             (let ((cold (point)))
-              (should (looking-at-p "```\nOutput\n"))
+              (should (looking-at-p "```\n… 2 more lines\n"))
               (dotimes (offset (- heading hidden))
                 (let ((expected (if (zerop offset) base rest))
                       (restored (get-text-property (+ cold offset) 'line-prefix)))

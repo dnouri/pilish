@@ -90,8 +90,12 @@
     ;; Add entries to tool-args-cache and live tool registry
     (puthash "tool-1" '(:path "/test-a") pilish--tool-args-cache)
     (puthash "tool-2" '(:path "/test-b") pilish--tool-args-cache)
-    (puthash "tool-1" '(:tool-call-id "tool-1") pilish--live-tool-blocks)
-    (puthash "tool-2" '(:tool-call-id "tool-2") pilish--live-tool-blocks)
+    (puthash "tool-1" (pilish--make-tool-block :tool-call-id "tool-1"
+                                               :overlay (make-overlay 1 1) :order 0)
+             pilish--live-tool-blocks)
+    (puthash "tool-2" (pilish--make-tool-block :tool-call-id "tool-2"
+                                               :overlay (make-overlay 1 1) :order 1)
+             pilish--live-tool-blocks)
     ;; Clear the buffer
     (pilish--clear-chat-buffer)
     ;; All session state should be reset
@@ -1967,7 +1971,9 @@ replaced by the resumed or forked history."
       (overlay-put tool-ov 'pilish-tool-block t)
       (setq pilish--pending-tool-overlay tool-ov))
     (puthash "old-tool" '(:path "/tmp/old.el") pilish--tool-args-cache)
-    (puthash "old-tool" '(:tool-call-id "old-tool") pilish--live-tool-blocks)))
+    (puthash "old-tool" (pilish--make-tool-block :tool-call-id "old-tool"
+                                                :overlay pilish--pending-tool-overlay :order 0)
+             pilish--live-tool-blocks)))
 
 (defun pilish-test--assert-clean-session-rebuild
     (chat-buf expected-messages stale-text)
@@ -3352,20 +3358,22 @@ The tree is built iteratively to avoid recursion in test setup."
        (pilish-test--menu-history-with-thinking-and-tool)
        (current-buffer))
       (goto-char (point-min))
-      (let ((button (next-button (point-min))))
+      (pilish-test--search-output-control)
+      (let ((button (button-at (1- (point)))))
         (should button)
-        (pilish--toggle-tool-output button))
+        (button-activate button))
       (should (string-match-p "L12" (buffer-string)))
       (should (eq 'all (pilish--tool-output-view-selection
                         (pilish-test--output-view
-                         (pilish--find-toggle-button-in-region (point-min) (point-max))))))
+                         (pilish--find-toggle-button-in-region (point-min) (point-max) 'output)))))
       (pilish-toggle-thinking-display)
       (let ((text (buffer-string)))
         (should (string-match-p "L12" text))
         (should (eq 'all (pilish--tool-output-view-selection
                           (pilish-test--output-view
-                           (pilish--find-toggle-button-in-region (point-min) (point-max))))))
-        (should-not (string-match-p "[▸▾] Output" text))))))
+                           (pilish--find-toggle-button-in-region (point-min) (point-max) 'output)))))
+        (should (string-match-p "^Show less$" text))
+        (should-not (string-match-p "^Output$\\|[▸▾]" text))))))
 
 (ert-deftest pilish-test-menu-model-description-uses-short-name ()
   "Menu model description shows shortened name, not full \"Claude Opus 4.6\"."

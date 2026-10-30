@@ -807,7 +807,7 @@ established file actions keep authority over real path references only."
     (should (string-match-p "echo FIRST[^\n]*\necho SECOND" (pilish-arguments-test--visible-text)))
     (should-not (string-match-p "command=" (pilish-arguments-test--visible-text)))
     (should-not (string-match-p "CHILD-OUTPUT" (pilish-arguments-test--visible-text)))
-    (pilish-arguments-test--goto-text "Output")
+    (pilish-arguments-test--goto-text "… 1 more line")
     (pilish-toggle-tool-section)
     (should (string-match-p "CHILD-OUTPUT" (pilish-arguments-test--visible-text)))
     (should (string-match-p "echo SECOND" (pilish-arguments-test--visible-text)))))
@@ -1082,7 +1082,7 @@ established file actions keep authority over real path references only."
     (pilish-arguments-test--child
      "edit" (list :path (concat "/tmp/" (make-string 130 ?a)) :note "A1\nA2\nA3")
      "OK" '(:diff "- 1 OLD\n+ 1 CHILD-DIFF\n  2 TAIL"))
-    (pilish-arguments-test--goto-text "Output")
+    (pilish-arguments-test--goto-text "… 3 more lines")
     (pilish-toggle-tool-section)
     (pilish-arguments-test--goto-text "CHILD-DIFF")
     (let* ((block (pilish--nested-tool-owner "root"))
@@ -1123,7 +1123,7 @@ established file actions keep authority over real path references only."
            "custom" '(:first "A1\nA2\nA3" :second "B1\nB2")
            (mapconcat (lambda (n) (format "CHILD-LINE-%02d" n)) (number-sequence 0 50) "\n"))
           (pilish--render-history-text (mapconcat #'number-to-string (number-sequence 0 100) "\n"))
-          (pilish-arguments-test--goto-text "Output")
+          (pilish-arguments-test--goto-text "… 51 more lines")
           (pilish-toggle-tool-section)
           (let ((active (selected-window)) (other (split-window-below)))
             (set-window-buffer other chat)
@@ -1252,14 +1252,14 @@ established file actions keep authority over real path references only."
                                          '(:payload "FIRST\nLAST" :short "last")) "CHILD")
       (dotimes (fold 2)
         (let ((visible (pilish-arguments-test--visible-text)))
-          (should (string-match-p "\nOutput\n" visible))
-          (should-not (string-match-p "\n\nOutput" visible))
-          (should-not (string-match-p "last Output\\|LAST Output" visible)))
+          (should (string-match-p "\n… 1 more line\n" visible))
+          (should-not (string-match-p "\n\n… 1 more line" visible))
+          (should-not (string-match-p "last … 1\\|LAST … 1" visible)))
         (pilish-arguments-test--goto-text "FIRST")
         (pilish-toggle-tool-section))
       (pilish-arguments-test--goto-text "FIRST")
       (pilish-toggle-tool-section)
-      (pilish-arguments-test--goto-text "Output")
+      (pilish-arguments-test--goto-text "… 1 more line")
       (should-not (get-text-property (point) 'pilish-argument-literal))
       (when (equal tool "bash")
         (save-excursion
@@ -1267,8 +1267,8 @@ established file actions keep authority over real path references only."
           (should (get-text-property (point) 'pilish-argument-guard))
           (should (looking-at "[~`]\\{3,\\}$"))))
       (pilish-toggle-tool-section)
-      (should (string-match-p "\nOutput\n" (pilish-arguments-test--visible-text)))
-      (pilish-arguments-test--goto-text "Output")
+      (should (string-match-p "\nCHILD\nShow less\n" (pilish-arguments-test--visible-text)))
+      (pilish-arguments-test--goto-text "Show less")
       (should (equal (pilish-arguments-test--gutter (point)) "▾")))))
 
 (ert-deftest pilish-test-arguments-final-child-primary-saved-button-after-splice ()
@@ -1307,7 +1307,7 @@ established file actions keep authority over real path references only."
            "custom" nil
            (mapconcat (lambda (n) (format "CHILD-LINE-%02d" n)) (number-sequence 0 50) "\n"))
           (pilish--render-history-text (mapconcat #'number-to-string (number-sequence 0 100) "\n"))
-          (pilish-arguments-test--goto-text "Output")
+          (pilish-arguments-test--goto-text "… 51 more lines")
           (pilish-toggle-tool-section)
           (let ((other (split-window-below)))
             (set-window-buffer other chat)
@@ -1329,7 +1329,7 @@ established file actions keep authority over real path references only."
         (kill-buffer chat)))))
 
 (ert-deftest pilish-test-arguments-final-active-output-label-and-cold-count ()
-  "Active Output has no count, while folding metadata and cold notices remain."
+  "The bottom count becomes Show less and cools to one inert continuation."
   (pilish-arguments-test--with-chat
     (let ((pilish-tool-preview-lines 2))
       (pilish-arguments-test--execute "r" "custom" '(:value "ok")
@@ -1338,20 +1338,20 @@ established file actions keep authority over real path references only."
              (button (pilish--find-toggle-button-in-region (overlay-start overlay) (overlay-end overlay)))
              (view (pilish-test--output-view button))
              (hidden (plist-get (pilish--tool-output-view-excerpt view) :hidden-lines)))
-        (should (> hidden 0))
-        (should (equal (button-label button) "Output"))
+        (should (= hidden 4))
+        (should (equal (button-label button) "… 4 more lines"))
         (should (equal (pilish-arguments-test--gutter (button-start button)) "▸"))
         (button-activate button)
         (should (string-match-p "six" (pilish-arguments-test--visible-text)))
         (setq button (pilish--find-toggle-button-in-region (overlay-start overlay) (overlay-end overlay)))
-        (should (equal (button-label button) "Output"))
+        (should (equal (button-label button) "Show less"))
         (should (equal (pilish-arguments-test--gutter (button-start button)) "▾"))
         (should (eq view (pilish-test--output-view button)))
         (should (= hidden (plist-get (pilish--tool-output-view-excerpt view) :hidden-lines)))
         (button-activate button)
         (pilish--cool-completed-tool-blocks (list overlay))
-        (should (string-match-p (regexp-quote (format "... (%d more lines)" hidden))
-                                (pilish-arguments-test--visible-text)))))))
+        (should (= 2 (length (split-string (pilish-arguments-test--visible-text)
+                                           "… 4 more lines"))))))))
 
 (defun pilish-arguments-test--output-button-keyboard (kind key)
   "Check KIND's Output button through KEY and RET in a displayed buffer."
@@ -1658,7 +1658,7 @@ established file actions keep authority over real path references only."
             (pilish--handle-display-event
              '(:type "tool_execution_end" :toolCallId "root" :toolName "codemode"
                :result (:content [(:type "text" :text "PARENT-OUTPUT")])))
-            (dolist (label '("Script" "Output" "rootNote=" "childNote="))
+            (dolist (label '("Script" "… 2 more lines" "rootNote=" "childNote="))
               (pilish-arguments-test--goto-text label)
               (pilish-toggle-tool-section))
             (font-lock-ensure)
@@ -1769,7 +1769,7 @@ established file actions keep authority over real path references only."
            (overlay (pilish--tool-block-overlay block)))
       (pilish--display-tool-end "custom" nil [(:type "text" :text "one\ntwo\nthree")] nil nil block)
       (let ((button (pilish--find-toggle-button-in-region (overlay-start overlay) (overlay-end overlay))))
-        (should (equal (button-label button) "Output"))
+        (should (equal (button-label button) "… 2 more lines"))
         (should (equal (pilish-arguments-test--gutter (button-start button)) "▸")))
       (pilish--argument-release-cold block)
       (let ((before (buffer-string)))
@@ -1934,12 +1934,14 @@ established file actions keep authority over real path references only."
         (let* ((button (pilish--find-toggle-button-in-region (overlay-start overlay) (overlay-end overlay)))
                (start (button-start button))
                (fence (save-excursion (goto-char start) (forward-line -1) (point))))
-          (should-not (invisible-p fence))
-          (should-not (pilish-arguments-test--gutter fence))
+          (should (invisible-p fence))
+          (should (equal (pilish-arguments-test--gutter fence) "▸"))
           (should (equal (pilish-arguments-test--gutter start) "▸"))
-          (should (< start (car (pilish--tool-fenced-content-bounds
-                                 (marker-position (overlay-get overlay 'pilish-header-end))
-                                 (overlay-end overlay))))))))))
+          (let ((bounds (pilish--tool-fenced-content-bounds
+                         (marker-position (overlay-get overlay 'pilish-header-end))
+                         (overlay-end overlay))))
+            (should (> start (cdr bounds)))
+            (should-not (pilish-arguments-test--gutter (car bounds)))))))))
 
 (ert-deftest pilish-test-correction-prefix-owner-boundaries ()
   "Hidden wrapper propagation stops at another address, section or visible text."

@@ -1055,7 +1055,7 @@ remain substantially filled even when the collapsed tail is shorter."
                      (regexp-quote
                       (pilish-gui-test--thinking-scroll-hidden-stub))
                      (buffer-string)))
-            (should (equal (pilish-gui-test--thinking-scroll-hidden-stub)
+            (should (equal (car (split-string (pilish-gui-test--thinking-scroll-hidden-stub) "\n"))
                            (pilish-gui-test--window-current-line win)))
             (should (equal block-before
                            (pilish-gui-test--window-thinking-block-order win)))
@@ -1077,13 +1077,13 @@ unrelated raw offset in the conversation."
             (should (search-forward
                      (pilish-gui-test--thinking-scroll-hidden-stub)
                      nil t))
-            (beginning-of-line)
+            (goto-char (match-beginning 0))
             (recenter 10)
             (redisplay)
             (setq block-before
                   (pilish-gui-test--window-thinking-block-order win))
             (should block-before)
-            (should (equal (pilish-gui-test--thinking-scroll-hidden-stub)
+            (should (equal (car (split-string (pilish-gui-test--thinking-scroll-hidden-stub) "\n"))
                            (pilish-gui-test--window-current-line win)))
             (pilish-toggle-thinking-display)
             (redisplay)
@@ -1131,7 +1131,7 @@ logical block and should not start following later streamed output."
                           (1- (with-current-buffer buf (point-max)))))
               (should (pilish-gui-test--window-substantially-filled-p tail-win))
               (should (equal "> Thinking detail 25" context-line-before))
-              (should (equal (pilish-gui-test--thinking-scroll-hidden-stub)
+              (should (equal (car (split-string (pilish-gui-test--thinking-scroll-hidden-stub) "\n"))
                              (pilish-gui-test--window-current-line context-win)))
               (should (pilish-gui-test--window-substantially-filled-p context-win))
               (setq context-start-after-toggle (window-start context-win))
@@ -1143,7 +1143,7 @@ logical block and should not start following later streamed output."
               (should (>= (window-end tail-win t)
                           (1- (with-current-buffer buf (point-max)))))
               (should (= context-start-after-toggle (window-start context-win)))
-              (should (equal (pilish-gui-test--thinking-scroll-hidden-stub)
+              (should (equal (car (split-string (pilish-gui-test--thinking-scroll-hidden-stub) "\n"))
                              (pilish-gui-test--window-current-line context-win))))))
       (kill-buffer buf))))
 
@@ -1436,46 +1436,116 @@ rear-advance overlay before assistant text continues after the tool block."
 ;;;; Tool Toggle Tests
 
 (ert-deftest pilish-gui-test-tool-toggle-expand-collapse-cycle ()
-  "TAB expands, collapses, and re-expands in a displayed GUI buffer.
-Regression for issue #166: collapsing from the [-] button placed cursor
-at the overlay boundary (half-open interval), making the next TAB fall
-through to `outline-cycle' instead of toggling.  Uses a standalone
-chat-mode buffer to isolate the toggle logic from RPC timing."
+  "Bottom controls accept TAB, RET and native margin hits at standard widths.
+Capture text/image ordering, completed thinking and both cold projections."
   (require 'pilish-arguments-test)
-  (let ((buf (get-buffer-create "*pi-gui-toggle-test*")))
+  (let ((width (frame-width)) (height (frame-height))
+        (pilish-tool-preview-lines 2))
     (unwind-protect
-        (progn
-          (switch-to-buffer buf)
-          (pilish-chat-mode)
-          (pilish--display-tool-start "read" '(:path "/tmp/test.txt"))
-          (pilish--display-tool-end "read" '(:path "/tmp/test.txt")
-            `((:type "text"
-               :text ,(mapconcat (lambda (n) (format "Line %02d of file" n))
-                                 (number-sequence 1 20) "\n")))
-            nil nil)
-          (font-lock-ensure)
-          (redisplay)
-          (should (string-match-p "^Output$" (buffer-string)))
-          (should-not (string-match-p "Line 20" (buffer-string)))
-          (goto-char (point-min))
-          (re-search-forward "^Output$" nil t)
-          (should (equal (pilish-arguments-test--gutter (match-beginning 0)) "▸"))
-          (beginning-of-line)
-          (pilish-toggle-tool-section)
-          (redisplay)
-          (should (string-match-p "Line 20" (buffer-string)))
-          (goto-char (point-min))
-          (re-search-forward "^Output$" nil t)
-          (should (equal (pilish-arguments-test--gutter (match-beginning 0)) "▾"))
-          (beginning-of-line)
-          (pilish-toggle-tool-section)
-          (redisplay)
-          (should (string-match-p "^Output$" (buffer-string)))
-          (should-not (string-match-p "Line 20" (buffer-string)))
-          (pilish-toggle-tool-section)
-          (redisplay)
-          (should (string-match-p "Line 20" (buffer-string))))
-      (kill-buffer buf))))
+        (dolist (columns '(104 54))
+          (set-frame-size nil columns 45)
+          (sit-for 0.1)
+          (let ((buf (generate-new-buffer " *pilish-gui-bottom-controls*")))
+            (unwind-protect
+                (save-window-excursion
+                  (delete-other-windows)
+                  (switch-to-buffer buf)
+                  (pilish-chat-mode)
+                  (setq pilish--thinking-display 'hidden)
+                  (pilish--render-history-thinking "\nPlan the work\n\n\nCheck the result\n\n")
+                  (let* ((block (pilish--display-tool-start "read" '(:path "/tmp/test.txt") "root"))
+                         (overlay (pilish--tool-block-overlay block))
+                         (window (selected-window)))
+                    (pilish--display-tool-end
+                     "read" '(:path "/tmp/test.txt")
+                     (list (list :type "text" :text
+                                 (mapconcat (lambda (n) (format "Line %02d of file" n))
+                                            (number-sequence 1 20) "\n"))
+                           (list :type "image" :mimeType "image/png"
+                                 :data (pilish-test--prompt-image-base64 'png)))
+                     nil nil block)
+                    (cl-labels
+                        ((footer ()
+                           (goto-char (button-start (pilish--find-toggle-button-in-region
+                                                     (overlay-start overlay) (overlay-end overlay)))))
+                         (capture (state)
+                           (goto-char (point-min))
+                           (set-window-start window (point-min) t)
+                           (redisplay t)
+                           (pilish-gui-test--large-evidence
+                            (format "bottom-%d-%s" columns state)
+                            (list :width (window-body-width) :state state
+                                  :raw (buffer-substring-no-properties (point-min) (point-max))
+                                  :visible (pilish-arguments-test--visible-text)
+                                  :window-start (window-start) :point (point)
+                                  :package-user-dir package-user-dir :window-system window-system
+                                  :render-library (symbol-file 'pilish--insert-tool-output-section)))))
+                      (font-lock-ensure)
+                      (should-not (string-match-p "Line 20" (buffer-string)))
+                      (footer)
+                      (should (looking-at-p "… 18 more lines"))
+                      (should (equal (pilish-arguments-test--gutter (point)) "▸"))
+                      (should (> (point) (text-property-any (point-min) (point-max)
+                                                           'pilish-image-preview t)))
+                      (should-not (pilish--file-target-at-point))
+                      (should (pilish-gui-test--tool-margin-position window (point)))
+                      (capture "collapsed")
+                      (footer)
+                      (execute-kbd-macro (kbd "<tab>"))
+                      (should (string-match-p "Line 20" (buffer-string)))
+                      (footer)
+                      (should (looking-at-p "Show less"))
+                      (should (equal (pilish-arguments-test--gutter (point)) "▾"))
+                      (capture "expanded")
+                      (footer)
+                      (let ((hit (pilish-gui-test--tool-margin-position window (point))))
+                        (should hit)
+                        (pilish--disclosure-click (list 'mouse-1 hit)))
+                      (should-not (string-match-p "Line 20" (buffer-string)))
+                      ;; Re-expansion from the newly shortened block must remain local.
+                      (execute-kbd-macro (kbd "TAB"))
+                      (should (string-match-p "Line 20" (buffer-string)))
+                      (footer)
+                      (execute-kbd-macro (kbd "RET"))
+                      (should-not (string-match-p "Line 20" (buffer-string)))
+                      (footer)
+                      (execute-kbd-macro (kbd "RET"))
+                      (should (string-match-p "Line 20" (buffer-string)))
+                      ;; Thinking's normalized three source lines conceal two, not
+                      ;; the extra input blank lines or the continuation row.
+                      (goto-char (point-min))
+                      (re-search-forward "^… 2 more lines$")
+                      (beginning-of-line)
+                      (should (get-text-property (point) 'pilish-thinking-footer))
+                      (let ((hit (pilish-gui-test--tool-margin-position window (point))))
+                        (should hit)
+                        (pilish--disclosure-click (list 'mouse-1 hit)))
+                      (goto-char (point-min))
+                      (re-search-forward "^Show less$")
+                      (beginning-of-line)
+                      (should (get-text-property (point) 'pilish-thinking-footer))
+                      (capture "thinking-expanded")
+                      (re-search-forward "^Show less$")
+                      (beginning-of-line)
+                      (execute-kbd-macro (kbd "RET"))
+                      (should-not (string-match-p "^> Check the result" (buffer-string)))
+                      (let ((other (pilish--display-tool-start "read" '(:path "/tmp/second.txt") "other")))
+                        (pilish--display-tool-end "read" '(:path "/tmp/second.txt")
+                                                  [(:type "text" :text "A\nB\nC\nD")] nil nil other)
+                        (pilish--cool-completed-tool-blocks
+                         (list overlay (pilish--tool-block-overlay other))))
+                      (should (string-match-p "Line 20" (buffer-string)))
+                      (should-not (string-match-p "Show less\\|^Output$" (buffer-string)))
+                      (should-not (pilish--tool-block-output-view block))
+                      (let ((start (text-property-not-all (point-min) (point-max) 'pilish-cold-tool-block nil)))
+                        (should-not (text-property-not-all start (point-max) 'pilish-tool-toggle nil))
+                        (should-not (text-property-not-all start (point-max) 'pilish-disclosure-hit nil)))
+                      (capture "cooled"))))
+              (when (buffer-live-p buf)
+                (with-current-buffer buf (set-buffer-modified-p nil))
+                (kill-buffer buf)))))
+      (set-frame-size nil width height)
+      (sit-for 0.1))))
 
 (ert-deftest pilish-gui-test-saved-button-keyboard ()
   "Saved-name GUI TAB folds locally without changing RET's captured target."
@@ -1485,21 +1555,21 @@ chat-mode buffer to isolate the toggle logic from RPC timing."
       (pilish-arguments-test--saved-button-keyboard (kbd key)))))
 
 (ert-deftest pilish-gui-test-output-button-keyboard-ordinary ()
-  "Native <tab> on ordinary Output toggles locally and RET still activates."
+  "Native <tab> on an ordinary bottom control toggles locally, as does RET."
   (require 'pilish-arguments-test)
   (dolist (key '("<tab>" "C-i"))
     (ert-info ((format "key=%s" key))
       (pilish-arguments-test--output-button-keyboard 'ordinary (kbd key)))))
 
 (ert-deftest pilish-gui-test-output-button-keyboard-compound ()
-  "Native <tab> on compound Output toggles locally and RET still activates."
+  "Native <tab> on a compound bottom control toggles locally, as does RET."
   (require 'pilish-arguments-test)
   (dolist (key '("<tab>" "C-i"))
     (ert-info ((format "key=%s" key))
       (pilish-arguments-test--output-button-keyboard 'compound (kbd key)))))
 
 (ert-deftest pilish-gui-test-output-button-keyboard-child ()
-  "Native <tab> on child Output keeps its argument fold independent."
+  "Native <tab> on a child bottom control keeps its argument fold independent."
   (require 'pilish-arguments-test)
   (dolist (key '("<tab>" "C-i"))
     (ert-info ((format "key=%s" key))
@@ -1989,7 +2059,7 @@ keep their recovery keys on screen too."
         (kill-buffer chat)))))
 
 (ert-deftest pilish-gui-test-polish-compound-controls-share-native-gutter ()
-  "Script, Output, Children and child Output keep their existing native actions."
+  "Heading and bottom controls invoke their exact owners through native margins."
   (require 'pilish-arguments-test)
   (let ((chat (generate-new-buffer " *pilish-gui-compound-gutter*"))
         (pilish-tool-preview-lines 2))

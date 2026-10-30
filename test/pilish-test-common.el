@@ -49,6 +49,14 @@ redisplay, and subprocess event delivery.")
           (pilish--nested-call-output-view (pilish--nested-call-get block (cdr section)))
         (pilish--tool-block-output-view block)))))
 
+(defun pilish-test--search-output-control ()
+  "Move after the next real output continuation button, or fail the test."
+  (let* ((position (text-property-not-all (point) (point-max) 'pilish-tool-output-footer nil))
+         (button (and position (button-at position))))
+    (should button)
+    (should (button-get button 'pilish-tool-toggle))
+    (goto-char (button-end button))))
+
 ;;;; JSON Fixtures
 
 (defvar pilish-test--fixture-dir
