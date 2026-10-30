@@ -6942,12 +6942,8 @@ section-aware old-position to new-position mapping."
 
 (defun pilish--cool-tool-overlay-preserving-view (overlay)
   "Cool completed tool OVERLAY while mapping visible view positions.
-Argument controls are released before the viewport snapshot so captured
-positions describe the final cold text.  The header stays in place, so
-only the replaced body bounds participate in the mapping.  Return
-non-nil when the rewrite succeeds."
-  (when (pilish--completed-tool-overlay-p overlay)
-    (pilish--argument-release-cold (pilish--tool-block-from-overlay overlay)))
+The header stays in place, so only the replaced body bounds participate
+in the mapping.  Return non-nil when the rewrite succeeds."
   (let* ((header-end-marker
           (overlay-get overlay 'pilish-header-end))
          (old-start (and (markerp header-end-marker)
