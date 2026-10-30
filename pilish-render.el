@@ -4094,15 +4094,22 @@ renders with the normal absent-path placeholder."
                       (length (split-string normalized "\n" nil)))
              (unless (string-empty-p provenance) (concat "\n" provenance))))))
 
+(defun pilish--format-tool-duration-seconds (seconds &optional tenths)
+  "Format nonnegative SECONDS using seconds, minutes and hours.
+With TENTHS, show one decimal place below a minute; otherwise use whole seconds."
+  (let* ((whole-seconds (floor seconds))
+         (minutes (/ whole-seconds 60)))
+    (cond
+     ((< seconds 60) (if tenths (format "%.1fs" seconds)
+                      (format "%ds" whole-seconds)))
+     ((< minutes 60) (format "%dm %ds" minutes (% whole-seconds 60)))
+     (t (format "%dh %dm %ds" (/ minutes 60) (% minutes 60) (% whole-seconds 60))))))
+
 (defun pilish--format-recorded-tool-time (timing)
   "Format recorded TIMING using Pi's seconds, minutes and hours convention."
-  (let* ((milliseconds (pilish--recorded-tool-time-milliseconds timing))
-         (seconds (/ milliseconds 1000))
-         (minutes (/ seconds 60)))
-    (cond
-     ((< milliseconds 60000) (format "%.1fs" (/ milliseconds 1000.0)))
-     ((< minutes 60) (format "%dm %ds" minutes (% seconds 60)))
-     (t (format "%dh %dm %ds" (/ minutes 60) (% minutes 60) (% seconds 60))))))
+  (let ((milliseconds (pilish--recorded-tool-time-milliseconds timing)))
+    (pilish--format-tool-duration-seconds
+     (/ milliseconds (if (< milliseconds 60000) 1000.0 1000)) t)))
 
 (defun pilish--format-tool-details (tool-name args &optional result timing)
   "Return literal details for TOOL-NAME, ARGS, saved RESULT and recorded TIMING."
@@ -6592,8 +6599,10 @@ local seconds and never supply a missing final measurement."
         (concat "Took " (pilish--format-recorded-tool-time timing)))
        ((and (pilish--running-tool-time-p timing)
              (not (pilish--tool-block-history-p block)))
-        (format "Elapsed %ds" (floor (max 0 (- (float-time (current-time))
-                                             (pilish--running-tool-time-started-at timing))))))))))
+        (concat "Elapsed "
+                (pilish--format-tool-duration-seconds
+                 (floor (max 0 (- (float-time (current-time))
+                                  (pilish--running-tool-time-started-at timing)))))))))))
 
 (defun pilish--running-tool-clock-p (block)
   "Return non-nil when BLOCK is an attached eligible running root here."
