@@ -1843,7 +1843,9 @@
           (let ((pilish-bash-preview-lines 1) snapshot)
             (unwind-protect
                 (cl-letf (((symbol-function 'pilish--tool-block-start-execution)
-                           (lambda (&rest _) (ert-fail "Saved duration started a live clock"))))
+                           (lambda (&rest _) (ert-fail "Saved duration started a live clock")))
+                          ((symbol-function 'pilish--schedule-tool-times)
+                           (lambda () (ert-fail "Snapshot scheduled a live clock"))))
                   (setq snapshot (pilish-open-subagent-snapshot target))
                   (let* ((overlay (car (pilish--tool-block-overlays-in-region (point-min) (point-max))))
                          (block (pilish--tool-block-from-overlay overlay)))
@@ -1857,7 +1859,9 @@
                         (should-not (string-match-p "Took\\|Elapsed" (buffer-string))))
                       (when (and (not cold) milliseconds)
                         (should (pilish--tool-output-view-footer-start (pilish--tool-block-output-view block))))
-                      (should-not (string-match-p "Elapsed" (buffer-string))))))
+                      (should-not (string-match-p "Elapsed" (buffer-string)))
+                      (should-not pilish--running-tool-blocks)
+                      (should-not pilish--tool-time-timer))))
               (pilish-test--kill-live-buffers snapshot))))))))
 
 (ert-deftest pilish-test-snapshot-refresh-preserves-and-replaces-recorded-tool-time ()
@@ -1869,7 +1873,9 @@
         (let (snapshot replacement)
           (unwind-protect
               (cl-letf (((symbol-function 'pilish--tool-block-start-execution)
-                         (lambda (&rest _) (ert-fail "Snapshot armed live timing"))))
+                         (lambda (&rest _) (ert-fail "Snapshot armed live timing")))
+                        ((symbol-function 'pilish--schedule-tool-times)
+                         (lambda () (ert-fail "Snapshot refresh scheduled a live clock"))))
                 (setq snapshot (pilish-open-subagent-snapshot target))
                 (goto-char (point-min))
                 (search-forward "Timed saved output")

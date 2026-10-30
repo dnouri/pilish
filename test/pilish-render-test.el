@@ -9324,7 +9324,9 @@ no payload at all."
         (should (equal (plist-get snapshot :text) "ONE\nTWO"))
         (should (equal (plist-get (pilish--tool-output-view-excerpt view) :content) "ONE\nTWO"))
         (should (string-match-p (regexp-quote "... (earlier output)") (buffer-string)))
-        (should-not (text-property-not-all (point-min) (point-max) 'pilish-tool-output-footer nil))
+        (should (pilish--tool-output-view-footer-start view))
+        (should (equal (pilish--tool-duration-label block) "Elapsed 0s"))
+        (should-not (pilish--find-toggle-button-in-region (point-min) (point-max)))
         (should-not (string-match-p "more lines" (buffer-string)))
         (pilish--handle-display-event
          '(:type "tool_execution_update" :toolCallId "tail-owner" :toolName "bash"
@@ -9530,6 +9532,603 @@ no payload at all."
         (should (= pilish--tool-footer-min-columns 104)))
       (should (= tick (buffer-chars-modified-tick)))
       (should (equal-including-properties before (buffer-string))))))
+
+(defmacro pilish-test--with-tool-clock (&rest body)
+  "Run BODY with local NOW seconds and captured CLOCK-TIMERS and CANCELLED.
+Timers are real timer objects with callable callbacks, but are not activated.
+Tests dispatch the captured callback rather than calling a paint directly."
+  (declare (indent 0) (debug t))
+  `(let ((now 100.0) clock-timers cancelled)
+     (cl-letf (((symbol-function 'current-time) (lambda () (seconds-to-time now)))
+               ((symbol-function 'run-at-time)
+                (lambda (delay repeat function &rest args)
+                  (let ((timer (timer-create)))
+                    (timer-set-function timer function args)
+                    (push (list timer delay repeat) clock-timers)
+                    timer)))
+               ((symbol-function 'cancel-timer) (lambda (timer) (push timer cancelled))))
+       ,@body)))
+
+(defun pilish-test--dispatch-tool-clock (timer)
+  "Dispatch TIMER's captured callback, including its original identity."
+  (apply (timer--function timer) (timer--args timer)))
+
+(defun pilish-test--tool-duration-text (block)
+  "Return just BLOCK's owned duration text, or nil without a suffix."
+  (when-let* ((view (pilish--tool-block-output-view block))
+              (footer (pilish--tool-output-view-footer-start view))
+              (duration (text-property-any footer (overlay-end (pilish--tool-block-overlay block))
+                                           'pilish-tool-duration block)))
+    (buffer-substring-no-properties
+     duration (next-single-property-change duration 'pilish-tool-duration nil
+                                            (overlay-end (pilish--tool-block-overlay block))))))
+
+(ert-deftest pilish-test-tool-duration-live-start-policy-and-local-floor ()
+  "Authoritative exact-name starts immediately paint one duration-only footer."
+  (dolist (name '("bash" "subagent" "read" "write" "edit" "codemode" "custom"
+                  "Bash" "Subagent" "bash-extra" "my-subagent" "subagent_resume"))
+    (pilish-test--with-tool-clock
+      (with-temp-buffer
+        (pilish-chat-mode)
+        (let* ((block (pilish--display-tool-start name nil "start-clock"))
+               (eligible (member name '("bash" "subagent"))))
+          (should-not (pilish--tool-block-output-view block))
+          (pilish--handle-display-event
+           (list :type "tool_execution_start" :toolName name :toolCallId "start-clock"))
+          (should (equal (pilish-test--tool-duration-text block) (and eligible "Elapsed 0s")))
+          (should (= (length clock-timers) (if eligible 1 0)))
+          (when eligible
+            (should (equal (cdar clock-timers) '(1 nil)))
+            (should (local-variable-p 'pilish--running-tool-blocks))
+            (should (local-variable-p 'pilish--tool-time-timer))
+            (should-not (text-property-not-all (point-min) (point-max) 'pilish-disclosure-hit nil))
+            (let ((running (pilish--tool-block-timing block))
+                  (timer pilish--tool-time-timer))
+              (setq now 109.99)
+              (pilish--tool-block-start-execution block now nil)
+              (should (eq running (pilish--tool-block-timing block)))
+              (should (equal pilish--running-tool-blocks (list block)))
+              (should (eq timer pilish--tool-time-timer))
+              (should (= (length clock-timers) 1))
+              (pilish-test--dispatch-tool-clock timer)
+              (should (equal (pilish-test--tool-duration-text block) "Elapsed 9s"))
+              (setq now 95)
+              (pilish-test--dispatch-tool-clock pilish--tool-time-timer)
+              (should (equal (pilish-test--tool-duration-text block) "Elapsed 0s")))
+            (pilish--cancel-tool-times)
+            (should-not (pilish-test--tool-duration-text block))
+            (should-not (pilish--tool-output-view-footer-start (pilish--tool-block-output-view block)))))))))
+
+(ert-deftest pilish-test-tool-duration-live-concurrent-roots-and-stale-identities ()
+  "One clock serves concurrent exact roots; completing one never stops another."
+  (pilish-test--with-tool-clock
+    (with-temp-buffer
+      (pilish-chat-mode)
+      (pilish-test--hover-tool-start "A")
+      (let ((first (pilish--tool-block-get "A")))
+        (setq now 102)
+        (pilish-test--hover-tool-start "B")
+        (let ((second (pilish--tool-block-get "B"))
+              (initial pilish--tool-time-timer))
+          (should (= (length clock-timers) 1))
+          (should (= (length pilish--running-tool-blocks) 2))
+          (setq now 109)
+          (pilish-test--dispatch-tool-clock initial)
+          (should (equal (pilish-test--tool-duration-text first) "Elapsed 9s"))
+          (should (equal (pilish-test--tool-duration-text second) "Elapsed 7s"))
+          (let ((pending pilish--tool-time-timer))
+            (setq now 150)
+            (pilish-test--hover-tool-end "A" "done" 3400)
+            (should (equal (pilish-test--tool-duration-text first) "Took 3.4s"))
+            (should (equal pilish--running-tool-blocks (list second)))
+            (should (eq pending pilish--tool-time-timer))
+            (should-not cancelled)
+            (let ((before (buffer-string)) (count (length clock-timers)))
+              (pilish-test--dispatch-tool-clock initial)
+              (should (equal-including-properties before (buffer-string)))
+              (should (= count (length clock-timers))))
+            (pilish-test--dispatch-tool-clock pending)
+            (should (equal (pilish-test--tool-duration-text second) "Elapsed 48s")))
+          (let ((pending pilish--tool-time-timer))
+            (pilish-test--hover-tool-end "B" "done")
+            (should (eq (pilish--tool-block-timing second) 'untimed))
+            (should-not (pilish-test--tool-duration-text second))
+            (should-not pilish--running-tool-blocks)
+            (should-not pilish--tool-time-timer)
+            (should (memq pending cancelled))
+            (pilish-test--hover-tool-start "C")
+            (let ((current pilish--tool-time-timer) (before (buffer-string)))
+              (pilish-test--dispatch-tool-clock pending)
+              (should (eq current pilish--tool-time-timer))
+              (should (equal-including-properties before (buffer-string))))
+            (pilish--cancel-tool-times)))))))
+
+(ert-deftest pilish-test-tool-duration-live-tick-prunes-terminal-and-detached-roots ()
+  "A callback prunes exact dead owners and does not rearm an empty clock."
+  (pilish-test--with-tool-clock
+    (with-temp-buffer
+      (pilish-chat-mode)
+      (pilish-test--hover-tool-start "A")
+      (pilish-test--hover-tool-start "B")
+      (let* ((first (pilish--tool-block-get "A"))
+             (second (pilish--tool-block-get "B"))
+             (overlay (pilish--tool-block-overlay second))
+             (timer pilish--tool-time-timer)
+             (inhibit-read-only t))
+        (setf (pilish--tool-block-timing first) 'untimed)
+        (delete-region (overlay-start overlay) (overlay-end overlay))
+        (delete-overlay overlay)
+        (pilish-test--dispatch-tool-clock timer)
+        (should-not pilish--running-tool-blocks)
+        (should-not pilish--tool-time-timer)
+        (should (= (length clock-timers) 1))
+        (should-not (string-match-p "Elapsed" (buffer-string)))
+        (let ((before (buffer-string)))
+          (pilish-test--dispatch-tool-clock timer)
+          (should (equal-including-properties before (buffer-string))))))))
+
+(ert-deftest pilish-test-tool-duration-live-buffer-local-clock-ownership ()
+  "Cancelling one transcript cannot retire another transcript's live owner."
+  (pilish-test--with-tool-clock
+    (let ((first (generate-new-buffer " *clock-first*"))
+          (second (generate-new-buffer " *clock-second*")) first-timer second-timer)
+      (unwind-protect
+          (progn
+            (with-current-buffer first
+              (pilish-chat-mode)
+              (pilish-test--hover-tool-start "same-id")
+              (setq first-timer pilish--tool-time-timer))
+            (with-current-buffer second
+              (pilish-chat-mode)
+              (pilish-test--hover-tool-start "same-id")
+              (setq second-timer pilish--tool-time-timer))
+            (should-not (eq first-timer second-timer))
+            (with-current-buffer first (pilish--cancel-tool-times))
+            (setq now 104)
+            (pilish-test--dispatch-tool-clock first-timer)
+            (pilish-test--dispatch-tool-clock second-timer)
+            (with-current-buffer second
+              (should (equal (pilish-test--tool-duration-text (pilish--tool-block-get "same-id")) "Elapsed 4s"))
+              (should (= (length pilish--running-tool-blocks) 1))))
+        (kill-buffer first)
+        (kill-buffer second)))))
+
+(ert-deftest pilish-test-tool-duration-live-streaming-body-replacement-retains-one-footer ()
+  "Empty, short and tail body replacements keep one live footer, never a count."
+  (pilish-test--with-tool-clock
+    (with-temp-buffer
+      (pilish-chat-mode)
+      (pilish-test--hover-tool-start "A")
+      (let* ((block (pilish--tool-block-get "A")) (pilish-bash-preview-lines 2)
+             (footer (pilish--tool-output-view-footer-start (pilish--tool-block-output-view block))))
+        (dolist (output '("" "SHORT\n" "ZERO\nONE\nTWO\n" "NEW\n" ""))
+          (pilish--display-tool-update (list :content (vector (list :type "text" :text output))) block)
+          (should (equal (pilish-test--tool-duration-text block) "Elapsed 0s"))
+          (should (eq footer (pilish--tool-output-view-footer-start (pilish--tool-block-output-view block))))
+          (should-not (text-property-not-all footer (overlay-end (pilish--tool-block-overlay block))
+                                             'pilish-tool-output-footer 'tail))
+          (should (= 2 (length (split-string (buffer-string) "Elapsed "))))
+          (should-not (pilish--find-toggle-button-in-region (point-min) (point-max)))
+          (should-not (string-match-p "more lines" (buffer-string))))
+        (pilish--cancel-tool-times)))))
+
+(ert-deftest pilish-test-tool-duration-live-tick-only-edits-owned-suffix-and-fit ()
+  "Digit growth preserves snapshots, images, maps, fold controls and child text."
+  (dolist (expanded '(nil t))
+    (pilish-test--with-tool-clock
+      (with-temp-buffer
+        (pilish-chat-mode)
+        (let ((pilish-tool-preview-lines 1))
+          (pilish-test--nested-event "tool_execution_start" "root" nil :toolName "subagent")
+          (pilish-test--nested-event "tool_execution_start" "child" "root" :toolName "read" :args '(:path "/tmp/clock.el"))
+          (pilish-test--nested-event "tool_execution_end" "child" "root" :toolName "read"
+                                     :result '(:content [(:type "text" :text "CHILD\nHIDDEN")]))
+          (let* ((block (pilish--nested-tool-owner "root"))
+                 (overlay (pilish--tool-block-overlay block)))
+            (pilish--display-tool-update
+             (list :content (vector '(:type "text" :text "ONE\nTWO\nTHREE")
+                                    (list :type "image" :data pilish-test--png-base64 :mimeType "image/png"))) block)
+            (pilish-test--flush-tool-updates)
+            (when expanded
+              (button-activate (pilish--find-toggle-button-in-region (overlay-start overlay) (overlay-end overlay) 'output)))
+            (setq now 109)
+            (pilish-test--dispatch-tool-clock pilish--tool-time-timer)
+            (let* ((view (pilish--tool-block-output-view block))
+                   (snapshot (pilish--tool-output-view-snapshot view))
+                   (excerpt (pilish--tool-output-view-excerpt view))
+                   (selection (pilish--tool-output-view-selection view))
+                   (folds (pilish--tool-block-folds block))
+                   (line-map (pilish--tool-block-line-map block))
+                   (child-view (pilish--nested-call-output-view (car (pilish--tool-block-nested-calls block))))
+                   (footer (pilish--tool-output-view-footer-start view))
+                   (button (button-at footer))
+                   (control-end (button-end button))
+                   (witness (get-text-property footer 'pilish-disclosure-hit))
+                   (duration (text-property-any footer (overlay-end overlay) 'pilish-tool-duration block))
+                   (duration-end (next-single-property-change duration 'pilish-tool-duration nil (overlay-end overlay)))
+                   (before-control (buffer-substring (point-min) control-end))
+                   (after-duration (buffer-substring duration-end (point-max)))
+                   (images (pilish-test--image-preview-positions))
+                   (old-width (get-text-property control-end 'pilish-tool-footer-break-width))
+                   (old-align (get-text-property (1- duration) 'pilish-tool-footer-align-width))
+                   changes)
+              (should button)
+              (should images)
+              (setq now 110)
+              (cl-letf (((symbol-function 'pilish--tool-result-presentation) (lambda (&rest _) (ert-fail "Tick selected rich output")))
+                        ((symbol-function 'pilish--insert-tool-output-section) (lambda (&rest _) (ert-fail "Tick repainted a section")))
+                        ((symbol-function 'pilish--redraw-compound-tool) (lambda (&rest _) (ert-fail "Tick redrew compound output")))
+                        ((symbol-function 'pilish--content-image-previews) (lambda (&rest _) (ert-fail "Tick decoded images"))))
+                (let ((before-change-functions
+                       (list (lambda (beg end) (push (cons beg end) changes)))))
+                  (pilish-test--dispatch-tool-clock pilish--tool-time-timer)))
+              (should (equal (pilish-test--tool-duration-text block) "Elapsed 10s"))
+              (should (seq-every-p (lambda (change)
+                                    (or (and (<= duration (car change)) (<= (cdr change) (1+ duration-end)))
+                                        (equal change (cons control-end (1+ control-end)))
+                                        (equal change (cons (1- duration) duration)))) changes))
+              (should (member (cons duration duration-end) changes))
+              (should (equal-including-properties before-control (buffer-substring (point-min) control-end)))
+              (should (equal-including-properties after-duration (buffer-substring (1+ duration-end) (point-max))))
+              (should (eq view (pilish--tool-block-output-view block)))
+              (should (eq snapshot (pilish--tool-output-view-snapshot view)))
+              (should (eq excerpt (pilish--tool-output-view-excerpt view)))
+              (should (eq selection (pilish--tool-output-view-selection view)))
+              (should (eq folds (pilish--tool-block-folds block)))
+              (should (eq line-map (pilish--tool-block-line-map block)))
+              (should (eq child-view (pilish--nested-call-output-view (car (pilish--tool-block-nested-calls block)))))
+              (should (equal images (pilish-test--image-preview-positions)))
+              (should (eq witness (get-text-property footer 'pilish-disclosure-hit)))
+              (should (= control-end (button-end (button-at footer))))
+              (should (= (1+ old-width) (get-text-property control-end 'pilish-tool-footer-break-width)))
+              (should (= (1+ old-align) (get-text-property (1- duration) 'pilish-tool-footer-align-width)))
+              (should (equal (get-text-property control-end 'display)
+                             (pilish--tool-footer-break-display (1+ old-width))))
+              (should (equal (get-text-property (1- duration) 'display)
+                             (pilish--tool-footer-align-display (1+ old-align))))
+              (let ((before (buffer-string)) (tick (buffer-chars-modified-tick)))
+                (pilish-test--dispatch-tool-clock pilish--tool-time-timer)
+                (should (= tick (buffer-chars-modified-tick)))
+                (should (equal-including-properties before (buffer-string)))))
+            (pilish--cancel-tool-times)))))))
+
+(ert-deftest pilish-test-tool-duration-live-abort-retires-owners-and-delivers-rpc ()
+  "Cancellation settles every owner before painting and never blocks the RPC.
+A failing footer refresh cannot strand another root or leave the follow-up
+queue and Abort RPC undelivered.  With `debug-on-error' set, the paint
+failure still reaches the debugger after delivery."
+  (dolist (debug '(nil t))
+    (ert-info ((format "debug-on-error=%s" debug))
+      (pilish-test--with-tool-clock
+        (with-temp-buffer
+          (pilish-chat-mode)
+          (pilish-test--hover-tool-start "A")
+          (pilish-test--hover-tool-start "B")
+          (let* ((first (pilish--tool-block-get "A"))
+                 (second (pilish--tool-block-get "B"))
+                 (original (symbol-function 'pilish--refresh-tool-duration))
+                 (timer pilish--tool-time-timer)
+                 (events nil))
+            (setq now 199)
+            (pilish-test--dispatch-tool-clock timer)
+            (should (equal (pilish-test--tool-duration-text first) "Elapsed 99s"))
+            (setq pilish--status 'streaming)
+            (let ((debug-invoked nil))
+              (cl-letf (((symbol-function 'pilish--refresh-tool-duration)
+                         (lambda (block &rest _)
+                           (push (cons 'paint block) events)
+                           (when (eq block first)
+                             (error "Expected footer failure"))
+                           (funcall original block)))
+                        ((symbol-function 'pilish--clear-followup-queue)
+                         (lambda () (push 'cleared events)))
+                        ((symbol-function 'pilish--send-abort)
+                         (lambda () (push 'aborted events)))
+                        ((symbol-function 'message) #'ignore)
+                        ;; Batch Emacs would exit inside the real debugger;
+                        ;; record the entry instead of recursing into it.
+                        ((symbol-function 'debug)
+                         (lambda (&rest _) (setq debug-invoked t))))
+                (when debug (setq debug-on-error t))
+                (unwind-protect
+                    ;; Depending on the `condition-case-unless-debug'
+                    ;; expansion, the surfaced failure is either contained
+                    ;; after the debugger entry or escapes after delivery.
+                    (let ((outcome (condition-case _
+                                       (pilish-abort)
+                                     (error 'escaped))))
+                      (should (memq outcome '(escaped nil))))
+                  (setq debug-on-error nil))
+                ;; Delivery and both owners precede any failure handling.
+                (should (equal events
+                               (list (cons 'paint first) (cons 'paint second)
+                                     'aborted 'cleared)))
+                (should (eq debug-invoked (and debug t)))))
+            ;; Every owner's state settled regardless of the paint outcome.
+            (should (eq (pilish--tool-block-timing first) 'untimed))
+            (should (eq (pilish--tool-block-timing second) 'untimed))
+            (should-not pilish--running-tool-blocks)
+            (should-not pilish--tool-time-timer)
+            (should-not (pilish-test--tool-duration-text second))
+            ;; The failing footer keeps its last good paint; only the healthy
+            ;; one was removed.
+            (should (equal (pilish-test--tool-duration-text first) "Elapsed 99s"))
+            (let ((before (buffer-string)))
+              (pilish-test--dispatch-tool-clock timer)
+              (should (equal-including-properties before (buffer-string))))))))))
+
+(ert-deftest pilish-test-tool-duration-live-tick-quarantines-a-failing-owner ()
+  "A failing footer retires quietly with one warning; healthy roots tick on.
+The quarantined owner is not retried by later callbacks, so a persistent
+failure produces exactly one warning instead of a per-second error loop."
+  (pilish-test--with-tool-clock
+    (with-temp-buffer
+      (pilish-chat-mode)
+      (pilish-test--hover-tool-start "A")
+      (pilish-test--hover-tool-start "B")
+      (let* ((first (pilish--tool-block-get "A"))
+             (second (pilish--tool-block-get "B"))
+             (original (symbol-function 'pilish--refresh-tool-duration))
+             (failures 0)
+             (warnings nil))
+        (setq now 109)
+        (cl-letf (((symbol-function 'pilish--refresh-tool-duration)
+                   (lambda (block &rest _)
+                     (when (eq block first)
+                       (cl-incf failures)
+                       (error "Persistent footer failure"))
+                     (funcall original block)))
+                  ((symbol-function 'display-warning)
+                   (lambda (&rest args) (push args warnings))))
+          (pilish-test--dispatch-tool-clock pilish--tool-time-timer)
+          (should (= failures 1))
+          (should (eq (pilish--tool-block-timing first) 'untimed))
+          (should-not (memq first pilish--running-tool-blocks))
+          (should (equal pilish--running-tool-blocks (list second)))
+          (should (= 1 (length warnings)))
+          (should (string-match-p "Persistent footer failure"
+                                  (format "%s" (nth 1 (car warnings)))))
+          (should (string-match-p "\\<A\\>" (format "%s" (nth 1 (car warnings)))))
+          ;; No repaint was attempted for the quarantined owner.
+          (should (equal (pilish-test--tool-duration-text first) "Elapsed 0s"))
+          (should (equal (pilish-test--tool-duration-text second) "Elapsed 9s"))
+          (setq now 110)
+          (pilish-test--dispatch-tool-clock pilish--tool-time-timer)
+          (should (= failures 1))
+          (should (= 1 (length warnings)))
+          (should (equal (pilish-test--tool-duration-text second) "Elapsed 10s")))
+        (pilish--cancel-tool-times)))))
+
+(ert-deftest pilish-test-tool-duration-live-reconciles-through-narrowing ()
+  "Restrictions before, at and inside the footer cannot corrupt the suffix.
+Ticks, the completion settle and cancellation all reconcile widened, with
+searches bounded to the owned footer's property run."
+  (dolist (phase '(tick complete cancel))
+    (dolist (restriction '(before at-start inside-label))
+      (ert-info ((format "narrowing %s through %s" restriction phase))
+        (pilish-test--with-tool-clock
+          (with-temp-buffer
+            (pilish-chat-mode)
+            (pilish-test--hover-tool-start "A")
+            (let* ((block (pilish--tool-block-get "A"))
+                   (view (pilish--tool-block-output-view block))
+                   (footer (marker-position
+                            (pilish--tool-output-view-footer-start view))))
+              (setq now 109)
+              (pcase restriction
+                ('before (narrow-to-region (point-min) footer))
+                ('at-start (narrow-to-region footer (+ footer 3)))
+                ('inside-label (narrow-to-region (+ footer 2) (point-max))))
+              (pcase phase
+                ('tick (pilish-test--dispatch-tool-clock pilish--tool-time-timer))
+                ('complete
+                 ;; The settle `pilish--display-tool-end' performs before its
+                 ;; fallible presentation.
+                 (setf (pilish--tool-block-timing block)
+                       (pilish--recorded-tool-time 125000))
+                 (pilish--unschedule-tool-time block)
+                 (pilish--refresh-tool-duration block))
+                ('cancel (pilish--cancel-tool-times)))
+              (widen)
+              (pcase phase
+                ('tick
+                 (should (equal (pilish-test--tool-duration-text block) "Elapsed 9s"))
+                 (should (= 2 (length (split-string (buffer-string) "Elapsed"))))
+                 (should (string-match-p "\n Elapsed 9s\n" (buffer-string))))
+                ('complete
+                 (should (equal (pilish-test--tool-duration-text block) "Took 2m 5s"))
+                 (should (string-match-p "\n Took 2m 5s\n" (buffer-string)))
+                 (should-not (string-match-p "Elapsed" (buffer-string)))
+                 (should (= 2 (length (split-string (buffer-string) "Took ")))))
+                ('cancel
+                 (should (eq (pilish--tool-block-timing block) 'untimed))
+                 (should-not (string-match-p "Elapsed\|Took" (buffer-string)))
+                 (should-not (pilish--tool-output-view-footer-start
+                              (pilish--tool-block-output-view block))))))))))))
+
+(defun pilish-test--require-md-ts-change-hooks ()
+  "Require the md-ts per-change hooks installed by a chat buffer."
+  (unless (and (fboundp 'md-ts--before-change-check-link-reference-definition)
+               (fboundp 'md-ts--region-could-change-link-structure-p)
+               (fboundp 'md-ts--flush-all-font-lock))
+    (ert-skip "Markdown hook regression requires the md-ts per-change hooks"))
+  (with-temp-buffer
+    (pilish-chat-mode)
+    (unless (and (memq #'md-ts--before-change-check-link-reference-definition
+                       before-change-functions)
+                 (memq #'md-ts--after-change-flush-link-reference-links
+                       after-change-functions))
+      (ert-skip "Markdown hook regression requires installed md-ts change hooks"))))
+
+(ert-deftest pilish-test-tool-duration-live-tick-avoids-whole-buffer-markdown-work ()
+  "A suffix tick suspends only whole-block md-ts work and stays propertized.
+The footer shares its blank-line-delimited block with the fenced output
+body, so an unsuspended tick pays a body-sized link-structure scan and can
+trigger whole-buffer font-lock flushes from the adjacent fence.  The owned
+suffix edit must still keep md-ts's cheap dirty-tick bookkeeping rather than
+suppressing every modification hook."
+  (pilish-test--require-md-ts-change-hooks)
+  (pilish-test--with-tool-clock
+    (with-temp-buffer
+      (pilish-chat-mode)
+      (let ((pilish-tool-preview-lines 400)
+            (pilish-bash-preview-lines 400)
+            (lines nil))
+        (dotimes (_ 300) (push (make-string 60 ?l) lines))
+        (pilish-test--hover-tool-start "long")
+        (let* ((block (pilish--tool-block-get "long"))
+               (overlay (pilish--tool-block-overlay block))
+               (body-start (marker-position (pilish--tool-block-header-end block))))
+          (pilish--handle-display-event
+           `(:type "tool_execution_update" :toolCallId "long" :toolName "bash"
+                   :partialResult (:content
+                                   [(:type "text" :text ,(concat (string-join lines "\n") "\n"))])))
+          (pilish-test--flush-tool-updates)
+          (should (> (- (marker-position (pilish--tool-block-end-marker block))
+                        body-start)
+                     10000))
+          (let* ((footer (marker-position
+                          (pilish--tool-output-view-footer-start
+                           (pilish--tool-block-output-view block))))
+                 (original-pre (symbol-function 'md-ts--region-could-change-link-structure-p))
+                 (flushes 0) (link-hooks 0) (stale-hooks 0) (dirty-hooks 0) (jit-hooks 0)
+                 (scans nil))
+            (setq now 109)
+            (cl-letf (((symbol-function 'md-ts--region-could-change-link-structure-p)
+                       (lambda (beg end)
+                         (cl-incf link-hooks)
+                         (let* ((line-bounds (md-ts--fence-detection-line-bounds beg end))
+                                (block-bounds (md-ts--blank-line-delimited-block-bounds
+                                               (car line-bounds) (cdr line-bounds))))
+                           (push (- (cdr block-bounds) (car block-bounds)) scans))
+                         (funcall original-pre beg end)))
+                      ((symbol-function 'md-ts--flush-all-font-lock)
+                       (lambda (&rest _) (cl-incf flushes)))
+                      ((symbol-function 'md-ts--font-lock-record-stale-side-effect-bounds)
+                       (lambda (&rest _) (cl-incf stale-hooks)))
+                      ((symbol-function 'md-ts--font-lock-record-dirty-side-effect-bounds)
+                       (lambda (&rest _) (cl-incf dirty-hooks)))
+                      ((symbol-function 'jit-lock-after-change)
+                       (lambda (&rest _) (cl-incf jit-hooks))))
+              (pilish-test--dispatch-tool-clock pilish--tool-time-timer))
+            ;; No whole-buffer flush and no link-structure work ran at all.
+            (should (zerop flushes))
+            (should (zerop link-hooks))
+            (should (null scans))
+            (should (zerop stale-hooks))
+            ;; The cheap dirty bookkeeping and jit-lock still observe the edit.
+            (should (>= dirty-hooks 2))
+            (should (>= jit-hooks 1))
+            ;; The footer itself stays correctly propertized.
+            (let* ((view (pilish--tool-block-output-view block))
+                   (duration (text-property-any footer (overlay-end overlay)
+                                                'pilish-tool-duration block))
+                   (duration-end (next-single-property-change
+                                  duration 'pilish-tool-duration nil (overlay-end overlay))))
+              (should (equal (pilish-test--tool-duration-text block) "Elapsed 9s"))
+              (should (eq (get-text-property duration 'pilish-tool-duration) block))
+              (should (eq (get-text-property duration 'pilish-tool-output-footer)
+                          (pilish--tool-output-view-selection view)))
+              (should (eq (get-text-property duration 'pilish-tool-section) 'output))
+              (should (eq (get-text-property duration 'face) 'pilish-tool-duration))
+              (should (equal (get-text-property (1- duration) 'display)
+                             (pilish--tool-footer-align-display 11)))
+              (should (= (get-text-property (1- duration) 'pilish-tool-footer-align-width) 11)))
+            (pilish--cancel-tool-times)))))))
+
+(ert-deftest pilish-test-tool-duration-live-completion-retires-before-fallible-render ()
+  "Completion replaces the estimate before presentation, even when that fails."
+  (dolist (milliseconds '(3400 nil))
+    (pilish-test--with-tool-clock
+      (with-temp-buffer
+        (pilish-chat-mode)
+        (pilish-test--hover-tool-start "A")
+        (let ((block (pilish--tool-block-get "A")) (timer pilish--tool-time-timer))
+          (setq now 199)
+          (pilish-test--dispatch-tool-clock timer)
+          (should (equal (pilish-test--tool-duration-text block) "Elapsed 99s"))
+          (cl-letf (((symbol-function 'pilish--saved-conversation-labels)
+                     (lambda (&rest _)
+                       (should-not pilish--running-tool-blocks)
+                       (should-not pilish--tool-time-timer)
+                       (should (equal (pilish-test--tool-duration-text block) (and milliseconds "Took 3.4s")))
+                       (error "Expected presentation failure"))))
+            (should-error (pilish-test--hover-tool-end "A" "done" milliseconds)))
+          (let ((before (buffer-string)))
+            (setq now 300)
+            (pilish-test--dispatch-tool-clock timer)
+            (should (equal-including-properties before (buffer-string)))))))))
+
+(ert-deftest pilish-test-tool-duration-live-teardown-and-stale-callbacks ()
+  "Abort, finalization, resets, replacement, exit, rebuild and kill retire clocks."
+  (dolist (boundary '(finalize abort reset artifacts replacement exit replay kill))
+    (ert-info ((format "Clock teardown %s" boundary))
+      (pilish-test--with-tool-clock
+        (let ((buffer (generate-new-buffer " *clock-teardown*")) process)
+          (unwind-protect
+              (with-current-buffer buffer
+                (pilish-chat-mode)
+                (when (eq boundary 'exit)
+                  (setq process (start-process "clock-exit" nil "cat"))
+                  (set-process-query-on-exit-flag process nil)
+                  (pilish--set-process process))
+                (pilish-test--hover-tool-start "A")
+                (let* ((block (pilish--tool-block-get "A"))
+                       (timer pilish--tool-time-timer))
+                  (should (equal (pilish-test--tool-duration-text block) "Elapsed 0s"))
+                  (pcase boundary
+                    ('finalize (pilish--tool-block-finalize block 'pilish-tool-block-error))
+                    ('abort (setq pilish--status 'streaming)
+                            (cl-letf (((symbol-function 'pilish--send-abort) #'ignore)) (pilish-abort)))
+                    ('reset (pilish--reset-session-state))
+                    ('artifacts (pilish--clear-render-artifacts))
+                    ('replacement (pilish--set-process 'replacement))
+                    ('exit (pilish--mark-process-exited process '(:error "Clock process exited")))
+                    ('replay (pilish--display-session-history []))
+                    ('kill (kill-buffer buffer)))
+                  (should (eq (pilish--tool-block-timing block) 'untimed))
+                  (should (memq timer cancelled))
+                  (if (buffer-live-p buffer)
+                      (progn
+                        (should-not pilish--tool-time-timer)
+                        (should-not pilish--running-tool-blocks)
+                        (should-not (string-match-p "Elapsed\\|Took" (buffer-string)))
+                        (let ((before (buffer-string)) (count (length clock-timers)))
+                          (setq now 200)
+                          (pilish-test--dispatch-tool-clock timer)
+                          (should (equal-including-properties before (buffer-string)))
+                          (should (= count (length clock-timers))))
+                        (pilish--cancel-tool-times)
+                        (when (eq boundary 'abort)
+                          (pilish-test--hover-tool-start "late")
+                          (should-not pilish--tool-time-timer)
+                          (should-not (string-match-p "Elapsed" (buffer-string)))))
+                    (let ((count (length clock-timers)))
+                      (pilish-test--dispatch-tool-clock timer)
+                      (should (= count (length clock-timers)))))))
+            (when (and process (process-live-p process)) (delete-process process))
+            (when (buffer-live-p buffer) (kill-buffer buffer))))))))
+
+(ert-deftest pilish-test-tool-duration-live-replay-never-arms-a-clock ()
+  "Saved results and replay rebuilds use recorded values without scheduling."
+  (pilish-test--with-tool-clock
+    (with-temp-buffer
+      (pilish-chat-mode)
+      (pilish-test--hover-tool-start "old")
+      (let ((timer pilish--tool-time-timer))
+        (cl-letf (((symbol-function 'pilish--schedule-tool-times)
+                   (lambda () (ert-fail "Replay scheduled a live clock"))))
+          (pilish--display-session-history
+           [(:role "assistant" :content [(:type "toolCall" :id "saved" :name "bash" :arguments (:command "saved"))])
+            (:role "toolResult" :toolCallId "saved" :toolName "bash" :durationMs 1234 :content [])]))
+        (should (memq timer cancelled))
+        (should-not pilish--tool-time-timer)
+        (should-not pilish--running-tool-blocks)
+        (should (string-match-p "Took 1.2s" (buffer-string)))
+        (should-not (string-match-p "Elapsed" (buffer-string)))
+        (let ((before (buffer-string)))
+          (pilish-test--dispatch-tool-clock timer)
+          (should (equal-including-properties before (buffer-string))))))))
 
 ;;; Generic Tool Details in Output
 
@@ -19737,7 +20336,7 @@ Regression test: streaming output with no newlines should still be capped."
      '(:type "tool_execution_start" :toolName "subagent" :toolCallId "child"
        :args (:model "kimi-coding/k3" :task "Build the feature"
               :thinkingLevel "max")))
-    (let ((header (buffer-string))
+    (let ((header (pilish-test--tool-header-by-id "child"))
           (flushes 0)
           (flush (symbol-function 'md-ts--flush-all-font-lock)))
       (cl-letf (((symbol-function 'md-ts--flush-all-font-lock)
@@ -19759,9 +20358,12 @@ Regression test: streaming output with no newlines should still be capped."
          "child" "Log: ~/child.jsonl.subagents.md\n- subagent (9% ctx, 18 turns): ```inside```")
         (pilish-test--flush-tool-updates)
         (should (> flushes 0)))
-      (should (string-prefix-p header (buffer-string)))
-      (should (equal (pilish-test--tool-stream-body-by-id "child")
-                     "~~~\nLog: ~/child.jsonl.subagents.md\n- subagent (9% ctx, 18 turns): ```inside```\n~~~\n")))))
+      (should (equal header (pilish-test--tool-header-by-id "child")))
+      (let* ((block (pilish--tool-block-get "child"))
+             (footer (pilish--tool-output-view-footer-start (pilish--tool-block-output-view block))))
+        (should (equal (buffer-substring-no-properties (pilish--tool-block-header-end block) footer)
+                       "~~~\nLog: ~/child.jsonl.subagents.md\n- subagent (9% ctx, 18 turns): ```inside```\n~~~\n"))
+        (should (string-prefix-p "Elapsed " (pilish-test--tool-duration-text block)))))))
 
 (ert-deftest pilish-test-tool-body-minimal-replacement-preserves-blocks ()
   "Structural changes keep the exact fenced body, hint, and block boundaries."
