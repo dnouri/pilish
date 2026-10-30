@@ -929,6 +929,11 @@ Here are some common non-default preferences:
 ;; rebalanced on frame resize:
 (setopt pilish-input-window-height 0.25)
 
+;; Or size the input window to the draft: one line when empty, growing
+;; while you type up to `pilish-input-window-max-height' (30% of the
+;; pair by default) and shrinking again after sending:
+;; (setopt pilish-input-window-height 'fit)
+
 ;; Copy source Markdown from the chat buffer instead of only visible text:
 (setopt pilish-copy-raw-markdown t)
 

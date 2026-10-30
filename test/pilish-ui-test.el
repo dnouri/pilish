@@ -3801,6 +3801,155 @@ Binds `chat-win' and `input-win' for use in BODY."
     (should (memq #'pilish--maybe-rebalance-windows
                   window-size-change-functions))))
 
+;;; Input window fitted to the draft
+
+(defmacro pilish-test-with-fit-layout (input-mode &rest body)
+  "Execute BODY with a linked chat/input pair and a `fit' input height.
+With INPUT-MODE non-nil, the input buffer uses `pilish-input-mode'.
+Binds `chat-win', `input-win' and `input-buf' for use in BODY."
+  (declare (indent 1) (debug t))
+  `(let ((pilish-input-window-height 'fit)
+         (pilish-input-window-max-height 0.3)
+         (input-mode ,input-mode))
+     (pilish-test-with-split-layout
+       (let ((chat-buf (current-buffer)))
+         (with-current-buffer input-buf
+           (when input-mode
+             (pilish-input-mode))
+           (setq-local pilish--chat-buffer chat-buf)))
+       ,@body)))
+
+(defun pilish-test--fit-chrome (window)
+  "Return WINDOW's header and mode line rows."
+  (- (window-total-height window) (window-body-height window)))
+
+(defun pilish-test--set-draft (buffer text)
+  "Replace BUFFER's draft with TEXT."
+  (with-current-buffer buffer
+    (erase-buffer)
+    (insert text)))
+
+(ert-deftest pilish-test-input-height-fit-splits-at-min-height ()
+  "A `fit' input window is split at `window-min-height' before fitting."
+  (let ((pilish-input-window-height 'fit)
+        (window-min-height 4))
+    (should (= (pilish--input-height-for-window-height 40) 4))))
+
+(ert-deftest pilish-test-fit-input-grows-and-shrinks-with-draft ()
+  "The input window shows one line when empty and every line of a draft."
+  (pilish-test-with-fit-layout nil
+    (let ((chrome (pilish-test--fit-chrome input-win)))
+      (pilish-fit-input-window input-win)
+      (should (= (window-total-height input-win) (1+ chrome)))
+      (pilish-test--set-draft input-buf "one\ntwo\nthree")
+      (pilish-fit-input-window input-win)
+      (should (= (window-body-height input-win) 3))
+      ;; A trailing newline puts point on a line of its own.
+      (pilish-test--set-draft input-buf "one\ntwo\nthree\n")
+      (pilish-fit-input-window input-win)
+      (should (= (window-body-height input-win) 4))
+      (pilish-test--set-draft input-buf "")
+      (pilish-fit-input-window input-win)
+      (should (= (window-total-height input-win) (1+ chrome))))))
+
+(ert-deftest pilish-test-fit-input-counts-wrapped-lines ()
+  "A long draft line counts each screen line it wraps to."
+  (pilish-test-with-fit-layout nil
+    (with-current-buffer input-buf (setq truncate-lines nil))
+    (pilish-test--set-draft
+     input-buf (make-string (* 2 (window-body-width input-win)) ?x))
+    (pilish-fit-input-window input-win)
+    (should (= (window-body-height input-win) 3))))
+
+(ert-deftest pilish-test-fit-input-stops-at-max-height ()
+  "A draft taller than the cap scrolls within the capped window."
+  (pilish-test-with-fit-layout nil
+    (let ((total (+ (window-total-height chat-win)
+                    (window-total-height input-win))))
+      (pilish-test--set-draft input-buf (make-string 200 ?\n))
+      (set-window-point input-win (with-current-buffer input-buf (point-max)))
+      (set-window-start input-win (with-current-buffer input-buf (- (point-max) 3)))
+      (pilish-fit-input-window input-win)
+      (should (= (window-total-height input-win) (round (* 0.3 total))))
+      ;; An overflowing draft keeps its scroll position.
+      (should (= (window-start input-win)
+                 (with-current-buffer input-buf (- (point-max) 3))))
+      (let ((pilish-input-window-max-height 5))
+        (pilish-fit-input-window input-win)
+        (should (= (window-total-height input-win) 5))))))
+
+(ert-deftest pilish-test-fit-input-shows-draft-top-after-growing ()
+  "Growing to fit the whole draft scrolls back to its first line."
+  (pilish-test-with-fit-layout nil
+    (pilish-test--set-draft input-buf "one\ntwo\nthree")
+    (set-window-point input-win (with-current-buffer input-buf (point-max)))
+    (set-window-start input-win
+                      (with-current-buffer input-buf
+                        (save-excursion (goto-char (point-max))
+                                        (line-beginning-position))))
+    (pilish-fit-input-window input-win)
+    (should (= (window-start input-win) 1))))
+
+(ert-deftest pilish-test-fit-input-moves-preserved-size ()
+  "A preserved input height follows the fitted height."
+  (pilish-test-with-fit-layout nil
+    (window-preserve-size input-win nil t)
+    (pilish-test--set-draft input-buf "one\ntwo\nthree\nfour")
+    (pilish-fit-input-window input-win)
+    (should (= (window-body-height input-win) 4))
+    (should (= (nth 2 (window-parameter input-win 'window-preserved-size))
+               (window-body-height input-win)))))
+
+(ert-deftest pilish-test-fit-input-ignores-other-settings-and-layouts ()
+  "Fitting leaves integer heights and inputs not below their chat alone."
+  (pilish-test-with-fit-layout nil
+    (pilish-test--set-draft input-buf "one\ntwo\nthree")
+    (let ((before (window-total-height input-win)))
+      (let ((pilish-input-window-height 10))
+        (pilish-fit-input-window input-win))
+      (should (= (window-total-height input-win) before))
+      (with-current-buffer input-buf (setq-local pilish--chat-buffer nil))
+      (pilish-fit-input-window input-win)
+      (should (= (window-total-height input-win) before)))))
+
+(ert-deftest pilish-test-fit-input-reopened-window-fits-draft ()
+  "An input window reopened below its chat, as on demand, fits its draft."
+  (pilish-test-with-fit-layout nil
+    (pilish-test--set-draft input-buf "one\ntwo")
+    (delete-window input-win)
+    (let ((reopened (pilish--split-input-below-chat (current-buffer) input-buf)))
+      (should (eq (window-buffer reopened) input-buf))
+      (should (= (window-body-height reopened) 2)))))
+
+(ert-deftest pilish-test-fit-input-resize-refits-only-changed-geometry ()
+  "Size changes refit only when the width or the pair height changed."
+  (pilish-test-with-fit-layout t
+    (pilish-fit-input-window input-win)
+    (let ((fitted (window-total-height input-win)))
+      ;; The fit's own resize leaves the geometry unchanged.
+      (pilish-test--set-draft input-buf "one\ntwo\nthree")
+      (pilish--maybe-rebalance-windows (selected-frame))
+      (should (= (window-total-height input-win) fitted))
+      ;; A changed width rewraps the draft, so it refits.
+      (set-window-parameter input-win 'pilish--fit-geometry '(1 . 1))
+      (pilish--maybe-rebalance-windows (selected-frame))
+      (should (= (window-body-height input-win) 3)))))
+
+(ert-deftest pilish-test-fit-input-edits-schedule-one-fit ()
+  "Edits in an input buffer schedule a single fit of its windows."
+  (pilish-test-with-fit-layout t
+    (with-current-buffer input-buf
+      (should (memq #'pilish--schedule-fit-input-windows
+                    after-change-functions))
+      (insert "one\n")
+      (let ((timer pilish--fit-input-timer))
+        (should (timerp timer))
+        (insert "two\nthree")
+        (should (eq pilish--fit-input-timer timer))
+        (timer-event-handler timer)
+        (should-not pilish--fit-input-timer)))
+    (should (= (window-body-height input-win) 3))))
+
 (ert-deftest pilish-test-repeating-timer-observation-uses-real-scheduling-and-cleanup ()
   "Observe both scheduling APIs once, retain cancelled allocations, and unwind."
   (let ((unrelated (run-at-time 3600 3600 #'ignore))
