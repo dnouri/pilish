@@ -11105,6 +11105,45 @@ When EXPANDED is non-nil, expand its preview before returning the overlay."
           (dolist (key '(:source :raw :display :emacs-path :shell-path :line))
             (should (equal (plist-get before key) (plist-get after key)))))))))
 
+(ert-deftest pilish-test-cooled-identical-tools-keep-independent-bounds ()
+  "Repeated tools retain separate cold ranges and file-target authority."
+  (with-temp-buffer
+    (pilish-chat-mode)
+    (dotimes (_ 2)
+      (pilish--display-tool-start "read" '(:path "/tmp/same.el"))
+      (pilish--display-tool-end
+       "read" '(:path "/tmp/same.el")
+       '((:type "text" :text "src/fallback.el")) nil nil))
+    (pilish--cool-completed-tool-blocks (pilish-test--all-tool-overlays))
+    (let (positions)
+      (goto-char (point-min))
+      (while (search-forward "src/fallback.el" nil t)
+        (push (match-beginning 0) positions))
+      (setq positions (nreverse positions))
+      (should (= 2 (length positions)))
+      (let ((cold-blocks
+             (mapcar (lambda (position)
+                       (goto-char position)
+                       (pilish--cold-tool-block-at-point))
+                     positions)))
+        (should (cl-every #'identity cold-blocks))
+        (should (= 2 (length (cl-delete-duplicates
+                              (mapcar (lambda (block) (plist-get block :bounds))
+                                      cold-blocks)
+                              :test #'equal))))
+        (let ((first-metadata (plist-get (car cold-blocks) :metadata))
+              (second-metadata (plist-get (cadr cold-blocks) :metadata)))
+          (should (equal first-metadata second-metadata))
+          (should-not (eq first-metadata second-metadata)))
+        (dolist (block cold-blocks)
+          (should (equal "/tmp/same.el"
+                         (plist-get (plist-get block :metadata) :path)))
+          (goto-char (car (plist-get block :bounds)))
+          (let ((target (pilish--file-target-at-point)))
+            (should (eq :tool (plist-get target :source)))
+            (should (equal (plist-get block :bounds)
+                           (plist-get target :bounds)))))))))
+
 (ert-deftest pilish-test-cooled-file-target-boundaries-do-not-bleed ()
   "Cold authority has hot half-open bounds and does not stick to new text."
   (with-temp-buffer

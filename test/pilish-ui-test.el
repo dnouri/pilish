@@ -2576,22 +2576,6 @@ Buffer is read-only with `inhibit-read-only' used for insertion.
                   (goto-char boundary)
                   (looking-at "Inserted at the boundary")))))))
 
-(ert-deftest pilish-test-in-hot-tail-p-respects-boundary ()
-  "Positions before the hot-tail marker are cold; marker and later are hot."
-  (with-temp-buffer
-    (pilish-chat-mode)
-    (let ((inhibit-read-only t))
-      (insert "You · 10:00\n===========\nFirst question\n\n"
-              "Assistant\n=========\nFirst answer\n\n"
-              "You · 10:05\n===========\nSecond question\n\n"
-              "Assistant\n=========\nSecond answer\n\n"
-              "You · 10:10\n===========\nThird question\n"))
-    (let ((pilish-hot-tail-turn-count 3))
-      (pilish--update-hot-tail-boundary)
-      (should-not (pilish--in-hot-tail-p (point-min)))
-      (should (pilish--in-hot-tail-p
-               (marker-position pilish--hot-tail-start))))))
-
 ;;; Executable Customization
 
 (ert-deftest pilish-test-check-pi-uses-executable ()

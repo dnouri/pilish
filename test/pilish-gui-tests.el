@@ -2513,18 +2513,19 @@ FAILURE permits an expected user error, whose native post hook may not run."
                                  (pilish--tool-block-overlays-in-region (point-min) (point-max)))))
               (should (= 1 (cl-count id blocks :key #'pilish--tool-block-tool-call-id :test #'equal)))
               (let ((block (cl-find id blocks :key #'pilish--tool-block-tool-call-id :test #'equal)))
-                (list block (copy-sequence (pilish--tool-block-nested-calls block)))))) ids))
+                (list block
+                      (copy-sequence (pilish--tool-block-nested-calls block))
+                      (copy-marker (overlay-start (pilish--tool-block-overlay block))))))) ids))
 
 (defun pilish-gui-test--large-cold-ranges ()
-  "Check released cold text and return its metadata order and bounds."
+  "Check released cold text and return its physical bounds."
   (let ((p (point-min)) ranges)
     (while (< p (point-max))
       (let* ((metadata (get-text-property p 'pilish-cold-tool-block))
              (end (next-single-property-change p 'pilish-cold-tool-block nil (point-max))))
         (when metadata
-          (should (integerp (plist-get metadata :order)))
           (should (stringp (plist-get metadata :tool-name)))
-          (push (list (plist-get metadata :order) p end) ranges)
+          (push (list p end) ranges)
           (dolist (property '(pilish-argument-locator pilish-argument-address pilish-disclosure-hit))
             (should-not (text-property-not-all p end property nil)))
           (let ((q p))
@@ -2555,7 +2556,9 @@ FAILURE permits an expected user error, whose native post hook may not run."
             (should-not (pilish--nested-call-argument-charge call)))
           (should-not (seq-some (lambda (fold) (eq (car-safe fold) 'argument))
                                (pilish--tool-block-folds block)))
-          (should (assq (pilish--tool-block-order block) ranges)))))))
+          (let ((start (marker-position (nth 2 handle))))
+            (should start)
+            (should (cl-find start ranges :key #'car))))))))
 
 (ert-deftest pilish-gui-test-large-arguments-scroll-and-cool ()
   "Large transcripts retain independent readers and release old display views."
@@ -2918,7 +2921,7 @@ FAILURE permits an expected user error, whose native post hook may not run."
                   (set-window-margins first 3 2) (set-window-margins second 4 3)
                   (should (>= (string-bytes (buffer-string)) 409600))
                   (pilish-gui-test--large-retention handles nil)
-                  (should (equal (mapcar #'car (pilish-gui-test--large-cold-ranges)) (number-sequence 0 178)))
+                  (should (= 179 (length (pilish-gui-test--large-cold-ranges))))
                   (should (= 33 (length (pilish--tool-block-overlays-in-region (point-min) (point-max)))))
                   (pilish-gui-test--large-goto "G1-VALUE-02-FIRST")
                   (pilish-gui-test--large-command (kbd "TAB") 'pilish-toggle-tool-section)
@@ -2963,7 +2966,7 @@ FAILURE permits an expected user error, whose native post hook may not run."
                       (should (string-match-p "G1-INDEPENDENT-REFRESH-MARKER" (buffer-string)))
                       (should-not (pilish--tool-block-folds (caar (pilish-gui-test--large-handles '("G1-hot-02")))))
                       (pilish-gui-test--large-retention (pilish-gui-test--large-handles ids) nil)
-                      (should (equal (mapcar #'car (pilish-gui-test--large-cold-ranges)) (number-sequence 0 179)))
+                      (should (= 180 (length (pilish-gui-test--large-cold-ranges))))
                       (should (= 32 (length (pilish--tool-block-overlays-in-region (point-min) (point-max)))))
                       (pilish-gui-test--large-evidence "observer-changed" (reverse pilish-gui-test--large-trace))
                       (let ((last-good (buffer-substring-no-properties (point-min) (point-max))))

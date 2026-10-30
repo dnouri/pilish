@@ -733,10 +733,6 @@ makes the hot region empty by moving the marker to `point-max'."
            (if (> seen count) nth-newest (point-min)))))
      (current-buffer))))
 
-(defun pilish--in-hot-tail-p (pos)
-  "Return non-nil when POS is inside the hot tail."
-  (>= pos (marker-position pilish--hot-tail-start)))
-
 ;;;; Chat Navigation
 
 (defun pilish--find-you-heading (search-fn)

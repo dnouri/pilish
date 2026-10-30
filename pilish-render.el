@@ -6632,17 +6632,15 @@ Exclude the wrapper newline immediately before the closing fence."
 HEADER-END is the current absolute end of its header.  COLLAPSED is non-nil
 when the visible body is a mapped preview.  The result deliberately excludes
 buttons, full content, markers, and absolute buffer positions."
-  (let ((record (pilish--tool-block-from-overlay overlay)))
-    (list :order (and record (pilish--tool-block-order record))
-          :tool-name (overlay-get overlay 'pilish-tool-name)
-          :path (overlay-get overlay 'pilish-tool-path)
-          :raw-path (overlay-get overlay 'pilish-tool-raw-path)
-          :path-error (overlay-get overlay 'pilish-tool-path-error)
-          :offset (overlay-get overlay 'pilish-tool-offset)
-          ;; Only collapsed previews need the small visible-line map.
-          :line-map (and collapsed
-                         (overlay-get overlay 'pilish-line-map))
-          :header-length (- header-end (overlay-start overlay)))))
+  (list :tool-name (overlay-get overlay 'pilish-tool-name)
+        :path (overlay-get overlay 'pilish-tool-path)
+        :raw-path (overlay-get overlay 'pilish-tool-raw-path)
+        :path-error (overlay-get overlay 'pilish-tool-path-error)
+        :offset (overlay-get overlay 'pilish-tool-offset)
+        ;; Only collapsed previews need the small visible-line map.
+        :line-map (and collapsed
+                       (overlay-get overlay 'pilish-line-map))
+        :header-length (- header-end (overlay-start overlay))))
 
 (defun pilish--compound-tool-cold-projection (overlay)
   "Project OVERLAY's displayed body to language-free cold text.
