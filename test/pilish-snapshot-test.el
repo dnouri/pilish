@@ -376,19 +376,19 @@
           (pilish-test--kill-live-buffers snapshot second))))))
 
 (ert-deftest pilish-test-snapshot-details-survive-source-death ()
-  "Every saved block opens detached Help without timing, RPC, or source retention."
+  "Saved blocks open detached Help with recorded tool time, but no live timing or RPC."
   (pilish-test--with-snapshot-files
     (pilish-test--snapshot-write
      child (list header
                  '(:type "message" :id "reply" :parentId :null
                    :message (:role "assistant" :timestamp 0 :provider "saved"
-                             :model "historical" :usage (:input 0 :output 7)
+                             :model "historical" :usage (:input 0 :output 7) :durationMs 9000
                              :content [(:type "text" :text "Saved inspected answer")
                                        (:type "thinking" :thinking "Saved private thinking")
                                        (:type "toolCall" :id "A" :name "bash"
                                         :arguments (:command "printf '\\[find-file]' %"))]))
                  '(:type "message" :id "result" :parentId "reply"
-                   :message (:role "toolResult" :toolCallId "A" :timestamp 0
+                   :message (:role "toolResult" :toolCallId "A" :timestamp 0 :durationMs 0
                              :content [(:type "text" :text "Saved private output")]))))
     (save-window-excursion
       (let (snapshot reports)
@@ -407,7 +407,10 @@
                              (lambda (fmt &rest args) (when fmt (setq shown (apply #'format fmt args))))))
                     (call-interactively (key-binding (kbd "C-h ."))))
                   (should (equal shown expected))
-                  (should-not (string-match-p "Stream:\\|Execution time:\\|Saved inspected\\|private" expected))
+                  (should-not (string-match-p "Stream:\\|Saved inspected\\|private" expected))
+                  (if (equal text "Saved private output")
+                      (should (string-suffix-p "\nExecution time: 0.0s" expected))
+                    (should-not (string-match-p "Execution time:" expected)))
                   (call-interactively #'pilish-describe-reply)
                   (set-buffer (window-buffer (selected-window)))
                   (should (derived-mode-p 'help-mode))
@@ -1686,8 +1689,8 @@
             (should (string-match-p "Independent peer review" (buffer-string))))
         (pilish-test--kill-live-buffers descendant snapshot parent)))))
 
-(defun pilish-test--snapshot-tool-entries (header output)
-  "Return HEADER plus one bash tool call and result whose output is OUTPUT."
+(defun pilish-test--snapshot-tool-entries (header output &optional milliseconds)
+  "Return HEADER and a bash result with OUTPUT and optional recorded MILLISECONDS."
   (list header
         (pilish-test--snapshot-message "user" nil "Run a tool")
         (list :type "message" :id "assistant" :parentId "user"
@@ -1696,9 +1699,11 @@
                                                     :arguments (list :command "emit output")))
                              :timestamp 0))
         (list :type "message" :id "result" :parentId "assistant"
-              :message (list :role "toolResult" :toolCallId "call_1"
-                             :content (vector (list :type "text" :text output))
-                             :details nil :timestamp 0))))
+              :message (append
+                        (list :role "toolResult" :toolCallId "call_1"
+                              :content (vector (list :type "text" :text output))
+                              :details nil :timestamp 0)
+                        (when milliseconds (list :durationMs milliseconds))))))
 
 (defun pilish-test--snapshot-hidden-stage-names ()
   "Return live buffer names belonging to hidden snapshot stages."
@@ -1829,6 +1834,44 @@
                 (should (equal (with-current-buffer input (buffer-string)) "Unsent parent draft"))
                 (should (eq (pilish--find-session directory) parent))))
           (pilish-test--kill-live-buffers replacement snapshot))))))
+
+(ert-deftest pilish-test-snapshot-refresh-preserves-and-replaces-recorded-tool-time ()
+  "Unchanged and failed refreshes keep time; a changed saved value replaces it."
+  (pilish-test--with-snapshot-files
+    (let ((entries (pilish-test--snapshot-tool-entries header "Timed saved output" 0)))
+      (pilish-test--snapshot-write child entries)
+      (save-window-excursion
+        (let (snapshot replacement)
+          (unwind-protect
+              (cl-letf (((symbol-function 'pilish--tool-block-start-execution)
+                         (lambda (&rest _) (ert-fail "Snapshot armed live timing"))))
+                (setq snapshot (pilish-open-subagent-snapshot target))
+                (goto-char (point-min))
+                (search-forward "Timed saved output")
+                (let* ((details (pilish--details-at-point))
+                       (overlay (car (pilish--tool-block-overlays-in-region (point-min) (point-max))))
+                       (timing (pilish--tool-block-timing (pilish--tool-block-from-overlay overlay))))
+                  (should (string-suffix-p "\nExecution time: 0.0s" details))
+                  (should (= (pilish--recorded-tool-time-milliseconds timing) 0))
+                  (should (eq (pilish-test--snapshot-refresh "Saved conversation unchanged") snapshot))
+                  (should (eq (pilish--details-at-point) details))
+                  (should (eq (pilish--tool-block-timing (pilish--tool-block-from-overlay overlay)) timing))
+                  (pilish-test--snapshot-write child (pilish-test--snapshot-tool-entries
+                                                     header "Timed saved output" 1300))
+                  (setq replacement (pilish-test--snapshot-refresh "Saved conversation updated"))
+                  (should-not (buffer-live-p snapshot))
+                  (with-current-buffer replacement
+                    (goto-char (point-min))
+                    (search-forward "Timed saved output")
+                    (let ((updated (pilish--details-at-point)))
+                      (should (string-suffix-p "\nExecution time: 1.3s" updated))
+                      (should-not (string-match-p "Stream:" updated))
+                      (pilish-test--snapshot-write
+                       child (list (plist-put (copy-sequence header) :id "wrong")))
+                      (should-error (pilish-snapshot-refresh) :type 'user-error)
+                      (should (eq (pilish--details-at-point) updated))
+                      (should pilish--snapshot-refresh-note)))))
+            (pilish-test--kill-live-buffers replacement snapshot)))))))
 
 (ert-deftest pilish-test-snapshot-refresh-neutral-target ()
   (pilish-test--with-saved-conversation-files

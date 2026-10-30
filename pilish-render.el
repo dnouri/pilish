@@ -1611,10 +1611,10 @@ which asks upfront before any buffers are touched."
   "Handle EVENT for display purposes.
 Updates buffer-local state and renders display updates."
   ;; Sample before state updates or rendering, never on deltas or remote
-  ;; user/toolResult lifecycle events.  Both endpoints use this local clock.
+  ;; user/toolResult lifecycle events.  Tool starts permit live estimates;
+  ;; only assistant stream timing uses two local endpoints.
   (let ((boundary-time
-         (when (or (member (plist-get event :type)
-                           '("tool_execution_start" "tool_execution_end"))
+         (when (or (equal (plist-get event :type) "tool_execution_start")
                    (and (member (plist-get event :type) '("message_start" "message_end"))
                         (equal (plist-get (plist-get event :message) :role) "assistant")))
            (float-time (current-time)))))
@@ -1789,7 +1789,7 @@ Updates buffer-local state and renders display updates."
          (unless block
            (setq block (pilish--display-tool-start
                         (plist-get event :toolName) args tool-call-id)))
-         (pilish--tool-block-set-execution-start block boundary-time args)
+         (pilish--tool-block-start-execution block boundary-time args)
          (pilish--argument-observe
           block nil (plist-get event :toolName) args)
          (when (equal (plist-get event :toolName) "codemode")
@@ -1820,10 +1820,7 @@ Updates buffer-local state and renders display updates."
                              (remhash tool-call-id pilish--tool-args-cache)))))
                     (if (and block (pilish--tool-block-compound-p block))
                         (pilish--tool-block-args block)
-                      cached)))
-            (duration (pilish--details-elapsed
-                       (and block (pilish--tool-block-execution-start block))
-                       boundary-time)))
+                      cached))))
        ;; The authoritative result supersedes any pending preview; discard
        ;; it first so completion renders exactly once.
        (pilish--discard-pending-tool-update tool-call-id)
@@ -1832,9 +1829,11 @@ Updates buffer-local state and renders display updates."
                                  (plist-get result :content)
                                  (plist-get result :details)
                                  (plist-get event :isError)
-                                 block)
+                                 block
+                                 (pilish--recorded-tool-time
+                                  (plist-get event :durationMs)))
        (when block
-         (pilish--complete-tool-details block (plist-get event :toolName) args duration))))
+         (pilish--complete-tool-details block (plist-get event :toolName) args))))
     ("tool_execution_update"
      (let* ((tool-call-id (plist-get event :toolCallId))
             (partial-result (plist-get event :partialResult))
@@ -1973,6 +1972,7 @@ buffer and render state stay consistent.  Pending deferred cooling is
 invalidated first.  Tree-sitter overlays are left alone."
   (pilish--cancel-tool-update-flush)
   (pilish--cancel-stream-delta-flush)
+  (pilish--clear-live-details-state)
   (pilish--reset-thinking-state)
   (pilish--release-nested-tool-state)
   (remove-overlays (point-min) (point-max) 'pilish-tool-block t)
@@ -1987,11 +1987,33 @@ invalidated first.  Tree-sitter overlays are left alone."
     (clrhash pilish--tool-args-cache))
   (when pilish--live-tool-blocks
     (clrhash pilish--live-tool-blocks))
-  (pilish--reset-toolcall-streams)
-  (pilish--clear-live-details-state))
+  (pilish--reset-toolcall-streams))
+
+(cl-defstruct (pilish--running-tool-time
+               (:constructor pilish--make-running-tool-time (started-at)))
+  "A local start in seconds, usable only for live execution estimates."
+  (started-at nil :read-only t))
+
+(cl-defstruct (pilish--recorded-tool-time
+               (:constructor pilish--make-recorded-tool-time (milliseconds)))
+  "Pi's authoritative nonnegative integer execution duration in milliseconds.
+Construct through `pilish--recorded-tool-time' at the live or saved boundary."
+  (milliseconds nil :read-only t))
+
+(defun pilish--recorded-tool-time (milliseconds)
+  "Normalize optional wire or saved MILLISECONDS to recorded time or `untimed'.
+Only nonnegative integers, including zero, are recorded durations.  Missing,
+null and malformed values are terminally untimed, never local estimates."
+  (if (and (integerp milliseconds) (>= milliseconds 0))
+      (pilish--make-recorded-tool-time milliseconds)
+    'untimed))
 
 (cl-defstruct (pilish--tool-block
                (:constructor pilish--make-tool-block))
+  "One root tool's rendering and execution state.
+TIMING is nil before any execution boundary, a `pilish--running-tool-time'
+for live estimates, or terminal `pilish--recorded-tool-time' or `untimed'.
+Untimed completion never falls back to the local running clock."
   tool-call-id
   overlay
   header-end
@@ -2004,7 +2026,7 @@ invalidated first.  Tree-sitter overlays are left alone."
   line-map
   last-tail
   image-previews
-  execution-start
+  timing
   details
   compound-p
   args
@@ -3667,7 +3689,7 @@ idempotent release precedes cold capture, including for output-only blocks."
 (defun pilish--tool-block-execution-backed-p (block)
   "Return non-nil when BLOCK represents execution rather than a pure preview."
   (and block
-       (or (pilish--tool-block-execution-start block)
+       (or (pilish--tool-block-timing block)
            (and (pilish--tool-block-compound-p block)
                 (or (pilish--tool-block-result block)
                     (pilish--tool-block-nested-calls block))))))
@@ -3807,10 +3829,18 @@ needed for compatibility, the current non-keyed pending block."
       (pilish--tool-block-apply-details block)))
   block)
 
-(defun pilish--tool-block-set-execution-start (block time args)
-  "Store execution-start TIME and authoritative ARGS on BLOCK, not its preview."
-  (setf (pilish--tool-block-execution-start block) time
-        (pilish--tool-block-args block) args))
+(defun pilish--tool-block-start-execution (block time args)
+  "Start BLOCK's live timing once at local seconds TIME with authoritative ARGS.
+Repeated starts never reset the estimate or reopen terminal timing."
+  (unless (pilish--tool-block-timing block)
+    (setf (pilish--tool-block-timing block)
+          (pilish--make-running-tool-time time)))
+  (setf (pilish--tool-block-args block) args))
+
+(defun pilish--tool-block-retire-running-time (block)
+  "Retire BLOCK's running estimate as `untimed', preserving recorded timing."
+  (when (pilish--running-tool-time-p (pilish--tool-block-timing block))
+    (setf (pilish--tool-block-timing block) 'untimed)))
 
 (defun pilish--tool-block-apply-details (block)
   "Project BLOCK's completed details onto its current owned text."
@@ -3971,8 +4001,18 @@ renders with the normal absent-path placeholder."
                       (length (split-string normalized "\n" nil)))
              (unless (string-empty-p provenance) (concat "\n" provenance))))))
 
-(defun pilish--format-tool-details (tool-name args &optional result duration)
-  "Return literal details for TOOL-NAME, ARGS, saved RESULT and live DURATION."
+(defun pilish--format-recorded-tool-time (timing)
+  "Format recorded TIMING using Pi's seconds, minutes and hours convention."
+  (let* ((milliseconds (pilish--recorded-tool-time-milliseconds timing))
+         (seconds (/ milliseconds 1000))
+         (minutes (/ seconds 60)))
+    (cond
+     ((< milliseconds 60000) (format "%.1fs" (/ milliseconds 1000.0)))
+     ((< minutes 60) (format "%dm %ds" minutes (% seconds 60)))
+     (t (format "%dh %dm %ds" (/ minutes 60) (% minutes 60) (% seconds 60))))))
+
+(defun pilish--format-tool-details (tool-name args &optional result timing)
+  "Return literal details for TOOL-NAME, ARGS, saved RESULT and recorded TIMING."
   (let* ((title (if (member tool-name '("bash" "read" "write" "edit"))
                     (capitalize tool-name)
                   (pilish--tool-display-value-string tool-name "Tool")))
@@ -3993,8 +4033,9 @@ renders with the normal absent-path placeholder."
                               (pilish--escape-control-chars-for-display
                                (string-trim (replace-regexp-in-string "[ \t\n\r\f]+" " " hint)))
                               80)))
-             (when (and (numberp duration) (> duration 0))
-               (format "\nExecution time: %.1f s" duration))))))
+             (when (pilish--recorded-tool-time-p timing)
+               (concat "\nExecution time: "
+                       (pilish--format-recorded-tool-time timing)))))))
 
 (defun pilish--fontify-and-restore-tool-properties (function start end &rest args)
   "Call FUNCTION with START, END and ARGS, then repair tool properties.
@@ -4098,18 +4139,17 @@ have no details."
 (defun pilish--clear-live-details-state ()
   "Clear unfinished measurements and pending result associations."
   (setq pilish--assistant-details-clock nil)
-  (when pilish--live-tool-blocks
-    (maphash (lambda (_id block)
-               (setf (pilish--tool-block-execution-start block) nil))
-             pilish--live-tool-blocks))
+  (dolist (block (pilish--all-live-tool-blocks))
+    (pilish--tool-block-retire-running-time block))
   (when pilish--pending-tool-details
     (clrhash pilish--pending-tool-details)))
 
-(defun pilish--complete-tool-details (block tool-name args duration)
-  "Complete BLOCK's TOOL-NAME and ARGS details with live DURATION.
+(defun pilish--complete-tool-details (block tool-name args)
+  "Complete BLOCK's TOOL-NAME and ARGS details with its recorded timing.
 Await its saved result for a timestamp."
   (setf (pilish--tool-block-details block)
-        (pilish--format-tool-details tool-name args nil duration))
+        (pilish--format-tool-details
+         tool-name args nil (pilish--tool-block-timing block)))
   (pilish--tool-block-apply-details block)
   (unless pilish--pending-tool-details
     (setq pilish--pending-tool-details
@@ -4498,9 +4538,8 @@ until an authoritative tool execution/history event supplies it."
               (ov (pilish--tool-block-overlay block)))
     (when-let* ((end-marker (pilish--tool-block-end-marker block)))
       (set-marker-insertion-type end-marker nil))
-    ;; Forced finalization is not an observed execution end.  Only the event
-    ;; handler may calculate a duration, before this boundary is discarded.
-    (setf (pilish--tool-block-execution-start block) nil)
+    ;; Forced finalization never turns a local estimate into a measurement.
+    (pilish--tool-block-retire-running-time block)
     (when (pilish--argument-settle
            block nil (overlay-get ov 'pilish-tool-name)
            (list :result-present-p nil :is-error nil :details nil))
@@ -6039,18 +6078,23 @@ contains prepared previews, and :image-content-p reports image presence."
           :offset (and (equal tool-name "read") (pilish--tool-arg-get args :offset)))))
 
 (defun pilish--display-tool-end
-    (tool-name args content details is-error &optional block)
+    (tool-name args content details is-error &optional block timing)
   "Display result for TOOL-NAME and finalize BLOCK.
 ARGS contains tool arguments, CONTENT is a list of content blocks.
 DETAILS contains tool-specific data (e.g., a diff for the edit tool);
 for generic tools, non-nil DETAILS are rendered below the content.
-IS-ERROR indicates failure.
+IS-ERROR indicates failure.  TIMING is normalized recorded time or `untimed';
+omitting it settles without a measurement, never with local elapsed time.
 When BLOCK is nil, fall back to the current compatibility tool block and,
 if none exists, render the result at point without a live overlay."
   (let* ((block (or block (pilish--current-tool-block)))
          (is-error (eq t is-error))
-         (labels (pilish--saved-conversation-labels tool-name content details))
+         (labels nil)
          (inhibit-read-only t))
+    ;; Settle before any fallible presentation work or finalization.
+    (when block
+      (setf (pilish--tool-block-timing block) (or timing 'untimed)))
+    (setq labels (pilish--saved-conversation-labels tool-name content details))
     (when block
       (setf (pilish--tool-block-saved-labels block) labels)
       (when (pilish--argument-settle block nil tool-name
@@ -9696,12 +9740,13 @@ and :arguments.  RESULT is the matching toolResult message, or nil."
          (plist-get result :content)
          (plist-get result :details)
          (plist-get result :isError)
-         block)
+         block (pilish--recorded-tool-time (plist-get result :durationMs)))
       (pilish--tool-overlay-finalize 'pilish-tool-block block)
       (let ((inhibit-read-only t))
         (save-excursion (goto-char (point-max)) (insert "\n"))))
     (setf (pilish--tool-block-details block)
-          (pilish--format-tool-details tool-name args result))
+          (pilish--format-tool-details
+           tool-name args result (pilish--tool-block-timing block)))
     (pilish--tool-block-apply-details block)))
 
 (defun pilish--render-history-assistant-content (message results)

@@ -2573,7 +2573,7 @@ Returns nil if MS is nil."
 (defconst pilish--pi-package "@earendil-works/pi-coding-agent"
   "Npm package name for the pi CLI supported by Pilish.")
 
-(defconst pilish--minimum-pi-version "1.0.0"
+(defconst pilish--minimum-pi-version "1.1.0"
   "Minimum supported pi CLI version.")
 
 (defun pilish--pi-install-command ()

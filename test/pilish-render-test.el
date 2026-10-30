@@ -527,11 +527,13 @@
    `(:type "tool_execution_start" :toolCallId ,id :toolName "bash"
      :args (:command "same command"))))
 
-(defun pilish-test--hover-tool-end (id &optional output)
-  "Send an execution end for ID with OUTPUT, without a saved timestamp."
+(defun pilish-test--hover-tool-end (id &optional output milliseconds)
+  "Send an execution end for ID with OUTPUT and optional recorded MILLISECONDS."
   (pilish--handle-display-event
-   `(:type "tool_execution_end" :toolCallId ,id :toolName "bash"
-     :result (:content [(:type "text" :text ,(or output (concat "Output " id)))]))))
+   (append
+    `(:type "tool_execution_end" :toolCallId ,id :toolName "bash"
+      :result (:content [(:type "text" :text ,(or output (concat "Output " id)))]))
+    (when milliseconds (list :durationMs milliseconds)))))
 
 (ert-deftest pilish-test-details-stream-clock-is-message-local-and-before-rendering ()
   "12.4 seconds and 386 final output tokens give ~31, excluding rendering."
@@ -541,7 +543,8 @@
     (let* ((now 10)
            (message (pilish-test--hover-message
                      [(:type "thinking" :thinking "Measured reasoning")
-                      (:type "text" :text "Measured reply")]))
+                      (:type "text" :text "Measured reply")]
+                     :durationMs 987654321))
            (original-state-update (symbol-function 'pilish--update-state-from-event)))
       (cl-letf (((symbol-function 'current-time) (lambda () (seconds-to-time now)))
                 ((symbol-function 'pilish--update-state-from-event)
@@ -583,8 +586,8 @@
           (should (string-suffix-p "Stream: 12.4 s · ~31 output tokens/s"
                                    (get-text-property (pilish-test--hover-pos "Measured reply") 'pilish-details))))))))
 
-(ert-deftest pilish-test-details-tool-clocks-exclude-preview-and-late-results ()
-  "Interleaved A10 B11 B12 A15 belongs to call IDs, including late timestamps."
+(ert-deftest pilish-test-details-tool-recorded-times-survive-replay-and-cooling ()
+  "Recorded durations belong to call IDs, not local boundaries or late timestamps."
   (let ((pilish-bash-preview-lines 2))
     (with-temp-buffer
       (pilish-chat-mode)
@@ -596,9 +599,9 @@
                         (:type "toolCall" :id "B" :name "bash"
                          :arguments (:command "same command"))]))
              (a '(:role "toolResult" :toolCallId "A" :timestamp 1784817180000
-                  :content [(:type "text" :text "A1\nA2\nA3\nA4")]))
+                  :durationMs 2700 :content [(:type "text" :text "A1\nA2\nA3\nA4")]))
              (b '(:role "toolResult" :toolCallId "B" :timestamp 1784817240000
-                  :content [(:type "text" :text "Output B")]))
+                  :durationMs 800 :content [(:type "text" :text "Output B")]))
              (canonical (vector message a b))
              (snapshot (copy-tree canonical t)))
         (cl-letf (((symbol-function 'current-time) (lambda () (seconds-to-time now))))
@@ -612,14 +615,14 @@
           (setq now 11)
           (pilish-test--hover-tool-start "B")
           (setq now 12)
-          (pilish-test--hover-tool-end "B")
+          (pilish-test--hover-tool-end "B" nil 800)
           (setq now 15)
-          (pilish-test--hover-tool-end "A" "A1\nA2\nA3\nA4")
+          (pilish-test--hover-tool-end "A" "A1\nA2\nA3\nA4" 2700)
           (should (= 0 (hash-table-count pilish--live-tool-blocks)))
           (should (equal (pilish-test--details "A1")
-                         "Bash\nsame command\nExecution time: 5.0 s"))
+                         "Bash\nsame command\nExecution time: 2.7s"))
           (should (equal (pilish-test--details "Output B")
-                         "Bash\nsame command\nExecution time: 1.0 s"))
+                         "Bash\nsame command\nExecution time: 0.8s"))
           (setq now 100)
           (dolist (result (list a b))
             (pilish--handle-display-event `(:type "message_start" :message ,result))
@@ -628,11 +631,11 @@
           (let ((help-a (concat "Bash · "
                                 (pilish--format-message-timestamp
                                  (pilish--ms-to-time 1784817180000))
-                                "\nsame command\nExecution time: 5.0 s"))
+                                "\nsame command\nExecution time: 2.7s"))
                 (help-b (concat "Bash · "
                                 (pilish--format-message-timestamp
                                  (pilish--ms-to-time 1784817240000))
-                                "\nsame command\nExecution time: 1.0 s")))
+                                "\nsame command\nExecution time: 0.8s")))
             (should (equal (pilish-test--details "A1") help-a))
             (should (equal (pilish-test--details "Output B") help-b))
             (goto-char (pilish-test--hover-pos "A1"))
@@ -648,10 +651,8 @@
             (pilish--display-session-history canonical)
             (should (equal (get-text-property (pilish-test--hover-pos "Before tools") 'pilish-details)
                            (pilish-test--hover-reply-help)))
-            (should (equal (pilish-test--details "A1")
-                           (string-remove-suffix "\nExecution time: 5.0 s" help-a)))
-            (should (equal (pilish-test--details "Output B")
-                           (string-remove-suffix "\nExecution time: 1.0 s" help-b)))))
+            (should (equal (pilish-test--details "A1") help-a))
+            (should (equal (pilish-test--details "Output B") help-b))))
         (should (equal canonical snapshot))))))
 
 (ert-deftest pilish-test-details-stream-usage-and-invalid-boundaries ()
@@ -803,19 +804,141 @@
   "An error final message without thinking_end must not label thinking Reply."
   (pilish-test--hover-interrupted-thinking "error"))
 
-(ert-deftest pilish-test-details-tool-missing-and-nonpositive-boundaries ()
-  "Tool execution without both ordered local boundaries never invents time."
-  (dolist (start '(nil 12 13))
+(ert-deftest pilish-test-details-tool-recorded-time-without-start ()
+  "Any root tool can expose recorded time, including zero, without a local start."
+  (dolist (tool '("bash" "read" "edit" "write" "subagent" "codemode" "custom_tool"))
+    (dolist (case '((0 "0.0s") (1400 "1.4s") (59999 "60.0s")
+                    (60000 "1m 0s") (61001 "1m 1s")
+                    (3600000 "1h 0m 0s") (3661001 "1h 1m 1s")))
+      (ert-info ((format "%s duration %S" tool (car case)))
+        (with-temp-buffer
+          (pilish-chat-mode)
+          (pilish--handle-display-event
+           `(:type "tool_execution_end" :toolCallId "A" :toolName ,tool
+             :durationMs ,(car case)
+             :result (:content [(:type "text" :text "Timed output")])))
+          (let* ((overlay (car (pilish--tool-block-overlays-in-region (point-min) (point-max))))
+                 (block (pilish--tool-block-from-overlay overlay))
+                 (timing (pilish--tool-block-timing block))
+                 (expected (concat (if (member tool '("bash" "read" "edit" "write"))
+                                       (capitalize tool) tool)
+                                   "\nExecution time: " (cadr case))))
+            (should (pilish--recorded-tool-time-p timing))
+            (should (= (pilish--recorded-tool-time-milliseconds timing) (car case)))
+            (should (equal (pilish-test--details "Timed output") expected))
+            (should (equal (pilish-test--hover-displayed-help "Timed output") expected))
+            (should (pilish--tool-block-execution-backed-p block))
+            (pilish--tool-block-finalize block 'pilish-tool-block)
+            (should (eq (pilish--tool-block-timing block) timing))))))))
+
+(ert-deftest pilish-test-details-tool-invalid-recorded-time-never-falls-back ()
+  "Invalid optional time retires an unchanged running start without local fallback."
+  (dolist (value '(absent nil :null :false t :true -1 1.0 1.5 "12" [] (:durationMs 12)))
+    (ert-info ((format "Invalid duration %S" value))
+      (with-temp-buffer
+        (pilish-chat-mode)
+        (let ((now 10))
+          (cl-letf (((symbol-function 'current-time) (lambda () (seconds-to-time now))))
+            (pilish-test--hover-tool-start "A")
+            (let* ((block (pilish--tool-block-get "A"))
+                   (running (pilish--tool-block-timing block)))
+              (should (pilish--running-tool-time-p running))
+              (should (= (pilish--running-tool-time-started-at running) 10))
+              (setq now 20)
+              (pilish-test--hover-tool-start "A")
+              (should (eq (pilish--tool-block-timing block) running))
+              (setq now 30)
+              (pilish--handle-display-event
+               (append
+                '(:type "tool_execution_end" :toolCallId "A" :toolName "bash"
+                  :timestamp 999999 :result (:durationMs 9000
+                   :content [(:type "text" :text "Took 9 seconds")]
+                   :details (:durationMs 9000 :calls [(:id "child" :name "bash"
+                                                      :status "ok" :durationMs 9000)])))
+                (unless (eq value 'absent) (list :durationMs value))))
+              (should (eq (pilish--tool-block-timing block) 'untimed))
+              (should (equal (pilish-test--hover-displayed-help "Took 9 seconds")
+                             "Bash\nsame command"))
+              (pilish--tool-block-start-execution block 100 nil)
+              (should (eq (pilish--tool-block-timing block) 'untimed)))))))))
+
+(ert-deftest pilish-test-details-tool-forced-finalization-is-untimed ()
+  "Forced finalization retires a live estimate without inventing completed details."
+  (with-temp-buffer
+    (pilish-chat-mode)
+    (pilish-test--hover-tool-start "A")
+    (let* ((block (pilish--tool-block-get "A"))
+           (overlay (pilish--tool-block-overlay block)))
+      (should (pilish--running-tool-time-p (pilish--tool-block-timing block)))
+      (pilish--tool-block-finalize block 'pilish-tool-block-error)
+      (should (eq (pilish--tool-block-timing block) 'untimed))
+      (goto-char (overlay-start overlay))
+      (should-not (pilish--details-at-point))
+      (should-error (pilish-describe-reply) :type 'user-error)
+      (pilish--tool-block-finalize block 'pilish-tool-block-error)
+      (should (eq (pilish--tool-block-timing block) 'untimed)))))
+
+(ert-deftest pilish-test-details-tool-time-settles-before-fallible-presentation ()
+  "Even failed rendering leaves a recorded or untimed terminal value, not a clock."
+  (dolist (value '(0 nil))
     (with-temp-buffer
       (pilish-chat-mode)
-      (let ((now (or start 10)))
-        (cl-letf (((symbol-function 'current-time) (lambda () (seconds-to-time now))))
-          (pilish--handle-display-event '(:type "agent_start"))
-          (when start (pilish-test--hover-tool-start "A"))
-          (setq now 12)
-          (pilish-test--hover-tool-end "A")))
-      (should (equal (pilish-test--details "Output A")
-                     (if start "Bash\nsame command" "Bash"))))))
+      (pilish-test--hover-tool-start "A")
+      (let ((block (pilish--tool-block-get "A")))
+        (cl-letf (((symbol-function 'pilish--saved-conversation-labels)
+                   (lambda (&rest _)
+                     (if value
+                         (should (= (pilish--recorded-tool-time-milliseconds
+                                     (pilish--tool-block-timing block)) value))
+                       (should (eq (pilish--tool-block-timing block) 'untimed)))
+                     (error "Expected presentation failure"))))
+          (should-error (pilish-test--hover-tool-end "A" nil value)))
+        (let ((timing (pilish--tool-block-timing block)))
+          (pilish--tool-block-finalize block 'pilish-tool-block-error)
+          (should (eq (pilish--tool-block-timing block) timing)))))))
+
+(ert-deftest pilish-test-details-history-tool-time-uses-only-saved-top-level-value ()
+  "Saved tools normalize optional recorded time without ever starting live timing."
+  (dolist (case '((0 "\nExecution time: 0.0s") (2400 "\nExecution time: 2.4s")
+                  (absent "") (nil "") (:null "") (:false "") (t "")
+                  (-1 "") (1.0 "") (1.5 "") ("12" "") ([] "")))
+    (ert-info ((format "Saved duration %S" (car case)))
+      (with-temp-buffer
+        (pilish-chat-mode)
+        (let* ((value (car case))
+               (result (append
+                        '(:role "toolResult" :toolCallId "A" :timestamp 999999
+                          :content [(:type "text" :text "Saved timed output")]
+                          :details (:durationMs 9000)
+                          :nestedCalls (:complete t :calls [(:id "child" :name "bash"
+                                                            :status "ok" :durationMs 9000)]))
+                        (unless (eq value 'absent) (list :durationMs value))))
+               (messages (vector
+                          (pilish-test--hover-message
+                           [(:type "text" :text "Saved timed reply")
+                            (:type "toolCall" :id "A" :name "bash" :arguments (:command "ls"))]
+                           :durationMs 9000)
+                          result)))
+          (cl-letf (((symbol-function 'pilish--tool-block-start-execution)
+                     (lambda (&rest _) (ert-fail "History armed live timing"))))
+            (pilish--display-session-history messages))
+          (let* ((overlay (car (pilish--tool-block-overlays-in-region (point-min) (point-max))))
+                 (timing (pilish--tool-block-timing (pilish--tool-block-from-overlay overlay))))
+            (if (member value '(0 2400))
+                (should (= (pilish--recorded-tool-time-milliseconds timing) value))
+              (should (eq timing 'untimed))))
+          (should (equal (pilish-test--details "Saved timed output")
+                         (concat "Bash · "
+                                 (pilish--format-message-timestamp (pilish--ms-to-time 999999))
+                                 "\nls" (cadr case))))
+          (should (equal (pilish-test--details "Saved timed reply")
+                         (pilish-test--hover-reply-help)))
+          (should-not pilish--assistant-details-clock)
+          (should (= (hash-table-count pilish--live-tool-blocks) 0))
+          (should-not (and pilish--nested-tool-owners
+                           (> (hash-table-count pilish--nested-tool-owners) 0)))
+          (should-not (and pilish--pending-tool-details
+                           (> (hash-table-count pilish--pending-tool-details) 0))))))))
 
 (ert-deftest pilish-test-details-identical-thinking-finalization-keeps-properties ()
   "The unchanged-text thinking-end fast path still acquires final provenance."
@@ -878,15 +1001,17 @@
           (with-temp-buffer
             (pilish-chat-mode)
             (setq pilish--process process)
-            (let ((now 10))
+            (let ((now 10) completed-block running-block)
               (cl-letf (((symbol-function 'current-time) (lambda () (seconds-to-time now))))
                 (pilish--handle-display-event '(:type "agent_start"))
                 (pilish--handle-display-event
                  '(:type "message_start" :message (:role "assistant")))
                 (pilish-test--hover-tool-start "A")
                 (pilish-test--hover-tool-start "B")
-                (setq now 12)
-                (pilish-test--hover-tool-end "A")
+                (setq completed-block (pilish--tool-block-get "A")
+                      running-block (pilish--tool-block-get "B")
+                      now 12)
+                (pilish-test--hover-tool-end "A" nil 1400)
                 (should (= 1 (hash-table-count pilish--pending-tool-details)))
                 (pcase cleanup
                   ('abort
@@ -900,6 +1025,9 @@
                   ('clear (pilish--clear-render-artifacts)))
                 (should-not pilish--assistant-details-clock)
                 (should (= 0 (hash-table-count pilish--pending-tool-details)))
+                (should (eq (pilish--tool-block-timing running-block) 'untimed))
+                (should (= (pilish--recorded-tool-time-milliseconds
+                            (pilish--tool-block-timing completed-block)) 1400))
                 ;; No start in this fresh generation: reused ID B gets no
                 ;; duration from the unfinished execution above.
                 (pilish--handle-display-event '(:type "agent_start"))
@@ -923,14 +1051,14 @@
               (pilish-test--hover-tool-start "same"))
             (setq now (1+ now)))
           (with-current-buffer b
-            (pilish-test--hover-tool-end "same")
+            (pilish-test--hover-tool-end "same" nil 3000)
             (should (equal (pilish-test--details "Output same")
-                           "Bash\nsame command\nExecution time: 1.0 s")))
+                           "Bash\nsame command\nExecution time: 3.0s")))
           (setq now 15)
           (with-current-buffer a
-            (pilish-test--hover-tool-end "same")
+            (pilish-test--hover-tool-end "same" nil 4200)
             (should (equal (pilish-test--details "Output same")
-                           "Bash\nsame command\nExecution time: 5.0 s"))
+                           "Bash\nsame command\nExecution time: 4.2s"))
             (pilish--handle-display-event '(:type "agent_end" :messages []))
             (pilish--handle-display-event '(:type "agent_start")))
           (with-current-buffer b
@@ -941,16 +1069,16 @@
                            (concat "Bash · "
                                    (pilish--format-message-timestamp
                                     (pilish--ms-to-time 1784817120000))
-                                   "\nsame command\nExecution time: 1.0 s"))))
+                                   "\nsame command\nExecution time: 3.0s"))))
           (with-current-buffer a
             (setq now 100)
             (pilish-test--hover-tool-start "same")
             (setq now 102)
-            (pilish-test--hover-tool-end "same" "Fresh same")
+            (pilish-test--hover-tool-end "same" "Fresh same" 0)
             (should (equal (pilish-test--details "Fresh same")
-                           "Bash\nsame command\nExecution time: 2.0 s"))
+                           "Bash\nsame command\nExecution time: 0.0s"))
             (should (equal (pilish-test--details "Output same")
-                           "Bash\nsame command\nExecution time: 5.0 s"))))
+                           "Bash\nsame command\nExecution time: 4.2s"))))
       (pilish-test--kill-live-buffers a b))))
 
 (ert-deftest pilish-test-details-later-markdown-reference-definition-still-resolves ()
@@ -4038,7 +4166,7 @@ as the top-level structure."
        (list :type "message_end" :message (list :role "assistant" :content (vector call))))
       (let* ((block (pilish--tool-block-get "unexecuted"))
              (overlay (pilish--tool-block-overlay block)))
-        (should-not (pilish--tool-block-execution-start block))
+        (should-not (pilish--tool-block-timing block))
         (pilish--handle-display-event '(:type "agent_end" :messages []))
         (should (equal (buffer-substring-no-properties (overlay-start overlay) (point-max))
                        "bash echo final\n"))
@@ -17397,7 +17525,9 @@ fixture; a test may dynamically override it inside FUNCTION."
            (should (equal overlays
                           (pilish-test--all-tool-overlays)))
            (should (equal overlay-state
-                          (mapcar #'tool-overlay-state overlays)))))))))
+                          (mapcar #'tool-overlay-state overlays)))
+           ;; This sentinel is not a tool record; remove it before render teardown.
+           (remhash "live-sentinel" pilish--live-tool-blocks)))))))
 
 (ert-deftest pilish-test-visit-file-native-opener-error-propagates ()
   "An error from native display policy propagates with its original payload."

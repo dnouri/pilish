@@ -1177,13 +1177,15 @@ other family names there."
   (should-not (pilish--extract-pi-version "npm warn only\n")))
 
 (ert-deftest pilish-test-pi-version-outdated-compares-segments-numerically ()
-  "Compare pi versions numerically against the 1.0.0 floor."
-  (should (equal pilish--minimum-pi-version "1.0.0"))
+  "Compare pi versions numerically against the 1.1.0 floor."
+  (should (equal pilish--minimum-pi-version "1.1.0"))
   (should (pilish--pi-version-outdated-p "0.85.0"))
   (should (pilish--pi-version-outdated-p "0.87.1"))
   (should (pilish--pi-version-outdated-p "0.99.99"))
-  (should-not (pilish--pi-version-outdated-p "1.0.0"))
-  (should-not (pilish--pi-version-outdated-p "1.0.1"))
+  (should (pilish--pi-version-outdated-p "1.0.0"))
+  (should (pilish--pi-version-outdated-p "1.0.99"))
+  (should-not (pilish--pi-version-outdated-p "1.1.0"))
+  (should-not (pilish--pi-version-outdated-p "1.1.1"))
   (should-not (pilish--pi-version-outdated-p "1.10.0")))
 
 (ert-deftest pilish-test-finish-pi-version-process-parses-stderr ()
@@ -1342,7 +1344,7 @@ other family names there."
 
 (ert-deftest pilish-test-probe-process-version-warns-when-pi-too-old ()
   "Version probe warns clearly for every tested below-minimum pi version."
-  (dolist (version '("0.85.0" "0.87.1" "0.99.99"))
+  (dolist (version '("0.85.0" "0.87.1" "0.99.99" "1.0.0" "1.0.99"))
     (ert-info ((format "Unsupported Pi %s" version))
       (let ((callback nil)
             (warnings nil)
@@ -1367,7 +1369,7 @@ other family names there."
                 (should (equal (car (car warnings)) 'pi))
                 (let ((warning-text (nth 1 (car warnings))))
                   (should (string-match-p
-                           "requires Pi 1.0.0 or later" warning-text))
+                           "requires Pi 1.1.0 or later" warning-text))
                   (should (string-match-p
                            (format "found Pi %s" version) warning-text))
                   (should (string-match-p
@@ -1377,8 +1379,8 @@ other family names there."
             (delete-process proc)))))))
 
 (ert-deftest pilish-test-probe-process-version-does-not-warn-when-supported ()
-  "Version probe accepts Pi 1.0.0 exactly and newer versions without warning."
-  (dolist (version '("1.0.0" "1.0.1" "1.10.0"))
+  "Version probe accepts Pi 1.1.0 exactly and newer versions without warning."
+  (dolist (version '("1.1.0" "1.1.1" "1.10.0"))
     (ert-info ((format "Supported Pi %s" version))
       (let ((callback nil)
             (warning-called nil)
