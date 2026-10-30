@@ -25,7 +25,7 @@
 #+html: <img align="right" src="assets/pilish-logo.svg" alt="Pilish Hornbridge logo" width="96" height="96">
 
 Pilish is an Emacs frontend for [[https://pi.dev][Pi]], an open and
-extensible coding agent.  A session runs in two windows: the
+extensible coding agent.  A session uses two windows.  The
 conversation renders as Markdown in the top window, and you compose
 your next prompt in an ordinary Emacs buffer in the bottom one.
 
@@ -36,12 +36,10 @@ anything else your setup gives you.  You can keep writing while the
 answer streams in above, and scroll, search, and copy from previous
 output with the keys you already use everywhere else.
 
-Pi's own terminal UI and Pilish are two frontends to the same =pi=
-CLI.  Pilish talks to Pi over its JSON-RPC mode, so Emacs receives
-structured messages and tool events rather than terminal output.
-Model providers, sessions, skills, and prompt templates carry over
-unchanged, and Pi extensions work with basic UI support (see
-=Extension support= under Advanced).
+Pi's terminal UI and Pilish use the same =pi= CLI.  Your model
+providers, sessions, skills, and prompt templates carry over unchanged.
+Pi extensions work with basic UI support.  See =Extension support=
+under Advanced for the supported features and limits.
 
 #+html: <a href="https://danielnouri.org/media/pi-coding-agent-demo.mp4"><img src="https://danielnouri.org/media/pi-coding-agent-preview.gif" alt="Narrated Pilish demo video (6:38) - click to play" width="600" height="600"></a>
 #+html: <p><small>Video music: "Electrodoodle" by Kevin MacLeod
@@ -49,7 +47,7 @@ unchanged, and Pi extensions work with basic UI support (see
 #+html: licensed under <a href="https://creativecommons.org/licenses/by/4.0/">CC BY 4.0</a>.</small></p>
 
 #+html: <a id="quick-start"></a>
-* Quick start 🚀
+* Quick start
 
 If you already have Emacs 29.1 or later with tree-sitter support, this
 is the shortest path to a working session.
@@ -84,25 +82,25 @@ Pi authenticates in one of two ways:
 
 - *Subscription or API key* via =/login=: =/login= is interactive and
   unavailable from Emacs, so run plain =pi= once in a terminal and
-  type =/login=; you can then pick a subscription such as ChatGPT
+  type =/login=.  You can then pick a subscription such as ChatGPT
   Plus/Pro, or choose a provider and enter its API key.  Credentials
   are stored in =~/.pi/agent/auth.json= and auto-refresh, so later
   Emacs sessions pick them up automatically.
 
 - *Provider API key, no terminal login:* export a provider
-  environment variable, e.g. ~export ZAI_API_KEY=...~, or add an entry
+  environment variable, for example ~export ZAI_API_KEY=...~, or add an entry
   to =~/.pi/agent/auth.json=.  Pi supports many providers including
   DeepSeek, OpenAI, and Z.AI.  See the
   [[https://pi.dev/docs/latest/providers][providers documentation]] for the full set and its
   environment variables.
 
-Either way, usage is billed as with any Pi frontend: per token by
-your provider, or covered by your subscription.
+Either way, your provider bills usage per token, or your
+subscription covers it.
 
 ** Install the Emacs package
 
 Install from [[https://melpa.org/#/pilish][MELPA]].  MELPA alone does not
-resolve every dependency right now: its =transient= build needs
+resolve every dependency right now.  Its =transient= build needs
 =compat ≥ 31.0=, which is only published on
 [[https://elpa.gnu.org/][GNU ELPA]], so add GNU ELPA as a second
 archive before installing:
@@ -132,14 +130,13 @@ session.
 ** Your first exchange
 
 Run =M-x pilish= in the directory of a project you want to work on.
-Pilish opens the two windows, and on first start it offers to install
-the tree-sitter grammars needed for Markdown rendering — a one-time
-step that needs a C compiler (=gcc= or =cc=); say yes so the chat
-buffer renders properly.
+Pilish opens the two windows.  On first start, accept the offer to
+install the tree-sitter grammars needed for Markdown rendering.
+This one-time step needs a C compiler (=gcc= or =cc=).
 
-Type a prompt in the bottom window — =explain what this project does=,
-for instance — and press =C-c C-c=.  Your text appears in the chat
-under a =You= heading, and Pi's reply streams in under =Assistant=.
+Type a prompt such as =explain what this project does= in the bottom
+window and press =C-c C-c=.  Your text appears in the chat under a
+=You= heading, and Pi's reply streams in under =Assistant=.
 The header line above the input tracks the model, activity phase,
 cost, and context usage while it works.
 
@@ -159,8 +156,8 @@ the Troubleshooting section below has the fixes.
 
 =pilish= 3.0 is the renamed =pi-coding-agent= package (now
 [[https://github.com/dnouri/pilish][dnouri/pilish]] on GitHub).  The
-rename is a clean break: old configurations need a one-time update,
-and old-name settings do not carry over automatically.
+rename is a clean break.  Update old configurations once because
+old-name settings do not carry over automatically.
 
 1. Install =pilish=, then delete the old package:
 
@@ -181,8 +178,8 @@ and old-name settings do not carry over automatically.
    =pi-coding-agent-*= variable names in =setq=, =setopt=, or
    =custom-set-variables=, and any =with-eval-after-load=, hook, or
    keybinding forms naming =pi-coding-agent= commands.  A missed old
-   name raises no error at startup; it is silently ignored, so
-   re-check your config after upgrading.
+   name raises no error at startup and is silently ignored.
+   Re-check your config after upgrading.
 
    #+begin_src emacs-lisp
    (require 'pilish)
@@ -192,70 +189,67 @@ and old-name settings do not carry over automatically.
 #+html: </details>
 
 #+html: <a id="everyday-workflow"></a>
-* Everyday workflow 🧭
+* Everyday workflow
 
-A session has two windows:
+Write prompts in the bottom input window and read replies in the top
+chat window.  You can keep writing while Pi replies.
 
-- *Chat buffer* (top) — the rendered Markdown conversation, including
-tool output and thinking blocks from previous turns.
-- *Input buffer* (bottom) — a normal Emacs buffer where you write the
-  next prompt.
-
-The input header line shows the current model, thinking level,
-activity phase, cost and context usage, session name, and extension
-status when available, plus the basename and size of an attached
-prompt image.  The model and thinking fields can be clicked to change
-their values.  After context usage, =queued N= counts the queued
-messages Pilish knows about and hides at zero; hover it for previews
-of pending follow-ups and steering messages.  Pilish includes
-backend queues only after Pi reports their contents, so the count
-can lag, and follow-ups also include text waiting for prompt
-acceptance.  A count that reaches zero does not by itself mean the
-work has finished.
+The input header shows the model, thinking level, activity, cost,
+context usage, session name, and any extension status or attached
+image.  Click the model or thinking level to change it.  =queued N=
+shows known pending messages.  Hover it for follow-up and steering
+previews.  The count can lag and disappears at zero, which does not
+mean Pi has finished.
 
 Type in the input buffer and press =C-c C-c= (=M-x pilish-send=) to
 send.  If Pi is already working, the same key queues the text as a
 follow-up and sends it when the current turn finishes.  Press
 =C-c C-s= (=M-x pilish-queue-steering=) while Pi is busy to send a
-steering message: it is delivered after the current tool call and
+steering message.  Pi delivers it after the current tool call and
 interrupts the remaining queued tools.  During compaction or while a
 run is settling, =C-c C-s= queues a local follow-up instead, sent
 when Pi is ready for another prompt.  Press =C-c C-k=
 (=M-x pilish-abort=) to abort the current response or compaction.
 
-Press =C-c C-p= for the transient menu.  It groups the remaining
-commands — sessions, fork, compact, export, stats, model, thinking,
-skills, and custom commands — and is the quickest way to discover
-them.
+Press =C-c C-p= for the transient menu to find session commands,
+model settings, skills, and custom commands.
 
-If Pi works silently for five minutes, the input header says so, for
-example =thinking (no output 5m)=.  That is a hint, not an error:
-quiet tools and healthy subagents can produce no output at all.  See
-Troubleshooting for what the warning counts and how to tune or
-disable it.
+If Pi works silently for five minutes, the header shows a warning
+such as =thinking (no output 5m)=.  Quiet tools and healthy subagents
+can produce no output.  See Troubleshooting to change or disable
+this warning.
+
+#+html: <details>
+#+html: <summary><strong>Queue status reference</strong></summary>
+
+=queued N= combines local follow-ups with queues whose contents Pi
+has reported.  An unreported backend queue contributes nothing to
+the count.  Follow-ups include text waiting for prompt acceptance.
+The hover groups follow-ups and steering messages separately, with
+backend follow-ups before local follow-ups in send order.
+
+#+html: </details>
 
 #+html: <a id="composing-prompts"></a>
 ** Composing prompts
 
-The input buffer is intentionally boring Emacs: every editing
-feature your setup already gives you works there.  Your prompt stays
-in the bottom window while the conversation streams above it.
+Use your usual Emacs editing commands in the input buffer.
 
-Press =C-c C-p a i= to attach one image: select a file, or paste its
+Press =C-c C-p a i= to attach one image.  Select a file or paste its
 path into the file prompt.  Attaching another image replaces the
 first, and =C-u= before the =i= clears it.  Images are recognized by
 content rather than extension (PNG, JPEG, GIF, WebP), the source
 limit is 3 MiB, and the header keeps the attached name and size
 visible.  Send the image with a nonempty ordinary prompt while Pi is
-idle and a vision-capable model is selected; the finer rules live
+idle and a vision-capable model is selected.  The finer rules live
 under =Images= in Advanced.
 
-Slash commands work with completion: type =/= then =TAB= to complete
+Type =/= then =TAB= to complete slash commands, including
 built-in commands and Pi commands such as prompt templates, skills,
 and extension commands.  Prompt templates are discovered from places
 such as =~/.pi/agent/prompts/=, and skills from
-=~/.agents/skills/=.  File references also complete: use =TAB= on
-paths such as =./=, =../=, and =~/=.  Absolute paths complete too,
+=~/.agents/skills/=.  Use =TAB= to complete file paths such as =./=,
+=../=, and =~/=.  Absolute paths complete too,
 except for a bare =/= at the start of the buffer, where slash-command
 completion wins.
 
@@ -270,355 +264,380 @@ commands) work for the same reason.
 #+html: <a id="reading-output"></a>
 ** Reading output
 
-The chat buffer renders Markdown with tree-sitter syntax highlighting
-for code blocks and diffs.  Long tool output collapses to a preview
-so the chat stays readable; press =TAB= on a tool block to expand or
-collapse it.  Long-running commands stream output live, file
-operations (=read=, =write=, =edit=) get syntax highlighting, and
-edit diffs highlight what changed.  Wide Markdown pipe tables are
-wrapped and redrawn to fit the window while the underlying text
-stays plain Markdown.  Images sent with prompts and returned by
-tools appear inline in graphical Emacs and as a type-and-size
-placeholder in terminals; the limits are described under =Images= in
-Advanced.
+The chat renders Markdown with syntax highlighting for code, file
+operations, and edit diffs.  Commands stream their output live, and
+long tool output collapses to a preview.  Wide pipe tables wrap to
+fit the window without changing the Markdown text.  Images appear
+inline in graphical Emacs and as type-and-size placeholders in
+terminals.  See =Images= in Advanced for the limits.
 
-Tools, completed thinking, startup details, and both browsers use the
-same left-margin caret.  Click it or press =TAB= in the section to
-expand or collapse it.  Carets are not included in copied text.
+Click a left-margin caret or press =TAB= in a section to expand or
+collapse tools, completed thinking, startup details, or browser rows.
+Press =TAB= on a =You= or =Assistant= heading to fold a whole turn.
+Tool arguments appear in the header or on separate rows and fold
+independently of output.  Expanded shell commands have syntax
+highlighting.  Carets are not copied with text.
 
-Tool arguments appear in the header or on separate rows.  Use =TAB=
-to expand an argument independently of the output.  Expanded shell
-commands have syntax highlighting.
+For =codemode=, the script, call list, parent output, and child
+outputs fold independently inside the parent tool block.  Reload and
+resume retain saved child-call summaries, not child outputs.
 
-For =codemode=, the script and child calls appear inside the parent
-tool block.  Its script, call list, parent output, and individual
-child outputs fold independently with =TAB=.  Reload and resume
-retain saved child-call summaries, not child outputs.
-
-On a generated Pi session link, click or press =RET= to read the
-saved conversation in another window.  Use =C-c ]= and =C-c [= to reach the
-next or previous visible link.  =TAB= still folds the current section.
-The snapshot is read-only and has no live session controls.  Opening the
-same name again reads a new, independent observer, and =q= closes only
-that observer.  Existing snapshots never update automatically.
+Click a generated Pi session link or press =RET= on it to open a
+read-only snapshot in another window.  Use =C-c ]= and =C-c [= to
+reach the next or previous visible link.  Snapshots have no live
+session controls and do not update automatically.  Press =g= or run
+=M-x revert-buffer= to refresh from disk.  A failed refresh keeps the
+last good view and shows a stale note until a later =g= succeeds.
+Press =q= to close only that snapshot.
 
 #+caption: A parent and its linked child session.  This example uses scripted replies.
 [[file:assets/pi-session-view.png]]
 
-Press =g=, or run =M-x revert-buffer=, to reread the observer's saved
-conversation from disk.  The saved file is revalidated first.  The
-captured file association and the exact session header, branch, and role
-rules must still hold.  An unchanged read keeps the buffer, its folds,
-and your view exactly.  A changed read replaces the content, keeps the
-buffer name, restores your approximate position, and resets folds to
-their defaults.  A failed or invalid read keeps the last good view and
-shows a stale note in the header until a later =g= succeeds.  Reads and
-rendering are synchronous, so large saves and TRAMP reads can block
-Emacs.
+#+html: <details>
+#+html: <summary><strong>Saved conversation reference</strong></summary>
 
-A snapshot shows the full current saved branch, including pre-compaction
-history and saved summaries, but not unsaved output.  A link to a resumed
-child shows its current branch, not the state when the result was emitted.
-Remote reads reuse the captured parent session's TRAMP route.
+Each open creates an independent observer, even for the same link.
+Refresh rereads that observer's captured file association and
+revalidates the exact session header, branch, and role rules.  An
+unchanged read keeps the buffer, folds, and view exactly.  A changed
+read replaces the content, keeps the buffer name, restores your
+approximate position, and resets folds to their defaults.  A read,
+validation, or rendering failure keeps the last good view.
+Reads and rendering are synchronous, so large saves and TRAMP reads
+can block Emacs.
 
-A running tool can declare its planned file before the first save.  If
-=RET= fails because that file does not exist yet, retry =RET= later in
-the parent.  A failed open creates no observer.  A reference can also
-become unavailable when its file disappears or fails validation.
+A snapshot shows the full current saved branch, including
+pre-compaction history and saved summaries, but not unsaved output.
+A link to a resumed child shows its current branch, not the state
+when the tool returned the result.  Remote reads reuse the captured
+parent session's TRAMP route.
 
-Results without the current declaration stay readable.  Pilish never
-rewrites saved files or infers links from names, run metadata, or output.
-To add links to your own tools, see =Publishing saved conversations=
-under =Extension support= in Advanced.
+A running tool can declare its planned file before the first save.
+If =RET= fails because the file does not exist yet, retry =RET= later
+in the parent.  A failed open creates no observer.  A reference can
+also become unavailable if its file disappears or fails validation.
 
-In a live chat, place point on a completed reply, thinking block, or tool
-block and press =C-c C-p d= to inspect its details in standard =*Help*=.
-In a saved snapshot, run =M-x pilish-describe-reply= on the same kinds of
-completed blocks.  Reply details include the timestamp, provider and model,
-and message-level token and cache usage.  Thinking details include line
+Results without the current declaration stay readable.  Pilish
+never rewrites saved files or infers links from names, run metadata,
+or output.  To add links to your own tools, see
+=Publishing saved conversations= under =Extension support= in Advanced.
+
+#+html: </details>
+
+To inspect a completed reply, thinking block, or tool block, place
+point on its text.  In a live chat, press =C-c C-p d=.  In a
+snapshot, run =M-x pilish-describe-reply=.  Pilish selects =*Help*=.
+Press =q= to return without quitting the session or closing the
+snapshot.  =C-h .= shows the same details in the echo area, with
+native link and control help taking priority.
+
+Reply details show the timestamp, provider, model, and message-level
+token and cache usage when available.  Thinking details show line
 counts and, once the message finishes, its timestamp and provenance.
-Tool details include a short command or path hint and the saved result
-timestamp when available.
+Tool details can include a command or path hint and the saved result
+timestamp.  Unfinished blocks, shared headings, and trailing
+separators have no block details.  Block metadata does not appear on
+hover.  Links, controls, input headers, browsers, and
+menus retain their own hover help.  Stream durations, output rates,
+and tool execution times are approximate and live-only.  Reload or
+resume drops these measurements.
 
-Pilish selects the Help window.  Press =q= to return without quitting the
-session or closing the snapshot.  In both transcripts, =C-h .= shows the
-same details in the echo area, while native link and control help takes
-priority.  Unfinished blocks, shared headings, and trailing separators
-have no block details.
+Press =RET= on a file-content row, plain path, or local Markdown link
+label to visit the file.  =src/app.el:12:3= opens line 12, column 3.
+=src/app.el#L12-L20= opens line 12.  =C-u RET= flips the window choice
+for that visit.  Press =!= to run a shell command on the file.
+A command word followed only by options, such as =wc -l= or =grep -n=,
+gets the path appended.  Other commands need an isolated =*= for the
+path, as in =grep -n TODO *=.  Press =w= to copy the shell-local path.
+See =File and command actions= in Advanced for the exact rules and
+=pilish-visit-file-other-window= for the default window choice.
 
-Reply, thinking, and tool metadata no longer appears on automatic hover.
-Other hover behavior is unchanged, including native chat links and
-controls, input headers, browsers, and menus.  Reply-stream durations,
-output rates, and tool execution times are approximate and live-only.
-Reload or resume drops these measurements.
+Use =n= and =p= to jump between user messages in the chat, and =f= to
+fork from the turn at point.
 
-Press =RET= on a file target to visit it: a file-content row in tool
-output, a plain path reference, or the label of a local Markdown
-link.  Locations are honored — =src/app.el:12:3= opens line 12,
-column 3, and =src/app.el#L12-L20= opens line 12 — and =C-u RET=
-flips the window choice for that one visit (see
-=pilish-visit-file-other-window=).  Press =!= on a file target to run
-a shell command on it, Dired-style: a single command word plus
-options, like =wc -l= or =grep -n=, gets the file appended
-automatically, while anything else needs an isolated =*= where the
-path belongs, as in =grep -n TODO *=.  Press =w= to
-copy the file's shell-local path.  The exact rules behind all three
-live under =File and command actions= in Advanced.
-
-Press =TAB= on a turn header (=You= or =Assistant=) to fold or unfold
-that turn.  Use =n= and =p= in the chat buffer to jump between user
-messages, and =f= to fork the conversation from the turn at point.
-
-The chat header ends with a summary line showing the pi and Pilish
-versions plus skill and prompt-template counts.  Click its caret or
-press =TAB= on the summary to expand sections listing context files,
-skills, prompt templates, and extension commands, grouped by Project
-and User, with explicit paths
-and unknown-scope resources kept separate; the extension section
-lists registered commands.  Names are links when a source file exists.
-Descriptions appear when available, so you can explore what is on
-offer before running anything from =C-c C-p=.  =TAB= anywhere in the
-details collapses the summary again.
+The chat header's summary line shows the Pi and Pilish versions plus
+skill and prompt-template counts.  Expand it to see context files,
+skills, prompt templates, and registered extension commands.
+Resources are grouped by Project and User, with explicit paths and
+unknown-scope resources kept separate.  Names link to source files
+when available, and descriptions help you choose what to run from
+=C-c C-p=.  =TAB= anywhere in the details collapses the summary.
 
 #+html: <a id="sessions-and-context"></a>
 ** Sessions and context
 
-Each project directory gets its own session automatically.  Running
-=M-x pilish= again from a Pilish buffer restores missing windows, or
-focuses the input window when both are visible.  =M-x pilish-toggle=
+*** Manage live sessions
+
+Each project directory gets its own session automatically.  Run
+=M-x pilish= again from a Pilish buffer to restore missing windows
+or focus the input window when both are visible.  =M-x pilish-toggle=
 hides and shows the session windows in the current frame.
 
-=C-c C-r=, =/resume=, or =M-x pilish-session-browser= opens the
-session browser.  It reads Pi's session archive from disk —
-=~/.pi/agent/sessions/= by default, or =$PI_CODING_AGENT_DIR/sessions/=
-— so browsing, searching, renaming, and deleting work with no live
-process at all.  Sessions saved by older Pi releases can still be
-resumed.  Sessions with a currently live Pilish process in this Emacs
-get a ● marker; the marker only sees Pilish processes in
-this Emacs — sessions running in another Emacs or in a terminal are
-not marked.
-Press =g= to refresh markers.  Press =RET= to switch to the session
-at point, and =?= for the browser menu.  =d= deletes a closed session
-only after a confirmation that names its displayed session title and
-project.  The configured =delete-by-moving-to-trash= action leads the
-prompt; unsafe title, project, and child-name characters are sanitized
-or replaced, while long metadata is ellipsized so the consequence stays
-visible.  Deletion acts on the selected archive pathname: if that entry
-is a symlink, Emacs removes or trashes the link, not its target, while
-canonical alias identity is used for live-session checks and child-fork
-matching.  If the full loaded archive snapshot contains direct child
-forks, the prompt reports their count
-(and up to three short titles): those files are /not/ deleted.  They
-appear as roots if the parent no longer appears elsewhere in the
-archive; their own descendants stay attached.  Deletion does not
-cascade.  Pilish checks for a live session before and after the prompt,
-but “live” means only a Pilish process in this Emacs, not a system-wide
-process check.  After confirmation it also rejects an observed canonical
-retarget, such as a selected symlink that now resolves to another target.
-This is observation, not locking: an independent writer can replace a
-path without changing its canonical spelling, or change it between the
-final check and =delete-file=.  Cancelling or a deletion error leaves the
-current browser snapshot in place; a successful deletion refreshes it.
+For multiple live sessions in one directory, use =C-u M-x pilish=
+and enter a name.  This names the Emacs buffer pair, not the saved
+session.  Rename the saved session with =C-c C-p N= or =/name=.
 
-The browser opens on this project's sessions, showing all names in
-the Threaded (fork families) view; =t= toggles between this project
-and All projects.  All-projects rows lead with a bounded project
-token in a fixed-width field — the project directory's name,
-prefixed with the host for remote sessions (=build-host:site=) —
-followed by the live marker, and only then connectors and the
-session title, so identity and live status stay visible on narrow
-terminals no matter how deep the fork nesting or how long the
-titles.  Projects sharing a directory name grow parent components
-(=client-a/app= vs =client-b/app=) until distinct; labels that
-cannot fit or distinguish fall back to an ordinal-front token
-(=#ORD app=, with a compact base-36 ordinal); a session run in =/=
-labels as =/=.  Windows drive
-and UNC working directories are recognized lexically, and
-this-project rows carry no token because the scope already fixes
-the project.  =s= cycles the view:
-- Threaded (fork families) — sessions grouped into fork families
-  through the =parentSession= link that =/fork= and Pi's =/clone=
-  write; each parent renders above its children, and families are
-  ordered by the latest activity anywhere in the family, newest first.
-- Recent activity — flat rows ordered by the session file's
-  modification time, newest first, under calendar Future / Today /
-  Yesterday / This Week / Older headings: a late-night session moves
-  to Yesterday at midnight, a clock-skewed future mtime groups as
-  Future at the top, and on Monday last week reads as Older (Sunday
-  stays Yesterday).
-- Most messages — flat rows ordered by the number of persisted
-  message records, tool results included, highest first.
+Tree navigation keeps alternate branches in the /same/ session file.
+Forking with =C-c C-p f= (=/fork=, or Pi's =/clone=) creates a /new/
+file whose header points back to the original.  The two sessions are
+independent.  The session browser groups these files into fork families.
 
-Threaded families and Recent time groups can be folded without turning
-these flat rows into nested Magit sections.  =TAB= toggles the row itself
-when it has displayed descendants; on a leaf it toggles the nearest
-containing foldable row (a fork ancestor or Recent group).  =S-TAB= folds
-all outer families/groups, and =C-u S-TAB= unfolds everything.  =^= goes
-to the family root in Threaded or the group heading in Recent.  Most
-messages and queried Threaded results have no fold target or parent unit;
-Recent queries keep their time groups.  Folds survive rerenders and a
-filter/search round trip; they are forgotten
-when the corresponding session or group leaves the published snapshot.
-=n= / =p= (and =M-n= / =M-p=) keep Magit's flat section motion and skip
-rows hidden by a fold.  Copying includes folded descendants.
+When context fills, use =C-c C-p c= to compact the older conversation
+into a summary.  Pi can also compact automatically.  The header changes
+face as context usage crosses the configured warning and error
+thresholds.
 
-Search results are always flat — a query never draws family
-connectors.  A queried Threaded (fork families) view orders the
-rows newest-first; Most messages keeps its count ordering under a
-query.  These starting states are customizable:
-=pilish-session-browser-default-scope= (this or all projects),
-=pilish-session-browser-default-view=,
-=pilish-session-browser-default-named-only=, and — for the tree
-browser — =pilish-tree-browser-default-filter=.  Each initializes a
-browser buffer when it is created; a browser you have toggled keeps
-its state when hidden with =q= and reopened.  Killing the buffer, or
-explicitly re-running the browser major mode, re-initializes from the
-current defaults.
+*** Browse saved sessions
 
-Search matches session names, first messages, and all saved
-user/assistant text, including inactive branches; thinking, tool
-arguments and results, images, and summaries are not searched.
-Tokens are whitespace-separated regexps that must all match.
+Open the session browser with =C-c C-r=, =/resume=, or
+=M-x pilish-session-browser=.  It reads saved sessions from disk, so
+browsing, searching, renaming, and deleting work without a live Pi
+process.  Press =RET= to switch sessions, =r= to rename, =g= to
+refresh, =?= for the menu, and =q= to hide the browser.
+
+By default, the browser shows this project's sessions in Threaded
+(fork families) view.  Press =t= to toggle All projects.  Press =s=
+to cycle through fork families, Recent activity, and Most messages.
+Use =/= to search names and saved user and assistant text, including
+inactive branches.  Search tokens are whitespace-separated regexps
+that must all match.  Submit an empty query to clear the search.
+Press =f= to toggle between all sessions and named sessions only.
+
+A ● marks sessions with a live Pilish process in this Emacs.  Neither
+the marker nor the deletion guard sees sessions running in another
+Emacs or a terminal.  Check those yourself before deleting a session.
+=d= deletes a closed session after confirming its title, project,
+and whether Emacs moves it to trash or deletes it permanently.
+Child forks are not deleted.
+
+#+html: <details>
+#+html: <summary><strong>Session browser views, search, and defaults</strong></summary>
+
+The archive is =~/.pi/agent/sessions/= by default, or
+=$PI_CODING_AGENT_DIR/sessions/=.  Sessions saved by older Pi
+releases can still be resumed.
+
+The three views have these ordering rules:
+
+- Threaded (fork families) groups sessions through the =parentSession=
+  link written by =/fork= and Pi's =/clone=.  Each parent appears above
+  its children.  Families are ordered by the latest activity anywhere
+  in the family, newest first.
+- Recent activity orders flat rows by the session file's modification
+  time, newest first, under Future, Today, Yesterday, This Week, and
+  Older headings.  A late-night session moves to Yesterday at
+  midnight.  A future modification time groups as Future at the top.
+  On Monday, last week reads as Older, but Sunday stays Yesterday.
+- Most messages orders flat rows by the number of saved message
+  records, tool results included, highest first.
+
+All-projects rows begin with a bounded project token in a fixed-width
+field, then the live marker, connectors, and session title.  The
+token uses the project directory's name with a host prefix for remote
+sessions (=build-host:site=).  Projects with the same directory name
+gain parent components until distinct (=client-a/app= and
+=client-b/app=).  Labels that cannot fit or distinguish use an
+ordinal-front token (=#ORD app= with a compact base-36 ordinal).
+A session run in =/= labels as =/=.  Windows drive and UNC working
+directories are recognized lexically.  This-project rows have no token.
+
+=TAB= toggles a row with displayed descendants.  On a leaf, it toggles
+the nearest containing fork ancestor or Recent group.  =S-TAB= folds
+all outer families or groups, and =C-u S-TAB= unfolds everything.
+=^= goes to the family root in Threaded or group heading in Recent.
+Most messages and queried Threaded results have no fold target or
+parent unit.  Recent queries keep their time groups.  Folds survive
+rerenders and filter or search round trips, but are forgotten when
+the corresponding session or group leaves the published snapshot.
+=n=, =p=, =M-n=, and =M-p= use Magit's flat section motion and skip
+folded rows.  Copying includes folded descendants.
+
+Search results are flat, without family connectors.  Queried Threaded
+results are newest-first.  Most messages keeps its count ordering.
+Search covers names, first messages, and all saved user and assistant
+text, including inactive branches.  It excludes thinking, tool
+arguments and results, images, and summaries.  Legacy first-message
+fallbacks can still match text from any role.
+
 Opening and refreshing gather listing metadata until the first valid,
-nonblank search gathers full text asynchronously.  Later searches use
-that text; refreshes and scope changes keep gathering full text until
-the browser buffer is killed or its mode is reinitialized.  Clearing
-the query does not reset this policy.  Very large archives can still
-pause Emacs during scanning; =q= hides the browser without cancelling
-its scan.  When
-an empty listing or search result can be widened, it names up to two
-of the most relevant keys: =t= switches scope, =f= clears named-only,
-and submitting an empty =/= query clears the filter.  An empty
-All-projects archive has no
-wider scope and intentionally shows no action hint.
+nonblank search gathers full text asynchronously.  Later searches
+reuse that text.  Refreshes and scope changes keep gathering full
+text until the browser buffer is killed or its mode is reinitialized.
+Clearing the query does not reset this policy.  Very large archives
+can pause Emacs during scanning.  =q= hides the browser without
+cancelling its scan.
 
-The tree browser (=C-c C-p w=, or Context =w= in the menu) shows the
-conversation tree Pi persists for a session.  On its first load, point
-starts at the current projected entry or its nearest visible active
-ancestor, falling back to the first visible row when no active-path
-row survives.  =@= marks the actual current entry and =*= marks its active
-ancestors, so a filter that hides the current entry never mislabels an
-ancestor as current.  Moving point yourself wins on later refreshes;
-when a selected row disappears, point first tries its nearest visible
-ancestor from the old snapshot, then the new active path.  =TAB= folds a
-row with displayed descendants; on a leaf it folds the nearest displayed
-ancestor that has descendants.  =S-TAB= folds all outer roots and
-=C-u S-TAB= unfolds everything; =^= moves to the nearest visible parent.
-Fold state survives rerenders and filter/search round trips, including
-when an id temporarily disappears and returns, and is pruned when that id
-leaves the published tree.  Point restoration never opens a user fold or
-leaves point on an invisible row, and Magit's =n= / =p= and sibling motions
-skip folded rows.  Switching
-the linked chat to another session file resets this orientation even
-when a fork shares node IDs with the old file.
+An empty listing or search result names up to two relevant keys when
+it can be widened.  =t= switches scope, =f= clears named-only, and an
+empty =/= query clears the search.  An empty All-projects archive has
+no wider scope and shows no action hint.
 
-Press =RET= to continue from the selected turn.  Its behavior depends
-on the selected projected node:
+=pilish-session-browser-default-scope= (=current= or =all=),
+=pilish-session-browser-default-view=, and
+=pilish-session-browser-default-named-only= set the starting state
+for new browser buffers.  A hidden browser keeps its toggled state
+when reopened.  Killing the buffer or rerunning its major mode
+initializes it from the current defaults.
+
+#+html: </details>
+
+#+html: <details>
+#+html: <summary><strong>Deletion safety and file identity</strong></summary>
+
+The confirmation follows =delete-by-moving-to-trash=.  Unsafe title,
+project, and child-name characters are sanitized or replaced.  Long
+metadata is ellipsized so the consequence stays visible.
+
+Deletion acts on the selected archive pathname.  For a symlink,
+Emacs removes or trashes the link, not its target.  Live-session
+checks and child-fork matching use canonical alias identity.
+The prompt reports direct child forks from the full loaded archive
+snapshot, with their count and up to three short titles.  Those files
+are not deleted.  They appear as roots if the parent is absent
+elsewhere in the archive, and their descendants stay attached.
+Deletion does not cascade.
+
+Pilish checks for a live session before and after confirmation, but
+only sees Pilish processes in this Emacs.  After confirmation it also
+rejects an observed canonical retarget, such as a symlink that now
+resolves to another target.  These checks do not lock files.  An
+independent writer can replace a path without changing its canonical
+spelling, or change it between the final check and =delete-file=.
+Cancellation or a deletion error keeps the current browser snapshot.
+Successful deletion refreshes it.
+
+#+html: </details>
+
+*** Continue from an earlier turn
+
+Open the tree browser with =C-c C-p w=, or Context =w= in the menu.
+It shows the session's saved conversation tree.  =@= marks the
+current entry and =*= marks its active ancestors.  Press =RET= to
+continue from the selected turn in the same session file.  =RET= on
+=@= changes nothing.
+
+If continuation would replace an unsent text or image draft, Pilish
+asks first.  Decline to keep both text and image and cancel the
+continuation before any file rewrite or resume.
+
+Press =f= to cycle filters, or =?= to choose any filter directly.
+The default hides tool results.  Use =/= to search and =l= to set or
+clear a node label.  Press =g= to read the last saved state from disk.
+Display and refresh work offline, but continuation from a historical
+turn needs the linked live, idle Pilish process.
+
+#+html: <details>
+#+html: <summary><strong>Continuation rules and draft protection</strong></summary>
+
+=RET= uses the selected projected node as follows:
 
 | Selected node | What =RET= does |
 |---------------+-----------------|
-| The =@= current projected position | Strict no-op before live-process, busy/transition, disk, or draft checks.  Trailing projected-away bookkeeping does not change its identity. |
-| Historical user prompt or user-like =custom_message= with a parent | Continues from the parent and prefills the selected prompt text when available.  If that parent is already current, this is prefill-only; otherwise Pilish rewrites the active path and resumes the same session file. |
+| The =@= current projected position | Strict no-op before live-process, busy, transition, disk, or draft checks.  Trailing projected-away bookkeeping does not change its identity. |
+| Historical user prompt or user-like =custom_message= with a parent | Continues from the parent and prefills the selected prompt text when available.  If that parent is already current, this is prefill-only.  Otherwise, Pilish rewrites the active path and resumes the same session file. |
 | Historical root user prompt or root user-like =custom_message= | Has no parent to continue from, so Pilish refuses and points to the chat's fork command.  A root prompt that is itself =@= remains the strict no-op above. |
-| Non-current assistant, tool result, branch or compaction summary, model/thinking change, or other node | Continues from that node itself by rewriting the active path and resuming the same session file.  Its prefill is applied when the navigation target provides one; most such nodes provide none. |
+| Non-current assistant, tool result, branch or compaction summary, model or thinking change, or other node | Continues from that node itself by rewriting the active path and resuming the same session file.  It applies prefill when the navigation target provides one.  Most such nodes provide none. |
 
-A continuation that would replace the input draft first checks the
-existing input-buffer draft state: either nonblank text or an attached
-prompt image triggers =Replace the unsent draft ...?=.  Declining keeps
-both text and image and occurs before any session-file rewrite or resume
-is scheduled.  Acceptance stays bound to the browser, linked chat, and
-session file that opened the question, then re-runs the live-session and
-disk/target checks.  If that browser dies or its chat/file changes,
-navigation is cancelled rather than reinterpreting the node ID in a new
-tree; a same-file refresh remains valid.  If the draft changes while the
-question is open, Pilish asks about the newer draft instead.  If a newer
-nonempty draft appears during later yielding file-handler work, Pilish
-keeps it and skips the prefill.  Blank text with no image proceeds
-without a prompt, and the =@= no-op never prompts.  This is a targeted
-loss-prevention check, not a blanket confirmation on every =RET=.
+Before replacing nonblank text or an attached prompt image,
+continuation asks =Replace the unsent draft ...?=.
+Acceptance stays bound to the browser, linked chat, and session file
+that opened the question.  Pilish then rechecks the live session,
+disk state, and target.  If that browser dies or its chat or file changes,
+navigation is cancelled.  Pilish does not reinterpret the node ID in
+a new tree.  A same-file refresh remains valid.
 
-For a path-changing continuation, Pilish preserves complete raw JSONL
-lines, writes the new order to a sibling temporary file, and replaces an
-ordinary local session file with one atomic rename before asking the
-normal resume flow to reload it.  This is not cross-process locking: an
-independent Pi instance or external writer can still race the final
-validated read and rename.  A TRAMP handler may yield and may implement
-rename as copy-and-delete, so remote replacement is not guaranteed to be
-atomic.
+If the draft changes while the question is open, Pilish asks about
+the newer draft instead.  If a newer nonempty draft appears during
+later yielding file-handler work, Pilish keeps it and skips prefill.
+Blank text with no image proceeds without a prompt.  The =@= no-op
+never prompts.  This check applies only when continuation would
+replace a draft, not to every =RET=.
 
-Pi's TUI can optionally ask the model for a branch summary while its
-own tree-navigation API changes branches.  Pilish deliberately cannot
-offer that option over Pi's current RPC surface: RPC has observation
-commands such as =get_tree= and =get_entries=, but no in-place
-=navigate= command; its =fork= command creates a different session file.
-Pilish fully displays =branch_summary= entries already persisted in the
-session file, but invents neither an LLM call nor a hidden summary
+For a path-changing continuation, Pilish preserves complete raw
+JSONL lines, writes the new order to a sibling temporary file, and
+replaces an ordinary local session file with one atomic rename.
+The normal resume flow then reloads it.  This does not lock out
+other processes.  An independent Pi instance or external writer can
+race the final validated read and rename.  A TRAMP handler may yield
+or implement rename as copy-and-delete, so remote replacement is
+not guaranteed to be atomic.
+
+Pi's TUI can ask the model for a branch summary during tree
+navigation.  Pilish cannot offer that option over Pi's current RPC.
+RPC has observation commands such as =get_tree= and =get_entries=,
+but no in-place =navigate= command.  Its =fork= command creates a
+different session file.  Pilish displays saved =branch_summary=
+entries but does not ask a model for a summary or run a hidden summary
 workflow during navigation.
 
-Legacy rows without IDs are visible but cannot be continuation targets;
-open the file with Pi once to migrate it.  Historical files with exact
-repeats of the same nonempty-ID entry display that entry once.  If the
-same ID instead names different entries, the later entry is the one
-shown, unrelated unique history remains usable, and the browser shows a
-duplicate-ID warning.  That ambiguous row has no =@= or =*= marker and
-cannot be labeled, used as a continuation target, or made a fold target.
+#+html: </details>
 
-Tree filtering runs after display projection.  Projection first removes
-raw =label=, =session_info=, and =custom= bookkeeping entries and
-promotes their children to the nearest displayable ancestor.  The five
-filter contracts are:
-- =default= — projected entries except model and thinking-level changes;
-- =no-tools= — =default= without tool results;
-- =user-only= — user messages only;
-- =labeled-only= — labeled nodes only;
-- =all= — all /projected, displayable/ content.  It does not restore the
-  raw bookkeeping records removed by projection.
+#+html: <details>
+#+html: <summary><strong>Tree display, filters, and search</strong></summary>
 
-Every filter also hides empty tool-dispatch assistant messages unless
+On first load, point starts at the current projected entry or its
+nearest visible active ancestor.  It falls back to the first visible
+row if no active-path row survives.  A filter that hides the current
+entry never marks an ancestor as =@=.  Moving point yourself wins on
+later refreshes.  If a selected row disappears, point first tries its
+nearest visible ancestor from the old snapshot, then the new active
+path.
+
+=TAB= folds a row with displayed descendants.  On a leaf, it folds
+the nearest displayed ancestor with descendants.  =S-TAB= folds all
+outer roots, =C-u S-TAB= unfolds everything, and =^= moves to the
+nearest visible parent.  Folds survive rerenders and filter or search
+round trips, including when an ID temporarily disappears and returns.
+They are pruned when that ID leaves the published tree.  Restoring
+point never opens a user fold or selects an invisible row.  Magit's
+=n=, =p=, and sibling motions skip folded rows.  Switching the linked
+chat to another session file resets this orientation, even when a
+fork shares node IDs with the old file.
+
+Legacy rows without IDs are visible but cannot be continuation
+targets.  Open the file with Pi once to migrate it.  Exact repeats of
+the same nonempty-ID entry display once.  If the same ID names
+different entries, the later entry appears and the browser shows a
+duplicate-ID warning.  Unrelated unique history remains usable.
+The ambiguous row has no =@= or =*= marker and cannot be labeled,
+used as a continuation target, or made a fold target.
+
+Display projection removes raw =label=, =session_info=, =custom=,
+=usage=, and =context_edit= bookkeeping entries and promotes their
+children to the nearest displayable ancestor.  Filtering follows
+projection.  The five filters have these rules:
+
+- =default= shows projected entries except model changes,
+  thinking-level changes, and system-role messages.
+- =no-tools= shows =default= without tool results.
+- =user-only= shows user messages only.
+- =labeled-only= shows labeled nodes only.
+- =all= shows all /projected, displayable/ content.  It does not
+  restore raw bookkeeping records removed by projection.
+
+Every filter hides empty tool-dispatch assistant messages unless
 aborted or carrying an error message.  The shipped value of
-=pilish-tree-browser-default-filter= is =no-tools=; changing that option
-changes the initial filter for new (or explicitly reinitialized) tree
-browser buffers.  =f= cycles the filters.  The =?= transient lists all
-five as direct choices (=d=, =n=, =u=, =L=, and =a= inside the menu), so
-they do not depend on discovering the cycle order.
+=pilish-tree-browser-default-filter= is =no-tools=.  It sets the
+initial filter for new or explicitly reinitialized tree browser
+buffers.  A hidden browser keeps its selected filter when reopened.
+The =?= menu offers all five filters directly with =d=, =n=, =u=,
+=L=, and =a=.
 
-=/= searches the semantic text of each projected node.  Query tokens are
-whitespace-separated Emacs regexps and every token must match the same
-node.  The corpus includes preview/message text, the label, role and
-type, full branch and compaction summaries, tool name (plus selected
-fields in built-in tool previews), and provider/model or thinking-level
-metadata.  It never serializes raw tool arguments or custom-tool JSON,
-and binary/image and hidden thinking payloads never enter the projected
-preview.  The final filter-and-query result gets a newly derived visible
-tree: hidden intermediates are bypassed and roots, nearest visible
-parents, sibling connectors, indentation, and gutters all describe only
-the rows on screen.
+Search tokens are whitespace-separated Emacs regexps.  Every token
+must match the same projected node.  Search includes preview and
+message text, the label, role, type, full branch and compaction
+summaries, tool name, selected fields in built-in tool previews,
+and provider, model, or thinking-level metadata.  It never serializes
+raw tool arguments or custom-tool JSON.  Binary data, images, and
+hidden thinking payloads never enter the projected preview.
 
-=l= sets or clears a label on a node.  Labels appear in the node line for
-keyboard discovery and search, and remain duplicated in the right
-margin for quick scanning.  Press =g= to refresh the last persisted
-state.  Display and refresh read the JSONL file from disk and still work
-offline; changing position by continuing from a historical turn requires
-the linked live, idle Pilish process.
+The final filtered search result derives a visible tree that bypasses
+hidden intermediates.  Its roots, nearest visible parents, sibling
+connectors, indentation, and gutters describe only the rows on screen.
+Labels appear both in the node line for discovery and search and in
+the right margin for scanning.
 
-The tree browser and forking answer different questions.  Example:
-after two turns you want to try a second approach.  The tree browser
-(Pi's =/tree=) keeps both approaches as branches of the /same/
-session file; =RET= continues the live conversation from the selected
-turn on that branch.  =C-c C-p f= (=/fork=, or Pi's =/clone=) instead writes
-a /new/ session file whose header points back at the original, so
-you get two independent sessions — and the session browser's
-Threaded (fork families) view shows that file relationship as a
-family.
-
-For multiple live sessions in the same directory, use
-=C-u M-x pilish= and enter a name; this names the Emacs buffer pair,
-not the persisted session.  Rename the persisted session with =r= in the
-session browser, =C-c C-p N=, or =/name=.  Fork with =C-c C-p f=.
-When the context window fills, compacting with =C-c C-p c=
-summarizes the older conversation so the session can continue; Pi
-can also compact automatically, and the header line changes face as
-usage crosses the configured warning and error thresholds.
+#+html: </details>
 
 #+html: <a id="common-keys"></a>
 ** Common keys
@@ -671,7 +690,7 @@ The browsers:
 | =s=       | sessions       | Cycle view: Threaded (fork families), Recent activity, or Most messages |
 | =t=       | sessions       | Toggle This project / All projects scope                                |
 | =f=       | sessions       | Named sessions only                                                     |
-| =f=       | tree           | Cycle filters; =?= offers all five directly                             |
+| =f=       | tree           | Cycle filters.  =?= offers all five directly                            |
 | =r= / =d= | sessions       | Rename a session / delete a closed one                                  |
 | =l=       | tree           | Set or clear a label on a node                                          |
 | =g=       | sessions, tree | Refresh                                                                 |
@@ -681,20 +700,17 @@ The browser rows stay flat, so Magit's recursive cycle bindings
 (=C-c TAB=, =C-<tab>=, =M-<tab>=) and level keys (=1= through =4= and
 their Meta variants) are intentionally unbound.
 
-The transient menu (=C-c C-p=) collects the full command set — new
-session, reload, name, export, quit, compact, fork, tree, model,
-thinking, stats, details, and copy last, plus submenus for skills,
-prompt templates, and extension commands.  =M-x pilish-toggle= hides or
-shows the session windows.
+The transient menu (=C-c C-p=) collects the full command set,
+including submenus for skills, prompt templates, and extension commands.
 
 #+html: <a id="troubleshooting"></a>
-* Troubleshooting and first-run notes 🩺
+* Troubleshooting and first-run notes
 
 #+html: <details>
 #+html: <summary><strong>No models are available: authenticate the Pi CLI</strong></summary>
 
-Make sure the [[https://pi.dev/docs/latest/providers][Pi CLI is authenticated]] before expecting models to
-appear: set a provider API key, or run =pi= in a terminal once and use
+Authenticate the [[https://pi.dev/docs/latest/providers][Pi CLI]] before expecting models to
+appear.  Set a provider API key, or run =pi= in a terminal once and use
 =/login=.  Then make the running session pick up the new credentials:
 press =C-c C-p R= (or =M-x pilish-reload=) to restart the Pi
 process without losing the conversation.
@@ -754,33 +770,39 @@ project-local Pi files for Emacs sessions.
 #+html: <details>
 #+html: <summary><strong>The header shows <code>thinking (no output 5m)</code></strong></summary>
 
-While streaming or compacting, five minutes without output from Pi
-changes only the existing input activity status, using Emacs's
-=warning= face; the phase stays visible.  Idle and sending sessions
-are not monitored, and hiding the input also hides the warning.  The
-warning never aborts, polls Pi, or changes session state.
+After five minutes without output while Pi is working or compacting,
+the input header warns with text such as =thinking (no output 5m)=.
+The warning does not stop the operation.  Quiet tools and healthy
+subagents can work without output, so silence does not prove a hang.
+Idle and sending sessions are not monitored.  Hiding the input also
+hides the warning.
 
-Any nonempty parent stdout counts — ordinary replies, repeated tool
-progress, even partial or malformed output; stderr does not.  Silence
-is not proof of a hang: quiet tools and healthy subagents may produce
-no parent output, while one sibling's output keeps the shared clock
-fresh.  Timing is approximate wall time, not an awake-time deadline —
-suspend, clock changes, or a blocked Emacs can shift it.  Active
-sessions refresh the input header once a second when Emacs can
-service its timers.
-
-=pilish-session-inactivity-timeout= defaults to =300= seconds.  Use a
-positive number to change the threshold, or =nil= to disable the
-warning:
+=pilish-session-inactivity-timeout= defaults to =300= seconds.  Set a
+positive number to change the threshold, or =nil= to disable it:
 
 #+begin_src emacs-lisp
 (setopt pilish-session-inactivity-timeout nil)
 #+end_src
 
-Changes apply at the next header refresh; reenabling retains the
-existing output age.  Hover the status for help.  To stop the
-current operation and discard queued continuations, use =C-c C-k=
-(=M-x pilish-abort=).
+Hover the status for help.  To stop the current operation and discard
+queued continuations, press =C-c C-k= (=M-x pilish-abort=).
+
+#+html: <details>
+#+html: <summary><strong>Inactivity timing reference</strong></summary>
+
+Any nonempty parent stdout counts as output, including replies,
+repeated tool progress, and partial or malformed output.  Stderr does
+not count.  One sibling's output keeps the shared clock fresh.
+Timing uses approximate wall time.  Suspend, clock changes, or a
+blocked Emacs can shift it.  Active sessions refresh the input header
+once a second when Emacs can service its timers.
+
+Timeout changes apply at the next header refresh.  Reenabling keeps
+the existing output age.  The warning changes only the activity
+status, uses Emacs's =warning= face, and keeps the phase visible.
+It never aborts, polls Pi, or changes session state.
+
+#+html: </details>
 
 #+html: </details>
 
@@ -808,13 +830,13 @@ system packages, then restart Emacs or run
 When the current project is a TRAMP directory, Pilish
 starts the Pi CLI on the remote host.  Install =pi= there.
 
-Authentication and configuration are remote too: run =pi= and =/login=
+Authentication and configuration are remote too.  Run =pi= and =/login=
 on that host, or set provider environment variables for the remote
 process.  Paths such as =~/.pi/agent/auth.json= and absolute entries in
 =pilish-executable= are interpreted on the host where Pi runs.
 
 For Emacs to find the command on the remote host, its directory must be
-in TRAMP's remote search path; Emacs's local =exec-path= is not used.
+in TRAMP's remote search path.  Emacs's local =exec-path= is not used.
 Use an absolute path in =pilish-executable=, or add the
 executable's absolute remote directory to =tramp-remote-path=:
 
@@ -837,24 +859,24 @@ dependency), and restart Emacs.
 #+html: </details>
 
 #+html: <a id="how-it-compares"></a>
-* How does it compare to other Emacs LLM helpers? 🆚
+* How does it compare to other Emacs LLM helpers?
 
-Pilish is a frontend for one agent: Pi.  Pi is open source and
-extensible — many model providers including local and custom models,
-reusable skills, prompt templates, TypeScript extensions and custom
-tools, and an SDK.  Pilish communicates with Pi over its JSON-RPC
+Pilish is a frontend for Pi.  Pi is open source and supports many
+model providers, including local and custom models.  It has reusable
+skills, prompt templates, TypeScript extensions, custom tools, and
+an SDK.  Pilish communicates with Pi over its JSON-RPC
 mode, receiving structured messages and tool events instead of
-driving a terminal UI; that is what makes the workflow above
-possible without embedding Pi's terminal UI.
+driving a terminal UI.  This makes the workflow above possible
+without embedding Pi's terminal UI.
 
-Pilish has real trade-offs: it is a young package, it needs the =pi=
-CLI (and Node.js) on the host where sessions run, and it does not
-talk to any other backend.  Here is where each option fits:
+Pilish has real trade-offs.  It is a young package, it needs the =pi=
+CLI and Node.js on the host where sessions run, and it does not talk
+to any other backend.  Here is where each option fits:
 
 - =pilish=: best when you want the Pi runtime (providers,
   sessions, extensions, skills, templates, custom tools, and custom
   providers) with an Emacs-native user interface.  It is not a general
-  Emacs LLM library and not a universal shell for every agent; it is a
+  Emacs LLM library or a universal shell for every agent.  It is a
   focused frontend for Pi.
 
 - [[https://github.com/karthink/gptel][gptel]] and [[https://github.com/karthink/gptel-agent][gptel-agent]]: =gptel= is reusable Emacs LLM
@@ -890,11 +912,10 @@ talk to any other backend.  Here is where each option fits:
   review.
 
 #+html: <a id="advanced-features-and-configuration"></a>
-* Advanced features and configuration ⚙️
+* Advanced features and configuration
 
-This section is reference material: changing defaults, managing
-grammars yourself, using extension features, the exact rules behind
-chat file actions, and installing from source.
+These settings and reference rules cover display preferences,
+extensions, file actions, grammar management, and source installation.
 
 ** Configuration
 
@@ -917,7 +938,7 @@ Here are some common non-default preferences:
 (setopt pilish-visit-file-other-window nil)
 #+end_src
 
-The input window has three display styles — pick one:
+Choose one of three input window display styles:
 
 #+begin_src emacs-lisp
 ;; Keep both windows visible whenever the session is shown (the default):
@@ -973,8 +994,8 @@ Less common tuning knobs:
 ;; (setopt pilish-tree-browser-default-filter 'default)
 #+end_src
 
-In =pilish-extra-args=, =--provider= requires =--model=; Pi exits with
-an error if the model option is missing.
+In =pilish-extra-args=, =--provider= requires =--model=.  Pi exits
+with an error if the model option is missing.
 
 You can also inspect the whole customization group with:
 
@@ -985,11 +1006,11 @@ M-x customize-group RET pilish RET
 ** Evil integration
 
 Optional Evil keybindings ship in =pilish-evil.el=, modeled on
-how Evil and Magit cooperate: the read-only chat buffer starts in
-motion state so navigation keys just work, the input buffer starts in
-insert state, and =?= opens the transient menu.  It loads
-automatically when a session is set up while Evil is in use; to opt
-out, set this before loading the package:
+how Evil and Magit cooperate.  The read-only chat buffer starts in
+motion state so navigation keys work, and the input buffer starts in
+insert state.  Press =?= to open the transient menu.  The integration
+loads automatically when a session starts while Evil is in use.
+To opt out, set this before loading the package:
 
 #+begin_src emacs-lisp
 (setq pilish-evil-integration nil)
@@ -1018,14 +1039,14 @@ Input buffer (normal state):
 | =?=   | transient menu     |
 
 Session and tree browser buffers start in motion state as well.  Evil's
-=j= / =k= move line-wise; Magit's section motions remain on =n= / =p=
+=j= / =k= move line-wise.  Magit's section motions remain on =n= / =p=
 (and =M-n= / =M-p=) and skip folded rows.  =TAB= / =S-TAB= and =^= use
 the browser folding and parent commands described above.  In the session
-browser =RET= switches to the selected session; in the tree browser it
-continues from the selected turn.  Every documented browser key — views,
-filters, folding, parent motion, search, scope, rename, delete, refresh,
-dispatch, =RET= — is rebound in motion state so the Evil and evil-collection
-keymap stack never swallows them (evil's
+browser, =RET= switches to the selected session.  In the tree browser,
+it continues from the selected turn.  Every documented browser key is
+rebound in motion state, including views, filters, folding, parent
+motion, search, scope, rename, delete, refresh, dispatch, and =RET=.
+The Evil and evil-collection keymap stack does not swallow them (Evil's
 motion state owns =/=, =?= and the =g= prefix; evil-snipe's =f= / =t=
 are disabled in these buffers, mirroring the chat buffer's =f= fork
 binding).
@@ -1059,11 +1080,11 @@ User bindings made after =pilish-evil-setup= runs (e.g. with
 defaults, and =M-x pilish-evil-setup= re-applies them after
 changing options.
 
-With =evil-snipe= (enabled by default in Doom): its minor-mode keymaps
-shadow the chat buffer's =f= binding, so setup turns the snipe minor
-modes off in chat buffers via evil-snipe's mode hooks — the same
-outcome =magit-mode= gets from its entry in
-=evil-snipe-disabled-modes=, and effective regardless of load order.
+With =evil-snipe=, which Doom enables by default, its minor-mode keymaps
+shadow the chat buffer's =f= binding.  Setup turns the snipe minor
+modes off in chat buffers via evil-snipe's mode hooks.  This has the
+same effect as =magit-mode='s entry in =evil-snipe-disabled-modes=,
+regardless of load order.
 Fork stays on =f=, char-finding remains available on =F=, =t=, and
 =T=, and snipe stays active in the input buffer.  Set
 =pilish-evil-disable-snipe= to nil to keep snipe active in
@@ -1072,7 +1093,7 @@ chat buffers.
 ** Display of thinking
 
 New chat buffers inherit =pilish-thinking-display=.  The
-default is =visible=: live thinking streams while the assistant is
+default is =visible=.  Live thinking streams while the assistant is
 working and remains expanded when that thinking block finishes.  Use
 =C-c C-p h= to change the current chat, or =C-c C-p H= to change the
 default for future chat buffers in the current Emacs session.  To make
@@ -1098,12 +1119,12 @@ highlighting, keeping long sessions fast.  Customize
 
 *Prompt images* are read and materialized when attached, and sent as
 stored bytes without resizing or format conversion.  Image-bearing
-drafts can be sent only as direct prompts while Pi is idle: they are
+drafts can be sent only as direct prompts while Pi is idle.  They are
 not queued while Pi is busy, not used as steering messages, and not
-combined with slash commands; a refusal preserves both the prompt
+combined with slash commands.  A refusal preserves both the prompt
 text and the image.  The default source limit is 3 MiB
 (=pilish-prompt-image-max-bytes=).  Files are read by Emacs, so an
-Emacs-readable path may use a file-name handler such as TRAMP — Pi
+Emacs-readable path may use a file-name handler such as TRAMP.  Pi
 receives the encoded bytes, never the path (remote reads depend on
 the configured handler and are not broadly tested).  Clipboard image
 extraction, automatic detection of paths typed into the prompt, and
@@ -1111,16 +1132,15 @@ multiple attachments are deferred.
 
 *Inline display:* image content in sent user turns and completed tool
 results renders inline in graphical Emacs and as a type-and-size
-placeholder in terminals; sent and returned images share the same
+placeholder in terminals.  Sent and returned images share the same
 bounded renderer.  Pi's built-in =read= already returns raster images
-as image content, resized to at most 2000x2000.  For SVG, a returned
-preview is made only from complete, standalone SVG text supplied by
-=read=;
+as image content, resized to at most 2000x2000.  For SVG, Pilish makes
+a preview only from complete, standalone SVG text supplied by =read=.
 Pilish never reopens the argument path, and text with obvious scripts
-or external resources is left as text.  Images in partial tool updates
+or external resources stays as text.  Images in partial tool updates
 appear when the final result arrives.  Unresized prompt images and
 custom tools can supply animated or highly compressed data whose
-decoder cost is not bounded by the source-byte cap; the preview
+decoder cost is not bounded by the source-byte cap.  The preview
 settings in Configuration bound what renders.  Moving a
 terminal-rendered chat to a GUI, resizing previews, or applying a
 later extension replacement may require a toggle or history reload.
@@ -1148,18 +1168,18 @@ session.  For a shareable export, use HTML export from the menu
 These are the exact rules behind =RET=, =!=, and =w= in the chat
 buffer.
 
-Outside Pi session links, =RET= opens one strict file target at point: a file-content row in
-tool output, a plain path reference, or the label of a local Markdown
-link.  Tool headers, fences, preview hints, and other non-content rows
-do not open files.  Plain locations such as =src/app.el:12:3= visit
-their one-based physical file line and optional one-based column; a
-range such as =src/app.el#L12-L20= visits its first line only.  If an
-explicit location is outside an existing narrowing, the default
-=widen-automatically= policy widens the file.  Coordinates apply only
-to file-visiting buffers; directory targets retain native Dired point
-and marks.  A target without a location keeps the point, mark, and
-narrowing chosen by normal Emacs file visiting.  By default Pilish
-requests the native other-window opener; =C-u RET= inverts
+Outside Pi session links, =RET= opens one strict file target at point.
+This can be a file-content row in tool output, a plain path reference,
+or the label of a local Markdown link.  Tool headers, fences, preview
+hints, and other non-content rows do not open files.  Plain locations
+such as =src/app.el:12:3= visit their one-based physical file line and
+optional one-based column.  A range such as =src/app.el#L12-L20= visits
+its first line only.  If an explicit location is outside an existing
+narrowing, the default =widen-automatically= policy widens the file.
+Coordinates apply only to file-visiting buffers.  Directory targets
+retain native Dired point and marks.  A target without a location keeps
+the point, mark, and narrowing chosen by normal Emacs file visiting.
+By default Pilish requests the native other-window opener.  =C-u RET= inverts
 =pilish-visit-file-other-window= for that visit, and Emacs display
 policy may redirect the final placement.
 
@@ -1167,15 +1187,16 @@ policy may redirect the final placement.
 Dired-inspired.  One command word followed only by
 whitespace-delimited options beginning with =-= receives the quoted
 target appended automatically, so =wc -l= and =grep -n= work as-is.
-All other command text — ordinary arguments, compound/control syntax,
-multiple lines — must place a textual isolated =*= (bounded by a
-space, tab, or string edge) where the target goes: =grep -n TODO *=,
-=head -20 * | less=.  A final whitespace-delimited ~&~ uses the usual
-asynchronous shell output.  Prompting and execution use a snapshot of
-the target session's local or TRAMP execution environment.
+All other command text must place a textual isolated =*= where the
+target goes, bounded by a space, tab, or string edge.  This includes
+ordinary arguments, compound or control syntax, and multiple lines.
+Examples include =grep -n TODO *= and =head -20 * | less=.
+A final whitespace-delimited ~&~ uses the usual asynchronous shell
+output.  Prompting and execution use a snapshot of the target session's
+local or TRAMP execution environment.
 
 =w= copies the same shell-local path that =!= operates on.  Local
-paths are absolute; paths in remote sessions use the remote shell's
+paths are absolute.  Paths in remote sessions use the remote shell's
 namespace without an Emacs TRAMP prefix.  Line, column, range, and
 link-fragment metadata are excluded, and the kill-ring value is the
 literal, unquoted pathname, so spaces remain spaces and no =@= prompt
@@ -1189,9 +1210,9 @@ transient menu, extension tools run normally, and extensions can use
 notifications, confirm/select/input prompts, prefill the input buffer,
 and show status text.
 
-Rich TUI-specific extension UI is not supported in Emacs yet: custom
-widgets, custom editor components, custom headers/footers, and other
-component-based views are unavailable or fall back.  Hover extension
+Rich TUI-specific extension UI is not supported in Emacs yet.
+Custom widgets, custom editor components, custom headers and footers,
+and other component-based views are unavailable or fall back.  Hover extension
 status text in the header line to see the exact =statusKey=, which you
 can use to change the font for that extension's status text using
 =pilish-extension-status-faces=.
@@ -1258,14 +1279,15 @@ child.
 
 In Emacs, bare =/mcp= shows server status in the echo area.
 =/mcp login [server]=, =/mcp logout [server]=, and
-=/mcp reconnect [server]= work through Pi's dialogs and notifications;
+=/mcp reconnect [server]= work through Pi's dialogs and notifications.
 =C-g= cancels a dialog.  Configure servers with =pi mcp add=,
-=pi mcp remove=, and =pi mcp list=; shell =pi mcp login= and
+=pi mcp remove=, and =pi mcp list=.  Shell =pi mcp login= and
 =pi mcp logout= also work without a session.
 
 The rich server manager, tool browsing, exposure changes, and
 enable/disable controls require Pi's terminal UI.  An Emacs server
-manager is deferred; see [[https://github.com/dnouri/pilish/issues/346][issue #346]].  =pi config= controls which
+manager is deferred.  See [[https://github.com/dnouri/pilish/issues/346][issue #346]].
+=pi config= controls which
 built-in extensions load.  Provider =/login=, including Radius setup,
 still requires the terminal.
 
@@ -1369,9 +1391,10 @@ busy:
           #'my-pi-tint-input-while-busy)
 #+end_src
 
-Another example: Notify when a real session turn finishes.  The
-=REASON= check matters: input relink cleanup also applies =idle= to
-the old input, but that does not mean Pi finished working.
+This example notifies you when a real session turn finishes.  The
+=REASON= check distinguishes completion from input relink cleanup.
+Cleanup also applies =idle= to the old input, but Pi has not finished
+working in that case.
 
 #+begin_src emacs-lisp
 (defun my-pi-message-when-done (chat _input old new reason)
@@ -1418,8 +1441,8 @@ With =use-package= (after the archive setup from Quick start):
 #+end_src
 
 On a fresh Emacs installation, run =M-x package-refresh-contents=
-once before restarting: =use-package='s =:ensure t= can only install
-=pilish= after the archive index has been downloaded.
+once before restarting.  The =use-package= keyword =:ensure t= can
+install =pilish= only after the archive index has been downloaded.
 
 For a plain Git checkout, configure the MELPA and GNU ELPA archives
 as shown in Quick start, then evaluate this once to install the
@@ -1457,104 +1480,84 @@ Or with =use-package= after installing the dependencies above:
 #+end_src
 
 If you prefer not to install the Pi CLI globally, point
-=pilish-executable= at npx instead; see the example in the
+=pilish-executable= at npx instead.  See the example in the
 Troubleshooting entry about finding the =pi= executable.
 
 #+html: <a id="development"></a>
-* Development 🛠️
+* Development
 
-Most users can skip this section.  It is for contributors and local
-package development.
+Start with [[file:AGENTS.md][AGENTS.md]] for module ownership and the contribution workflow.
+Run =make help= for supported targets and their prerequisites.
 
-** Running tests locally
+** Run checks locally
 
-The shared integration tests have two lanes:
-
-- a fast fake-pi lane for deterministic RPC-boundary checks
-- a real pi lane for backend compatibility coverage
-
-The default local integration target runs the fake lane first and the
-real lane second, so it still needs Docker for the real lane.  The GUI
-suite is fully fake-backed and does not need Docker or a local pi
-install.
+Common commands are:
 
 #+begin_src bash
-# Byte-compile, lint, and unit tests
+make help
+make install-hooks
 make check
-
-# Shared integration contract: fake first, then real
-make test-integration
-
-# Fast integration lane against the fake-pi harness only;
-# needs neither Docker nor a pi install
 make test-integration-fake
-
-# Real pi lane only; starts the project-local Ollama Docker container
-make test-integration-real
-
-# Run a single integration contract by selector
-make test-integration-fake SELECTOR=rpc-smoke
-make test-integration-real SELECTOR=steering-contract
-
-# Deterministic GUI tests (fake-backed, no Docker or local pi install)
 make test-gui
-
-# Run one GUI regression by selector
-make test-gui SELECTOR=tool-overlay-bounded
-
-# All tests
-make test-all
 #+end_src
 
-** Running fake-pi manually
+=make install-hooks= installs the pre-commit hook, which runs
+=make check= for byte-compilation, lint, and batch unit tests.
+Use a focused suite or ~SELECTOR=pattern~ during development.
 
-Run the harness directly when debugging the subprocess contract
-itself.  These commands start an interactive JSONL peer on
-stdin/stdout.
+The fake integration and GUI suites need neither Docker nor a local
+Pi installation.  =make test-integration= runs fake checks followed
+by real Pi checks.  The real lane starts an Ollama Docker container
+and can run alone with =make test-integration-real=.
+
+Before a PR, use [[file:.agents/skills/verify-pilish/SKILL.md][the verification skill]] for each changed user-facing
+feature and preserve its evidence.  Tests do not replace this
+user-action check.  Read [[file:test/support/fake-pi-contract.md][the fake Pi contract]] before changing
+subprocess fixtures.
+
+** Run fake Pi manually
+
+These commands start an interactive JSONL peer for subprocess
+contract debugging.  Scenario fixtures live in =test/fixtures/fake-pi/=.
 
 #+begin_src bash
-# Basic prompt lifecycle scenario
 uv run --script test/support/fake_pi.py --scenario prompt-lifecycle
-
-# Extension dialog scenario with a longer manual timeout
 ./test/support/fake_pi.py --scenario extension-confirm --extension-timeout-ms 10000
 #+end_src
 
-Scenario fixtures live under =test/fixtures/fake-pi/=.
+** Run GUI tests with a visible window
 
-** GUI tests with visible window
-
-The GUI suite is deterministic and fake-backed.  By default it
-auto-detects whether to show a window or run headless.
+The fake-backed GUI suite shows a window when a display is available
+and runs headless otherwise.  The script also accepts a test selector:
 
 #+begin_src bash
-# With a display available, runs with visible window
-./test/run-gui-tests.sh
-
-# Run one visible regression directly
 ./test/run-gui-tests.sh pilish-gui-test-scroll-auto-when-at-end
-
-# Force headless even with display available
 ./test/run-gui-tests.sh --headless
 #+end_src
 
-** CI setup
+** CI checks
 
-GitHub Actions runs on every push:
+Pull requests and pushes to =master= or =main= run these workflows:
 
-- =test-unit.yml= - Unit tests across Emacs 29.4, 30.1, and snapshot (31)
-- =lint.yml= - Byte-compile, checkdoc, and package-lint across Emacs 29.4, 30.1, and snapshot
-- =test-integration.yml= - Split fake/real integration jobs; fake stays fast, real keeps Ollama compatibility coverage
-- =test-gui.yml= - Deterministic fake-backed GUI tests with xvfb virtual framebuffer
+- =test-unit.yml= runs compilation and unit tests on Emacs 29.4, 30.1,
+  and snapshot.
+- =lint.yml= runs checkdoc and package-lint on the same Emacs versions.
+- =test-integration.yml= runs separate fake and real backend jobs.
+- =test-gui.yml= runs deterministic fake-backed GUI tests with xvfb.
+- =melpazoid.yml= checks the package build.
+- =bench.yml= runs batch table benchmarks and smoke checks for reload,
+  tool updates, and streamed output.
 
-The real integration workflows use Node 24.  Nightly builds keep real
-integration coverage against the pinned pi version (from Makefile) and
-latest, while the fake-backed GUI suite runs once.
+Real integration workflows use Node 24.  =nightly.yml= runs
+=make check= on all three Emacs versions, fake integration, real
+integration against the pinned Pi version from the Makefile and
+latest, and one fake-backed GUI job.  It runs on a schedule or by
+manual request.
 
-* Links 🔗
+* Links
 
 - [[https://pi.dev][pi.dev]]: pi coding agent home page
 
-* License ⚖️
+* License
 
 GPL-3.0-or-later. See [[file:LICENSE][LICENSE]].
