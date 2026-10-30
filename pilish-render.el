@@ -2624,14 +2624,25 @@ retained facts through the existing queue."
            (displayed-output (and (eq toggled-section 'output)
                                   (pilish--tool-block-displayed-output block)))
            (view (pilish--capture-tool-rewrite-view))
-           (inhibit-read-only t))
+           (inhibit-read-only t)
+           (failure nil))
       (save-excursion
-        (remove-overlays start old-end 'pilish-diff-overlay t)
-        (delete-region start old-end)
-        (goto-char start)
-        (pilish--insert-compound-tool-body block displayed-output)
-        (set-marker header start)
-        (set-marker end (point))
+        ;; One edit for change hooks: md-ts hooks read the parse tree, so each
+        ;; intermediate insertion would reparse the chat.  The header and
+        ;; fontification can touch text outside this region.
+        (combine-change-calls start old-end
+          ;; A non-local exit would skip the final after-change call.
+          (condition-case err
+              (progn
+                (remove-overlays start old-end 'pilish-diff-overlay t)
+                (delete-region start old-end)
+                (goto-char start)
+                (pilish--insert-compound-tool-body block displayed-output)
+                (set-marker header start)
+                (set-marker end (point)))
+            (t (setq failure err))))
+        (when failure
+          (signal (car failure) (cdr failure)))
         (pilish--tool-block-refresh-overlay block)
         (pilish--font-lock-ensure-excluding-property start (point) 'pilish-no-fontify))
       (let* ((new-end (marker-position end))
