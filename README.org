@@ -1306,13 +1306,14 @@ Pilish release, then restart Emacs:
 C-u M-x pilish-install-grammars
 #+end_src
 
-Older Markdown builds carry a scanner defect that could crash Emacs
-while deeply nested output was parsed, and an installed grammar is
-never rebuilt automatically.  The prefix argument removes and rebuilds
-both Markdown grammars from the current recipe.  It keeps a grammar that
-is newer than the pinned build instead of downgrading it.  If you manage
-grammars yourself, use the revision in
-=pilish-essential-grammar-recipes=.
+Older Markdown builds carry scanner defects that could crash Emacs
+while parsing deeply nested output or applying streamed edits after a
+block closes.  The current backport for Emacs 29 and 30 addresses both
+failure modes.  An installed grammar is never rebuilt automatically.
+The prefix argument removes and rebuilds both Markdown grammars from
+the current recipe.  It keeps a grammar that is newer than the pinned
+build instead of downgrading it.  If you manage grammars yourself, use
+the revision in =pilish-essential-grammar-recipes=.
 
 If you manage tree-sitter grammars outside of Emacs, for example
 through a system package manager, set

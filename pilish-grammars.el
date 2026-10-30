@@ -54,8 +54,8 @@
   "Upstream Markdown grammar source for tree-sitter ABI 15 and newer.")
 
 (defconst pilish--markdown-backport-source
-  '("https://github.com/dnouri/tree-sitter-markdown" "v0.4.1-pilish.1")
-  "Backport of the scanner fix for tree-sitter ABI 14, based on v0.4.1.")
+  '("https://github.com/dnouri/tree-sitter-markdown" "v0.4.1-pilish.2")
+  "Backport of scanner fixes for tree-sitter ABI 14, based on v0.4.1.")
 
 (defun pilish--treesit-abi-version ()
   "Return the newest language ABI this Emacs can load, or nil."
@@ -65,9 +65,9 @@
 (defun pilish--markdown-grammar-source ()
   "Return the (URL REVISION) pair of Markdown grammars for this Emacs.
 Upstream v0.5.4 is used when this Emacs loads ABI 15.  Otherwise the
-v0.4.1 backport is used, which carries the same scanner fix at ABI 14.
-Both fix the serialization overflow described in
-`pilish-essential-grammar-recipes'."
+v0.4.1 backport is used, which carries the same overflow fix at ABI 14
+and resets stale block state after the last block closes at end of input.
+See `pilish-essential-grammar-recipes' for the failure modes."
   (let ((abi (pilish--treesit-abi-version)))
     (if (and (integerp abi) (>= abi 15))
         pilish--markdown-upstream-source
@@ -89,12 +89,14 @@ corrupted the Emacs process.  Upstream fixed that in 2990e5a, released
 in v0.5.4, which requires tree-sitter ABI 15.
 
 Emacs 29 and 30 load at most ABI 14, so they cannot use that release.
-They get a v0.4.1 backport instead, tag v0.4.1-pilish.1 on
-https://github.com/dnouri/tree-sitter-markdown, whose commit is 9a12ff4
-and which carries only the scanner fix.  A build with ABI 15 or newer
-gets upstream v0.5.4 directly.  `treesit-install-language-grammar'
-clones with `git clone -b', so the revisions are tags, not commit
-hashes.")
+They get a v0.4.1 backport instead, tag v0.4.1-pilish.2 on
+https://github.com/dnouri/tree-sitter-markdown.  In addition to the
+overflow fix, that build resets stale matching and close-block flags
+when the last block closes at end of input.  Otherwise a later streamed
+edit can restore an empty block stack with those flags set and underflow
+it on the next close.  A build with ABI 15 or newer gets upstream v0.5.4
+directly.  `treesit-install-language-grammar' clones with `git clone -b',
+so the revisions are tags, not commit hashes.")
 
 (defconst pilish-optional-grammar-recipes
   '((python      "https://github.com/tree-sitter/tree-sitter-python"       "v0.23.6")
