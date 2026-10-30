@@ -20,9 +20,9 @@ Preconditions:
 
 - The Doctor check passed. `RUN_DIR` is a new empty evidence directory.
 
-- **Open the session.** Run `./test/run-gui-tests.sh --headless pilish-gui-test-session-starts 2>&1 | tee "$RUN_DIR/layout.log"`. Record `layout.exit`. A zero status proves the fake process, chat window, input window, and two-window layout.
+- **Open the session.** Run `./test/run-gui-tests.sh --headless pilish-gui-test-session-starts 2>&1 | tee "$RUN_DIR/layout.log"`. Record `layout.exit`. A passing, non-skipped result proves the fake process and stacked chat and input windows.
 - **Send two prompts.** Run `./test/run-gui-tests.sh --headless pilish-gui-test-send-waits-for-turn-start 2>&1 | tee "$RUN_DIR/send.log"`. Record `send.exit`. The test sends through `pilish-send`, displays the fake reply to the second prompt, and returns to idle.
-- **Check the proof.** Require zero statuses and nonempty logs with `test "$(cat "$RUN_DIR/layout.exit")" -eq 0`, `test "$(cat "$RUN_DIR/send.exit")" -eq 0`, `test -s "$RUN_DIR/layout.log"`, and `test -s "$RUN_DIR/send.log"`.
+- **Check the proof.** Require zero statuses and nonempty logs. Require `PASS: pilish-gui-test-session-starts` and `PASS: pilish-gui-test-send-waits-for-turn-start` in their respective logs, plus `0 skipped` in both. Use `test "$(cat "$RUN_DIR/layout.exit")" -eq 0`, `test "$(cat "$RUN_DIR/send.exit")" -eq 0`, `test -s "$RUN_DIR/layout.log"`, and `test -s "$RUN_DIR/send.log"`.
 
 ## Gotchas
 
