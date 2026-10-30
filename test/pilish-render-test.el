@@ -19263,23 +19263,24 @@ Regression test: streaming output with no newlines should still be capped."
                    (cl-incf flushes)
                    (funcall flush))))
         (pilish-test--send-tool-execution-update
-         "child" "Log: ~/child.jsonl.subagents.md\n- subagent (9% ctx, 18 turns): thinking")
+         "child" "[log]: ~/child.jsonl.subagents.md\n- subagent (9% ctx, 18 turns): thinking")
         (pilish-test--flush-tool-updates)
         (should (> flushes 0))
         (setq flushes 0)
         (dotimes (n 8)
           (pilish-test--send-tool-execution-update
-           "child" (format "Log: ~/child.jsonl.subagents.md\n- subagent (9%% ctx, 18 turns): using read %d" n))
+           "child" (format "[log]: ~/child.jsonl.subagents.md\n- subagent (9%% ctx, 18 turns): using read %d" n))
           (pilish-test--flush-tool-updates))
         (should (= 0 flushes))
-        ;; A real fence change still needs the non-local Markdown flush.
+        ;; A real fence change near definition syntax still needs the
+        ;; non-local Markdown flush.
         (pilish-test--send-tool-execution-update
-         "child" "Log: ~/child.jsonl.subagents.md\n- subagent (9% ctx, 18 turns): ```inside```")
+         "child" "[log]: ~/child.jsonl.subagents.md\n- subagent (9% ctx, 18 turns): ```inside```")
         (pilish-test--flush-tool-updates)
         (should (> flushes 0)))
       (should (string-prefix-p header (buffer-string)))
       (should (equal (pilish-test--tool-stream-body-by-id "child")
-                     "~~~\nLog: ~/child.jsonl.subagents.md\n- subagent (9% ctx, 18 turns): ```inside```\n~~~\n")))))
+                     "~~~\n[log]: ~/child.jsonl.subagents.md\n- subagent (9% ctx, 18 turns): ```inside```\n~~~\n")))))
 
 (ert-deftest pilish-test-tool-body-minimal-replacement-preserves-blocks ()
   "Structural changes keep the exact fenced body, hint, and block boundaries."
