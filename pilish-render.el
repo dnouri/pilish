@@ -6964,7 +6964,7 @@ in the mapping.  Return non-nil when the rewrite succeeds."
 This is the ordinary one-shot timer callback.  Current input wins without
 queue progress.  Otherwise one candidate is removed, revalidated as completed,
 current-buffer-owned, and still outside the live hot-tail boundary, then passed
-to the unchanged cold rewrite primitive with cooling-specific view mapping.
+to the shared cold rewrite primitive with cooling-specific view mapping.
 Timer ownership is cleared before input checks, mutation, or rearming."
   (when (buffer-live-p buffer)
     (with-current-buffer buffer
