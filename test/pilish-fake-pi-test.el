@@ -1967,6 +1967,104 @@ SPEC is (SESSION SCENARIO &rest EXTRA-ARGS)."
         (pilish-fake-pi-test--assert-assistant-roundtrip
          proc (list tool-assistant-message final-message))))))
 
+(ert-deftest pilish-fake-pi-test-tool-duration-wire-and-saved-roundtrip ()
+  "Recorded timing is optional, top-level, and survives the subprocess store."
+  (dolist (scenario '("tool-duration" "tool-read"))
+    (ert-info ((format "scenario=%s" scenario))
+      (pilish-fake-pi-test-with-process (proc scenario)
+        (should (eq t (plist-get (pilish-fake-pi-test--rpc
+                                 proc '(:type "prompt" :message "timing contract"))
+                                :success)))
+        (let* ((events (pilish-fake-pi-test--collect-until
+                        proc (lambda (event)
+                               (equal (plist-get event :type) "agent_settled"))))
+               (end (car (pilish-fake-pi-test--events-of-type events "tool_execution_end")))
+               (message (plist-get (car (pilish-fake-pi-test--message-events
+                                        events "message_end" "toolResult")) :message))
+               (state (plist-get (pilish-fake-pi-test--rpc proc '(:type "get_state")) :data))
+               (file (plist-get state :sessionFile))
+               (disk (seq-find (lambda (record)
+                                 (equal (plist-get (plist-get record :message) :role) "toolResult"))
+                               (pilish-fake-pi-test--read-jsonl-file file)))
+               (timed (equal scenario "tool-duration")))
+          (should end)
+          (should message)
+          (should disk)
+          (should (equal (plist-get end :toolCallId) (plist-get message :toolCallId)))
+          (dolist (payload (list end message (plist-get disk :message)))
+            (should (eq (not (null (plist-member payload :durationMs))) timed))
+            (when timed (should (= (plist-get payload :durationMs) 125000)))
+            (should-not (plist-member payload :duration_ms)))
+          (should-not (plist-member (plist-get end :result) :durationMs))
+          (should-not (plist-member (plist-get end :result) :duration_ms))
+          (should (equal (plist-get disk :message) message))
+          ;; Both the current projection and a disk switch must retain exactly
+          ;; the same toolResult, including legitimate field absence.
+          (dotimes (pass 2)
+            (when (= pass 1)
+              (should (eq t (plist-get (pilish-fake-pi-test--rpc proc '(:type "new_session")) :success)))
+              (should (eq t (plist-get (pilish-fake-pi-test--rpc
+                                       proc (list :type "switch_session" :sessionPath file)) :success))))
+            (let* ((messages (plist-get (plist-get (pilish-fake-pi-test--rpc
+                                                    proc '(:type "get_messages")) :data) :messages))
+                   (saved (seq-find (lambda (item) (equal (plist-get item :role) "toolResult")) messages)))
+              (should saved)
+              (should (equal saved message)))))))))
+
+(ert-deftest pilish-fake-pi-test-tool-duration-live-and-history-render ()
+  "The real filter drives local ticks, authoritative completion and quiet history."
+  (let ((pilish-bash-preview-lines 2))
+    (dolist (scenario '("tool-duration" "tool-read"))
+      (pilish-fake-pi-test-with-session (session scenario)
+        (let* ((chat (plist-get session :chat-buffer))
+               (input (plist-get session :input-buffer))
+               (proc (plist-get session :process))
+               (timed (equal scenario "tool-duration"))
+               block)
+          (pilish-fake-pi-test--wait-or-fail
+           proc (lambda () (with-current-buffer chat
+                             (not (pilish--session-transition-active-p)))) "startup")
+          (with-current-buffer input (insert "duration display contract") (pilish-send))
+          (when timed
+            (pilish-fake-pi-test--wait-or-fail
+             proc (lambda () (with-current-buffer chat
+                               (setq block (car pilish--running-tool-blocks))
+                               (and block (equal (pilish--tool-duration-label block) "Elapsed 0s"))))
+             "immediate local elapsed time")
+            (pilish-fake-pi-test--wait-or-fail
+             proc (lambda () (with-current-buffer chat
+                               (string-match-p "Elapsed 1s" (buffer-string))))
+             "real production one-second tick"))
+          (pilish-fake-pi-test--wait-or-fail
+           proc (lambda () (with-current-buffer chat (eq pilish--status 'idle))) "settlement")
+          (with-current-buffer chat
+            (should (string-match-p (if timed "DURATION FIRST" "fake tool output")
+                                    (buffer-string)))
+            (should-not pilish--tool-time-timer)
+            (should-not pilish--running-tool-blocks)
+            (should-not (string-match-p "Elapsed" (buffer-string)))
+            (if timed
+                (progn
+                  (should (equal (pilish--tool-duration-label block) "Took 2m 5s"))
+                  (should (string-match-p "Took 2m 5s" (pilish--visible-text (point-min) (point-max)))))
+              (should-not (string-match-p "Took" (buffer-string))))
+            (let ((text (buffer-substring-no-properties (point-min) (point-max)))
+                  (tick (buffer-chars-modified-tick)))
+              (sleep-for 1.15)
+              (should (= tick (buffer-chars-modified-tick)))
+              (should (equal text (buffer-substring-no-properties (point-min) (point-max))))))
+          (let* ((response (pilish--rpc-sync proc '(:type "get_messages") 5))
+                 (messages (plist-get (plist-get response :data) :messages)))
+            (with-temp-buffer
+              (pilish-chat-mode)
+              (pilish--display-history-messages messages)
+              (should-not pilish--tool-time-timer)
+              (should-not pilish--running-tool-blocks)
+              (should-not (string-match-p "Elapsed" (buffer-string)))
+              (should (string-match-p (if timed "DURATION FIRST" "fake tool output")
+                                      (buffer-string)))
+              (should (eq (not (null (string-match-p "Took 2m 5s" (buffer-string)))) timed)))))))))
+
 (ert-deftest pilish-fake-pi-test-nested-tools-wire-and-disk ()
   "Nested wire records keep the parent snapshot unchanged after a late end."
   (pilish-fake-pi-test-with-process (proc "nested-tools")

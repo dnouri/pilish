@@ -382,6 +382,11 @@ still operate on the raw table source."
   "Face for tool output text."
   :group 'pilish)
 
+(defface pilish-tool-duration
+  '((t :inherit (shadow fixed-pitch)))
+  "Face for tool durations in output footers."
+  :group 'pilish)
+
 (defface pilish-tool-block
   '((t :extend t))
   "Face for tool blocks.
@@ -2573,7 +2578,7 @@ Returns nil if MS is nil."
 (defconst pilish--pi-package "@earendil-works/pi-coding-agent"
   "Npm package name for the pi CLI supported by Pilish.")
 
-(defconst pilish--minimum-pi-version "1.0.0"
+(defconst pilish--minimum-pi-version "1.1.0"
   "Minimum supported pi CLI version.")
 
 (defun pilish--pi-install-command ()

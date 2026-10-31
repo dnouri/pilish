@@ -473,8 +473,15 @@ retained if Pi subsequently starts the accepted prompt."
                 (pilish--prompt-start-wait-active-p)
                 (pilish--command-pending-p (pilish--get-process) "compact"))
         (pilish--set-aborted t)
-        (pilish--clear-followup-queue)
-        (pilish--send-abort)
+        ;; Settle every duration owner before any fallible footer painting,
+        ;; then deliver the queue clear and Abort RPC first.  Footer repaints
+        ;; run afterwards so a paint error can never block the abort itself.
+        (let ((retired (pilish--cancel-tool-times-state)))
+          (unwind-protect
+              (progn
+                (pilish--clear-followup-queue)
+                (pilish--send-abort))
+            (pilish--paint-retired-tool-times retired)))
         (message "Pi: Aborting...")))))
 
 (defun pilish-quit ()

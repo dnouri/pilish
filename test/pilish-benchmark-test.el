@@ -67,7 +67,7 @@
    '("")
    (cl-loop for i below 6 collect
             (format "> SD-THINK-%04d thought-%05d" i (mod (+ 20240817 (* i 3571)) 100000)))
-   '("")
+   '("Show less" "")
    (cl-loop for i below 20 collect
             (format "SD-BACKLOG-%04d value-%05d" i (mod (+ 20240817 (* i 6151)) 100000)))
    (list "" (concat prefix pilish-benchmark-test--command) "")))
@@ -426,7 +426,7 @@ STREAM chooses the stream engine rather than the tool engine."
                         (seq-subseq (pilish-benchmark-test--stream-lines "$ ") 15 21)) "\n") "\n"))
       (pilish--display-thinking-end nil)
       (pilish--display-message-delta
-       (concat (string-join (seq-subseq (pilish-benchmark-test--stream-lines "$ ") 22 42) "\n") "\n"))
+       (concat (string-join (seq-subseq (pilish-benchmark-test--stream-lines "$ ") 23 43) "\n") "\n"))
       (pilish-test--send-toolcall-message-update
        "toolcall_end" 0
        (list (pilish-test--toolcall "boundary" "bash" (list :command pilish-benchmark-test--command))))

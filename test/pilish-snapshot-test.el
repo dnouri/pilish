@@ -376,19 +376,19 @@
           (pilish-test--kill-live-buffers snapshot second))))))
 
 (ert-deftest pilish-test-snapshot-details-survive-source-death ()
-  "Every saved block opens detached Help without timing, RPC, or source retention."
+  "Saved blocks open detached Help with recorded tool time, but no live timing or RPC."
   (pilish-test--with-snapshot-files
     (pilish-test--snapshot-write
      child (list header
                  '(:type "message" :id "reply" :parentId :null
                    :message (:role "assistant" :timestamp 0 :provider "saved"
-                             :model "historical" :usage (:input 0 :output 7)
+                             :model "historical" :usage (:input 0 :output 7) :durationMs 9000
                              :content [(:type "text" :text "Saved inspected answer")
                                        (:type "thinking" :thinking "Saved private thinking")
                                        (:type "toolCall" :id "A" :name "bash"
                                         :arguments (:command "printf '\\[find-file]' %"))]))
                  '(:type "message" :id "result" :parentId "reply"
-                   :message (:role "toolResult" :toolCallId "A" :timestamp 0
+                   :message (:role "toolResult" :toolCallId "A" :timestamp 0 :durationMs 0
                              :content [(:type "text" :text "Saved private output")]))))
     (save-window-excursion
       (let (snapshot reports)
@@ -407,7 +407,10 @@
                              (lambda (fmt &rest args) (when fmt (setq shown (apply #'format fmt args))))))
                     (call-interactively (key-binding (kbd "C-h ."))))
                   (should (equal shown expected))
-                  (should-not (string-match-p "Stream:\\|Execution time:\\|Saved inspected\\|private" expected))
+                  (should-not (string-match-p "Stream:\\|Saved inspected\\|private" expected))
+                  (if (equal text "Saved private output")
+                      (should (string-suffix-p "\nExecution time: 0.0s" expected))
+                    (should-not (string-match-p "Execution time:" expected)))
                   (call-interactively #'pilish-describe-reply)
                   (set-buffer (window-buffer (selected-window)))
                   (should (derived-mode-p 'help-mode))
@@ -726,14 +729,15 @@
                      details nil block)
                     (let* ((button (pilish--find-toggle-button-in-region
                                     (overlay-start overlay) (overlay-end overlay)))
-                           (original (and button (button-get button 'pilish-full-content))))
+                           (view (and button (pilish-test--output-view button)))
+                           (original (and view (plist-get (pilish--tool-output-view-snapshot view) :text))))
                       (should (stringp original))
                       (should (string-prefix-p "## Subagent result\nSaved answer\n\n**Details**\n" original))
                       (should (string-suffix-p "\n\nPi sessions: saved child" original))
                       (should (= (length (split-string original "\n")) 19))
-                      (should (= (button-get button 'hidden-count) 18)))
+                      (should (= (plist-get (pilish--tool-output-view-excerpt view) :hidden-lines) 18)))
                     (should (equal (pilish-test--snapshot-name-rows) (list (list "saved child" "child-id" anchor))))
-                    (should (string-match-p "^Output$" (buffer-string)))
+                    (should (string-match-p "^… 18 more lines$" (buffer-string)))
                     (let ((plain (buffer-substring-no-properties (point-min) (point-max))))
                       (goto-char (point-min))
                       (execute-kbd-macro (kbd "C-c ]"))
@@ -754,11 +758,7 @@
                         (font-lock-ensure)
                         (pilish--restore-tool-properties (point-min) (point-max))
                         (should (equal (buffer-substring-no-properties (point-min) (point-max))
-                                       (if cold
-                                           (replace-regexp-in-string
-                                            "\n```\n\n\\'"
-                                            "\n```\n... (18 more lines)\n\n" plain t t)
-                                         plain)))
+                                       plain))
                         (should (equal (pilish-test--snapshot-name-rows) (list (list "saved child" "child-id" anchor))))
                         (goto-char (point-min))
                         (execute-kbd-macro (kbd "C-c ]"))
@@ -1601,7 +1601,7 @@
                      (call (car (pilish--tool-block-nested-calls block)))
                      (overlay (pilish--tool-block-overlay block)))
                 (goto-char (point-min))
-                (re-search-forward "^Output$")
+                (pilish-test--search-output-control)
                 (button-activate (button-at (1- (point))))
                 (should (equal (mapcar #'cadr (pilish-test--snapshot-name-rows))
                                '("worker-17" "worker-42" "worker-17" "worker-42")))
@@ -1610,7 +1610,8 @@
                 (should-not (pilish--nested-call-result call))
                 (should-not (pilish--tool-block-nested-calls block))
                 (should-not (pilish--tool-block-result block))
-                (should-not (pilish--tool-block-displayed-output block)))
+                (should-not (pilish--tool-block-output-view block))
+                (should-not (pilish--nested-call-output-view call)))
               (goto-char (point-min))
               (pilish-next-subagent-name)
               (pilish-next-subagent-name)
@@ -1686,8 +1687,8 @@
             (should (string-match-p "Independent peer review" (buffer-string))))
         (pilish-test--kill-live-buffers descendant snapshot parent)))))
 
-(defun pilish-test--snapshot-tool-entries (header output)
-  "Return HEADER plus one bash tool call and result whose output is OUTPUT."
+(defun pilish-test--snapshot-tool-entries (header output &optional milliseconds)
+  "Return HEADER and a bash result with OUTPUT and optional recorded MILLISECONDS."
   (list header
         (pilish-test--snapshot-message "user" nil "Run a tool")
         (list :type "message" :id "assistant" :parentId "user"
@@ -1696,9 +1697,11 @@
                                                     :arguments (list :command "emit output")))
                              :timestamp 0))
         (list :type "message" :id "result" :parentId "assistant"
-              :message (list :role "toolResult" :toolCallId "call_1"
-                             :content (vector (list :type "text" :text output))
-                             :details nil :timestamp 0))))
+              :message (append
+                        (list :role "toolResult" :toolCallId "call_1"
+                              :content (vector (list :type "text" :text output))
+                              :details nil :timestamp 0)
+                        (when milliseconds (list :durationMs milliseconds))))))
 
 (defun pilish-test--snapshot-hidden-stage-names ()
   "Return live buffer names belonging to hidden snapshot stages."
@@ -1747,7 +1750,7 @@
               (setq win (selected-window))
               (should (string-match-p "fold-line-05" (buffer-string)))
               (should-not (string-match-p "fold-line-15" (buffer-string)))
-              (should (string-match-p "^Output$" (buffer-string)))
+              (should (string-match-p "^… [0-9]+ more lines?$" (buffer-string)))
               (goto-char (point-min))
               (search-forward "fold-line-01")
               (execute-kbd-macro (kbd "TAB"))
@@ -1822,13 +1825,93 @@
                   (should (string-match-p "Fresh saved text" (buffer-string)))
                   (should (string-match-p "fold-line-05" (buffer-string)))
                   (should-not (string-match-p "fold-line-15" (buffer-string)))
-                  (should (string-match-p "^Output$" (buffer-string))))
+                  (should (string-match-p "^… [0-9]+ more lines?$" (buffer-string))))
                 (should (equal (buffer-local-value 'pilish--status parent) 'sending))
                 (should (equal (buffer-local-value 'pilish--state parent) (list :session-file anchor)))
                 (should (eq (buffer-local-value 'pilish--canonical-messages parent) canonical))
                 (should (equal (with-current-buffer input (buffer-string)) "Unsent parent draft"))
                 (should (eq (pilish--find-session directory) parent))))
           (pilish-test--kill-live-buffers replacement snapshot))))))
+
+(ert-deftest pilish-test-snapshot-duration-rows-replay-without-live-execution ()
+  "Saved long, short, empty and zero results use final rows; old saves stay quiet."
+  (pilish-test--with-snapshot-files
+    (dolist (output '("FIRST\nSECOND\nTHIRD\nFOURTH" "SHORT" ""))
+      (dolist (milliseconds '(nil 0 3723000))
+        (pilish-test--snapshot-write child (pilish-test--snapshot-tool-entries header output milliseconds))
+        (save-window-excursion
+          (let ((pilish-bash-preview-lines 1) snapshot)
+            (unwind-protect
+                (cl-letf (((symbol-function 'pilish--tool-block-start-execution)
+                           (lambda (&rest _) (ert-fail "Saved duration started a live clock")))
+                          ((symbol-function 'pilish--schedule-tool-times)
+                           (lambda () (ert-fail "Snapshot scheduled a live clock"))))
+                  (setq snapshot (pilish-open-subagent-snapshot target))
+                  (let* ((overlay (car (pilish--tool-block-overlays-in-region (point-min) (point-max))))
+                         (block (pilish--tool-block-from-overlay overlay)))
+                    (dolist (cold '(nil t))
+                      (when cold (pilish--cool-tool-overlay overlay))
+                      (if milliseconds
+                          (progn
+                            (should (string-match-p (if (= milliseconds 0) "Took 0.0s" "Took 1h 2m 3s")
+                                                    (buffer-string)))
+                            (should (= 2 (length (split-string (buffer-string) "Took ")))))
+                        (should-not (string-match-p "Took\\|Elapsed" (buffer-string))))
+                      (when (and (not cold) milliseconds)
+                        (should (pilish--tool-output-view-footer-start (pilish--tool-block-output-view block))))
+                      (should-not (string-match-p "Elapsed" (buffer-string)))
+                      (should-not pilish--running-tool-blocks)
+                      (should-not pilish--tool-time-timer))))
+              (pilish-test--kill-live-buffers snapshot))))))))
+
+(ert-deftest pilish-test-snapshot-refresh-preserves-and-replaces-recorded-tool-time ()
+  "Unchanged and failed refreshes keep time; a changed saved value replaces it."
+  (pilish-test--with-snapshot-files
+    (let ((entries (pilish-test--snapshot-tool-entries header "Timed saved output" 0)))
+      (pilish-test--snapshot-write child entries)
+      (save-window-excursion
+        (let (snapshot replacement)
+          (unwind-protect
+              (cl-letf (((symbol-function 'pilish--tool-block-start-execution)
+                         (lambda (&rest _) (ert-fail "Snapshot armed live timing")))
+                        ((symbol-function 'pilish--schedule-tool-times)
+                         (lambda () (ert-fail "Snapshot refresh scheduled a live clock"))))
+                (setq snapshot (pilish-open-subagent-snapshot target))
+                (goto-char (point-min))
+                (search-forward "Timed saved output")
+                (let* ((details (pilish--details-at-point))
+                       (overlay (car (pilish--tool-block-overlays-in-region (point-min) (point-max))))
+                       (timing (pilish--tool-block-timing (pilish--tool-block-from-overlay overlay))))
+                  (should (string-suffix-p "\nExecution time: 0.0s" details))
+                  (should (= (pilish--recorded-tool-time-milliseconds timing) 0))
+                  (should (string-match-p "Took 0.0s" (buffer-string)))
+                  (let ((footer (pilish--tool-output-view-footer-start
+                                 (pilish--tool-block-output-view (pilish--tool-block-from-overlay overlay)))))
+                    (should (eq (pilish-test--snapshot-refresh "Saved conversation unchanged") snapshot))
+                    (should (eq footer (pilish--tool-output-view-footer-start
+                                        (pilish--tool-block-output-view (pilish--tool-block-from-overlay overlay))))))
+                  (should (eq (pilish-test--snapshot-refresh "Saved conversation unchanged") snapshot))
+                  (should (eq (pilish--details-at-point) details))
+                  (should (eq (pilish--tool-block-timing (pilish--tool-block-from-overlay overlay)) timing))
+                  (pilish-test--snapshot-write child (pilish-test--snapshot-tool-entries
+                                                     header "Timed saved output" 1300))
+                  (setq replacement (pilish-test--snapshot-refresh "Saved conversation updated"))
+                  (should-not (buffer-live-p snapshot))
+                  (with-current-buffer replacement
+                    (goto-char (point-min))
+                    (search-forward "Timed saved output")
+                    (let ((updated (pilish--details-at-point)))
+                      (should (string-suffix-p "\nExecution time: 1.3s" updated))
+                      (should (string-match-p "Took 1.3s" (buffer-string)))
+                      (should-not (string-match-p "Took 0.0s" (buffer-string)))
+                      (should-not (string-match-p "Stream:" updated))
+                      (pilish-test--snapshot-write
+                       child (list (plist-put (copy-sequence header) :id "wrong")))
+                      (should-error (pilish-snapshot-refresh) :type 'user-error)
+                      (should (eq (pilish--details-at-point) updated))
+                      (should (string-match-p "Took 1.3s" (buffer-string)))
+                      (should pilish--snapshot-refresh-note)))))
+            (pilish-test--kill-live-buffers replacement snapshot)))))))
 
 (ert-deftest pilish-test-snapshot-refresh-neutral-target ()
   (pilish-test--with-saved-conversation-files
@@ -2244,7 +2327,7 @@
                   (should (< (pilish--chat-display-width) 60))
                   (should-not (string-match-p (make-string 300 ?x) (buffer-string)))
                   (should (string-match-p (make-string 100 ?x) (buffer-string)))
-                  (should (string-match-p "^Output$" (buffer-string)))
+                  (should (string-match-p "^… [0-9]+ more lines?$" (buffer-string)))
                   (should (string-match-p "Width marker" (buffer-string)))))
             (pilish-test--kill-live-buffers replacement snapshot)))))))
 

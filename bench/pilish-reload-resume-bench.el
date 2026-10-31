@@ -533,7 +533,7 @@ extras.  Return a metrics plist for the generated session."
                      pilish--tool-overlay-finalize
                      pilish--tool-block-finalize
                      pilish--truncate-to-visual-lines
-                     pilish--insert-tool-content-with-toggle
+                     pilish--insert-tool-output-section
                      pilish--insert-rendered-tool-content
                      pilish--pretty-print-json
                      make-overlay

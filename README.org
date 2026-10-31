@@ -56,7 +56,7 @@ is the shortest path to a working session.
 
 - Emacs 29.1 or later, built with tree-sitter support
 - Node.js 22.19 or later for the Pi CLI
-- [[https://pi.dev][pi coding agent]] =@earendil-works/pi-coding-agent@1.0.0= or later,
+- [[https://pi.dev][pi coding agent]] =@earendil-works/pi-coding-agent@1.1.0= or later,
   installed and in =PATH= on the host where Pi runs
 - Pi CLI authentication: a provider API key, or a one-time =/login=
   run in a terminal (see below)
@@ -338,9 +338,10 @@ Tool details can include a command or path hint and the saved result
 timestamp.  Unfinished blocks, shared headings, and trailing
 separators have no block details.  Block metadata does not appear on
 hover.  Links, controls, input headers, browsers, and
-menus retain their own hover help.  Stream durations, output rates,
-and tool execution times are approximate and live-only.  Reload or
-resume drops these measurements.
+menus retain their own hover help.  Reply stream durations and output
+rates remain approximate and live-only.  Reload or resume drops these
+measurements.  Tool execution times use Pi's recorded durations when
+available, including in saved conversations.
 
 Press =RET= on a file-content row, plain path, or local Markdown link
 label to visit the file.  =src/app.el:12:3= opens line 12, column 3.
