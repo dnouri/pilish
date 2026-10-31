@@ -71,6 +71,8 @@
                   (node beg end &optional named))
 (declare-function treesit-query-capture "treesit.c"
                   (node query &optional beg end node-only))
+;; Headless Emacs builds omit this window-system-only subr.
+(declare-function font-info "font.c" (name &optional frame))
 (declare-function comint-output-filter "comint" (process string))
 (declare-function comint-term-environment "comint" ())
 (declare-function shell-mode "shell" ())
