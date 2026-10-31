@@ -9825,7 +9825,8 @@ failure still reaches the debugger after delivery."
             (pilish-test--dispatch-tool-clock timer)
             (should (equal (pilish-test--tool-duration-text first) "Elapsed 1m 39s"))
             (setq pilish--status 'streaming)
-            (let ((debug-invoked nil))
+            (let ((debug-invoked nil)
+                  outcome)
               (cl-letf (((symbol-function 'pilish--refresh-tool-duration)
                          (lambda (block &rest _)
                            (push (cons 'paint block) events)
@@ -9836,21 +9837,17 @@ failure still reaches the debugger after delivery."
                          (lambda () (push 'cleared events)))
                         ((symbol-function 'pilish--send-abort)
                          (lambda () (push 'aborted events)))
-                        ((symbol-function 'message) #'ignore)
-                        ;; Batch Emacs would exit inside the real debugger;
-                        ;; record the entry instead of recursing into it.
-                        ((symbol-function 'debug)
-                         (lambda (&rest _) (setq debug-invoked t))))
-                (when debug (setq debug-on-error t))
-                (unwind-protect
-                    ;; Depending on the `condition-case-unless-debug'
-                    ;; expansion, the surfaced failure is either contained
-                    ;; after the debugger entry or escapes after delivery.
-                    (let ((outcome (condition-case _
-                                       (pilish-abort)
-                                     (error 'escaped))))
-                      (should (memq outcome '(escaped nil))))
-                  (setq debug-on-error nil))
+                        ((symbol-function 'message) #'ignore))
+                ;; Override Emacs 29 ERT's debugger bindings only for the call.
+                (let ((debug-on-error (and debug t))
+                      (debugger (lambda (&rest _) (setq debug-invoked t))))
+                  ;; Depending on the `condition-case-unless-debug'
+                  ;; expansion, the surfaced failure is either contained
+                  ;; after the debugger entry or escapes after delivery.
+                  (setq outcome (condition-case _
+                                    (pilish-abort)
+                                  (error 'escaped))))
+                (should (memq outcome '(escaped nil)))
                 ;; Delivery and both owners precede any failure handling.
                 (should (equal events
                                (list (cons 'paint first) (cons 'paint second)
@@ -9882,7 +9879,9 @@ failure produces exactly one warning instead of a per-second error loop."
              (second (pilish--tool-block-get "B"))
              (original (symbol-function 'pilish--refresh-tool-duration))
              (failures 0)
-             (warnings nil))
+             (warnings nil)
+             ;; Emacs 29 ERT enables debugging around the test body.
+             (debug-on-error nil))
         (setq now 109)
         (cl-letf (((symbol-function 'pilish--refresh-tool-duration)
                    (lambda (block &rest _)
