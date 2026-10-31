@@ -9983,7 +9983,10 @@ overlapping tool headers, live or finalized."
                       (put-text-property pos next 'face fl-face))
                     (setq pos next))))
               (put-text-property hdr-beg hdr-end 'fontified t))))
-        (pilish--tool-place-prefixes ov-start ov-end)))
+        ;; Display-row counting fontifies inside a restriction that can
+        ;; start or end within a block.
+        (pilish--tool-place-prefixes (max ov-start (point-min))
+                                     (min ov-end (point-max)))))
     (pilish--restore-subagent-buttons beg end)))
 
 ;;;; History Display
