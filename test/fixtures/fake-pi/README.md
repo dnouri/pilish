@@ -122,6 +122,24 @@ Example:
 }
 ```
 
+Optional `execution_delay_ms` controls the pause after the partial result and
+before execution end; it defaults to `delay_ms`, preserving existing fixtures.
+Optional `duration_ms` is a nonnegative integer, including zero. Omitted or null
+means no recorded timing. It is independent of pacing, not a measured clock.
+The harness emits it as top-level **`durationMs`** on `tool_execution_end` and
+on the correlated `toolResult` message. It does not put it in `result` or
+`details`. The same saved field survives `get_messages`, JSONL, session
+switching, and frontend reload/resume.
+
+`tool-duration.json` streams six lines of fake bash output, pauses execution
+for 3500 ms, then completes the seventh line at execution end. The real frontend
+timer can show `Elapsed 0s` and
+`Elapsed 1s`; completion deliberately records 125000 ms, yielding
+`Took 2m 5s`, rather than the local estimate. Nothing is executed. Existing
+`tool-read` and other untimed scenarios omit the timing field and must not
+acquire a duration row. Frontend policy still excludes read/edit/write rows,
+even when a backend supplies timing.
+
 ## `nested_tools`
 
 `nested-tools.json` is one bounded literal wire replay. Its `prompt` has only

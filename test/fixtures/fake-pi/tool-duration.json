@@ -1,0 +1,16 @@
+{
+  "description": "A slow fake bash stream with an authoritative duration unlike its local elapsed time",
+  "commands": [],
+  "prompt": {
+    "type": "tool_stream",
+    "tool_name": "bash",
+    "tool_args": {"command": "printf 'DURATION OUTPUT (scripted, not executed)'"},
+    "partial_result_text": "DURATION FIRST\nDURATION SECOND\nDURATION THIRD\nDURATION FOURTH\nDURATION FIFTH\nDURATION SIXTH\n",
+    "result_text": "DURATION FIRST\nDURATION SECOND\nDURATION THIRD\nDURATION FOURTH\nDURATION FIFTH\nDURATION SIXTH\nDURATION LAST\n",
+    "assistant_text": "Duration fixture complete.",
+    "delay_ms": 30,
+    "execution_delay_ms": 3500,
+    "duration_ms": 125000,
+    "echo_user": true
+  }
+}

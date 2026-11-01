@@ -350,6 +350,7 @@ Return the parsed metadata, or nil when SESSION-FILE was not a pi session."
 (defun pilish--reset-session-state ()
   "Reset all session-specific state for a new session.
 Call this when starting a new session to ensure no stale state persists."
+  (pilish--cancel-tool-times)
   (pilish--reset-inactivity-observation)
   (dolist (marker (list pilish--message-start-marker
                         pilish--streaming-marker
@@ -369,6 +370,7 @@ Call this when starting a new session to ensure no stale state persists."
         pilish--thinking-marker nil
         pilish--thinking-start-marker nil
         pilish--thinking-raw nil
+        pilish--thinking-stream nil
         pilish--line-parse-state 'line-start
         pilish--pending-tool-overlay nil
         pilish--tool-block-order-counter 0

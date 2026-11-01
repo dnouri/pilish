@@ -1910,6 +1910,11 @@ snapshot's total instead of relabeling it as the requested scope.")
 (defvar-local pilish--session-browser-search-tokens nil
   "Parsed search tokens from `pilish--session-browser-search-query'.")
 
+(defvar-local pilish--session-browser-include-search-text nil
+  "Whether future scans collect full search text.
+The first accepted nonblank query enables this policy until mode reset
+or buffer death.  It does not indicate that a scan has completed.")
+
 (defvar-local pilish--session-browser-loading nil
   "Non-nil while a fetch is in progress.")
 
@@ -2070,7 +2075,8 @@ re-initializes from the current defaults."
         pilish--session-browser-view
         pilish-session-browser-default-view
         pilish--session-browser-named-only
-        pilish-session-browser-default-named-only)
+        pilish-session-browser-default-named-only
+        pilish--session-browser-include-search-text nil)
   (setq-local header-line-format
               '(:eval (pilish--session-browser-header-line)))
   (setq-local right-margin-width pilish--session-margin-width))
@@ -2532,27 +2538,30 @@ see `pilish--session-view-label' for what each view shows."
 Whitespace-separated regexp tokens must all match.  Text on inactive
 branches is included; thinking, tools, images and summaries are not added.
 The legacy first-message fallback can still match text from any role.
-A blank or whitespace-only query clears the filter."
+The first valid nonblank query gathers full text asynchronously.
+A blank or whitespace-only query clears only the filter."
   (interactive)
-  (let ((query (string-trim
-                (read-string "Filter (regexp tokens): "
-                             pilish--session-browser-search-query)))
-        (need-rerender t))
-    (if (string-empty-p query)
-        (setq pilish--session-browser-search-query nil
-              pilish--session-browser-search-tokens nil)
-      ;; Validate regexp tokens
-      (condition-case err
-          (let ((tokens (split-string query)))
-            (dolist (tok tokens)
-              (string-match-p tok ""))
-            (setq pilish--session-browser-search-query query
-                  pilish--session-browser-search-tokens tokens))
-        (invalid-regexp
-         (message "Pi: Invalid regexp: %s" (error-message-string err))
-         (setq need-rerender nil))))
-    (when need-rerender
-      (pilish--session-browser-rerender))))
+  (let* ((query (string-trim
+                 (read-string "Filter (regexp tokens): "
+                              pilish--session-browser-search-query)))
+         (tokens (split-string query))
+         (valid t))
+    (condition-case err
+        (dolist (tok tokens)
+          (string-match-p tok ""))
+      (invalid-regexp
+       (message "Pi: Invalid regexp: %s" (error-message-string err))
+       (setq valid nil)))
+    (when valid
+      (let ((promote (and tokens
+                          (not pilish--session-browser-include-search-text))))
+        (setq pilish--session-browser-search-query (and tokens query)
+              pilish--session-browser-search-tokens tokens)
+        (if promote
+            (progn
+              (setq pilish--session-browser-include-search-text t)
+              (pilish--session-browser-fetch-and-render))
+          (pilish--session-browser-rerender))))))
 
 (defun pilish--session-browser-item-at-point ()
   "Return the loaded session item represented at point, or nil.
@@ -3090,6 +3099,8 @@ paths."
 (defun pilish--session-browser-fetch-and-render ()
   "Fetch sessions and re-render the session browser.
 Sessions are read from disk, so no live pi process is required.
+Capture scope and search-text policy before rendering.  A startup failure
+publishes an error for the current generation and re-signals its condition.
 
 The point anchor is captured before the loading-state render — that
 render destroys the session sections, so without carrying the anchor
@@ -3104,23 +3115,45 @@ cycle's anchor (see `pilish--session-browser-fetch-anchor')."
          (token (setq pilish--session-browser-fetch-token
                       (1+ pilish--session-browser-fetch-token)))
          (scope pilish--session-browser-scope)
-         (anchor (or (pilish--browse-capture-point-anchor)
-                     ;; Mid-flight refresh: the loading render already
-                     ;; destroyed the sections under point, so carry
-                     ;; the anchor the in-flight cycle captured.
-                     (and pilish--session-browser-loading
-                          pilish--session-browser-fetch-anchor))))
-    (setq pilish--session-browser-loading t
-          pilish--session-browser-fetch-anchor anchor)
-    ;; Loading-state render: default point behavior (nothing to keep).
-    (pilish--session-browser-rerender)
-    (pilish--browse-load-sessions
-     scope
-     (lambda (items error)
-       (when (buffer-live-p buf)
-         (pilish--session-browser-apply-scan
-          buf items error anchor scope token)))
-     token)))
+         (search-text pilish--session-browser-include-search-text)
+         anchor)
+    (condition-case err
+        (progn
+          (setq anchor
+                (or (pilish--browse-capture-point-anchor)
+                    ;; Loading already removed the sections under point.
+                    (and pilish--session-browser-loading
+                         pilish--session-browser-fetch-anchor)))
+          (when (pilish--session-browser-generation-current-p buf token)
+            (setq pilish--session-browser-loading t
+                  pilish--session-browser-fetch-anchor anchor)
+            (pilish--session-browser-rerender)
+            (pilish--browse-load-sessions
+             scope
+             (lambda (items error)
+               (when (buffer-live-p buf)
+                 (pilish--session-browser-apply-scan
+                  buf items error anchor scope token)))
+             token search-text)))
+      ((error quit)
+       (when (pilish--session-browser-generation-current-p buf token)
+         (with-current-buffer buf
+           ;; A failed promotion must not expose the old metadata snapshot
+           ;; as a completed full-text result, even after a query edit.
+           (setq pilish--session-browser-loading nil
+                 pilish--session-browser-fetch-anchor nil
+                 pilish--session-browser-items nil
+                 pilish--session-browser-items-scope scope
+                 pilish--session-browser-error
+                 (if (eq (car err) 'quit)
+                     "Session scan was interrupted"
+                   (format "Cannot load sessions: %s"
+                           (error-message-string err))))
+           ;; Rendering recovery can fail too.  Preserve the startup error.
+           (condition-case nil
+               (pilish--session-browser-rerender)
+             ((error quit) nil))))
+       (signal (car err) (cdr err))))))
 
 (defun pilish--session-browser-apply-scan
     (buf items error anchor &optional scope generation)
@@ -4244,9 +4277,10 @@ later directory listings and returns nil."
   (pilish--session-browser-generation-current-p buf token))
 
 (defun pilish--browse-scan-session-files
-    (buf token files items callback &optional state include-file)
+    (buf token files items callback &optional state include-file search-text)
   "Advance FILES and accumulated ITEMS for BUF's generation TOKEN.
 STATE is the optional in-progress JSONL scan for the first file.
+SEARCH-TEXT requests full search text for every file and continuation.
 INCLUDE-FILE, when non-nil, tests each file before its full scan.  Each
 slice shares a 10 ms deadline across opens and line processing.  A
 positive-delay continuation allows a command-loop turn; it is not a
@@ -4288,7 +4322,7 @@ Hiding the browser with q does not cancel a current generation."
                               (when (and include (not cancelled))
                                 (setq state
                                       (pilish-jsonl-open-session-info
-                                       (car files) t))
+                                       (car files) search-text))
                                 (unless (pilish--browse-session-scan-current-p
                                          buf token)
                                   (setq cancelled t)))))
@@ -4345,7 +4379,7 @@ Hiding the browser with q does not cancel a current generation."
                         (run-at-time 0.001 nil
                                      #'pilish--browse-scan-session-files
                                      buf token files items callback state
-                                     include-file)
+                                     include-file search-text)
                         (setq transferred t))
                     (setq finished t))))
             (quit (setq failure "Session scan was interrupted"))
@@ -4358,7 +4392,8 @@ Hiding the browser with q does not cancel a current generation."
       (cond (failure (funcall callback nil failure))
             (finished (funcall callback (nreverse items) nil))))))
 
-(defun pilish--browse-load-sessions (scope callback &optional generation)
+(defun pilish--browse-load-sessions
+    (scope callback &optional generation search-text)
   "Load session items for SCOPE, then call CALLBACK with (ITEMS ERROR).
 ITEMS is a list of session plists in the browse session dialect:
 \(:path :id :cwd :name? :parentSessionPath? :created :modified
@@ -4383,7 +4418,8 @@ A resolver that reentrantly starts another fetch cannot publish its
 now-stale failure.  GENERATION, when supplied by the browser fetch
 cycle, was claimed before its loading render so render-time reentrancy
 cannot reverse request order.  Direct seam callers omit it and claim a
-new generation here."
+new generation here.  SEARCH-TEXT requests full search text; nil collects
+listing metadata only."
   (let* ((buf (current-buffer))
          (token
           (or generation
@@ -4442,7 +4478,8 @@ new generation here."
                  (and project-id
                       (equal project-id
                              (car (pilish--session-canonical-project-spec
-                                   (list :path file :cwd cwd)))))))))))))))
+                                   (list :path file :cwd cwd))))))))
+           search-text)))))))
 
 (defun pilish--tree-browser-chat-session-file ()
   "Return the linked chat buffer's current session file, or nil.
