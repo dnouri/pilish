@@ -1,12 +1,13 @@
 # Read streamed output
 
-The chat renders streamed Markdown and changes thinking display without losing the reader's place. It preserves reading positions, follows the tail on request, and rewraps hot tables after a resize. Completed thinking and long tool output use bottom continuation controls. Bash and subagent footers show live elapsed time, then Pi's recorded duration when available. Completed replies, thinking, and tools expose literal details through explicit Help and echo-area commands. This metadata does not appear on automatic hover; other hover behavior is unchanged.
+The chat renders streamed Markdown and changes thinking display without losing the reader's place. It preserves reading positions, follows the tail on request, and rewraps hot tables after a resize. Completed thinking and long tool output use bottom continuation controls. Bash and subagent footers, including resumed subagent calls, show live elapsed time, then Pi's recorded duration when available. A settled run adds a transient right-aligned return timestamp and whole-run duration. Completed replies, thinking, and tools expose literal details through explicit Help and echo-area commands. This metadata does not appear on automatic hover; other hover behavior is unchanged.
 
 ## Sub-features
 
 - `output-stream` renders streamed write-tool content without exposing fence markers.
 - `output-thinking` changes completed thinking display in two windows and toggles one block from its bottom control.
-- `output-duration` advances live bash and subagent timing, then restores the same recorded duration after reload or resume.
+- `output-duration` advances live bash and subagent timing, including resumed calls, then restores the same recorded duration after reload or resume.
+- `output-return-receipt` records when the current run returned control and its total observed duration, aligns the receipt in unequal windows, retains earlier receipts, and omits them after reload or resume.
 - `output-scroll` preserves a scrolled-back view while output arrives and keeps tail-following windows at the end.
 - `output-table` rewraps a hot table after a frame resize.
 - `output-table-kill` keeps the cursor at the visual end of a wrapped row after `C-k`.
@@ -18,7 +19,8 @@ The chat renders streamed Markdown and changes thinking display without losing t
 - Read write-tool content as it streams into the chat.
 - Run `M-x pilish-toggle-thinking-display` to change completed thinking display.
 - Press `TAB` or `RET` on a thinking or tool footer, or click its left-margin caret.
-- Watch `Elapsed` advance during bash or subagent execution and change to `Took …` on completion. Live labels use whole seconds below a minute and minutes or hours above it.
+- Watch `Elapsed` advance during bash or subagent execution, including resumed calls, and change to `Took …` on completion. Live labels use whole seconds below a minute and minutes or hours above it.
+- When Pi returns control, read the right-aligned `Returned YYYY-MM-DD HH:MM · Took …` receipt below the run. Below a minute it shows one decimal, like recorded tool times. The neutral receipt also follows aborted and failed runs. Continue with another prompt to retain separate receipts. Reload or resume to omit these transient observations while keeping recorded tool durations.
 - Scroll back with ordinary Emacs scrolling commands while new output arrives.
 - Stay at the stream tail across consecutive turns.
 - Resize the frame while viewing a table in recent history.
@@ -45,16 +47,19 @@ Preconditions:
 - **Kill part of a wrapped table row.** Run `./test/run-gui-tests.sh --headless pilish-gui-test-table-kill-line-moves-cursor-to-visual-end 2>&1 | tee "$RUN_DIR/table-kill.log"`. Record `table-kill.exit`. Ordinary `C-k` copies the same source text, leaves canonical text unchanged, keeps point at raw end-of-line, and places the visible cursor on the last continuation line.
 - **Inspect completed blocks.** Run `./test/run-gui-tests.sh --headless pilish-gui-test-reply-details-keyboard-help-and-safe-quit 2>&1 | tee "$RUN_DIR/reply-details.log"`. Record `reply-details.exit`. Real `C-h .` and `C-c C-p d` inspect a fake reply, synthetic completed thinking before and after `TAB`, and a synthetic tool before and after output folds and cooling. The reply opens selected read-only Help both fresh and in an existing Help window. Reports contain metadata, not private thinking or tool output. `q` returns to the chat with the same live process, draft, and session-file bytes.
 - **Observe duration and restoration.** Run `G1_CAPTURE="$RUN_DIR/duration" ./test/run-gui-tests.sh --headless pilish-gui-test-fake-duration-live-reload-and-resume 2>&1 | tee "$RUN_DIR/duration.log"`. Record `duration.exit`. The fake bash stream advances through real `Elapsed` timers, settles on `Took 2m 5s`, and keeps that recorded value through bottom-control actions, browser resume, and process reload. The final timer stays stopped.
+- **Read run-return receipts.** Run `G1_CAPTURE="$RUN_DIR/return-receipt" ./test/run-gui-tests.sh --headless pilish-gui-test-run-return-receipt-responsive-and-transient 2>&1 | tee "$RUN_DIR/return-receipt.log"`. Record `return-receipt.exit`. The test sends through `C-c C-c`, checks the recorded tool duration and the receipt's own label, aligns the receipt at 104 and 54 columns and in unequal sibling windows, sends a second run, then reloads. The two live receipts remain in order until reload; recorded tool time survives it, but return receipts do not.
 - **Copy link targets.** Run `./test/run-gui-tests.sh --headless pilish-gui-test-copy-link-targets-with-w 2>&1 | tee "$RUN_DIR/link-copy.log"`. Record `link-copy.exit`. Real `w` presses on `https:`, `file:`, and absolute-path link labels push the URL, the `file:` URL, and the absolute pathname into the kill ring.
-- **Check the proof.** Require zero statuses and nonempty logs for all twelve commands. Require `fake-duration-elapsed-1.png`, `fake-duration-recorded.png`, `fake-duration-resumed.png`, `fake-duration-reloaded.png`, and their matching `.el` files under `$RUN_DIR/duration`. Use the evidence pattern from the skill.
+- **Check the proof.** Require zero statuses and nonempty logs for all thirteen commands. Require `fake-duration-elapsed-1.png`, `fake-duration-recorded.png`, `fake-duration-resumed.png`, `fake-duration-reloaded.png`, and their matching `.el` files under `$RUN_DIR/duration`. Under `$RUN_DIR/return-receipt`, require `run-return-wide.png`, `run-return-narrow.png`, `run-return-independent-edges.png`, `run-return-second.png`, `run-return-reloaded.png`, and their matching `.el` files. Use the evidence pattern from the skill.
 
 ## Gotchas
 
 - The thinking test invokes the real toggle command directly. Do not describe it as a keystroke test.
-- Most tests in this feature assert text, properties, and window state without PNG evidence. The duration journey saves the required frames listed above.
+- Most tests in this feature assert text, properties, and window state without PNG evidence. The duration and return-receipt journeys save the required frames listed above.
 - Cold tables intentionally remain unchanged during the hot-tail resize test.
 - The table `C-k` test uses a real key sequence and cursor coordinates. It does not save PNG evidence.
 - The `details` menu suffix appears only for transcript-origin menus. It does not appear in the input-origin menu.
-- Completed replies, thinking, and tools are inspector targets. Shared headings, outcome notices, unfinished blocks, and trailing separators are not targets.
-- Saved reports omit live stream estimates. Saved tool results with `durationMs` restore recorded execution times. The saved-conversations recipe drives the snapshot inspector.
+- Completed replies, thinking, and tools are inspector targets. Shared headings, outcome notices, unfinished blocks, return receipts, and trailing separators are not targets.
+- Receipt geometry is verified at 104 and 54 columns and in unequal sibling windows. Very narrow layouts are outside this recipe.
+- Saved reports omit live stream estimates and transient return receipts. Saved tool results with `durationMs` restore recorded execution times. The saved-conversations recipe drives the snapshot inspector.
+- A return receipt measures local wall-clock observation from the first `agent_start` through accepted `agent_settled`, not Pi's monotonic tool clock. The fake scenario paces both clocks but executes no real tool.
 - Unit tests check that custom metadata is absent from native hover properties, native chat help still works, and provisional thinking details survive finalization. These keyboard journeys do not prove physical PGTK hover.

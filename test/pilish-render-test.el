@@ -10498,6 +10498,273 @@ suppressing every modification hook."
           (pilish-test--dispatch-tool-clock timer)
           (should (equal-including-properties before (buffer-string))))))))
 
+;;; Run Return Receipts
+
+(defmacro pilish-test--with-return-clock (&rest body)
+  "Run BODY with a controllable wall clock stored in NOW."
+  (declare (indent 0) (debug t))
+  `(let ((now 100.0))
+     (cl-letf (((symbol-function 'current-time)
+                (lambda () (seconds-to-time now))))
+       ,@body)))
+
+(ert-deftest pilish-test-run-return-receipt-lifecycle-and-properties ()
+  "The first start and accepted settlement produce one inert aligned receipt."
+  (pilish-test--with-return-clock
+    (with-temp-buffer
+      (pilish-chat-mode)
+      (pilish--handle-display-event '(:type "agent_start"))
+      (should (= pilish--run-started-at 100))
+      (setq now 110)
+      ;; A retry or continuation does not restart the session-level run.
+      (pilish--handle-display-event '(:type "agent_start"))
+      (should (= pilish--run-started-at 100))
+      (pilish--handle-display-event
+       '(:type "message_start" :message (:role "assistant")))
+      (pilish-test--send-text-delta "streamed reply")
+      (setq now 145.2)
+      (pilish--handle-display-event '(:type "agent_end" :messages []))
+      (should-not (string-match-p "Returned " (buffer-string)))
+      (should (= pilish--run-started-at 100))
+      (pilish--handle-display-event '(:type "agent_settled"))
+      (should-not pilish--run-started-at)
+      (let* ((label (concat "Returned "
+                            (pilish--format-message-timestamp (seconds-to-time 145.2))
+                            " · Took 45.2s"))
+             (content (buffer-string))
+             (label-pos (save-excursion
+                          (goto-char (point-min))
+                          (search-forward label)
+                          (- (point) (length label))))
+             (receipt-start (text-property-any (point-min) (point-max)
+                                               'pilish-run-receipt t)))
+        (should (= 1 (pilish-test--count-matches "Returned " content)))
+        (should (< (pilish-test--hover-pos "streamed reply") label-pos))
+        (should receipt-start)
+        (should (= receipt-start (1- label-pos)))
+        (should (eq (get-text-property receipt-start 'pilish-tool-output-footer)
+                    'return-receipt))
+        (should (= (get-text-property receipt-start 'pilish-tool-footer-align-width)
+                   (1+ (string-width label))))
+        (should (equal (get-text-property receipt-start 'display)
+                       (pilish--tool-footer-align-display (1+ (string-width label)))))
+        (should-not (button-at receipt-start))
+        (should-not (get-text-property label-pos 'pilish-details))
+        (should-not (text-property-not-all receipt-start
+                                           (+ label-pos (length label))
+                                           'pilish-tool-duration nil))
+        ;; Markdown refontification must preserve the independent footer paint.
+        (font-lock-flush)
+        (font-lock-ensure)
+        (should (eq (get-text-property label-pos 'face) 'pilish-tool-duration))
+        (should (equal (get-text-property receipt-start 'display)
+                       (pilish--tool-footer-align-display (1+ (string-width label))))))
+      ;; A duplicate or orphan settlement has no active run to complete.
+      (pilish--handle-display-event '(:type "agent_settled"))
+      (should (= 1 (pilish-test--count-matches "Returned " (buffer-string)))))))
+
+(ert-deftest pilish-test-run-return-receipt-duration-format-and-clock-reversal ()
+  "Run receipts use recorded-time precision and never show negative durations."
+  (dolist (case '((0 0.0 "0.0s")
+                  (1.5 1.5 "1.5s")
+                  (59.94 59.94 "59.9s")
+                  (60 60.0 "1m 0s")
+                  (61 61.0 "1m 1s")
+                  (3661 3661.0 "1h 1m 1s")
+                  (-4 0.0 "0.0s")))
+    (ert-info ((format "Run duration %S" (car case)))
+      (should (string-suffix-p
+               (concat " · Took " (caddr case))
+               (pilish--run-return-label 100 (+ 100 (car case))))))))
+
+(ert-deftest pilish-test-run-return-receipt-reentry-and-consecutive-runs ()
+  "Ignored settlement keeps the first start; later runs append new receipts."
+  (pilish-test--with-return-clock
+    (with-temp-buffer
+      (pilish-chat-mode)
+      (pilish--handle-display-event '(:type "agent_start"))
+      (pilish--handle-display-event '(:type "agent_end" :messages []))
+      (setq now 110)
+      (pilish--handle-display-event '(:type "agent_start"))
+      (pilish--handle-display-event
+       '(:type "message_start" :message (:role "assistant")))
+      (pilish-test--send-text-delta "newer work")
+      (setq now 115)
+      ;; The old settlement cannot finish observably newer streaming work.
+      (pilish--handle-display-event '(:type "agent_settled"))
+      (should (eq pilish--status 'streaming))
+      (should (= pilish--run-started-at 100))
+      (should-not (string-match-p "Returned " (buffer-string)))
+      (setq now 120)
+      (pilish--handle-display-event '(:type "agent_end" :messages []))
+      (pilish--handle-display-event '(:type "agent_settled"))
+      (should (= 1 (pilish-test--count-matches "Returned " (buffer-string))))
+      (should (string-match-p "Took 20.0s" (buffer-string)))
+      (setq now 130)
+      (pilish--handle-display-event '(:type "agent_start"))
+      (should (= pilish--run-started-at 130))
+      (setq now 132)
+      (pilish--handle-display-event '(:type "agent_end" :messages []))
+      (pilish--handle-display-event '(:type "agent_settled"))
+      (should (= 2 (pilish-test--count-matches "Returned " (buffer-string))))
+      (should (string-match-p "Took 20.0s" (buffer-string)))
+      (should (string-match-p "Took 2.0s" (buffer-string))))))
+
+(ert-deftest pilish-test-run-return-receipt-neutral-after-abort-and-error ()
+  "A genuine settlement records control return without claiming success."
+  (dolist (outcome '(aborted error))
+    (pilish-test--with-return-clock
+      (with-temp-buffer
+        (pilish-chat-mode)
+        (pilish--handle-display-event '(:type "agent_start"))
+        (pilish--handle-display-event
+         '(:type "message_start" :message (:role "assistant")))
+        (when (eq outcome 'aborted)
+          (setq pilish--aborted t))
+        (when (eq outcome 'error)
+          (pilish--handle-display-event
+           '(:type "message_end" :message
+             (:role "assistant" :content [] :stopReason "error"
+                    :errorMessage "Expected failure"))))
+        (setq now 105)
+        (pilish--handle-display-event '(:type "agent_end" :messages []))
+        (pilish--handle-display-event '(:type "agent_settled"))
+        (should (string-match-p "Returned .*Took 5.0s" (buffer-string)))
+        (should (string-match-p
+                 (if (eq outcome 'aborted) "\\[Aborted\\]" "Expected failure")
+                 (buffer-string)))
+        (should (eq pilish--status 'idle))))))
+
+(ert-deftest pilish-test-run-return-clock-reset-does-not-delete-receipts ()
+  "Ownership resets discard only unfinished timing, never painted history."
+  (dolist (boundary '(artifacts reset replacement))
+    (pilish-test--with-return-clock
+      (with-temp-buffer
+        (pilish-chat-mode)
+        (pilish--handle-display-event '(:type "agent_start"))
+        (setq now 101)
+        (pilish--handle-display-event '(:type "agent_end" :messages []))
+        (pilish--handle-display-event '(:type "agent_settled"))
+        (let ((painted (buffer-string)))
+          ;; A second run has an unfinished clock when ownership ends.
+          (pilish--handle-display-event '(:type "agent_start"))
+          (pcase boundary
+            ('artifacts (pilish--clear-render-artifacts))
+            ('reset (pilish--reset-session-state))
+            ('replacement (pilish--set-process 'replacement)))
+          (should-not pilish--run-started-at)
+          (unless (eq boundary 'artifacts)
+            (should (equal painted (buffer-string))))
+          (setq now 110)
+          (pilish--handle-display-event '(:type "agent_settled"))
+          (should-not (string-match-p "Took 9.0s" (buffer-string))))))))
+
+(ert-deftest pilish-test-run-return-clock-manual-reentry-does-not-leak ()
+  "Manual compaction cannot carry an older ignored run into the next prompt."
+  (pilish-test--with-return-clock
+    (with-temp-buffer
+      (pilish-chat-mode)
+      (cl-letf (((symbol-function 'message) #'ignore))
+        (pilish--handle-display-event '(:type "agent_start"))
+        (pilish--handle-display-event '(:type "agent_end" :messages []))
+        (pilish--handle-display-event '(:type "compaction_start" :reason "manual"))
+        (should-not pilish--run-started-at)
+        (pilish--handle-display-event '(:type "agent_settled"))
+        (pilish--handle-display-event
+         '(:type "compaction_end" :reason "manual" :aborted :false
+           :result :null :errorMessage "Expected compaction failure"))
+        (should (eq pilish--status 'idle))
+        (should-not (string-match-p "Returned " (buffer-string)))))))
+
+(ert-deftest pilish-test-run-return-receipt-precedes-idle-hooks-and-followups ()
+  "Receipt paint happens before activity hooks and local queue release."
+  (pilish-test--with-return-clock
+    (with-temp-buffer
+      (pilish-chat-mode)
+      (pilish--handle-display-event '(:type "agent_start"))
+      (pilish--handle-display-event '(:type "agent_end" :messages []))
+      (let* ((original (symbol-function 'pilish--display-run-return))
+             (order nil)
+             (hook (lambda (&rest _)
+                    (push (if (text-property-any (point-min) (point-max)
+                                                 'pilish-run-receipt t)
+                              'hook-with-receipt
+                            'hook-without-receipt)
+                          order))))
+        (setq-local pilish-activity-phase-functions (list hook))
+        (cl-letf (((symbol-function 'pilish--display-run-return)
+                   (lambda (start end)
+                     (push 'receipt order)
+                     (funcall original start end)))
+                  ((symbol-function 'pilish--process-followup-queue)
+                   (lambda () (push 'followup order))))
+          (pilish--handle-display-event '(:type "agent_settled")))
+        (should (equal (nreverse order) '(receipt hook-with-receipt followup)))))))
+
+(ert-deftest pilish-test-run-return-receipt-failure-does-not-wedge-settlement ()
+  "A failed receipt paint cannot retain the clock or block queue release."
+  (pilish-test--with-return-clock
+    (with-temp-buffer
+      (pilish-chat-mode)
+      (pilish--handle-display-event '(:type "agent_start"))
+      (pilish--handle-display-event '(:type "agent_end" :messages []))
+      (let (released diagnostics)
+        (cl-letf (((symbol-function 'pilish--display-run-return)
+                   (lambda (&rest _) (error "Expected receipt failure")))
+                  ((symbol-function 'pilish--process-followup-queue)
+                   (lambda () (setq released t)))
+                  ((symbol-function 'message)
+                   (lambda (format-string &rest args)
+                     (push (apply #'format format-string args) diagnostics))))
+          (pilish--handle-display-event '(:type "agent_settled")))
+        (should released)
+        (should (eq pilish--status 'idle))
+        (should-not pilish--run-started-at)
+        (should (equal diagnostics
+                       '("Pi: Could not display return receipt: Expected receipt failure")))))))
+
+(ert-deftest pilish-test-run-return-receipt-copy-and-history-omission ()
+  "Copies retain source text without stretched space; canonical replay omits it."
+  (pilish-test--with-return-clock
+    (with-temp-buffer
+      (pilish-chat-mode)
+      (pilish--handle-display-event '(:type "agent_start"))
+      (pilish--handle-display-event '(:type "agent_end" :messages []))
+      (pilish--handle-display-event '(:type "agent_settled"))
+      (let* ((label-pos (save-excursion (goto-char (point-min))
+                                        (search-forward "Returned ") (match-beginning 0)))
+             (start (1- label-pos))
+             (end (save-excursion (goto-char label-pos) (line-end-position))))
+        (dolist (raw '(nil t))
+          (let ((pilish-copy-raw-markdown raw))
+            (should (equal (pilish--filter-buffer-substring start end)
+                           (buffer-substring-no-properties start end))))))
+      (pilish--display-session-history [(:role "assistant" :content "Saved reply")])
+      (should-not (string-match-p "Returned " (buffer-string)))
+      (should-not (text-property-any (point-min) (point-max) 'pilish-run-receipt t))
+      (should-not pilish--run-started-at))))
+
+(ert-deftest pilish-test-run-return-receipt-survives-adjacent-tool-cooling ()
+  "Cooling an older tool cannot consume the independent receipt after it."
+  (pilish-test--with-return-clock
+    (with-temp-buffer
+      (pilish-chat-mode)
+      (pilish--handle-display-event '(:type "agent_start"))
+      (let ((block (pilish--display-tool-start "bash" '(:command "make test") "A")))
+        (pilish--display-tool-end "bash" nil [(:type "text" :text "Passed")]
+                                  nil nil block (pilish--recorded-tool-time 1200))
+        (pilish--handle-display-event '(:type "agent_end" :messages []))
+        (pilish--handle-display-event '(:type "agent_settled"))
+        (let ((receipt (save-excursion
+                         (goto-char (point-min))
+                         (search-forward "Returned ")
+                         (buffer-substring-no-properties
+                          (line-beginning-position) (line-end-position)))))
+          (should (pilish--cool-tool-overlay (pilish--tool-block-overlay block)))
+          (should (string-match-p "Took 1.2s" (buffer-string)))
+          (should (string-match-p (regexp-quote receipt) (buffer-string)))
+          (should (= 1 (pilish-test--count-matches "Returned " (buffer-string)))))))))
+
 ;;; Generic Tool Details in Output
 
 (defun pilish-test--insert-generic-tool (content-text &optional details)

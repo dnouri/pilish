@@ -5,7 +5,6 @@ A saved Pi conversation opens in an independent read-only observer. Each tool re
 ## Sub-features
 
 - `saved-recursive-tree` shows every declared descendant once, preserves ancestry, distinguishes duplicate labels without adding a header link, and leads each titled row with its task title, the agent label in parentheses, and turn and context stats. The title is linked on a chat's available first occurrence.
-- A running subagent with structured run metadata shows the task title and agent on one line and the activity, last-activity age, turns, and context on a second. The age becomes a quiet marker after `pilish-subagent-quiet-after-seconds`.
 - `saved-open` opens a linked child conversation in another window.
 - `saved-quit` closes only the observer and preserves the parent and draft.
 - `saved-refresh` rereads unchanged and changed files with native `g`.
@@ -40,6 +39,6 @@ Preconditions:
 - The recursive-tree journey uses a literal v2 declaration and scripted saved replies. It does not run pi-submarine or a real model. Historical v1 declarations remain flat and use the same strict opener.
 - `pilish-open-session-file` resumes a live session. It is not the observer entry point covered here.
 - The observer reads valid Pi-v3 fixture records. It does not infer a child from a tool name or output text. It shows saved data, not unsaved parent output.
-- All saved block reports use detached metadata and need no live observer process. They omit live stream estimates. Saved tool results with `durationMs` restore recorded execution times in details and eligible footers.
+- All saved block reports use detached metadata and need no live observer process. They omit live stream estimates and transient run-return receipts. Saved tool results with `durationMs` restore recorded execution times in details and eligible footers.
 - Native control help retains priority for `C-h .` and keeps its hover properties. Unit tests check that custom block metadata is absent from native hover properties. The headless keyboard journey does not prove physical PGTK hover.
 - PNG capture requires `x-export-frames`. A test pass without the required PNGs does not satisfy a screenshot claim.

@@ -2047,7 +2047,10 @@ SPEC is (SESSION SCENARIO &rest EXTRA-ARGS)."
                 (progn
                   (should (equal (pilish--tool-duration-label block) "Took 2m 5s"))
                   (should (string-match-p "Took 2m 5s" (pilish--visible-text (point-min) (point-max)))))
-              (should-not (string-match-p "Took" (buffer-string))))
+              ;; The run-level return receipt says "Took" even for an untimed
+              ;; tool.  Assert the absence of tool-owned duration instead.
+              (should-not (text-property-not-all (point-min) (point-max)
+                                                 'pilish-tool-duration nil)))
             (let ((text (buffer-substring-no-properties (point-min) (point-max)))
                   (tick (buffer-chars-modified-tick)))
               (sleep-for 1.15)

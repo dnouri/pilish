@@ -72,6 +72,7 @@
 (declare-function pilish--restore-tool-properties "pilish-render")
 (declare-function pilish--fontify-and-restore-tool-properties "pilish-render")
 (declare-function pilish--clear-live-details-state "pilish-render")
+(declare-function pilish--reset-run-clock "pilish-render")
 (declare-function pilish--release-nested-tool-state "pilish-render")
 (declare-function pilish--maybe-refresh-hot-tail-tables "pilish-table")
 
@@ -1408,6 +1409,8 @@ new live processes in interactive sessions."
       (process-put process 'pilish-last-output-time (float-time)))
     (pilish--invalidate-model-change)
     (pilish--invalidate-prompt-start-wait)
+    (when (fboundp 'pilish--reset-run-clock)
+      (pilish--reset-run-clock))
     ;; Reload can replace a process without its exit handler or a successful
     ;; subsequent history refresh.  End live measurements at this boundary.
     (when (fboundp 'pilish--clear-live-details-state)

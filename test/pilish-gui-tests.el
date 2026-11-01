@@ -2269,6 +2269,171 @@ Return observations suitable for the graphical evidence file."
       (set-frame-size nil original-width original-height)
       (sit-for 0.1))))
 
+(defun pilish-gui-test--run-return-receipt-geometry (window)
+  "Return and check the return receipt's actual coordinates in WINDOW."
+  (with-current-buffer (window-buffer window)
+    (let* ((spacer (or (text-property-not-all (point-min) (point-max)
+                                              'pilish-run-receipt nil)
+                       (error "Missing run return receipt")))
+           (start (1+ spacer))
+           (end (next-single-property-change spacer 'pilish-run-receipt nil (point-max)))
+           (first (posn-at-point start window))
+           (last (posn-at-point (1- end) window))
+           (object-width (and last (car (posn-object-width-height last))))
+           (cell (if (and object-width (> object-width 0))
+                     object-width
+                   (pilish--tool-duration-cell-width window)))
+           (right-gap (and last (- (window-body-width window t)
+                                   (+ (car (posn-x-y last)) cell)))))
+      (should first)
+      (should last)
+      (should (string-prefix-p "Returned " (buffer-substring-no-properties start end)))
+      (should (= (cdr (posn-x-y first)) (cdr (posn-x-y last))))
+      (unless (<= (abs (- right-gap cell)) 1)
+        (ert-fail (list :alignment-mismatch :right-gap right-gap :face-cell cell
+                        :first (posn-x-y first) :last (posn-x-y last)
+                        :body-pixels (window-body-width window t)
+                        :label (buffer-substring-no-properties start end)
+                        :align-width (get-text-property spacer 'pilish-tool-footer-align-width)
+                        :label-face (get-text-property start 'face))))
+      (list :body-columns (window-body-width window)
+            :body-pixels (window-body-width window t)
+            :receipt (buffer-substring-no-properties start end)
+            :receipt-start (posn-x-y first) :receipt-last (posn-x-y last)
+            :face-cell cell :right-gap right-gap))))
+
+(ert-deftest pilish-gui-test-run-return-receipt-responsive-and-transient ()
+  "Run receipts align in real windows, precede new work, and vanish on reload."
+  (let ((original-width (frame-width)) (original-height (frame-height))
+        (pilish-gui-test--large-trace nil))
+    (unwind-protect
+        (progn
+          (set-frame-size nil 104 45)
+          (pilish-gui-test-with-fresh-session
+           (:backend fake :fake-scenario "run-return-receipt")
+           (let* ((backend (plist-get pilish-gui-test--session :backend))
+                  (pilish-executable (plist-get backend :executable))
+                  (pilish-extra-args (plist-get backend :extra-args))
+                  (chat (plist-get pilish-gui-test--session :chat-buffer))
+                  (proc (plist-get pilish-gui-test--session :process))
+                  tick first-receipt)
+             (cl-labels
+                 ((wait (predicate)
+                    (unless (pilish-test-wait-until predicate 10 0.01)
+                      (ert-fail (list :wait-failed
+                                      :messages (with-current-buffer "*Messages*"
+                                                  (buffer-string))))))
+                  (receipt-count ()
+                    (with-current-buffer chat
+                      (pilish-test--count-matches "Returned " (buffer-string))))
+                  (receipt-labels ()
+                    (with-current-buffer chat
+                      (save-excursion
+                        (goto-char (point-min))
+                        (let (labels)
+                          (while (re-search-forward "^ Returned " nil t)
+                            (push (buffer-substring-no-properties
+                                   (line-beginning-position) (line-end-position))
+                                  labels))
+                          (nreverse labels)))))
+                  (send (text expected-count)
+                    (select-window (pilish-gui-test-input-window))
+                    (insert text)
+                    (pilish-gui-test--large-command (kbd "C-c C-c") 'pilish-send)
+                    (wait (lambda ()
+                            (with-current-buffer chat
+                              (and (eq pilish--status 'idle)
+                                   (not pilish--run-started-at)
+                                   (= (receipt-count) expected-count))))))
+                  (capture (name &optional geometry)
+                    (with-current-buffer chat
+                      (font-lock-ensure)
+                      (redisplay t)
+                      (pilish-gui-test--large-evidence
+                       name
+                       (list :backend "fake/run-return-receipt"
+                             :receipt-count (receipt-count)
+                             :geometry geometry
+                             :raw (buffer-substring-no-properties (point-min) (point-max))
+                             :visible (pilish--visible-text (point-min) (point-max))
+                             :run-clock pilish--run-started-at
+                             :frame-columns (frame-width)
+                             :package-user-dir package-user-dir
+                             :window-system window-system
+                             :render-library (symbol-file 'pilish--display-run-return)
+                             :commands (reverse pilish-gui-test--large-trace))))))
+               (wait (lambda () (with-current-buffer chat
+                                  (not (pilish--session-transition-active-p)))))
+               (send "Check the rendering fix and run its tests" 1)
+               (setq tick (with-current-buffer chat (buffer-chars-modified-tick)))
+               (with-current-buffer chat
+                 (should (= (receipt-count) 1))
+                 (should (string-match-p "Took 1.2s" (buffer-string)))
+                 (should (string-match-p
+                          "Returned [0-9]\\{4\\}-[0-9]\\{2\\}-[0-9]\\{2\\} [0-9]\\{2\\}:[0-9]\\{2\\} · Took "
+                          (buffer-string)))
+                 (let ((receipt (text-property-any (point-min) (point-max)
+                                                   'pilish-run-receipt t)))
+                   (should-not (get-text-property receipt 'pilish-tool-duration))
+                   (should-not (button-at receipt))))
+               (setq first-receipt (car (receipt-labels)))
+               (let ((window (get-buffer-window chat)))
+                 (select-window window)
+                 (goto-char (point-max))
+                 (set-window-point window (point-max))
+                 (capture "run-return-wide"
+                          (pilish-gui-test--run-return-receipt-geometry window))
+                 (set-frame-size nil 54 45)
+                 (sit-for 0.15)
+                 (redisplay t)
+                 (should (= (frame-width) 54))
+                 (capture "run-return-narrow"
+                          (pilish-gui-test--run-return-receipt-geometry window))
+                 (should (= tick (buffer-chars-modified-tick)))
+                 ;; Unequal windows use their own right edges without text edits.
+                 (set-frame-size nil 166 45)
+                 (sit-for 0.15)
+                 (let* ((overhead (- (window-total-width window)
+                                     (window-body-width window)))
+                        (narrow (split-window window (- (+ 54 overhead)) 'right)))
+                   (set-window-buffer narrow chat)
+                   (set-window-start window (point-min) t)
+                   (set-window-start narrow (point-min) t)
+                   (window-resize narrow (- 54 (window-body-width narrow)) t)
+                   (sit-for 0.15)
+                   (redisplay t)
+                   (should (= (window-body-width narrow) 54))
+                   (should (> (window-body-width window) 100))
+                   (let ((wide-geometry (pilish-gui-test--run-return-receipt-geometry window))
+                         (narrow-geometry (pilish-gui-test--run-return-receipt-geometry narrow)))
+                     (should (> (car (plist-get wide-geometry :receipt-start))
+                                (car (plist-get narrow-geometry :receipt-start))))
+                     (capture "run-return-independent-edges"
+                              (list :wide wide-geometry :narrow narrow-geometry)))
+                   (should (= tick (buffer-chars-modified-tick)))
+                   (delete-window narrow)))
+               ;; A second run retains the first receipt and appends after it.
+               (send "Run the focused tests once more" 2)
+               (should (equal first-receipt (car (receipt-labels))))
+               (capture "run-return-second")
+               ;; Reload restores recorded tool time but cannot restore the
+               ;; deliberately transient lifecycle observations.
+               (select-window (get-buffer-window chat))
+               (execute-kbd-macro (kbd "M-x pilish-reload RET"))
+               (wait (lambda ()
+                       (with-current-buffer chat
+                         (and (not (eq pilish--process proc))
+                              (not (pilish--session-transition-active-p))
+                              (string-match-p "Took 1.2s" (buffer-string))))))
+               (with-current-buffer chat
+                 (should-not (string-match-p "Returned " (buffer-string)))
+                 (should-not (text-property-any (point-min) (point-max)
+                                                'pilish-run-receipt t))
+                 (should-not pilish--run-started-at))
+               (capture "run-return-reloaded")))))
+      (set-frame-size nil original-width original-height)
+      (sit-for 0.1))))
+
 (ert-deftest pilish-gui-test-live-duration-advances-and-settles ()
   "Real one-second ticks preserve live footers, folds and responsive geometry."
   (let ((original-width (frame-width)) (original-height (frame-height))
