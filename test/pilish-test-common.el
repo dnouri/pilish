@@ -124,6 +124,22 @@ redisplay, and subprocess event delivery.")
            ,@body)
        (delete-directory directory t))))
 
+(defun pilish-test--conversation-action-ids ()
+  "Return exact IDs for the current buffer's generated saved-chat actions."
+  (let ((position (point-min)) ids)
+    (while (< position (point-max))
+      (let ((value (get-text-property position 'pilish-subagent-name)))
+        (when (pilish--snapshot-target-p value)
+          (should (eq (button-get (button-at position) 'action) #'pilish--subagent-button-action))
+          (push (pilish--snapshot-target-session-id value) ids)))
+      (setq position (next-single-property-change position 'pilish-subagent-name nil (point-max))))
+    (nreverse ids)))
+
+(defun pilish-test--recursive-conversation-declaration (&optional root)
+  "Return the six-occurrence, five-chat prototype declaration under ROOT."
+  (let ((declaration (pilish-test--read-json-fixture "saved-conversations-v2.json")))
+    (if root (plist-put declaration :root root) declaration)))
+
 (defun pilish-test--snapshot-message (id parent text)
   (list :type "message" :id id :parentId (or parent :null)
         :message (list :role "user" :content text :timestamp 0)))
