@@ -272,6 +272,134 @@ raced a turn that was never submitted."
     (should (pilish-gui-test-chat-contains "Fake reply for: second turn"))
     (should (pilish-gui-test-idle-p))))
 
+(ert-deftest pilish-gui-test-snapshot-recursive-tree-keyboard-journey ()
+  "One recursive body tree survives folds and opens all five exact saved chats."
+  (pilish-gui-test-with-fresh-session
+    (:backend fake :fake-scenario "prompt-lifecycle")
+    (pilish-test--with-snapshot-files
+      (let* ((parent (plist-get pilish-gui-test--session :chat-buffer))
+             (input (plist-get pilish-gui-test--session :input-buffer))
+             (process (plist-get pilish-gui-test--session :process))
+             (parent-window (get-buffer-window parent))
+             (declaration (pilish-test--recursive-conversation-declaration root))
+             (items (plist-get declaration :items))
+             (expected (mapcar (lambda (index) (plist-get (aref items index) :sessionId)) '(0 1 2 3 5)))
+             (files '("coordinator.jsonl" "explorer.jsonl" "reviewer-a.jsonl" "tester.jsonl" "reviewer-b.jsonl"))
+             (pilish-tool-preview-lines 1)
+             (frame-width (frame-width)) (frame-height (frame-height))
+             saved-bytes snapshot block)
+        (unwind-protect
+            (progn
+              (cl-loop for id in expected for file in files
+                       do (let ((path (expand-file-name file root)))
+                            (pilish-test--snapshot-write
+                             path (list (list :type "session" :version 3 :id id :cwd directory)
+                                        (pilish-test--snapshot-message "answer" nil (concat "GUI exact chat " id))))
+                            (push (cons path (with-temp-buffer (insert-file-contents-literally path) (buffer-string)))
+                                  saved-bytes)))
+              (with-current-buffer input (insert "Unsent recursive-tree draft"))
+              (select-window parent-window)
+              (setq pilish--state (plist-put pilish--state :session-file anchor))
+              (setq block (pilish--display-tool-start "subagent" '(:task "Review the saved tree") "recursive-call"))
+              (pilish--display-tool-end
+               "subagent" nil [(:type "text" :text "Recursive review finished\nOutput folds independently")]
+               (list :savedConversations declaration) nil block (pilish--recorded-tool-time 3400))
+              (dolist (width '(104 54))
+                (set-frame-size nil width frame-height)
+                (goto-char (overlay-start (pilish--tool-block-overlay block)))
+                (set-window-start parent-window (point) t)
+                (font-lock-flush)
+                (font-lock-ensure)
+                (redisplay t)
+                (should (equal expected (pilish-test--conversation-action-ids)))
+                (let ((visible (pilish--visible-text (point-min) (point-max))))
+                  (should (string-match-p
+                           (regexp-quote (concat "Pi sessions · 5 chats\n"
+                                                 "Coordinate review (coordinator) · 6 turns · 42% ctx\n"
+                                                 "├─ Explore files (explorer) · 2 turns · ? ctx\n"
+                                                 "├─ Review protocol (reviewer #a17c) · 4 turns · 18% ctx\n"
+                                                 "│  ├─ Run tests (tester) · 3 turns · 25% ctx\n"
+                                                 "│  └─ Rerun tests (tester) · resumed · same chat · 2 turns · 31% ctx\n"
+                                                 "└─ Review interface (reviewer #b92e)")) visible))
+                  (should-not (string-match-p "Pi session:" visible)))
+                (execute-kbd-macro (kbd "C-c ]"))
+                (should (looking-at "Coordinate review"))
+                (should (pos-visible-in-window-p (point) parent-window))
+                (save-excursion
+                  (dotimes (_ 4)
+                    (execute-kbd-macro (kbd "C-c ]"))
+                    (redisplay t)
+                    (should (pos-visible-in-window-p (point) parent-window))))
+                (pilish-gui-test--large-evidence
+                 (format "recursive-tree-%d-preview" width)
+                 (list :actions expected :visible (substring-no-properties
+                                                   (pilish--visible-text (point-min) (point-max))))))
+              (set-frame-size nil 104 frame-height)
+              (goto-char (point-min))
+              (execute-kbd-macro (kbd "C-c ]"))
+              (execute-kbd-macro (kbd "C-i"))
+              (redisplay t)
+              (should (string-match-p "Output folds independently" (pilish--visible-text (point-min) (point-max))))
+              (should (equal expected (pilish-test--conversation-action-ids)))
+              (goto-char (point-min))
+              (execute-kbd-macro (kbd "C-c ]"))
+              (execute-kbd-macro (kbd "C-i"))
+              (redisplay t)
+              (should-not (string-match-p "Output folds independently" (pilish--visible-text (point-min) (point-max))))
+              (should (equal expected (pilish-test--conversation-action-ids)))
+              (goto-char (point-min))
+              (cl-loop for id in expected for file in files
+                       do (execute-kbd-macro (kbd "C-c ]"))
+                       do (let ((position (point))
+                                (target (get-text-property (point) 'pilish-subagent-name)))
+                            (should (equal (pilish--snapshot-target-session-id target) id))
+                            (should (eq (get-text-property (point) 'face) 'link))
+                            (execute-kbd-macro (kbd "RET"))
+                            (setq snapshot (current-buffer))
+                            (redisplay t)
+                            (should (derived-mode-p 'pilish-snapshot-mode))
+                            (should buffer-read-only)
+                            (should (equal pilish--snapshot-source-file (expand-file-name file root)))
+                            (should (string-match-p (concat "GUI exact chat " id) (buffer-string)))
+                            (should-not (pilish--get-process))
+                            (should-not (eq (selected-window) parent-window))
+                            (should (eq (window-buffer parent-window) parent))
+                            (when (equal file "tester.jsonl")
+                              (pilish-gui-test--large-evidence
+                               "recursive-tree-observer"
+                               (list :opened-id id :opened-file pilish--snapshot-source-file
+                                     :read-only buffer-read-only
+                                     :parent-actions (with-current-buffer parent (pilish-test--conversation-action-ids)))))
+                            (execute-kbd-macro "q")
+                            (should-not (buffer-live-p snapshot))
+                            (select-window parent-window)
+                            (goto-char position)))
+              (should-error (call-interactively #'pilish-next-subagent-name) :type 'user-error)
+              (dotimes (_ 4) (execute-kbd-macro (kbd "C-c [")))
+              (should (looking-at "Coordinate review"))
+              (goto-char (point-min))
+              (search-forward "│  └─ Rerun tests (tester)")
+              (backward-char)
+              (should-not (button-at (point)))
+              (should-error (execute-kbd-macro (kbd "RET")) :type 'user-error)
+              (pilish--cool-tool-overlay (pilish--tool-block-overlay block))
+              (font-lock-flush)
+              (font-lock-ensure)
+              (should (equal expected (pilish-test--conversation-action-ids)))
+              (goto-char (text-property-not-all (point-min) (point-max) 'pilish-cold-tool-block nil))
+              (set-window-start parent-window (point) t)
+              (redisplay t)
+              (pilish-gui-test--large-evidence
+               "recursive-tree-cold" (list :actions expected :visible (substring-no-properties
+                                                                     (pilish--visible-text (point-min) (point-max)))))
+              (should (process-live-p process))
+              (should (eq (buffer-local-value 'pilish--process parent) process))
+              (should (equal (with-current-buffer input (buffer-string)) "Unsent recursive-tree draft"))
+              (dolist (saved saved-bytes)
+                (should (equal (with-temp-buffer (insert-file-contents-literally (car saved)) (buffer-string)) (cdr saved)))))
+          (when (buffer-live-p snapshot) (kill-buffer snapshot))
+          (set-frame-size nil frame-width frame-height))))))
+
 (ert-deftest pilish-gui-test-snapshot-keyboard-other-window ()
   "Open an observer, inspect each completed block, and quit only the observer."
   (pilish-gui-test-with-fresh-session
