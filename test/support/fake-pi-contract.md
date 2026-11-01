@@ -437,13 +437,22 @@ worker waits without setting `isStreaming` or emitting `agent_start`,
 custom-message output precedes the one `handled` response. Command text is not
 persisted as a user message. Overlapping dialogs are rejected: this double has
 one worker, not a concurrent extension engine. Stop/switch joins that worker,
-so any custom output and pending prompt acknowledgment precede stop/switch success.
+so any custom output and pending prompt acknowledgment precede stop/switch success,
+except for the editor's abort behavior described below.
+
+Editor requests have neither a timeout nor an abort signal in Pi 1.0.0's
+`rpc-mode.ts:254-271`. The fake ignores timeout overrides for `editor` and
+acknowledges `abort` without releasing the editor waiter. Only a matching
+`extension_ui_response` settles an editor command. Switching sessions or closing
+stdin still tears down the fake worker. Other dialog methods keep their existing
+timeout and abort behavior. Pilish Stop must send editor cancellation itself;
+`abort` alone does not prove that an editor caller resumed.
 
 Likewise, `/test-message` emits its custom message before `handled` acceptance,
 while `/test-noop` emits no messages, lifecycle events, or session entries.
 
-Timeouts for dialog requests should be explicit scenario data, not hidden magic
-constants in the harness. Fast defaults are good for automated tests, but the
+Timeouts for confirm, input, and select requests should be explicit scenario data,
+not hidden magic constants in the harness. Fast defaults are good for automated tests, but the
 manual-debugging path should be able to extend or disable those timeouts from
 the CLI so a human can inspect the UI before responding.
 

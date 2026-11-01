@@ -1,5 +1,5 @@
 {
-  "description": "Extension multiline editor flow with scenario-owned timeout data.",
+  "description": "Extension multiline editor flow without a timeout or abort signal.",
   "commands": [
     {
       "name": "test-editor",
@@ -14,11 +14,9 @@
     "method": "editor",
     "title": "Spike Editor",
     "prefill": "first line\nsecond line",
-    "timeout_ms": 10000,
     "response_messages": {
       "value": "EDITOR SUBMITTED",
-      "cancelled": "EDITOR CANCELLED",
-      "timeout": "EDITOR TIMED OUT"
+      "cancelled": "EDITOR CANCELLED"
     }
   }
 }

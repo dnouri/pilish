@@ -1476,6 +1476,23 @@ Return the selected editor buffer."
     (redisplay)
     editor))
 
+(defun pilish-gui-test--editor-evidence (name editor responses)
+  "Capture editor lifecycle state NAME for EDITOR and sent RESPONSES."
+  (let ((input (plist-get pilish-gui-test--session :input-buffer)))
+    (pilish-gui-test--large-evidence
+     name
+     (list :windows (mapcar (lambda (window) (buffer-name (window-buffer window)))
+                           (window-list))
+           :editor-live (buffer-live-p editor)
+           :editor-text (when (buffer-live-p editor)
+                          (with-current-buffer editor (buffer-string)))
+           :input-mode (buffer-local-value 'major-mode input)
+           :input-text (with-current-buffer input (buffer-string))
+           :draft-hash (with-current-buffer input (secure-hash 'sha256 (buffer-string)))
+           :responses responses :package-user-dir package-user-dir
+           :window-system window-system
+           :render-library (symbol-file 'pilish--extension-ui-editor)))))
+
 (ert-deftest pilish-gui-test-extension-editor-submits-edited-text ()
   "The editor opens prefilled, sends the edited text, and keeps the draft."
   (pilish-gui-test-with-fresh-session
@@ -1488,8 +1505,13 @@ Return the selected editor buffer."
         (should (string-prefix-p "*pilish-editor: Spike Editor*" (buffer-name editor)))
         (should (equal (with-current-buffer editor (buffer-string))
                        "first line\nsecond line"))
-        (execute-kbd-macro (kbd "RET e d i t e d"))
-        (execute-kbd-macro (kbd "C-c C-c"))
+        (let ((mode (buffer-local-value 'major-mode input-buf)))
+          (pilish-gui-test--editor-evidence "submit-before" editor responses)
+          (execute-kbd-macro (kbd "RET e d i t e d"))
+          (execute-kbd-macro (kbd "C-c C-c"))
+          (should (eq mode (buffer-local-value 'major-mode input-buf))))
+        (pilish-gui-test--editor-evidence "submit-after" editor responses)
+        (should (= 2 (length (window-list))))
         (should-not (buffer-live-p editor))
         (should (pilish-gui-test-wait-for-idle))
         (should (pilish-test-wait-until
@@ -1511,8 +1533,13 @@ Return the selected editor buffer."
              (editor (pilish-gui-test--editor-open-with-draft "unsent draft"))
              (draft-hash (with-current-buffer input-buf
                            (secure-hash 'sha256 (buffer-string)))))
-        (execute-kbd-macro (kbd "d i s c a r d e d"))
-        (execute-kbd-macro (kbd "C-c C-k"))
+        (let ((mode (buffer-local-value 'major-mode input-buf)))
+          (pilish-gui-test--editor-evidence "cancel-before" editor responses)
+          (execute-kbd-macro (kbd "d i s c a r d e d"))
+          (execute-kbd-macro (kbd "C-c C-k"))
+          (should (eq mode (buffer-local-value 'major-mode input-buf))))
+        (pilish-gui-test--editor-evidence "cancel-after" editor responses)
+        (should (= 2 (length (window-list))))
         (should-not (buffer-live-p editor))
         (should (pilish-test-wait-until
                  (lambda () (pilish-gui-test-chat-contains "EDITOR CANCELLED"))
@@ -1525,6 +1552,76 @@ Return the selected editor buffer."
         (should (equal (with-current-buffer input-buf
                          (secure-hash 'sha256 (buffer-string)))
                        draft-hash))))))
+
+(defun pilish-gui-test--editor-lifecycle (action)
+  "Drive editor lifecycle ACTION while protecting the session prompt."
+  (pilish-gui-test-with-fresh-session
+    (:backend fake :fake-scenario "extension-editor")
+    (pilish-gui-test--with-editor-responses responses
+      (let* ((input (plist-get pilish-gui-test--session :input-buffer))
+             (editor (pilish-gui-test--editor-open-with-draft "unsent draft"))
+             (draft (with-current-buffer input (buffer-string)))
+             (mode (buffer-local-value 'major-mode input))
+             (text (with-current-buffer editor (buffer-string)))
+             (retained (memq action '(mode reinitialize))))
+        (unwind-protect
+            (progn
+              (pilish-gui-test--editor-evidence (format "%s-before" action) editor responses)
+              (pcase action
+                ('kill (execute-kbd-macro (kbd "M-x kill-buffer RET RET")))
+                ('stop
+                 (select-window (get-buffer-window input))
+                 (execute-kbd-macro (kbd "C-c C-k")))
+                ('exit (delete-process (plist-get pilish-gui-test--session :process)))
+                ('mode (execute-kbd-macro (kbd "M-x text-mode RET")))
+                ('reinitialize (execute-kbd-macro (kbd "M-x pilish-editor-mode RET"))))
+              (pilish-gui-test--editor-evidence (format "%s-after" action) editor responses)
+              (should (eq (buffer-live-p editor) (and retained t)))
+              (should-not (get-buffer-window editor t))
+              (should (= 2 (length (window-list))))
+              (should (eq mode (buffer-local-value 'major-mode input)))
+              (should (equal (if (eq action 'exit)
+                                 (concat "/test-editor\n\n" draft)
+                               draft)
+                             (with-current-buffer input (buffer-string))))
+              (if (eq action 'exit)
+                  (should-not responses)
+                (should (= 1 (length responses)))
+                (should (eq t (plist-get (car responses) :cancelled)))
+                (should (pilish-test-wait-until
+                         (lambda () (pilish-gui-test-chat-contains "EDITOR CANCELLED"))
+                         pilish-test-gui-timeout pilish-test-poll-interval)))
+              (when retained
+                (should (equal text (with-current-buffer editor (buffer-string))))
+                (should (eq (buffer-local-value 'major-mode editor)
+                            (if (eq action 'mode) 'text-mode 'pilish-editor-mode)))
+                (should-not (memq #'pilish--editor-release
+                                  (buffer-local-value 'kill-buffer-hook editor)))
+                (should-not (memq #'pilish--editor-release
+                                  (buffer-local-value 'change-major-mode-hook editor)))
+                (kill-buffer editor)
+                (should (= 1 (length responses)))))
+          (when (buffer-live-p editor) (kill-buffer editor)))))))
+
+(ert-deftest pilish-gui-test-extension-editor-kill-restores-layout ()
+  "Killing the editor cancels once and restores the two session windows."
+  (pilish-gui-test--editor-lifecycle 'kill))
+
+(ert-deftest pilish-gui-test-extension-editor-stop-restores-layout ()
+  "Stop cancels a non-streaming extension command and restores its windows."
+  (pilish-gui-test--editor-lifecycle 'stop))
+
+(ert-deftest pilish-gui-test-extension-editor-exit-restores-layout ()
+  "Process exit restores the session windows without sending to a dead peer."
+  (pilish-gui-test--editor-lifecycle 'exit))
+
+(ert-deftest pilish-gui-test-extension-editor-mode-change-keeps-text ()
+  "Changing mode cancels once and retains editor text without changing the prompt."
+  (pilish-gui-test--editor-lifecycle 'mode))
+
+(ert-deftest pilish-gui-test-extension-editor-reinitialize-keeps-text ()
+  "Reinitializing editor mode releases its request but retains the text buffer."
+  (pilish-gui-test--editor-lifecycle 'reinitialize))
 
 ;;;; Tool Toggle Tests
 
