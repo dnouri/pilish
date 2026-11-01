@@ -3932,8 +3932,7 @@ Binds `chat-win', `input-win' and `input-buf' for use in BODY."
       (pilish-test--set-draft input-buf "one\ntwo\nthree")
       (pilish--maybe-rebalance-windows (selected-frame))
       (should (= (window-total-height input-win) fitted))
-      ;; A changed width rewraps the draft, so it refits.
-      (set-window-parameter input-win 'pilish--fit-geometry '(1 . 1))
+        (set-window-parameter input-win 'pilish--fit-geometry '(1 . 1))
       (pilish--maybe-rebalance-windows (selected-frame))
       (should (= (window-body-height input-win) 3)))))
 
