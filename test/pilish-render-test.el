@@ -13909,6 +13909,110 @@ INPUT is returned by `read-shell-command', or signals `quit' when it is
           (should (equal "No file at point" (error-message-string err)))))
       (should-not copied))))
 
+(ert-deftest pilish-test-copy-file-path-url-link ()
+  "A URL-destination link copies its URL instead of failing."
+  (dolist (case '(("[Pilish](https://github.com/dnouri/pilish)"
+                   . "https://github.com/dnouri/pilish")
+                  ("[Report](file:///tmp/pi/reports/out.md)"
+                   . "file:///tmp/pi/reports/out.md")
+                  ("[Mail](mailto:user@example.com)"
+                   . "mailto:user@example.com")))
+    (with-temp-buffer
+      (pilish-chat-mode)
+      (pilish--set-chat-session-identity "/tmp/project/")
+      (let ((inhibit-read-only t)) (insert (car case)))
+      (goto-char (+ (point-min) 3))
+      (let ((kill-ring nil)
+            (kill-ring-yank-pointer nil)
+            (messages nil))
+        (cl-letf (((symbol-function 'message)
+                   (lambda (fmt &rest args)
+                     (push (apply #'format fmt args) messages))))
+          (pilish-copy-file-path))
+        (should (equal (car kill-ring) (cdr case)))
+        (should (equal kill-ring-yank-pointer kill-ring))
+        (should (member (format "Pi: Copied %s" (cdr case)) messages))))))
+
+(ert-deftest pilish-test-copy-file-path-url-keeps-verbatim-text ()
+  "Copied URLs keep percent escapes and drop only Markdown syntax."
+  (with-temp-buffer
+    (pilish-chat-mode)
+    (let ((inhibit-read-only t))
+      (insert "[Doc](<https://example.com/a%20b?q=1&x=2>)"))
+    (goto-char (+ (point-min) 3))
+    (let ((kill-ring nil)
+          (kill-ring-yank-pointer nil))
+      (cl-letf (((symbol-function 'message) (lambda (&rest _))))
+        (pilish-copy-file-path))
+      (should (equal (car kill-ring) "https://example.com/a%20b?q=1&x=2")))))
+
+(ert-deftest pilish-test-copy-file-path-local-link-still-copies-path ()
+  "A local file link keeps copying its shell-local path."
+  (with-temp-buffer
+    (pilish-chat-mode)
+    (pilish--set-chat-session-identity "/tmp/project/")
+    (let ((inhibit-read-only t)) (insert "[Report](reports/out.md)"))
+    (goto-char (+ (point-min) 3))
+    (let ((kill-ring nil)
+          (kill-ring-yank-pointer nil))
+      (cl-letf (((symbol-function 'message) (lambda (&rest _))))
+        (pilish-copy-file-path))
+      (should (equal (car kill-ring) "/tmp/project/reports/out.md")))))
+
+(ert-deftest pilish-test-copy-file-path-non-url-invalid-link-errors ()
+  "Owned links without file or URL targets keep the controlled error."
+  (dolist (text '("[src/fallback.el](//example.com/file.md)"
+                  "[src/fallback.el](#heading)"
+                  "[src/fallback.el]()"
+                  "[src/fallback.el](README.md)"))
+    (with-temp-buffer
+      (pilish-chat-mode)
+      (let ((inhibit-read-only t) copied)
+        (insert text)
+        (goto-char (+ (point-min) 5))
+        (cl-letf (((symbol-function 'kill-new)
+                   (lambda (&rest _) (setq copied t))))
+          (let ((err (should-error (pilish-copy-file-path)
+                                   :type 'user-error)))
+            (should (equal "No file at point" (error-message-string err)))))
+        (should-not copied)))))
+
+(ert-deftest pilish-test-copy-file-path-url-not-on-label-errors ()
+  "Point outside a URL link's label does not copy the URL."
+  (with-temp-buffer
+    (pilish-chat-mode)
+    (let ((inhibit-read-only t) copied)
+      (insert "pre [Report](https://example.com/out.md) post")
+      (dolist (needle '("https://example.com/out.md" "post"))
+        (goto-char (point-min))
+        (search-forward needle)
+        (goto-char (match-beginning 0))
+        (cl-letf (((symbol-function 'kill-new)
+                   (lambda (&rest _) (setq copied t))))
+          (let ((err (should-error (pilish-copy-file-path)
+                                   :type 'user-error)))
+            (should (equal "No file at point" (error-message-string err)))))
+      (should-not copied)))))
+
+(ert-deftest pilish-test-copy-file-path-url-inside-tool-block-errors ()
+  "Tool blocks without path metadata never fall through to link URLs."
+  (with-temp-buffer
+    (pilish-chat-mode)
+    (pilish--display-tool-start "bash" '(:command "cat README.md"))
+    (pilish--display-tool-end "bash" '(:command "cat README.md")
+                          '((:type "text" :text "[Site](https://example.com)"))
+                          nil nil)
+    (goto-char (point-min))
+    (search-forward "Site")
+    (goto-char (match-beginning 0))
+    (let (copied)
+      (cl-letf (((symbol-function 'kill-new)
+                 (lambda (&rest _) (setq copied t))))
+        (let ((err (should-error (pilish-copy-file-path)
+                                 :type 'user-error)))
+          (should (equal "No file at point" (error-message-string err)))))
+      (should-not copied))))
+
 (ert-deftest pilish-test-shell-command-at-point-delayed-error-before-prompt ()
   "A shell-only target error is raised before prompting or execution."
   (with-temp-buffer
@@ -16227,6 +16331,61 @@ is validated and opened."
                    (pilish--semantic-link-file-target-at-point)
                    :status)))
       (should-not (pilish--file-target-at-point)))))
+
+(ert-deftest pilish-test-file-target-link-url-destinations-report-url ()
+  "Scheme-qualified destinations resolve as owned-invalid URLs, not files."
+  (dolist (case '(("[Report](file:///tmp/pi/reports/out.md)" . "file:///tmp/pi/reports/out.md")
+                  ("[Pilish](https://github.com/dnouri/pilish)" . "https://github.com/dnouri/pilish")
+                  ("[Docs](http://example.com/a%20b?q=1)" . "http://example.com/a%20b?q=1")
+                  ("[Mail](mailto:user@example.com)" . "mailto:user@example.com")
+                  ("[Escaped](<https://example.com/a\\_b>)" . "https://example.com/a_b")
+                  ("![Logo](https://example.com/logo.png)" . "https://example.com/logo.png")))
+    (dolist (fontified '(nil t))
+      (with-temp-buffer
+        (pilish-chat-mode)
+        (let ((inhibit-read-only t)) (insert (car case)))
+        (when fontified (font-lock-ensure))
+        (goto-char (+ (point-min) 3))
+        (let ((resolution (pilish--semantic-link-file-target-at-point)))
+          (should (eq :owned-invalid (plist-get resolution :status)))
+          (should (equal (cdr case) (plist-get resolution :url)))
+          (should-not (pilish--file-target-at-point)))))))
+
+(ert-deftest pilish-test-file-target-link-non-url-destinations-have-no-url ()
+  "Non-URL invalid destinations never report a URL."
+  (dolist (text '("[src/label.el](//example.com/file.md)"
+                  "[src/label.el](#heading)"
+                  "[src/label.el]()"
+                  "[src/label.el](README.md)"
+                  "[src/label.el][definition]"
+                  "[src/label.el](https%3A%2F%2Fexample.com/x)"
+                  "[src/label.el](docs/incomplete.md"
+                  "[Report](reports/out.md)"))
+    (with-temp-buffer
+      (pilish-chat-mode)
+      (let ((inhibit-read-only t)) (insert text))
+      (goto-char (+ (point-min) 5))
+      (should-not (plist-get (pilish--semantic-link-file-target-at-point)
+                            :url)))))
+
+(ert-deftest pilish-test-file-target-link-url-activation-follows-label ()
+  "A URL destination only activates on emitted label characters."
+  (with-temp-buffer
+    (pilish-chat-mode)
+    (let ((inhibit-read-only t))
+      (insert "pre [Report](https://example.com/out.md) post"))
+    (goto-char (point-min))
+    (search-forward "Report")
+    (goto-char (match-beginning 0))
+    (should (equal "https://example.com/out.md"
+                   (plist-get (pilish--semantic-link-file-target-at-point)
+                              :url)))
+    (dolist (needle '("https://example.com/out.md" "pre " " post"))
+      (goto-char (point-min))
+      (search-forward needle)
+      (goto-char (match-beginning 0))
+      (should-not (plist-get (pilish--semantic-link-file-target-at-point)
+                            :url)))))
 
 (ert-deftest pilish-test-file-target-link-non-file-destinations-own-label ()
   "Recognized non-file links suppress path-like visible-text fallback."

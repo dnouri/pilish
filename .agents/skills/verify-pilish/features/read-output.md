@@ -11,6 +11,7 @@ The chat renders streamed Markdown and changes thinking display without losing t
 - `output-table` rewraps a hot table after a frame resize.
 - `output-table-kill` keeps the cursor at the visual end of a wrapped row after `C-k`.
 - `output-block-details` inspects completed reply, thinking, and tool details without changing the session or draft.
+- `output-link-copy` copies a URL destination or a shell-local file path from a chat link with `w`.
 
 ## How to get to it (user POV)
 
@@ -24,6 +25,7 @@ The chat renders streamed Markdown and changes thinking display without losing t
 - Press `C-k` on a wrapped table row in the read-only chat.
 - In a live chat, place point on a completed reply, thinking block, or tool block and press `C-c C-p d` to open its details in standard Help. In a saved snapshot, run `M-x pilish-describe-reply`.
 - Press `C-h .` for an echo-area peek. Native link and control help keeps priority.
+- Place point on a Markdown link label and press `w` to copy the URL destination, or the shell-local path for a local file link.
 - Press `q` in Help to return to the chat or saved snapshot.
 - Native chat links and controls retain their hover help and click actions. Input headers, browsers, and menus keep their existing hover behavior.
 
@@ -43,7 +45,8 @@ Preconditions:
 - **Kill part of a wrapped table row.** Run `./test/run-gui-tests.sh --headless pilish-gui-test-table-kill-line-moves-cursor-to-visual-end 2>&1 | tee "$RUN_DIR/table-kill.log"`. Record `table-kill.exit`. Ordinary `C-k` copies the same source text, leaves canonical text unchanged, keeps point at raw end-of-line, and places the visible cursor on the last continuation line.
 - **Inspect completed blocks.** Run `./test/run-gui-tests.sh --headless pilish-gui-test-reply-details-keyboard-help-and-safe-quit 2>&1 | tee "$RUN_DIR/reply-details.log"`. Record `reply-details.exit`. Real `C-h .` and `C-c C-p d` inspect a fake reply, synthetic completed thinking before and after `TAB`, and a synthetic tool before and after output folds and cooling. The reply opens selected read-only Help both fresh and in an existing Help window. Reports contain metadata, not private thinking or tool output. `q` returns to the chat with the same live process, draft, and session-file bytes.
 - **Observe duration and restoration.** Run `G1_CAPTURE="$RUN_DIR/duration" ./test/run-gui-tests.sh --headless pilish-gui-test-fake-duration-live-reload-and-resume 2>&1 | tee "$RUN_DIR/duration.log"`. Record `duration.exit`. The fake bash stream advances through real `Elapsed` timers, settles on `Took 2m 5s`, and keeps that recorded value through bottom-control actions, browser resume, and process reload. The final timer stays stopped.
-- **Check the proof.** Require zero statuses and nonempty logs for all eleven commands. Require `fake-duration-elapsed-1.png`, `fake-duration-recorded.png`, `fake-duration-resumed.png`, `fake-duration-reloaded.png`, and their matching `.el` files under `$RUN_DIR/duration`. Use the evidence pattern from the skill.
+- **Copy link targets.** Run `./test/run-gui-tests.sh --headless pilish-gui-test-copy-link-targets-with-w 2>&1 | tee "$RUN_DIR/link-copy.log"`. Record `link-copy.exit`. Real `w` presses on `https:`, `file:`, and absolute-path link labels push the URL, the `file:` URL, and the absolute pathname into the kill ring.
+- **Check the proof.** Require zero statuses and nonempty logs for all twelve commands. Require `fake-duration-elapsed-1.png`, `fake-duration-recorded.png`, `fake-duration-resumed.png`, `fake-duration-reloaded.png`, and their matching `.el` files under `$RUN_DIR/duration`. Use the evidence pattern from the skill.
 
 ## Gotchas
 
