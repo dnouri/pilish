@@ -278,9 +278,34 @@ Tool arguments appear in the header or on separate rows and fold
 independently of output.  Expanded shell commands have syntax
 highlighting.  Carets are not copied with text.
 
+Subagents that publish structured progress show each running leaf's
+task title and agent along its ancestry, followed by its activity, age,
+turn count, and context usage when available.  The preview keeps the last
+five visual lines.  Ages refresh once per second.  After 45 seconds
+without activity, =quiet 45s= replaces the age.  Customize
+=pilish-subagent-quiet-after-seconds= to change that threshold.
+Silence alone does not mean the child is stuck.  Older producers keep
+their ordinary text preview.  Both =subagent= and =subagent_resume= show
+elapsed time while running and recorded execution time when available.
+
 For =codemode=, the script, call list, parent output, and child
 outputs fold independently inside the parent tool block.  Reload and
 resume retain saved child-call summaries, not child outputs.
+
+Each tool result shows one inline =Pi sessions= tree below its output
+preview.  Recursive declarations retain invocation ancestry.  A titled
+row leads with its task title, linked when the chat has an available
+first occurrence, with the agent label and any distinguishing suffix in
+parentheses.  Rows show turn counts and context
+usage when declared; =? ctx= means unknown context usage.  Each saved
+chat has one link at its first occurrence, on the title when present.
+Later resume occurrences stay visible as plain text.  Output folds do
+not hide the tree.  Older declarations without titles or stats keep
+their original label-led rows.  Titles, stats, and recursive trees
+need =pi-submarine= 0.7 or later.
+
+Completed subagent results include the producer's =Task:= and
+=Ran N turns= lines in the result body, with final stats in the tree.
 
 Click a generated Pi session link or press =RET= on it to open a
 read-only snapshot in another window.  Use =C-c ]= and =C-c [= to
@@ -290,7 +315,7 @@ session controls and do not update automatically.  Press =g= or run
 last good view and shows a stale note until a later =g= succeeds.
 Press =q= to close only that snapshot.
 
-#+caption: A parent and its linked child session.  This example uses scripted replies.
+#+caption: A recursive subagent tree in a parent session.  This example uses scripted replies.
 [[file:assets/pi-session-view.png]]
 
 #+html: <details>
@@ -1228,9 +1253,11 @@ can use to change the font for that extension's status text using
 *** Publishing saved conversations
 
 Return =details.savedConversations= from any tool that saves Pi
-conversations.  Pilish adds clickable labels without extra configuration
-or Pilish-specific code.  This is a tool-result convention understood by
-Pilish, not an upstream Pi API.  A tool named =delegate_work= can return:
+conversations.  Pilish adds one inline tree of read-only links without
+extra configuration or Pilish-specific code.  This is a tool-result
+convention understood by Pilish, not an upstream Pi API.  Version 1
+declares a flat list of saved chats.  Version 2 also declares invocation
+ancestry.  A tool named =delegate_work= can return:
 
 #+begin_src json
 {
@@ -1239,34 +1266,86 @@ Pilish, not an upstream Pi API.  A tool named =delegate_work= can return:
   ],
   "details": {
     "savedConversations": {
-      "version": 1,
+      "version": 2,
       "root": "/var/tmp/team-ledger",
+      "coverage": "complete",
       "items": [
-        {"sessionId": "exact-child-id", "file": "workers/blue/dialogue.jsonl", "label": "reviewer"}
+        {
+          "id": "episode-coordinator",
+          "parentId": null,
+          "kind": "start",
+          "sessionId": "exact-child-id",
+          "label": "coordinator",
+          "save": {
+            "kind": "pi-v3",
+            "file": "workers/blue/dialogue.jsonl",
+            "readiness": "checked"
+          }
+        },
+        {
+          "id": "episode-reviewer",
+          "parentId": "episode-coordinator",
+          "kind": "start",
+          "sessionId": "exact-grandchild-id",
+          "label": "reviewer",
+          "save": {
+            "kind": "pi-v3",
+            "file": "workers/red/dialogue.jsonl",
+            "readiness": "checked"
+          }
+        }
       ]
     }
   }
 }
 #+end_src
 
-Replace the placeholder paths and ID with your owned save's values.
-Copy the file and ID from your session manager's =getSessionFile()=
-and =getSessionId()= methods.  Choose a storage root and make =file=
-relative to it.  Do not derive a
-filename from the ID or recover identity from output text.
+Replace the placeholder paths and IDs with your owned saves' values.
+Copy each file and ID from its session manager's =getSessionFile()= and
+=getSessionId()= methods.  Choose a storage root and make each =file=
+relative to it.  Do not derive a filename from an ID or recover identity
+from output text.
 
-The declaration has these rules:
+Both declaration versions have these rules:
 
-- =version= is the number 1.  The saved Pi session header must have version 3.
-- =root= is an absolute directory, not a filesystem root.
-- =items= is a nonempty array with unique session IDs and file paths.
-- =sessionId= exactly matches the saved header's ID.  =file= is its exact
-  root-relative path, must not start with =~=, and has no empty, =.=, or
-  =..= components.  Pilish rechecks real containment, including symlinks,
-  when opening or refreshing.
-- =label= is optional, defaults to the ID, and must be nonempty single-line
-  text.  Duplicate labels are valid.  Paths, IDs, and labels cannot contain
-  control characters, format characters, or line or paragraph separators.
+- The saved Pi session header has version 3.  =root= is an absolute
+  directory, not a filesystem root.
+- =items= is a nonempty array with at most 1,024 rows.  Each validated
+  string has at most 4 KiB of UTF-8.
+- =sessionId= exactly matches its saved header's ID.  A =pi-v3= save has
+  the exact root-relative =file= and =readiness= equal to =planned= or
+  =checked=.  The path must not start with =~= or contain empty, =.=,
+  =..=, or backslash components.  Pilish rechecks real containment,
+  including symlinks, when opening or refreshing.
+- An =unavailable= save has a nonempty =reason= instead of a file.  Its
+  occurrence stays named and inert.  An unavailable save does not by
+  itself make the declaration partial.
+- =label= is optional, defaults to the session ID, and must be nonempty
+  single-line text.  Duplicate labels are valid.  Pilish adds the shortest
+  session-ID suffix that distinguishes duplicate labels.  Paths, IDs, and
+  labels cannot contain control characters, format characters, or line or
+  paragraph separators.
+
+Version 1 items contain =sessionId=, =file=, and optional =label=
+directly.  Their session IDs and files are unique within the declaration.
+Pilish renders them as flat legacy rows without a completeness claim.
+
+Version 2 items contain =id=, =parentId=, =kind=, =sessionId=, optional
+=label=, and =save=.  Occurrence IDs are unique.  Parent links have no
+cycles or dangling references, and exactly one root has =parentId: null=.
+=kind= is =start=, =resume=, or =unknown=.  Treat occurrence IDs as opaque.
+They describe invocation ancestry, not chat identity.
+
+Version 2 =coverage= is =observed= while running, =complete= when every
+nested declaration is represented, or =partial= when data is missing,
+malformed, conflicted, or over a limit.  Coverage does not describe task
+success or file availability.
+
+Pilish identifies a chat by its routed root and exact session ID.  A
+resume can repeat that ID with the same file.  The first occurrence owns
+the link.  Later occurrences remain plain metadata.  Conflicting files
+for one chat, or one file claimed by different chats, disable every action
+for the affected chats without withdrawing valid siblings.
 
 To keep links on a failed run, return the result with =isError: true=.
 Throwing an error does not preserve custom details.
@@ -1277,11 +1356,13 @@ content, and details, and returns nil or the same =version=, =root=,
 and =items= object without I/O.  Pilish copies its data at capture.
 An explicit =savedConversations= field wins even when null, malformed,
 or unsupported.  Invalid declarations and adapter errors produce inert
-unavailable labels.  See the variable's docstring for the full contract.
+unavailable metadata.  See the variable's docstring for the full contract.
 
-pi-submarine publishes exactly one item per result, its immediate
-child.  Deeper saved results carry their own declarations inside that
-child.
+Ordinary Pi tool results persist these declarations.  Codemode's bounded
+=nestedCalls= summaries omit terminal result details.  Pilish cannot
+restore a nested saved-conversation tree after reload unless its producer
+persists the declaration in another supported field.  It never infers the
+missing references from run metadata, output, or the pi-submarine manifest.
 
 ** MCP servers
 

@@ -813,7 +813,7 @@ established file actions keep authority over real path references only."
     (should (string-match-p "echo SECOND" (pilish-arguments-test--visible-text)))))
 
 (ert-deftest pilish-test-arguments-reviewed-saved-title-after-tab ()
-  "A generic saved declaration remains a working title button in either fold state."
+  "A generic saved declaration keeps its body button through argument folds."
   (pilish-arguments-test--with-chat
     (setq pilish--state '(:session-file "/tmp/pilish-argument-anchor.jsonl"))
     (pilish-arguments-test--execute
@@ -949,7 +949,7 @@ established file actions keep authority over real path references only."
           (should (> (length (delete-dups faces)) 1)))))))
 
 (ert-deftest pilish-test-arguments-reviewed-primary-guards-and-saved-chrome ()
-  "Root and child primaries keep literal guards and saved labels on the title line."
+  "Root and child primaries keep literal guards beside one saved body tree."
   (dolist (nested '(nil t))
     (pilish-arguments-test--with-chat
       (setq pilish--state '(:session-file "/tmp/pilish-argument-anchor.jsonl"))
@@ -965,7 +965,9 @@ established file actions keep authority over real path references only."
       (pilish-toggle-tool-section)
       (pilish-arguments-test--assert-following-markdown)
       (let ((visible (pilish-arguments-test--visible-text)))
-        (should (string-match-p "^bash[^\n]*saved label[^\n]*\nif true; then\necho literal\n```\n<!--\nfi" visible)))
+        (should (string-match-p "^bash\nif true; then\necho literal\n```\n<!--\nfi" visible))
+        (should (string-match-p "Pi sessions · 1 chat\nsaved label" visible))
+        (should-not (string-match-p "Pi session:" visible)))
       (pilish-arguments-test--goto-text "saved label")
       (let ((target (get-text-property (point) 'pilish-subagent-name)))
         (should (pilish--snapshot-target-p target))
@@ -1459,13 +1461,15 @@ established file actions keep authority over real path references only."
                        (lambda (value) (setq opened value))))
               (dotimes (iteration 2)
                 (setq opened nil)
-                (pilish-arguments-test--goto-text "saved label")
+                (goto-char (point-min))
+                (pilish-next-subagent-name)
                 (execute-kbd-macro key)
                 (should-not opened)
                 (should (eq (and (string-match-p "OUTPUT-HIDDEN" (pilish-arguments-test--visible-text)) t)
                             (= iteration 0)))
                 (should-not (string-match-p "ARG-LAST" (pilish-arguments-test--visible-text)))
-                (pilish-arguments-test--goto-text "saved label")
+                (goto-char (point-min))
+                (pilish-next-subagent-name)
                 (should (equal target (button-get (button-at (point)) 'pilish-subagent-name)))
                 (execute-kbd-macro (kbd "RET"))
                 (should (equal opened target))))))
@@ -2256,6 +2260,29 @@ established file actions keep authority over real path references only."
         (pilish--display-tool-update-header "custom" nil block)
         (should (equal (pilish-arguments-test--visible-text)
                        (concat "custom\n=" (if (vectorp value) "[]" (format "%s" value)) "\n")))))))
+
+(ert-deftest pilish-test-arguments-recursive-tree-is-independent-of-argument-splices ()
+  "Root and nested argument folds preserve the same five recursive viewer actions."
+  (dolist (nested '(nil t))
+    (pilish-arguments-test--with-chat
+      (setq pilish--state '(:session-file "/saved/parent.jsonl"))
+      (let ((args '(:command "echo ARG-FIRST\necho ARG-LAST" :note "NOTE-FIRST\nNOTE-LAST"))
+            (details (list :savedConversations (pilish-test--recursive-conversation-declaration))))
+        (if nested (pilish-arguments-test--child "bash" args "CHILD-OUTPUT" details)
+          (pilish-arguments-test--execute "root" "bash" args "ROOT-OUTPUT" nil details)))
+      (let ((expected (pilish-test--conversation-action-ids)))
+        (should (= (length expected) 5))
+        (dolist (needle '("echo ARG-FIRST" "note=" "echo ARG-FIRST" "note="))
+          (pilish-arguments-test--goto-text needle)
+          (pilish-toggle-tool-section)
+          (font-lock-flush)
+          (font-lock-ensure)
+          (should (equal expected (pilish-test--conversation-action-ids)))
+          (should (= (pilish-test--count-matches "Pi sessions ·" (buffer-string)) 1)))
+        (pilish--cool-completed-tool-blocks (pilish-arguments-test--all-tool-overlays))
+        (font-lock-flush)
+        (font-lock-ensure)
+        (should (equal expected (pilish-test--conversation-action-ids)))))))
 
 (provide 'pilish-arguments-test)
 ;;; pilish-arguments-test.el ends here

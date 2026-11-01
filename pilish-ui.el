@@ -248,6 +248,12 @@ Bash output is typically more verbose, so fewer lines are shown."
   :type 'natnum
   :group 'pilish)
 
+(defcustom pilish-subagent-quiet-after-seconds 45
+  "Seconds without activity before a subagent preview says quiet.
+This marker describes silence, not whether the subagent is stuck."
+  :type 'integer
+  :group 'pilish)
+
 (defcustom pilish-preview-max-bytes 51200
   "Maximum bytes for tool output preview (50KB default).
 Prevents huge single-line outputs from blowing up the chat buffer."

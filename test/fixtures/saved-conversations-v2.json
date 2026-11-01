@@ -1,0 +1,13 @@
+{
+  "version": 2,
+  "root": "/saved/ledger",
+  "coverage": "complete",
+  "items": [
+    {"id": "episode-coordinator", "parentId": null, "kind": "start", "sessionId": "01a19242-17ab-7000-8000-00000000c024", "label": "coordinator", "title": "Coordinate review", "stats": {"turns": 6, "contextPercent": 42}, "save": {"kind": "pi-v3", "file": "coordinator.jsonl", "readiness": "checked"}},
+    {"id": "episode-explorer", "parentId": "episode-coordinator", "kind": "start", "sessionId": "01a19242-17ab-7000-8000-00000000e018", "label": "explorer", "title": "Explore files", "stats": {"turns": 2, "contextPercent": null}, "save": {"kind": "pi-v3", "file": "explorer.jsonl", "readiness": "checked"}},
+    {"id": "episode-reviewer-a", "parentId": "episode-coordinator", "kind": "start", "sessionId": "01a19242-17ab-7000-8000-00000000a17c", "label": "reviewer", "title": "Review protocol", "stats": {"turns": 4, "contextPercent": 18}, "save": {"kind": "pi-v3", "file": "reviewer-a.jsonl", "readiness": "checked"}},
+    {"id": "episode-tester", "parentId": "episode-reviewer-a", "kind": "start", "sessionId": "01a19242-17ab-7000-8000-00000000f046", "label": "tester", "title": "Run tests", "stats": {"turns": 3, "contextPercent": 25}, "save": {"kind": "pi-v3", "file": "tester.jsonl", "readiness": "checked"}},
+    {"id": "episode-tester-resume", "parentId": "episode-reviewer-a", "kind": "resume", "sessionId": "01a19242-17ab-7000-8000-00000000f046", "label": "tester", "title": "Rerun tests", "stats": {"turns": 2, "contextPercent": 31}, "save": {"kind": "pi-v3", "file": "tester.jsonl", "readiness": "checked"}},
+    {"id": "episode-reviewer-b", "parentId": "episode-coordinator", "kind": "start", "sessionId": "01a19242-17ab-7000-8000-00000000b92e", "label": "reviewer", "title": "Review interface", "save": {"kind": "pi-v3", "file": "reviewer-b.jsonl", "readiness": "checked"}}
+  ]
+}

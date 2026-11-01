@@ -885,7 +885,7 @@
       (pilish-chat-mode)
       (pilish-test--hover-tool-start "A")
       (let ((block (pilish--tool-block-get "A")))
-        (cl-letf (((symbol-function 'pilish--saved-conversation-labels)
+        (cl-letf (((symbol-function 'pilish--conversation-capture)
                    (lambda (&rest _)
                      (if value
                          (should (= (pilish--recorded-tool-time-milliseconds
@@ -2829,6 +2829,74 @@ execution cannot retain a temporary record on this setup's evaluator stack."
    "tool_execution_end" "literal-root" nil :toolName "runner" :isError nil
    :result '(:content [(:type "text" :text "PARENT-OUTPUT")]))
   (pilish--tool-block-overlay (pilish--nested-tool-owner "literal-root")))
+
+(defmacro pilish-test--with-compound-changes (block changes &rest body)
+  "Run BODY with BLOCK a compound tool and CHANGES a log of its change hooks.
+Each hook call pushes (before BEG END) or (after BEG END LENGTH) on CHANGES.
+Fontification stays out of the log."
+  (declare (indent 2) (debug t))
+  `(with-temp-buffer
+     (pilish-chat-mode)
+     (pilish-test--nested-markup-summary)
+     (let ((,block (pilish--nested-tool-owner "literal-root"))
+           (,changes nil))
+       (add-hook 'before-change-functions
+                 (lambda (&rest args) (push (cons 'before args) ,changes)) nil t)
+       (add-hook 'after-change-functions
+                 (lambda (&rest args) (push (cons 'after args) ,changes)) nil t)
+       (cl-letf (((symbol-function 'pilish--font-lock-ensure-excluding-property)
+                  #'ignore))
+         ,@body))))
+
+(ert-deftest pilish-test-compound-redraw-is-one-change ()
+  "One compound rewrite is one edit for change hooks."
+  ;; Each intermediate insertion otherwise repeats md-ts change-hook work.
+  (pilish-test--with-compound-changes block changes
+    (let ((start (marker-position (pilish--tool-block-header-end block)))
+          (end (marker-position (pilish--tool-block-end-marker block)))
+          (text (buffer-string)))
+      (pilish--redraw-compound-tool block)
+      (should (equal text (buffer-string)))
+      (should (equal (reverse changes)
+                     `((before ,start ,end) (after ,start ,end ,(- end start))))))))
+
+(ert-deftest pilish-test-compound-redraw-change-spans-the-new-body ()
+  "The combined change ends where a grown or shrunk body ends."
+  ;; A stale end leaves part of a grown body unnoticed by jit-lock and md-ts.
+  (pilish-test--with-compound-changes block changes
+    (let ((start (marker-position (pilish--tool-block-header-end block)))
+          (end (pilish--tool-block-end-marker block)))
+      (dolist (body (list (make-string 400 ?x) ""))
+        (let ((old-length (- end start)))
+          (setq changes nil)
+          (cl-letf (((symbol-function 'pilish--insert-compound-tool-body)
+                     (lambda (&rest _) (insert body))))
+            (pilish--redraw-compound-tool block))
+          (should (= end (+ start (length body))))
+          (should (equal (car changes)
+                         `(after ,start ,(marker-position end) ,old-length))))))))
+
+(ert-deftest pilish-test-compound-redraw-failure-still-reports-the-change ()
+  "A failed rewrite restores change hooks and reports what changed."
+  ;; `combine-change-calls' skips its final notification on a non-local exit,
+  ;; which would leave observers of the before-change call waiting.
+  (pilish-test--with-compound-changes block changes
+    (let ((start (marker-position (pilish--tool-block-header-end block)))
+          (hooks after-change-functions))
+      (dolist (condition '(error quit))
+        (let ((old-length (- (pilish--tool-block-end-marker block) start)))
+          (setq changes nil)
+          (cl-letf (((symbol-function 'pilish--insert-compound-tool-body)
+                     (lambda (&rest _)
+                       (insert "partial")
+                       (signal condition nil))))
+            (should (eq condition
+                        (condition-case err
+                            (pilish--redraw-compound-tool block)
+                          (t (car err))))))
+          (should (equal (car changes)
+                         `(after ,start ,(+ start 7) ,old-length)))
+          (should (eq hooks after-change-functions)))))))
 
 (ert-deftest pilish-test-nested-summary-arguments-decode-json-utf8 ()
   "Native JSON bytes must display as the received Unicode argument characters."
@@ -9343,7 +9411,7 @@ no payload at all."
 
 (ert-deftest pilish-test-tool-duration-independent-of-output-fold-and-zero ()
   "Eligible completed roots have one real duration in every output shape."
-  (dolist (name '("bash" "subagent"))
+  (dolist (name '("bash" "subagent" "subagent_resume"))
     (dolist (output '("ONE\nTWO\nTHREE\nFOUR" "SHORT" ""))
       (dolist (milliseconds '(0 2460))
         (with-temp-buffer
@@ -9383,7 +9451,7 @@ no payload at all."
                   (should-not (text-property-not-all footer (overlay-end overlay) 'pilish-disclosure-hit nil)))))))))))
 
 (ert-deftest pilish-test-tool-duration-exact-policy-and-quiet-untimed-results ()
-  "Only bash and subagent have inline timing; explicit Help stays unrestricted."
+  "Only bash and subagent runs have inline timing; Help stays unrestricted."
   (dolist (name '("bash" "subagent" "read" "edit" "write" "codemode" "custom"
                   "Bash" "Subagent" "bash-extra" "my-subagent" "subagent_resume"))
     (dolist (milliseconds '(0 nil))
@@ -9392,7 +9460,7 @@ no payload at all."
           (pilish-chat-mode)
           (let* ((block (pilish--display-tool-start name nil "policy"))
                  (timing (pilish--recorded-tool-time milliseconds))
-                 (eligible (and milliseconds (member name '("bash" "subagent")))))
+                 (eligible (and milliseconds (member name '("bash" "subagent" "subagent_resume")))))
             (pilish--display-tool-end name nil (list (list :type "text" :text output)) nil nil block timing)
             (should (eq (not (null eligible))
                         (not (null (text-property-not-all (point-min) (point-max) 'pilish-tool-duration nil)))))
@@ -9571,7 +9639,7 @@ Tests dispatch the captured callback rather than calling a paint directly."
       (with-temp-buffer
         (pilish-chat-mode)
         (let* ((block (pilish--display-tool-start name nil "start-clock"))
-               (eligible (member name '("bash" "subagent"))))
+               (eligible (member name '("bash" "subagent" "subagent_resume"))))
           (should-not (pilish--tool-block-output-view block))
           (pilish--handle-display-event
            (list :type "tool_execution_start" :toolName name :toolCallId "start-clock"))
@@ -10058,7 +10126,7 @@ suppressing every modification hook."
           (setq now 199)
           (pilish-test--dispatch-tool-clock timer)
           (should (equal (pilish-test--tool-duration-text block) "Elapsed 1m 39s"))
-          (cl-letf (((symbol-function 'pilish--saved-conversation-labels)
+          (cl-letf (((symbol-function 'pilish--conversation-capture)
                      (lambda (&rest _)
                        (should-not pilish--running-tool-blocks)
                        (should-not pilish--tool-time-timer)
@@ -20355,25 +20423,26 @@ Regression test: streaming output with no newlines should still be capped."
                    (cl-incf flushes)
                    (funcall flush))))
         (pilish-test--send-tool-execution-update
-         "child" "Log: ~/child.jsonl.subagents.md\n- subagent (9% ctx, 18 turns): thinking")
+         "child" "[log]: ~/child.jsonl.subagents.md\n- subagent (9% ctx, 18 turns): thinking")
         (pilish-test--flush-tool-updates)
         (should (> flushes 0))
         (setq flushes 0)
         (dotimes (n 8)
           (pilish-test--send-tool-execution-update
-           "child" (format "Log: ~/child.jsonl.subagents.md\n- subagent (9%% ctx, 18 turns): using read %d" n))
+           "child" (format "[log]: ~/child.jsonl.subagents.md\n- subagent (9%% ctx, 18 turns): using read %d" n))
           (pilish-test--flush-tool-updates))
         (should (= 0 flushes))
-        ;; A real fence change still needs the non-local Markdown flush.
+        ;; A real fence change near definition syntax still needs the
+        ;; non-local Markdown flush.
         (pilish-test--send-tool-execution-update
-         "child" "Log: ~/child.jsonl.subagents.md\n- subagent (9% ctx, 18 turns): ```inside```")
+         "child" "[log]: ~/child.jsonl.subagents.md\n- subagent (9% ctx, 18 turns): ```inside```")
         (pilish-test--flush-tool-updates)
         (should (> flushes 0)))
       (should (equal header (pilish-test--tool-header-by-id "child")))
       (let* ((block (pilish--tool-block-get "child"))
              (footer (pilish--tool-output-view-footer-start (pilish--tool-block-output-view block))))
         (should (equal (buffer-substring-no-properties (pilish--tool-block-header-end block) footer)
-                       "~~~\nLog: ~/child.jsonl.subagents.md\n- subagent (9% ctx, 18 turns): ```inside```\n~~~\n"))
+                       "~~~\n[log]: ~/child.jsonl.subagents.md\n- subagent (9% ctx, 18 turns): ```inside```\n~~~\n"))
         (should (string-prefix-p "Elapsed " (pilish-test--tool-duration-text block)))))))
 
 (ert-deftest pilish-test-tool-body-minimal-replacement-preserves-blocks ()
@@ -22178,39 +22247,6 @@ parses it as a code block (language injection), not inline markdown."
     (goto-char (point-min))
     (search-forward "__init__")
     (should-not (get-text-property (match-beginning 0) 'invisible))))
-
-(ert-deftest pilish-test-restore-tool-properties-within-restriction ()
-  "Restoring a restricted chunk of a tool block places its prefixes.
-Display-row counting narrows the chat, so jit-lock can restore a chunk
-whose tool block starts before `point-min'.  The hidden wrapper inside the
-restriction gets its row prefix; text before the restriction is unchanged."
-  (with-temp-buffer
-    (pilish-chat-mode)
-    (let ((inhibit-read-only t)
-          (locator '(argument "c" 0))
-          block-start wrapper-start row-start)
-      (insert "before\n")
-      (setq block-start (point))
-      (insert "header\n")
-      (setq wrapper-start (point))
-      (insert (propertize "```\n" 'display "" 'pilish-tool-section 'output
-                          'pilish-argument-address locator))
-      (setq row-start (point))
-      (insert (propertize "value\n" 'line-prefix (pilish--tool-prefix-spaces 2)
-                          'pilish-tool-section 'output
-                          'pilish-argument-address locator))
-      (let ((overlay (make-overlay block-start (point)))
-            (outside (buffer-substring (point-min) wrapper-start)))
-        (overlay-put overlay 'pilish-tool-block t)
-        (overlay-put overlay 'pilish-header-end (copy-marker wrapper-start))
-        (save-restriction
-          (narrow-to-region wrapper-start (point-max))
-          (pilish--restore-tool-properties (point-min) (point-max)))
-        (should (equal-including-properties
-                 (get-text-property wrapper-start 'line-prefix)
-                 (get-text-property row-start 'line-prefix)))
-        (should (equal-including-properties
-                 (buffer-substring (point-min) wrapper-start) outside))))))
 
 (ert-deftest pilish-test-toolcall-delta-survives-restore-tool-properties ()
   "Syntax faces survive restore-tool-properties after fontification.
@@ -24839,6 +24875,491 @@ events where the header text hasn't changed."
                     (should (eq restored expected)))
                   (should (eq (get-text-property (+ cold offset) 'wrap-prefix) wrap)))))
             (should-not (text-property-not-all (point-min) (point-max) 'pilish-disclosure-hit nil))))))))
+
+(ert-deftest pilish-test-conversation-tree-streaming-growth-and-terminal-replacement ()
+  "A metadata-only snapshot grows the tree; terminal details replace it outright."
+  (with-temp-buffer
+    (pilish-chat-mode)
+    (setq pilish--state '(:session-file "/saved/parent.jsonl"))
+    (let* ((block (pilish--display-tool-start "subagent" nil "tree"))
+           (declaration (pilish-test--recursive-conversation-declaration))
+           (partial (copy-tree declaration t))
+           (content [(:type "text" :text "Working without changing this output")]))
+      (setf (plist-get partial :items) (seq-subseq (plist-get partial :items) 0 2)
+            (plist-get partial :coverage) "observed")
+      (pilish--display-tool-update (list :content content :details (list :savedConversations partial)) block)
+      (should (= (length (pilish-test--conversation-action-ids)) 2))
+      (setf (plist-get declaration :coverage) "partial")
+      (pilish--queue-tool-update "tree" (list :content content :details (list :savedConversations declaration)))
+      (should (= (length (pilish-test--conversation-action-ids)) 2))
+      (cl-letf (((symbol-function 'input-pending-p) (lambda (&optional _) nil)))
+        (pilish--flush-tool-updates (current-buffer)))
+      (should (= (length (pilish-test--conversation-action-ids)) 5))
+      (should (= (pilish-test--count-matches "Pi sessions ·" (buffer-string)) 1))
+      (should (string-match-p "Pi sessions · 5 chats · partial" (buffer-string)))
+      (should (pilish--conversation-catalog-p (pilish--tool-block-conversations block)))
+      (should-not (string-match-p "Pi sessions" (plist-get (pilish--tool-output-view-snapshot
+                                                          (pilish--tool-block-output-view block)) :text)))
+      (pilish--display-tool-end
+       "subagent" nil content
+       '(:savedConversations (:version 2 :root "/saved/ledger" :coverage "complete"
+                             :items [(:id "terminal" :parentId :null :kind "resume" :sessionId "new-chat"
+                                      :label "final" :save (:kind "pi-v3" :file "final.jsonl" :readiness "checked"))]))
+       nil block)
+      (should (equal (pilish-test--conversation-action-ids) '("new-chat")))
+      (should-not (string-match-p "partial\\|same chat\\|Pi session:" (pilish--visible-text (point-min) (point-max))))
+      (should (= (length (pilish--conversation-catalog-occurrences
+                          (pilish--tool-block-conversations block))) 1)))))
+
+(ert-deftest pilish-test-conversation-tree-metadata-only-rebind-and-retirement ()
+  "Equal tree characters still receive new copied targets, without editing output."
+  (with-temp-buffer
+    (pilish-chat-mode)
+    (setq pilish--state '(:session-file "/saved/parent.jsonl"))
+    (let* ((block (pilish--display-tool-start "custom" nil "tree"))
+           (declaration (pilish-test--recursive-conversation-declaration))
+           (content [(:type "text" :text "Unchanged output")]))
+      (pilish--display-tool-update (list :content content :details (list :savedConversations declaration)) block)
+      (let ((tick (buffer-chars-modified-tick))
+            (painted (buffer-substring-no-properties (point-min) (point-max))))
+        (setf (plist-get (aref (plist-get declaration :items) 1) :sessionId) "changed-explorer"
+              (plist-get (plist-get (aref (plist-get declaration :items) 1) :save) :file) "changed.jsonl")
+        (pilish--display-tool-update (list :content content :details (list :savedConversations declaration)) block)
+        (should (= tick (buffer-chars-modified-tick)))
+        (should (equal painted (buffer-substring-no-properties (point-min) (point-max))))
+        (should (member "changed-explorer" (pilish-test--conversation-action-ids))))
+      (pilish--display-tool-update (list :content content :details '(:savedConversations :null)) block)
+      (font-lock-flush)
+      (font-lock-ensure)
+      (should-not (pilish-test--conversation-action-ids))
+      (should-not (text-property-any (point-min) (point-max) 'face 'link))
+      (pilish--display-tool-end "custom" nil content nil nil block)
+      (should-not (pilish--tool-block-conversations block))
+      (should-not (text-property-not-all (point-min) (point-max) 'pilish-subagent-name nil))
+      (should-not (text-property-any (point-min) (point-max) 'pilish-conversation-tree t)))))
+
+(ert-deftest pilish-test-conversation-tree-output-fold-cold-font-lock-and-navigation ()
+  "One tree survives preview, expansion and cooling, with five exact navigation stops."
+  (with-temp-buffer
+    (pilish-chat-mode)
+    (setq pilish--state '(:session-file "/saved/parent.jsonl"))
+    (let* ((pilish-bash-preview-lines 1)
+           (block (pilish--display-tool-start "bash" '(:command "delegate") "tree"))
+           (overlay (pilish--tool-block-overlay block)))
+      (pilish--display-tool-end
+       "bash" nil [(:type "text" :text "FIRST\nSECOND\nTHIRD")]
+       (list :savedConversations (pilish-test--recursive-conversation-declaration))
+       nil block (pilish--recorded-tool-time 1200))
+      (let ((expected (pilish-test--conversation-action-ids)))
+        (dolist (stage '(head all head-again cold))
+          (pcase stage
+            ((or 'all 'head-again)
+             (button-activate (pilish--find-toggle-button-in-region (overlay-start overlay) (overlay-end overlay))))
+            ('cold (pilish--cool-tool-overlay overlay)))
+          (font-lock-flush)
+          (font-lock-ensure)
+          (should (equal expected (pilish-test--conversation-action-ids)))
+          (should (= (pilish-test--count-matches "Pi sessions ·" (buffer-string)) 1))
+          (let ((tree (text-property-any (point-min) (point-max) 'pilish-conversation-tree t))
+                (footer (text-property-not-all (point-min) (point-max) 'pilish-tool-output-footer nil)))
+            (should (< tree footer)))
+          (goto-char (point-min))
+          (let (observed)
+            (dotimes (_ 5)
+              (call-interactively (key-binding (kbd "C-c ]")))
+              (let ((target (get-text-property (point) 'pilish-subagent-name)) opened)
+                (should (eq (get-text-property (point) 'face) 'link))
+                (should-not (invisible-p (point)))
+                (should-not (equal (get-text-property (point) 'display) ""))
+                (push (pilish--snapshot-target-session-id target) observed)
+                (setq pilish--state '(:session-file "/different/parent.jsonl"))
+                (cl-letf (((symbol-function 'pilish-open-subagent-snapshot) (lambda (value) (setq opened value))))
+                  (button-activate (button-at (point)) t)
+                  (should (eq opened target))
+                  (setq opened nil)
+                  (call-interactively (key-binding (kbd "RET")))
+                  (should (eq opened target)))))
+            (should (equal expected (nreverse observed)))
+            (should-error (pilish-next-subagent-name) :type 'user-error)
+            (dotimes (_ 4) (call-interactively (key-binding (kbd "C-c ["))))
+            (should-error (pilish-previous-subagent-name) :type 'user-error)))
+        (should-not (overlay-buffer overlay))
+        (should-not (pilish--tool-block-conversations block))
+        (goto-char (point-min))
+        (search-forward "resumed · same chat")
+        (should-not (pilish--file-target-at-point))
+        (should-error (pilish-visit-file) :type 'user-error)))))
+
+(ert-deftest pilish-test-conversation-tree-empty-output-before-duration ()
+  "A tree needs no output text or output toggle and precedes the independent footer."
+  (with-temp-buffer
+    (pilish-chat-mode)
+    (setq pilish--state '(:session-file "/saved/parent.jsonl"))
+    (let* ((block (pilish--display-tool-start "bash" nil "empty"))
+           (overlay (pilish--tool-block-overlay block)))
+      (pilish--display-tool-end
+       "bash" nil [] (list :savedConversations (pilish-test--recursive-conversation-declaration))
+       nil block (pilish--recorded-tool-time 0))
+      (should (= (length (pilish-test--conversation-action-ids)) 5))
+      (should-not (pilish--find-toggle-button-in-region (overlay-start overlay) (overlay-end overlay)))
+      (should (string-match-p "Review interface (reviewer #b92e)\n Took 0.0s"
+                              (pilish--visible-text (point-min) (point-max))))
+      (should (equal (plist-get (pilish--tool-output-view-snapshot (pilish--tool-block-output-view block)) :text) ""))
+      (let ((before (pilish--visible-text (point-min) (point-max))))
+        (pilish--cool-tool-overlay overlay)
+        (font-lock-flush)
+        (font-lock-ensure)
+        (should (equal before (pilish--visible-text (point-min) (point-max))))
+        (should (= (length (pilish-test--conversation-action-ids)) 5))))))
+
+(ert-deftest pilish-test-conversation-tree-nested-live-partial-and-final-replacement ()
+  "A visible nested owner has its own tree even while child output is concealed."
+  (with-temp-buffer
+    (pilish-chat-mode)
+    (setq pilish--state '(:session-file "/saved/parent.jsonl"))
+    (pilish--handle-display-event
+     '(:type "tool_execution_start" :toolCallId "owner" :toolName "codemode" :args (:code "await delegate()")))
+    (pilish--handle-display-event
+     '(:type "tool_execution_start" :toolCallId "child" :parentToolCallId "owner" :toolName "bash"))
+    (pilish--handle-display-event
+     (list :type "tool_execution_update" :toolCallId "child" :parentToolCallId "owner" :toolName "bash"
+           :partialResult (list :content [] :details
+                                (list :savedConversations (pilish-test--recursive-conversation-declaration)))))
+    (cl-letf (((symbol-function 'input-pending-p) (lambda (&optional _) nil)))
+      (pilish--flush-tool-updates (current-buffer)))
+    (should (= (length (pilish-test--conversation-action-ids)) 5))
+    (let ((updated (pilish-test--recursive-conversation-declaration))
+          (explorer-id "01a19242-17ab-7000-8000-00000000e018"))
+      (setf (plist-get (aref (plist-get updated :items) 1) :sessionId) "changed-explorer"
+            (plist-get (plist-get (aref (plist-get updated :items) 1) :save) :file) "changed-explorer.jsonl")
+      (pilish--handle-display-event
+       (list :type "tool_execution_update" :toolCallId "child" :parentToolCallId "owner" :toolName "bash"
+             :partialResult (list :content [] :details (list :savedConversations updated))))
+      (cl-letf (((symbol-function 'input-pending-p) (lambda (&optional _) nil)))
+        (pilish--flush-tool-updates (current-buffer)))
+      (should (member "changed-explorer" (pilish-test--conversation-action-ids)))
+      (should-not (member explorer-id (pilish-test--conversation-action-ids)))
+      (should (= (pilish-test--count-matches "Pi sessions ·" (buffer-string)) 1)))
+    (let* ((block (pilish--nested-tool-owner "owner"))
+           (call (pilish--nested-call-get block "child")))
+      (should (pilish--conversation-catalog-p (pilish--nested-call-conversations call)))
+      (should-not (pilish--nested-call-result call))
+      (pilish--handle-display-event
+       (list :type "tool_execution_end" :toolCallId "child" :parentToolCallId "owner" :toolName "bash"
+             :result (list :content [(:type "text" :text "CONCEALED-CHILD-OUTPUT")]
+                           :details (list :savedConversations (pilish-test--recursive-conversation-declaration)))))
+      (should-not (string-match-p "CONCEALED-CHILD-OUTPUT" (buffer-string)))
+      (should (= (length (pilish-test--conversation-action-ids)) 5))
+      (let* ((overlay (pilish--tool-block-overlay block))
+             (button (pilish--find-toggle-button-in-region (overlay-start overlay) (overlay-end overlay) '(child . "child"))))
+        (button-activate button)
+        (should (string-match-p "CONCEALED-CHILD-OUTPUT" (buffer-string)))
+        (should (= (length (pilish-test--conversation-action-ids)) 5)))
+      (pilish--handle-display-event
+       '(:type "tool_execution_end" :toolCallId "owner" :toolName "codemode" :result (:content [])))
+      (pilish--cool-tool-overlay (pilish--tool-block-overlay block))
+      (font-lock-flush)
+      (font-lock-ensure)
+      (should (= (length (pilish-test--conversation-action-ids)) 5))
+      (should-not (pilish--nested-call-conversations call)))))
+
+(ert-deftest pilish-test-conversation-tree-codemode-persistence-gap-is-not-recovered ()
+  "Saved nested summaries omit terminal details, so they cannot reconstruct trees."
+  (with-temp-buffer
+    (pilish-chat-mode)
+    (setq pilish--state '(:session-file "/saved/parent.jsonl"))
+    (let* ((adapter-calls 0)
+           (pilish-saved-conversation-functions
+           (list (lambda (name _content _details)
+                   (when (equal name "subagent") (cl-incf adapter-calls)) nil))))
+      (pilish--render-history-tool
+       '(:type "toolCall" :id "owner" :name "codemode" :arguments (:code "await delegate()"))
+       '(:role "toolResult" :toolCallId "owner" :content []
+         :nestedCalls (:complete t :calls [(:id "child" :name "subagent" :status "ok"
+                                           :arguments (:sessionId "not-an-association"))])
+         :details (:calls [(:id "child" :name "subagent" :status "ok" :args "sessionId: not-an-association")]
+                   :run (:sessionId "also-not-an-association" :children [(:sessionId "descendant")]))))
+      (should (string-match-p "Child outputs are not saved in sessions" (buffer-string)))
+      (should-not (pilish-test--conversation-action-ids))
+      (should-not (string-match-p "Pi sessions" (buffer-string)))
+      (should (= adapter-calls 0)))))
+
+(ert-deftest pilish-test-conversation-tree-producer-labels-stay-literal ()
+  "Markdown-shaped labels cannot hide the tree or consume following conversation text."
+  (dolist (label '("<!--" "~~~" "[reviewer](https://example.com)" "**reviewer**" "`reviewer`"))
+    (with-temp-buffer
+      (pilish-chat-mode)
+      (setq pilish--state '(:session-file "/saved/parent.jsonl"))
+      (let* ((declaration (pilish-test--recursive-conversation-declaration))
+             (block (pilish--display-tool-start "bash" nil "labels"))
+             (overlay (pilish--tool-block-overlay block)))
+        (setf (plist-get (aref (plist-get declaration :items) 1) :label) label
+              (plist-get (aref (plist-get declaration :items) 1) :title) label)
+        (pilish--display-tool-end "bash" nil [] (list :savedConversations declaration) nil block)
+        (pilish--render-history-text "\nAFTER-TREE **bold** [real link](https://example.org).\n")
+        (dolist (cold '(nil t))
+          (when cold (pilish--cool-tool-overlay overlay))
+          (font-lock-flush)
+          (font-lock-ensure)
+          (should (= (length (pilish-test--conversation-action-ids)) 5))
+          (should (string-match-p (regexp-quote (concat "├─ " label " (" label ") · 2 turns · ? ctx\n"))
+                                  (pilish--visible-text (point-min) (point-max))))
+          (goto-char (point-min))
+          (search-forward "AFTER-TREE")
+          (let ((node (treesit-node-on (match-beginning 0) (match-end 0) 'markdown t)) types)
+            (while node (push (treesit-node-type node) types) (setq node (treesit-node-parent node)))
+            (should (member "paragraph" types))
+            (should-not (member "fenced_code_block" types)))
+          (search-forward "real link")
+          (should (button-at (1- (point)))))))))
+
+(ert-deftest pilish-test-conversation-tree-results-keep-contextual-actions ()
+  "A later resume result owns another control for the same chat, not a global registry."
+  (with-temp-buffer
+    (pilish-chat-mode)
+    (setq pilish--state '(:session-file "/saved/parent.jsonl"))
+    (let* ((declaration (pilish-test--recursive-conversation-declaration))
+           (resume (copy-tree declaration t))
+           (item (aref (plist-get resume :items) 4)))
+      (setf (plist-get item :parentId) :null
+            (plist-get resume :items) (vector item))
+      (dolist (result (list declaration resume))
+        (let ((block (pilish--display-tool-start "subagent_resume" nil)))
+          (pilish--display-tool-end "subagent_resume" nil [] (list :savedConversations result) nil block)))
+      (let ((ids (pilish-test--conversation-action-ids)))
+        (should (= (length ids) 6))
+        (should (= (length (delete-dups (copy-sequence ids))) 5))
+        (should (equal (nth 3 ids) (nth 5 ids))))
+      (should (= (pilish-test--count-matches "Pi sessions ·" (buffer-string)) 2)))))
+
+(ert-deftest pilish-test-conversation-tree-compatibility-update-captures-on-owner ()
+  "An unkeyed streaming update still captures its compatibility block's catalog."
+  (with-temp-buffer
+    (pilish-chat-mode)
+    (setq pilish--state '(:session-file "/saved/parent.jsonl"))
+    (let ((block (pilish--display-tool-start "custom" nil)))
+      (pilish--display-tool-update
+       (list :content [] :details (list :savedConversations (pilish-test--recursive-conversation-declaration))))
+      (should (pilish--conversation-catalog-p (pilish--tool-block-conversations block)))
+      (should (= (length (pilish-test--conversation-action-ids)) 5)))))
+
+(ert-deftest pilish-test-conversation-tree-queued-capture-survives-compound-promotion ()
+  "Queued catalogs are captured once and survive an ordinary owner's first child."
+  (dolist (promote '(nil t))
+    (with-temp-buffer
+      (pilish-chat-mode)
+      (setq pilish--state '(:session-file "/saved/parent.jsonl"))
+      (let* ((declaration (pilish-test--recursive-conversation-declaration))
+             (calls 0)
+             (pilish-saved-conversation-functions
+              (list (lambda (name _content _details)
+                      (when (equal name "custom") (cl-incf calls) declaration))))
+             (block (pilish--display-tool-start "custom" nil "root")))
+        (pilish--queue-tool-update "root" '(:content []))
+        (should (= calls 1))
+        (should (pilish--conversation-catalog-p (pilish--tool-block-conversations block)))
+        (should-not (pilish-test--conversation-action-ids))
+        (if promote
+            (pilish--handle-display-event
+             '(:type "tool_execution_start" :toolCallId "child" :parentToolCallId "root" :toolName "bash"))
+          (cl-letf (((symbol-function 'input-pending-p) (lambda (&optional _) nil)))
+            (pilish--flush-tool-updates (current-buffer))))
+        (should (= calls 1))
+        (should (= (length (pilish-test--conversation-action-ids)) 5))))))
+
+(defun pilish-test--subagent-run (&rest fields)
+  "Return a run view with FIELDS overriding its default RPC-shaped values."
+  (let ((run (json-parse-string
+              "{\"episodeId\":\"episode\",\"sessionId\":\"session\",\"agent\":\"reviewer\",\"title\":\"Check files\",\"status\":\"running\",\"activity\":\"reading\",\"turnCount\":2,\"lastActivityAt\":\"1970-01-01T00:01:00Z\",\"children\":[]}"
+              :object-type 'plist)))
+    (while fields (setq run (plist-put run (pop fields) (pop fields))))
+    run))
+
+(ert-deftest pilish-test-subagent-run-view-title-and-optional-segments ()
+  "RPC keyword plists render titles and omit unavailable details."
+  (should (equal (pilish--subagent-run-view-text (pilish-test--subagent-run) 100)
+                 "Check files · reviewer\n  reading · 40s ago · 2 turns"))
+  (should (equal (pilish--subagent-run-view-text (pilish-test--subagent-run :title "") 100)
+                 "reviewer\n  reading · 40s ago · 2 turns"))
+  (let ((run (pilish-test--subagent-run)))
+    (setq run (cl-loop for (key value) on run by #'cddr
+                       unless (memq key '(:title :turnCount :lastActivityAt)) append (list key value)))
+    (should (equal (pilish--subagent-run-view-text run 100) "reviewer\n  reading"))))
+
+(ert-deftest pilish-test-subagent-run-view-nested-and-parallel-leaves ()
+  "Running paths retain ancestry and ignore terminal siblings."
+  (let* ((leaf (pilish-test--subagent-run :agent "tester" :title "Run tests" :activity "testing"))
+         (branch (pilish-test--subagent-run :agent "explorer" :title "Find files" :children (vector leaf)))
+         (other (pilish-test--subagent-run :agent "writer" :title "" :activity "writing"))
+         (done (pilish-test--subagent-run :agent "done" :status "completed"))
+         (run (pilish-test--subagent-run :children (vector branch done other))))
+    (should (equal (pilish--subagent-run-view-text run 100)
+                   (concat "Check files · reviewer -> Find files · explorer -> Run tests · tester\n"
+                           "  testing · 40s ago · 2 turns\n"
+                           "Check files · reviewer -> writer\n  writing · 40s ago · 2 turns")))
+    (setf (plist-get run :status) "completed")
+    (should (equal (pilish--subagent-run-view-text run 100)
+                   "Check files · reviewer\n  reading · 40s ago · 2 turns"))))
+
+(ert-deftest pilish-test-subagent-run-view-age-quiet-and-context ()
+  "Quiet starts at the threshold; future and invalid timestamps are harmless."
+  (let ((pilish-subagent-quiet-after-seconds 45)
+        (run (pilish-test--subagent-run
+              :contextUsage '(:tokens 24 :contextWindow 100 :percent 24))))
+    (should (equal (pilish--subagent-run-view-text run 104.99)
+                   "Check files · reviewer\n  reading · 44s ago · 2 turns · 24% ctx"))
+    (should (equal (pilish--subagent-run-view-text run 105)
+                   "Check files · reviewer\n  reading · quiet 45s · 2 turns · 24% ctx"))
+    (should (equal (pilish--subagent-run-view-text run 59)
+                   "Check files · reviewer\n  reading · 0s ago · 2 turns · 24% ctx"))
+    (setf (plist-get (plist-get run :contextUsage) :percent) 23.571428571428573)
+    (should (equal (pilish--subagent-run-view-text run 104.99)
+                   "Check files · reviewer\n  reading · 44s ago · 2 turns · 24% ctx"))
+    (setf (plist-get run :lastActivityAt) "not a timestamp"
+          (plist-get run :contextUsage) '(:tokens :null :contextWindow 100 :percent :null))
+    (should (equal (pilish--subagent-run-view-text run 200)
+                   "Check files · reviewer\n  reading · 2 turns · ? ctx"))
+    (setq pilish-subagent-quiet-after-seconds 10)
+    (setf (plist-get run :lastActivityAt) "1970-01-01T00:01:00Z")
+    (should (string-match-p "quiet 10s" (pilish--subagent-run-view-text run 70)))))
+
+(ert-deftest pilish-test-subagent-run-view-invalid-shapes ()
+  "Foreign and malformed views return nil rather than claiming their content."
+  (dolist (run (list nil :null 42 [] '(wrong . shape) '(:agent "only")
+                    (pilish-test--subagent-run :children [(:agent "bad")])
+                    (pilish-test--subagent-run :status "unknown")
+                    (pilish-test--subagent-run :turnCount "two")
+                    (pilish-test--subagent-run :contextUsage '(:percent 24))))
+    (should-not (pilish--subagent-run-view-text run 100))))
+
+(ert-deftest pilish-test-subagent-run-view-content-fallback-unchanged ()
+  "Missing or invalid run metadata leaves the old content rendering identical."
+  (with-temp-buffer
+    (pilish-chat-mode)
+    (let* ((block (pilish--display-tool-start "foreign" nil "fallback"))
+           (content [(:type "text" :text "Old producer\nSame preview\n")]))
+      (pilish--display-tool-update (list :content content) block)
+      (let ((before (buffer-string)))
+        (dolist (details (list nil '(:other "metadata") '(:run :null) '(:run 42)
+                              (list :run (pilish-test--subagent-run :children [(:bad t)]))))
+          (pilish--display-tool-update (list :content content :details details) block)
+          (should (equal-including-properties before (buffer-string))))))))
+
+(ert-deftest pilish-test-subagent-run-view-update-uses-five-line-tail ()
+  "Structured output uses the ordinary bounded streaming preview pipeline."
+  (with-temp-buffer
+    (pilish-chat-mode)
+    (let* ((pilish-bash-preview-lines 5)
+           (block (pilish--display-tool-start "subagent" nil "structured"))
+           (children (vconcat (cl-loop for n from 1 to 4
+                                      collect (pilish-test--subagent-run :agent (format "child%d" n) :title ""))))
+           (run (pilish-test--subagent-run :agent "root" :title "" :children children)))
+      (cl-letf (((symbol-function 'current-time) (lambda () (seconds-to-time 100))))
+        (pilish--display-tool-update
+         (list :content [(:type "text" :text "CONTENT FALLBACK")] :details (list :run run)) block))
+      (let ((text (plist-get (pilish--tool-output-view-snapshot (pilish--tool-block-output-view block)) :text)))
+        (should (= (length (split-string text "\n")) 5))
+        (should-not (string-match-p "child1\\|child2" text))
+        (should (string-match-p "root -> child3" text))
+        (should (string-match-p "root -> child4" text)))
+      (should (string-match-p "earlier output" (buffer-string)))
+      (should-not (string-match-p "CONTENT FALLBACK" (buffer-string)))
+      (should (string-match-p "```" (buffer-string))))))
+
+(ert-deftest pilish-test-subagent-run-view-tick-refreshes-age-and-keeps-cache ()
+  "One-second ticks age the stored view without duplicating pending paints."
+  (pilish-test--with-tool-clock
+    (with-temp-buffer
+      (pilish-chat-mode)
+      (pilish--handle-display-event
+       '(:type "tool_execution_start" :toolName "subagent_resume" :toolCallId "live-run"))
+      (let* ((block (pilish--tool-block-get "live-run"))
+             (run (pilish-test--subagent-run))
+             (partial (list :content [(:type "text" :text "fallback")] :details (list :run run))))
+        (pilish--queue-tool-update "live-run" partial)
+        (setq now 104)
+        (pilish-test--dispatch-tool-clock pilish--tool-time-timer)
+        (should (string-match-p "44s ago" (buffer-string)))
+        (should (eq partial (pilish--tool-block-result block)))
+        (let ((before (buffer-string)) (tick (buffer-chars-modified-tick)))
+          (pilish-test--flush-tool-updates)
+          (should (= tick (buffer-chars-modified-tick)))
+          (should (equal-including-properties before (buffer-string))))
+        (setq now 105)
+        (pilish-test--dispatch-tool-clock pilish--tool-time-timer)
+        (should (string-match-p "quiet 45s" (buffer-string)))
+        (should-not (string-match-p "44s ago" (buffer-string)))
+        (should (equal (pilish-test--tool-duration-text block) "Elapsed 5s"))
+        (pilish--cancel-tool-times)))))
+
+(ert-deftest pilish-test-subagent-run-view-tick-defers-while-typing ()
+  "Ticks refresh durations but never repaint previews while input is pending."
+  (pilish-test--with-tool-clock
+    (with-temp-buffer
+      (pilish-chat-mode)
+      (pilish--handle-display-event
+       '(:type "tool_execution_start" :toolName "subagent" :toolCallId "typing-run"))
+      (let* ((run (pilish-test--subagent-run))
+             (partial (list :content [(:type "text" :text "fallback")] :details (list :run run))))
+        (pilish--queue-tool-update "typing-run" partial)
+        (setq now 104)
+        (pilish-test--dispatch-tool-clock pilish--tool-time-timer)
+        (should (string-match-p "44s ago" (buffer-string)))
+        (setq now 105)
+        (cl-letf (((symbol-function 'input-pending-p) (lambda (&rest _) t)))
+          (pilish-test--dispatch-tool-clock pilish--tool-time-timer))
+        (should (string-match-p "44s ago" (buffer-string)))
+        (should-not (string-match-p "quiet" (buffer-string)))
+        (setq now 106)
+        (pilish-test--dispatch-tool-clock pilish--tool-time-timer)
+        (should (string-match-p "quiet 46s" (buffer-string)))
+        (pilish--cancel-tool-times)))))
+
+(ert-deftest pilish-test-subagent-run-view-tick-stops-after-completion ()
+  "A terminal result survives later ticks without a preview returning."
+  (pilish-test--with-tool-clock
+    (with-temp-buffer
+      (pilish-chat-mode)
+      (pilish--handle-display-event
+       '(:type "tool_execution_start" :toolName "subagent" :toolCallId "done-run"))
+      (let* ((run (pilish-test--subagent-run))
+             (partial (list :content [(:type "text" :text "fallback")] :details (list :run run))))
+        (pilish--queue-tool-update "done-run" partial)
+        (setq now 104)
+        (pilish-test--dispatch-tool-clock pilish--tool-time-timer)
+        (should (string-match-p "44s ago" (buffer-string)))
+        (pilish--handle-display-event
+         '(:type "tool_execution_end" :toolName "subagent" :toolCallId "done-run"
+                 :durationMs 60000
+                 :result (:content [(:type "text" :text "## Subagent reviewer result\nfinal answer")]
+                          :details (:run (:episodeId "episode" :sessionId "session" :agent "reviewer"
+                                           :title "Check files" :status "completed" :activity "done"
+                                           :turnCount 2 :lastActivityAt "1970-01-01T00:01:00Z" :children [])))))
+        (should (string-match-p "final answer" (buffer-string)))
+        (should-not (string-match-p "44s ago" (buffer-string)))
+        (should-not pilish--tool-time-timer)
+        (should-not pilish--running-tool-blocks)
+        (setq now 200)
+        (should (string-match-p "final answer" (buffer-string)))
+        (should-not (string-match-p "quiet" (buffer-string)))
+        (pilish--cancel-tool-times)))))
+
+(ert-deftest pilish-test-subagent-run-view-node-cap-and-children-shape ()
+  "List children and views past the node cap fall back to content text."
+  (let ((list-children (pilish-test--subagent-run :children (list (pilish-test--subagent-run)))))
+    (should-not (pilish--subagent-run-view-p list-children)))
+  (let* ((cap pilish--subagent-run-view-max-nodes)
+         (deep (pilish-test--subagent-run))
+         (node deep)
+         (index 0))
+    (while (< index (- cap 1))
+      (let ((child (pilish-test--subagent-run :episodeId (format "episode-%d" index))))
+        (plist-put node :children (vector child))
+        (setq node child))
+      (cl-incf index))
+    (should (pilish--subagent-run-view-p deep))
+    (plist-put node :children (vector (pilish-test--subagent-run :episodeId "one-too-many")))
+    (should-not (pilish--subagent-run-view-p deep))))
 
 (provide 'pilish-render-test)
 ;;; pilish-render-test.el ends here
