@@ -5203,11 +5203,92 @@ Pi handles command expansion on the server side."
   (should (equal "50k" (pilish--format-tokens-compact 50000)))
   (should (equal "1.2M" (pilish--format-tokens-compact 1200000))))
 
-(ert-deftest pilish-test-input-mode-has-header-line ()
-  "Input mode sets up header-line-format."
+(ert-deftest pilish-test-input-mode-has-header-line-only-on-request ()
+  "Input mode owns the header line only when located there.
+The default location is the chat window, so a fresh input buffer
+has no header line of its own."
   (with-temp-buffer
     (pilish-input-mode)
-    (should header-line-format)))
+    (should-not header-line-format))
+  (let ((pilish-header-line-location 'input))
+    (with-temp-buffer
+      (pilish-input-mode)
+      (should (equal '(:eval (pilish--header-line-string))
+                     header-line-format)))))
+
+(ert-deftest pilish-test-chat-mode-has-header-line-by-default ()
+  "Chat mode owns the session header line by default."
+  (with-temp-buffer
+    (pilish-chat-mode)
+    (should (equal '(:eval (pilish--header-line-string))
+                   header-line-format)))
+  (let ((pilish-header-line-location 'input))
+    (with-temp-buffer
+      (pilish-chat-mode)
+      (should-not header-line-format))))
+
+(ert-deftest pilish-test-header-line-location-moves-live-buffers ()
+  "Customizing the location moves an existing session's header line.
+The setter used by Customize and `setopt' rewrites chat and input
+buffers in place; unrelated modes keep their own header lines."
+  (let ((chat (generate-new-buffer " *pilish-header-chat*"))
+        (input (generate-new-buffer " *pilish-header-input*"))
+        (foreign (generate-new-buffer " *pilish-header-foreign*")))
+    (unwind-protect
+        (progn
+          (with-current-buffer chat
+            (pilish-chat-mode)
+            (setq pilish--input-buffer input))
+          (with-current-buffer input
+            (pilish-input-mode)
+            (setq pilish--chat-buffer chat))
+          (with-current-buffer foreign
+            (fundamental-mode)
+            (setq-local header-line-format "keep me"))
+          (should (equal '(:eval (pilish--header-line-string))
+                         (buffer-local-value 'header-line-format chat)))
+          (should-not (buffer-local-value 'header-line-format input))
+          (customize-set-variable 'pilish-header-line-location 'input)
+          (should (eq 'input pilish-header-line-location))
+          (should-not (buffer-local-value 'header-line-format chat))
+          (should (equal '(:eval (pilish--header-line-string))
+                         (buffer-local-value 'header-line-format input)))
+          (customize-set-variable 'pilish-header-line-location 'chat)
+          (should (equal '(:eval (pilish--header-line-string))
+                         (buffer-local-value 'header-line-format chat)))
+          (should-not (buffer-local-value 'header-line-format input))
+          (should (equal "keep me"
+                         (buffer-local-value 'header-line-format foreign))))
+      (customize-set-variable 'pilish-header-line-location 'chat)
+      (dolist (buf (list input chat foreign))
+        (when (buffer-live-p buf) (kill-buffer buf))))))
+
+(ert-deftest pilish-test-header-line-string-reads-input-image-from-chat ()
+  "Header rendered in the chat buffer still shows the draft image.
+The draft prompt image is input-buffer state; the header string
+reads it through the session link instead of the current buffer."
+  (let ((chat (generate-new-buffer " *pilish-header-chat*"))
+        (input (generate-new-buffer " *pilish-header-img*")))
+    (unwind-protect
+        (progn
+          (with-current-buffer chat
+            (pilish-chat-mode)
+            (setq pilish--input-buffer input))
+          (with-current-buffer input
+            (pilish-input-mode)
+            (setq pilish--chat-buffer chat)
+            (pilish--set-prompt-image
+             (pilish--make-prompt-image
+              :name "pixel.png" :mime-type "image/png"
+              :byte-size 1 :data "AA==")
+             input))
+          (with-current-buffer chat
+            (should (string-match-p
+                     "pixel.png"
+                     (substring-no-properties
+                      (pilish--header-line-string))))))
+      (dolist (buf (list input chat))
+        (when (buffer-live-p buf) (kill-buffer buf))))))
 
 (ert-deftest pilish-test-header-line-handles-model-plist ()
   "Header line handles model as plist with :name."
