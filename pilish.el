@@ -10,7 +10,7 @@
 ;; Assisted-by: pi:claude-opus-4.6
 ;; URL: https://github.com/dnouri/pilish
 ;; Keywords: ai llm ai-pair-programming tools
-;; Version: 3.4.0
+;; Version: 3.4.1
 ;; Package-Requires: ((emacs "29.1") (transient "0.9.0") (magit-section "4.0.0") (md-ts-mode "0.5.0") (markdown-table-wrap "0.2.0"))
 
 ;; SPDX-License-Identifier: GPL-3.0-or-later
@@ -38,8 +38,8 @@
 ;;
 ;; Requirements:
 ;;   - Emacs 29.1 or later (tree-sitter support required)
-;;   - pi coding agent @earendil-works/pi-coding-agent 1.0.0 or later,
-;;     installed and in PATH on the host where Pi runs (tested with 1.0.0)
+;;   - pi coding agent @earendil-works/pi-coding-agent 1.1.0 or later,
+;;     installed and in PATH on the host where Pi runs
 ;;   - tree-sitter grammars for markdown and markdown-inline
 ;;
 ;; Pilish uses `md-ts-mode` for its own chat and input buffers;

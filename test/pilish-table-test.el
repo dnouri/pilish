@@ -21,6 +21,31 @@
   "| Feature | Status | Notes |\n|---------|--------|-------------------------------|\n| Auth | Done | OAuth2 with refresh tokens |\n| DB | WIP | PostgreSQL connection pool |\n"
   "A wide pipe table for decoration tests.")
 
+(ert-deftest pilish-test-table-history-replay-decorates-actual-hot-tail ()
+  "Fresh replay parsers retain real hot tables without painting cold or fenced ones."
+  (with-temp-buffer
+    (pilish-chat-mode)
+    (let ((pilish-hot-tail-turn-count 2)
+          (messages
+           [(:role "assistant" :content "| Cold | Table |\n|---|---|\n| old | data |")
+            (:role "user" :content "Newest question")
+            (:role "assistant"
+             :content "Try `grep foo | sort`.\n\n```\n| Fake | Table |\n|---|---|\n| no | data |\n```\n\n| Real | Notes |\n|---|---|\n| yes | A long cell that must wrap to the supplied snapshot width |")]))
+      (dotimes (_ 2)
+        (pilish--replay-history (current-buffer) messages nil 32)
+        (let ((tables (seq-filter
+                       (lambda (overlay) (overlay-get overlay 'pilish-table-display))
+                       (overlays-in (point-min) (point-max)))))
+          (should (= (length tables) 3))
+          (should (= pilish--last-table-display-width 32))
+          (dolist (overlay tables)
+            (should (>= (overlay-start overlay) (marker-position pilish--hot-tail-start)))
+            (should-not (string-match-p
+                         "Cold\\|Fake\\|grep"
+                         (buffer-substring-no-properties (overlay-start overlay) (overlay-end overlay))))
+            (dolist (line (split-string (overlay-get overlay 'display) "\n" t))
+              (should (<= (string-width line) 32)))))))))
+
 (ert-deftest pilish-test-decorate-tables-creates-display-overlay ()
   "decorate-tables-in-region creates overlays with display property."
   (with-temp-buffer

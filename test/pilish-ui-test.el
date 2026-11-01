@@ -1177,13 +1177,15 @@ other family names there."
   (should-not (pilish--extract-pi-version "npm warn only\n")))
 
 (ert-deftest pilish-test-pi-version-outdated-compares-segments-numerically ()
-  "Compare pi versions numerically against the 1.0.0 floor."
-  (should (equal pilish--minimum-pi-version "1.0.0"))
+  "Compare pi versions numerically against the 1.1.0 floor."
+  (should (equal pilish--minimum-pi-version "1.1.0"))
   (should (pilish--pi-version-outdated-p "0.85.0"))
   (should (pilish--pi-version-outdated-p "0.87.1"))
   (should (pilish--pi-version-outdated-p "0.99.99"))
-  (should-not (pilish--pi-version-outdated-p "1.0.0"))
-  (should-not (pilish--pi-version-outdated-p "1.0.1"))
+  (should (pilish--pi-version-outdated-p "1.0.0"))
+  (should (pilish--pi-version-outdated-p "1.0.99"))
+  (should-not (pilish--pi-version-outdated-p "1.1.0"))
+  (should-not (pilish--pi-version-outdated-p "1.1.1"))
   (should-not (pilish--pi-version-outdated-p "1.10.0")))
 
 (ert-deftest pilish-test-finish-pi-version-process-parses-stderr ()
@@ -1342,7 +1344,7 @@ other family names there."
 
 (ert-deftest pilish-test-probe-process-version-warns-when-pi-too-old ()
   "Version probe warns clearly for every tested below-minimum pi version."
-  (dolist (version '("0.85.0" "0.87.1" "0.99.99"))
+  (dolist (version '("0.85.0" "0.87.1" "0.99.99" "1.0.0" "1.0.99"))
     (ert-info ((format "Unsupported Pi %s" version))
       (let ((callback nil)
             (warnings nil)
@@ -1367,7 +1369,7 @@ other family names there."
                 (should (equal (car (car warnings)) 'pi))
                 (let ((warning-text (nth 1 (car warnings))))
                   (should (string-match-p
-                           "requires Pi 1.0.0 or later" warning-text))
+                           "requires Pi 1.1.0 or later" warning-text))
                   (should (string-match-p
                            (format "found Pi %s" version) warning-text))
                   (should (string-match-p
@@ -1377,8 +1379,8 @@ other family names there."
             (delete-process proc)))))))
 
 (ert-deftest pilish-test-probe-process-version-does-not-warn-when-supported ()
-  "Version probe accepts Pi 1.0.0 exactly and newer versions without warning."
-  (dolist (version '("1.0.0" "1.0.1" "1.10.0"))
+  "Version probe accepts Pi 1.1.0 exactly and newer versions without warning."
+  (dolist (version '("1.1.0" "1.1.1" "1.10.0"))
     (ert-info ((format "Supported Pi %s" version))
       (let ((callback nil)
             (warning-called nil)
@@ -2133,6 +2135,176 @@ Buffer is read-only with `inhibit-read-only' used for insertion.
       (kill-buffer chat)
       (kill-buffer input))))
 
+(ert-deftest pilish-test-transcript-construction-settles-once-after-appends ()
+  "Chunk count does not multiply viewport work or disturb independent views."
+  (save-window-excursion
+    (delete-other-windows)
+    (let ((chat (generate-new-buffer " *pilish-construction-chat*"))
+          (input (generate-new-buffer " *pilish-construction-input*")))
+      (unwind-protect
+          (progn
+            (switch-to-buffer chat)
+            (let* ((reader (selected-window))
+                   (tail (split-window-right))
+                   (input-window (split-window reader -5 'below))
+                   (capture (symbol-function 'get-buffer-window-list))
+                   (restore (symbol-function 'pilish--restore-tail-window)))
+              (set-window-buffer tail chat)
+              (set-window-buffer input-window input)
+              (select-window input-window)
+              (insert "unchanged draft")
+              (goto-char 5)
+              (dolist (chunks '(1 80 320))
+                (with-current-buffer chat
+                  (erase-buffer)
+                  (insert "retained prefix\n")
+                  (set-window-point reader 3)
+                  (set-window-point tail (point-max))
+                  (let ((captures 0) (restores 0))
+                    (cl-letf (((symbol-function 'get-buffer-window-list)
+                               (lambda (&rest args)
+                                 (cl-incf captures)
+                                 (apply capture args)))
+                              ((symbol-function 'pilish--restore-tail-window)
+                               (lambda (window start)
+                                 (cl-incf restores)
+                                 (funcall restore window start))))
+                      (should
+                       (eq 'complete
+                           (pilish--with-transcript-construction
+                             (dotimes (_ chunks)
+                               (pilish--append-to-chat "appended line\n"))
+                             (goto-char (point-max))
+                             'complete))))
+                    (should (= captures 1))
+                    (should (= restores 1)))
+                  (should (equal (buffer-string)
+                                 (concat "retained prefix\n"
+                                         (apply #'concat
+                                                (make-list chunks "appended line\n")))))
+                  (should (= (point) (point-max)))
+                  (should (= (window-point reader) 3))
+                  (should (= (window-point tail) (point-max)))
+                  (should (eq (selected-window) input-window))
+                  (should (= (window-point input-window) 5))
+                  (should (equal (with-current-buffer input (buffer-string))
+                                 "unchanged draft"))))))
+        (kill-buffer chat)
+        (kill-buffer input)))))
+
+(ert-deftest pilish-test-transcript-construction-nesting-is-buffer-specific ()
+  "A/B/A nesting coalesces only construction, including caught inner errors."
+  (save-window-excursion
+    (delete-other-windows)
+    (let ((a (generate-new-buffer " *pilish-construction-a*"))
+          (b (generate-new-buffer " *pilish-construction-b*"))
+          (capture (symbol-function 'get-buffer-window-list))
+          captures)
+      (unwind-protect
+          (progn
+            (switch-to-buffer a)
+            (insert "A\n")
+            (let ((b-window (split-window-right)))
+              (set-window-buffer b-window b)
+              (with-current-buffer b (insert "B\n"))
+              (set-window-point b-window (with-current-buffer b (point-max)))
+              (cl-letf (((symbol-function 'get-buffer-window-list)
+                         (lambda (&rest args)
+                           (push (car args) captures)
+                           (apply capture args))))
+                (pilish--with-transcript-construction
+                  (pilish--append-to-chat "outer\n")
+                  (with-current-buffer b
+                    (pilish--append-to-chat "ordinary\n")
+                    (pilish--with-transcript-construction
+                      (pilish--append-to-chat "nested B\n")
+                      (with-current-buffer a
+                        (pilish--with-transcript-construction
+                          (pilish--append-to-chat "nested A\n")))))
+                  (condition-case nil
+                      (pilish--with-transcript-construction
+                        (pilish--append-to-chat "caught\n")
+                        (error "Expected inner error"))
+                    (error nil))
+                  (pilish--append-to-chat "after catch\n"))
+                (should (= (cl-count a captures) 1))
+                (should (= (cl-count b captures) 2))
+                (pilish--append-to-chat "ordinary A\n")
+                (should (= (cl-count a captures) 2)))
+              (should (equal (buffer-string)
+                             "A\nouter\nnested A\ncaught\nafter catch\nordinary A\n"))
+              (should (equal (with-current-buffer b (buffer-string))
+                             "B\nordinary\nnested B\n"))
+              (should (= (window-point b-window)
+                         (with-current-buffer b (point-max))))))
+        (kill-buffer a)
+        (kill-buffer b)))))
+
+(ert-deftest pilish-test-transcript-construction-empty-and-property-only-are-neutral ()
+  "A build with no character edits leaves a final-newline follower untouched."
+  (save-window-excursion
+    (with-temp-buffer
+      (insert "\n")
+      (switch-to-buffer (current-buffer))
+      (goto-char 1)
+      (let ((window (selected-window))
+            (restore (symbol-function 'pilish--restore-tail-window))
+            (restores 0))
+        (cl-letf (((symbol-function 'pilish--restore-tail-window)
+                   (lambda (&rest args)
+                     (cl-incf restores)
+                     (apply restore args))))
+          (should (eq 'empty (pilish--with-transcript-construction 'empty)))
+          (should (= (window-point window) 1))
+          (should (eq 'properties
+                      (pilish--with-transcript-construction
+                        (pilish--with-scroll-preservation
+                          (put-text-property 1 2 'face 'bold))
+                        'properties)))
+          (should (= (window-point window) 1))
+          (should (= (window-start window) 1))
+          (should (= restores 0))
+          (should (null (pilish--with-scroll-preservation 'ordinary)))
+          (should (= (window-point window) 2)))))))
+
+(ert-deftest pilish-test-transcript-construction-unwinds-without-settlement ()
+  "Errors, quits and throws release anchors and leave ordinary appends active."
+  (save-window-excursion
+    (with-temp-buffer
+      (switch-to-buffer (current-buffer))
+      (let ((copy (symbol-function 'copy-marker))
+            (restore (symbol-function 'pilish--restore-tail-window))
+            markers restores)
+        (cl-letf (((symbol-function 'copy-marker)
+                   (lambda (&rest args)
+                     (let ((marker (apply copy args)))
+                       (push marker markers)
+                       marker)))
+                  ((symbol-function 'pilish--restore-tail-window)
+                   (lambda (&rest args)
+                     (push t restores)
+                     (apply restore args))))
+          (dolist (exit '(error quit throw))
+            (setq markers nil restores nil)
+            (condition-case nil
+                (catch 'expected
+                  (pilish--with-transcript-construction
+                    (pilish--append-to-chat "built before failure\n")
+                    (pcase exit
+                      ('error (error "Expected failure"))
+                      ('quit (signal 'quit nil))
+                      ('throw (throw 'expected t)))))
+              (error nil)
+              (quit nil))
+            (should-not restores)
+            (should (= (length markers) 1))
+            (should (cl-every (lambda (marker) (null (marker-buffer marker)))
+                              markers))
+            (goto-char (point-max))
+            (pilish--append-to-chat "ordinary after failure\n")
+            (should (= (length restores) 1))
+            (should (= (window-point (selected-window)) (point-max)))))))))
+
 ;;; Turn Detection
 
 (ert-deftest pilish-test-turn-index-on-first-heading ()
@@ -2268,6 +2440,23 @@ Buffer is read-only with `inhibit-read-only' used for insertion.
 
 ;;; Hot Tail
 
+(defun pilish-ui-test--forward-hot-tail-position (count)
+  "Return the boundary selected by a full forward scan for COUNT."
+  (let (headings)
+    (save-excursion
+      (goto-char (point-min))
+      (while (re-search-forward pilish--turn-heading-re nil t)
+        (let ((candidate (match-beginning 0)))
+          (save-excursion
+            (goto-char candidate)
+            (when (pilish--at-turn-heading-p)
+              (push candidate headings))))))
+    (setq headings (nreverse headings))
+    (cond
+     ((zerop count) (point-max))
+     ((<= (length headings) count) (point-min))
+     (t (nth (- (length headings) count) headings)))))
+
 (ert-deftest pilish-test-hot-tail-boundary-keeps-buffer-hot-when-few-turns ()
   "Buffers with at most N headed turns stay entirely hot."
   (with-temp-buffer
@@ -2296,21 +2485,98 @@ Buffer is read-only with `inhibit-read-only' used for insertion.
       (goto-char (marker-position pilish--hot-tail-start))
       (should (looking-at "You · 10:05")))))
 
-(ert-deftest pilish-test-in-hot-tail-p-respects-boundary ()
-  "Positions before the hot-tail marker are cold; marker and later are hot."
+(ert-deftest pilish-test-hot-tail-boundary-exact-count-keeps-preamble-hot ()
+  "Exactly N headings do not separate a preamble from the hot tail."
   (with-temp-buffer
-    (pilish-chat-mode)
-    (let ((inhibit-read-only t))
-      (insert "You · 10:00\n===========\nFirst question\n\n"
-              "Assistant\n=========\nFirst answer\n\n"
-              "You · 10:05\n===========\nSecond question\n\n"
-              "Assistant\n=========\nSecond answer\n\n"
-              "You · 10:10\n===========\nThird question\n"))
-    (let ((pilish-hot-tail-turn-count 3))
+    (insert "Banner\n\nYou\n===\nFirst\n\nAssistant\n=========\nSecond\n")
+    (setq-local pilish--hot-tail-start (copy-marker (point-min) nil))
+    (let ((pilish-hot-tail-turn-count 2))
       (pilish--update-hot-tail-boundary)
-      (should-not (pilish--in-hot-tail-p (point-min)))
-      (should (pilish--in-hot-tail-p
-               (marker-position pilish--hot-tail-start))))))
+      (should (= (marker-position pilish--hot-tail-start) (point-min))))))
+
+(ert-deftest pilish-test-hot-tail-boundary-zero-and-empty-buffer ()
+  "A zero count selects point-max.  An empty buffer stays hot with a positive count."
+  (with-temp-buffer
+    (insert "You\n===\nBody\n")
+    (setq-local pilish--hot-tail-start (copy-marker (point-min) nil))
+    (let ((pilish-hot-tail-turn-count 0))
+      (pilish--update-hot-tail-boundary)
+      (should (= (marker-position pilish--hot-tail-start) (point-max))))
+    (erase-buffer)
+    (let ((pilish-hot-tail-turn-count 2))
+      (pilish--update-hot-tail-boundary)
+      (should (= (marker-position pilish--hot-tail-start) (point-min))))))
+
+(ert-deftest pilish-test-hot-tail-boundary-matches-forward-scan ()
+  "The boundary matches a full forward scan across deterministic histories."
+  (dolist (preamble '(nil t))
+    (dotimes (heading-count 6)
+      (let ((text
+             (concat
+              (if preamble "Banner\n\n" "")
+              (mapconcat
+               #'identity
+               (cl-loop for i below heading-count
+                        collect (format "%s\n%s\nbody %d\nYou\nnot an underline\n\n"
+                                        (if (zerop (mod i 2)) "You" "Assistant")
+                                        (if (zerop (mod i 2)) "===" "=========")
+                                        i))
+               ""))))
+        (dotimes (count 5)
+          (with-temp-buffer
+            (insert text)
+            (setq-local pilish--hot-tail-start (copy-marker (point-min) nil))
+            (setq-local pilish-hot-tail-turn-count count)
+            (let ((expected (pilish-ui-test--forward-hot-tail-position count))
+                  (marker pilish--hot-tail-start)
+                  (point (point)))
+              (pilish--update-hot-tail-boundary)
+              (should (= (marker-position pilish--hot-tail-start) expected))
+              (should (eq pilish--hot-tail-start marker))
+              (should (= (point) point)))))))))
+
+(ert-deftest pilish-test-hot-tail-boundary-respects-narrowing ()
+  "Only accessible headings and accessible bounds affect the boundary."
+  (with-temp-buffer
+    (insert "You\n===\nOutside\n\n"
+            "Assistant\n=========\nAccessible first\n\n"
+            "You · later\n===\nAccessible second\n")
+    (goto-char (point-min))
+    (search-forward "Assistant\n")
+    (narrow-to-region (match-beginning 0) (point-max))
+    (setq-local pilish--hot-tail-start (copy-marker (point-min) nil))
+    (dolist (count '(1 2 3))
+      (let ((pilish-hot-tail-turn-count count))
+        (let ((expected (pilish-ui-test--forward-hot-tail-position count))
+              (minimum (point-min))
+              (maximum (point-max)))
+          (pilish--update-hot-tail-boundary)
+          (should (= (marker-position pilish--hot-tail-start) expected))
+          (should (= (point-min) minimum))
+          (should (= (point-max) maximum)))))))
+
+(ert-deftest pilish-test-hot-tail-boundary-preserves-marker-contract ()
+  "Updating preserves point, marker identity, and marker insertion behavior."
+  (with-temp-buffer
+    (insert "Banner\n\nYou\n===\nOne\n\nAssistant\n=========\nTwo\n\n"
+            "You\n===\nThree\n")
+    (setq-local pilish--hot-tail-start (copy-marker (point-min) nil))
+    (let ((pilish-hot-tail-turn-count 2)
+          (marker pilish--hot-tail-start))
+      (goto-char (point-max))
+      (let ((original-point (point)))
+        (pilish--update-hot-tail-boundary)
+        (should (= (point) original-point)))
+      (should (eq pilish--hot-tail-start marker))
+      (should (eq (marker-buffer marker) (current-buffer)))
+      (should-not (marker-insertion-type marker))
+      (let ((boundary (marker-position marker)))
+        (goto-char boundary)
+        (insert "Inserted at the boundary\n")
+        (should (= (marker-position marker) boundary))
+        (should (save-excursion
+                  (goto-char boundary)
+                  (looking-at "Inserted at the boundary")))))))
 
 ;;; Executable Customization
 
@@ -2525,38 +2791,60 @@ Buffer is read-only with `inhibit-read-only' used for insertion.
              (lambda (_lang &rest _) t)))
     (should-not (pilish--missing-essential-grammars))))
 
+(defun pilish-test--fake-grammar-install (dir)
+  "Return an installer stub that writes LANG libraries into DIR."
+  (lambda (lang &optional _out-dir)
+    (with-temp-file
+        (expand-file-name
+         (concat "libtree-sitter-" (symbol-name lang)
+                 (or (car dynamic-library-suffixes) ".so"))
+         dir)
+      (insert "test build"))))
+
 (ert-deftest pilish-test-essential-grammars-auto-install ()
   "Auto-install essential grammars without prompting when action is `auto'."
-  (let ((installed-langs nil)
-        (noninteractive nil)
-        (pilish-essential-grammar-action 'auto))
-    (cl-letf (((symbol-function 'treesit-language-available-p)
-               (lambda (lang &rest _)
-                 (not (memq lang '(markdown markdown-inline)))))
-              ((symbol-function 'treesit-install-language-grammar)
-               (lambda (lang &optional _out-dir)
-                 (push lang installed-langs)))
-              ((symbol-function 'message) #'ignore))
-      (pilish--maybe-install-essential-grammars)
-      (should (memq 'markdown installed-langs))
-      (should (memq 'markdown-inline installed-langs)))))
+  (let* ((dir (make-temp-file "pilish-grammars" t))
+         (installed-langs nil)
+         (treesit-extra-load-path (list dir))
+         (noninteractive nil)
+         (pilish-essential-grammar-action 'auto))
+    (unwind-protect
+        (cl-letf (((symbol-function 'treesit-language-available-p)
+                   (lambda (lang &rest _)
+                     (not (memq lang '(markdown markdown-inline)))))
+                  ((symbol-function 'treesit-install-language-grammar)
+                   (lambda (lang &optional out-dir)
+                     (push lang installed-langs)
+                     (funcall (pilish-test--fake-grammar-install dir)
+                              lang out-dir)))
+                  ((symbol-function 'message) #'ignore))
+          (pilish--maybe-install-essential-grammars)
+          (should (memq 'markdown installed-langs))
+          (should (memq 'markdown-inline installed-langs)))
+      (delete-directory dir t))))
 
 (ert-deftest pilish-test-essential-grammars-prompt-accept ()
   "Install essential grammars when action is `prompt' and user accepts."
-  (let ((installed-langs nil)
-        (noninteractive nil)
-        (pilish-essential-grammar-action 'prompt))
-    (cl-letf (((symbol-function 'treesit-language-available-p)
-               (lambda (lang &rest _)
-                 (not (memq lang '(markdown markdown-inline)))))
-              ((symbol-function 'treesit-install-language-grammar)
-               (lambda (lang &optional _out-dir)
-                 (push lang installed-langs)))
-              ((symbol-function 'y-or-n-p) (lambda (_prompt) t))
-              ((symbol-function 'message) #'ignore))
-      (pilish--maybe-install-essential-grammars)
-      (should (memq 'markdown installed-langs))
-      (should (memq 'markdown-inline installed-langs)))))
+  (let* ((dir (make-temp-file "pilish-grammars" t))
+         (installed-langs nil)
+         (treesit-extra-load-path (list dir))
+         (noninteractive nil)
+         (pilish-essential-grammar-action 'prompt))
+    (unwind-protect
+        (cl-letf (((symbol-function 'treesit-language-available-p)
+                   (lambda (lang &rest _)
+                     (not (memq lang '(markdown markdown-inline)))))
+                  ((symbol-function 'treesit-install-language-grammar)
+                   (lambda (lang &optional out-dir)
+                     (push lang installed-langs)
+                     (funcall (pilish-test--fake-grammar-install dir)
+                              lang out-dir)))
+                  ((symbol-function 'y-or-n-p) (lambda (_prompt) t))
+                  ((symbol-function 'message) #'ignore))
+          (pilish--maybe-install-essential-grammars)
+          (should (memq 'markdown installed-langs))
+          (should (memq 'markdown-inline installed-langs)))
+      (delete-directory dir t))))
 
 (ert-deftest pilish-test-essential-grammars-prompt-decline ()
   "Warn without installing when action is `prompt' and user declines."
@@ -2662,6 +2950,179 @@ Buffer is read-only with `inhibit-read-only' used for insertion.
       (should (= 1 (length warnings)))
       (should (string-match-p "Incompatible Markdown" (car warnings)))
       (should (string-match-p "treesit-extra-load-path" (car warnings))))))
+
+;;; Markdown Grammar Runtime Safety
+
+(defun pilish-test--markdown-stress-program (depth)
+  "Return an Elisp program that parses DEPTH nested blockquotes.
+The program runs in a child Emacs: a vulnerable Markdown grammar
+corrupts native parser state and can abort the process, so the parse
+must not run in the test runner itself."
+  (format "(progn
+  (require 'treesit)
+  (dolist (dir (split-string (or (getenv \"PILISH_TEST_GRAMMAR_PATHS\") \"\")
+                             path-separator t))
+    (add-to-list 'treesit-extra-load-path dir))
+  (with-temp-buffer
+    (insert (concat
+             (mapconcat (lambda (_) \">\") (number-sequence 1 %d) \" \")
+             \" text\\n\\n\"
+             \"| a | b |\\n| - | - |\\n| 1 | 2 |\\n\"))
+    (let* ((parser (treesit-parser-create 'markdown))
+           (root (treesit-parser-root-node parser)))
+      (unless (treesit-query-capture root '((pipe_table) @table))
+        (error \"Markdown table query returned nothing\"))))
+  (princ \"PILISH-STRESS-OK\"))"
+          depth))
+
+(ert-deftest pilish-test-markdown-grammar-survives-deep-nesting ()
+  "Deeply nested Markdown must not corrupt the process that parses it.
+The Markdown scanner serialized its open-block stack into a fixed
+1024-byte buffer.  A grammar without the upstream overflow fix aborts
+Emacs once 255 blocks are open, so parse in a child Emacs and require
+a clean exit."
+  (skip-unless (treesit-language-available-p 'markdown))
+  (let* ((emacs (or (and invocation-directory invocation-name
+                         (expand-file-name invocation-name invocation-directory))
+                    (executable-find "emacs")))
+         (paths (mapconcat #'identity treesit-extra-load-path path-separator))
+         (process-environment
+          (cons (concat "PILISH_TEST_GRAMMAR_PATHS=" paths)
+                process-environment))
+         (output (with-temp-buffer
+                   (let ((status (call-process
+                                  emacs nil t nil
+                                  "--batch" "-Q" "--eval"
+                                  (pilish-test--markdown-stress-program 600))))
+                     (list status (buffer-string))))))
+    (pcase-let ((`(,status ,text) output))
+      (unless (and (integerp status) (zerop status)
+                   (string-match-p "PILISH-STRESS-OK" text))
+        (ert-fail
+         (format "Deep Markdown nesting killed the parser process (status %s).\n\
+Reinstall the Markdown grammars with C-u M-x pilish-install-grammars.\n%s"
+                 status text))))))
+
+(ert-deftest pilish-test-reinstall-grammars-replaces-installed-libraries ()
+  "Reinstalling deletes installed Markdown libraries and builds them again.
+Without this, `pilish-install-grammars' would report an outdated
+grammar as installed and never replace it."
+  (let* ((dir (make-temp-file "pilish-grammars" t))
+         (library (expand-file-name
+                   (concat "libtree-sitter-markdown"
+                           (or (car dynamic-library-suffixes) ".so"))
+                   dir))
+         (treesit-extra-load-path (list dir))
+         (installed nil))
+    (unwind-protect
+        (progn
+          (with-temp-file library (insert "old build"))
+          (cl-letf (((symbol-function 'treesit-install-language-grammar)
+                     (lambda (lang &optional _dir)
+                       (push lang installed)
+                       (with-temp-file
+                           (expand-file-name
+                            (concat "libtree-sitter-" (symbol-name lang)
+                                    (or (car dynamic-library-suffixes) ".so"))
+                            dir)
+                         (insert "new build"))))
+                    ;; Keep the real user grammar directory out of the test.
+                    ((symbol-function 'locate-user-emacs-file)
+                     (lambda (&rest _) (expand-file-name "none" dir))))
+            (pilish-install-grammars t))
+          (should (file-exists-p library))
+          (should (memq 'markdown installed))
+          (should (memq 'markdown-inline installed)))
+      (delete-directory dir t))))
+
+(ert-deftest pilish-test-install-grammars-reports-missing-library ()
+  "An installer that only warns must not count as a successful install.
+`treesit-install-language-grammar' reports failures as warnings, so the
+grammar count is only truthful when the built library is checked."
+  (let* ((dir (make-temp-file "pilish-grammars" t))
+         (treesit-extra-load-path (list dir))
+         (warnings nil))
+    (unwind-protect
+        (cl-letf (((symbol-function 'treesit-install-language-grammar)
+                   (lambda (_lang &optional _dir) nil))
+                  ((symbol-function 'locate-user-emacs-file)
+                   (lambda (&rest _) (expand-file-name "none" dir)))
+                  ((symbol-function 'display-warning)
+                   (lambda (_type msg &rest _) (push msg warnings))))
+          (should (= 0 (pilish--install-grammars '(markdown))))
+          (should (= 1 (length warnings)))
+          (should (string-match-p "Failed to install" (car warnings))))
+      (delete-directory dir t))))
+
+(ert-deftest pilish-test-markdown-grammar-source-tracks-abi ()
+  "Use upstream v0.5.4 on ABI 15 and the fixed backport below that."
+  (cl-letf (((symbol-function 'treesit-library-abi-version)
+             (lambda (&rest _) 14)))
+    (should (equal (pilish--markdown-grammar-source)
+                   pilish--markdown-backport-source)))
+  (cl-letf (((symbol-function 'treesit-library-abi-version)
+             (lambda (&rest _) 15)))
+    (should (equal (pilish--markdown-grammar-source)
+                   pilish--markdown-upstream-source))))
+
+(ert-deftest pilish-test-install-grammars-use-pilish-recipes ()
+  "Pilish installs from its own recipe when another one comes first.
+A newer Emacs ships a vulnerable v0.4.1 pin for its built-in Markdown
+mode, and that entry can precede ours in
+`treesit-language-source-alist'."
+  (let* ((dir (make-temp-file "pilish-grammars" t))
+         (treesit-extra-load-path (list dir))
+         (treesit-language-source-alist
+          (cons '(markdown "https://example.invalid/other" "v9.9.9" "src")
+                treesit-language-source-alist))
+         (recipe nil))
+    (unwind-protect
+        (cl-letf (((symbol-function 'treesit-install-language-grammar)
+                   (lambda (lang &optional _dir)
+                     (setq recipe (assoc lang treesit-language-source-alist))
+                     (funcall (pilish-test--fake-grammar-install dir) lang)))
+                  ((symbol-function 'locate-user-emacs-file)
+                   (lambda (&rest _) (expand-file-name "none" dir))))
+          (pilish--install-grammars '(markdown))
+          (should (equal (nth 1 recipe)
+                         (nth 0 (pilish--markdown-grammar-source))))
+          (should (equal (nth 2 recipe)
+                         (nth 1 (pilish--markdown-grammar-source)))))
+      (delete-directory dir t))))
+
+(ert-deftest pilish-test-reinstall-keeps-newer-grammar ()
+  "Reinstalling must not downgrade a grammar newer than the pinned build."
+  (let* ((dir (make-temp-file "pilish-grammars" t))
+         (suffix (or (car dynamic-library-suffixes) ".so"))
+         (markdown-lib (expand-file-name
+                        (concat "libtree-sitter-markdown" suffix) dir))
+         (inline-lib (expand-file-name
+                      (concat "libtree-sitter-markdown-inline" suffix) dir))
+         (treesit-extra-load-path (list dir))
+         (installed nil))
+    (unwind-protect
+        (progn
+          (with-temp-file markdown-lib (insert "newer build"))
+          (with-temp-file inline-lib (insert "old build"))
+          (cl-letf (((symbol-function 'treesit-language-abi-version)
+                     (lambda (lang)
+                       (if (eq lang 'markdown)
+                           (1+ pilish--markdown-grammar-abi-version)
+                         pilish--markdown-grammar-abi-version)))
+                    ((symbol-function 'treesit-install-language-grammar)
+                     (lambda (lang &optional _dir)
+                       (push lang installed)
+                       (funcall (pilish-test--fake-grammar-install dir) lang)))
+                    ((symbol-function 'locate-user-emacs-file)
+                     (lambda (&rest _) (expand-file-name "none" dir))))
+            (pilish-install-grammars t))
+          (should (equal (with-temp-buffer
+                           (insert-file-contents markdown-lib)
+                           (buffer-string))
+                         "newer build"))
+          (should-not (memq 'markdown installed))
+          (should (memq 'markdown-inline installed)))
+      (delete-directory dir t))))
 
 ;;; Grammar Recipe Validation
 
