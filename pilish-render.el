@@ -2715,18 +2715,28 @@ retained facts through the existing queue."
              (list (cons 'script (pilish--tool-block-script-line-map block))
                    (cons 'output (pilish--tool-block-line-map block)))))
            (view (pilish--capture-tool-rewrite-view))
-           (inhibit-read-only t))
+           (inhibit-read-only t)
+           (failure nil))
       (save-excursion
-        (remove-overlays start old-end 'pilish-diff-overlay t)
-        ;; A hidden child list can omit sections from the next paint entirely.
-        (pilish--detach-tool-output-footer (pilish--tool-block-output-view block))
-        (dolist (call (pilish--tool-block-nested-calls block))
-          (pilish--detach-tool-output-footer (pilish--nested-call-output-view call)))
-        (delete-region start old-end)
-        (goto-char start)
-        (pilish--insert-compound-tool-body block toggled-section output-selection)
-        (set-marker header start)
-        (set-marker end (point))
+        ;; Notify change hooks once for the body.  Header annotation and
+        ;; fontification can touch text outside these bounds.
+        (combine-change-calls start old-end
+          ;; A non-local exit would skip the final after-change call.
+          (condition-case err
+              (progn
+                (remove-overlays start old-end 'pilish-diff-overlay t)
+                ;; A hidden child list can omit sections from the next paint entirely.
+                (pilish--detach-tool-output-footer (pilish--tool-block-output-view block))
+                (dolist (call (pilish--tool-block-nested-calls block))
+                  (pilish--detach-tool-output-footer (pilish--nested-call-output-view call)))
+                (delete-region start old-end)
+                (goto-char start)
+                (pilish--insert-compound-tool-body block toggled-section output-selection)
+                (set-marker header start)
+                (set-marker end (point)))
+            ((error quit) (setq failure err))))
+        (when failure
+          (signal (car failure) (cdr failure)))
         (pilish--tool-block-refresh-overlay block)
         (pilish--font-lock-ensure-excluding-property start (point) 'pilish-no-fontify))
       (let* ((new-end (marker-position end))
