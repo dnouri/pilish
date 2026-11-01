@@ -1753,6 +1753,30 @@ rear-advance overlay before assistant text continues after the tool block."
                             (overlays-at assistant-pos))))
         (should-not tool-overlay)))))
 
+(ert-deftest pilish-gui-test-copy-link-targets-with-w ()
+  "`w' copies URL and local-file link targets from a live chat."
+  (pilish-gui-test-with-fresh-session
+    (:backend fake :fake-scenario "prompt-lifecycle")
+    (let ((chat (plist-get pilish-gui-test--session :chat-buffer)))
+      (with-current-buffer chat
+        (pilish--display-history-messages
+         [(:role "assistant" :timestamp 1784817120000 :provider "saved"
+           :model "m"
+           :content [(:type "text" :text
+                            "Links: [repo](https://github.com/dnouri/pilish), [report](file:///tmp/gui-report.md), and [notes](/tmp/gui-notes.md).")])])
+        (font-lock-ensure))
+      (select-window (pilish-gui-test-chat-window))
+      (dolist (case '(("repo" . "https://github.com/dnouri/pilish")
+                      ("report" . "file:///tmp/gui-report.md")
+                      ("notes" . "/tmp/gui-notes.md")))
+        (let ((kill-ring nil)
+              (kill-ring-yank-pointer nil))
+          (goto-char (point-min))
+          (search-forward (car case))
+          (goto-char (match-beginning 0))
+          (execute-kbd-macro "w")
+          (should (equal (car kill-ring) (cdr case))))))))
+
 ;;;; Extension Command Tests
 
 (ert-deftest pilish-gui-test-extension-command-returns-to-idle ()

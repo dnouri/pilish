@@ -9131,6 +9131,40 @@ rules."
              :fragment fragment
              :label label)))))))
 
+(defun pilish--semantic-link-url (owner)
+  "Return the absolute URL destination for semantic link OWNER, or nil.
+An inline link or inline image with a complete destination qualified by an
+explicit URL scheme is a URL target: `file:', `https:', and `mailto:'
+destinations qualify.  Fragment-only, protocol-relative, empty, malformed,
+and reference destinations are not URLs, matching the classes the local
+file target rejects.  Activation matches the local file target exactly: point
+must sit on an emitted label character, so a URL-looking destination or
+surrounding prose never activates by itself.  The returned text resolves
+Markdown backslash escapes and drops angle quoting, while URL percent
+escapes stay verbatim so the value remains a well-formed address; the local
+file target instead percent-decodes because its value is a filesystem path."
+  (let* ((type (plist-get owner :type))
+         (label-projection (plist-get owner :label-projection))
+         (label-positions (plist-get label-projection :positions))
+         (destination-start (plist-get owner :destination-start))
+         (destination-end (plist-get owner :destination-end)))
+    (when (and (not (plist-get owner :malformed))
+               (member type '("inline_link" "image"))
+               label-positions destination-start destination-end
+               (seq-contains-p label-positions (point) #'=))
+      (let* ((raw (buffer-substring-no-properties
+                   destination-start destination-end))
+             (angle (and (> (length raw) 1)
+                         (string-prefix-p "<" raw)
+                         (string-suffix-p ">" raw)))
+             (source (if angle (substring raw 1 -1) raw)))
+        (when (and (not (string-empty-p source))
+                   (not (string-prefix-p "#" source))
+                   (not (string-prefix-p "//" source))
+                   (string-match-p
+                    "\\`[[:alpha:]][[:alnum:]+.-]*:" source))
+          (pilish--semantic-link-unescape source))))))
+
 (defun pilish--semantic-link-parser-overlays ()
   "Return every inline-parser overlay md-ts could adopt in this buffer.
 Use `overlay-lists' rather than positional overlay APIs: local ranges are
@@ -9251,7 +9285,10 @@ owned-invalid and cannot reach text fallback.  Lookup snapshots parser state,
 isolates every preexisting inline overlay md-ts could adopt, and dynamically
 disables local range discovery.  It therefore creates no md-ts parser overlays,
 including at half-open host endpoints.  Lookup temporarily widens so buffer
-narrowing cannot clip semantic ownership; the caller's restriction is restored."
+narrowing cannot clip semantic ownership; the caller's restriction is restored.
+An `:owned-invalid' result for a scheme-qualified destination additionally
+carries `:url', the destination text `pilish--semantic-link-url' derives for
+command fallbacks; strict file-target consumers ignore it."
   (save-restriction
     (widen)
     (let ((pilish--semantic-link-resolver-parsers (list :active))
@@ -9310,13 +9347,13 @@ narrowing cannot clip semantic ownership; the caller's restriction is restored."
                  (list (error-message-string error-data))))))
     ;; Path normalization is outside the parser-failure boundary: controlled
     ;; path `user-error' values retain their established target contract.
-    (if (eq (plist-get parse-result :status) :owner)
-        (if-let* ((target
-                   (pilish--semantic-link-target
-                    (plist-get parse-result :owner))))
-            (list :status :owned-valid :target target)
-          (list :status :owned-invalid))
-      parse-result))))
+    (let ((owner (plist-get parse-result :owner)))
+      (if (eq (plist-get parse-result :status) :owner)
+          (if-let* ((target (pilish--semantic-link-target owner)))
+              (list :status :owned-valid :target target)
+            (list :status :owned-invalid
+                  :url (pilish--semantic-link-url owner)))
+        parse-result)))))
 
 (defun pilish--text-file-target-at-point (&optional markdown-code-span)
   "Return a strict markup-visible file target on the current line, or nil.
@@ -9499,6 +9536,20 @@ Return nil outside a cold tool.  Any chat restriction is restored exactly."
      (plist-get cold-block :bounds)
      (lambda () (pilish--cold-tool-line-at-point cold-block)))))
 
+(defun pilish--target-lookup-suppressed-p ()
+  "Return non-nil when point sits in a region without target authority.
+Child sections and output footers, conversation trees, thinking footers, and
+generated startup banners without known source metadata suppress both strict
+file-target and link-URL resolution, so their content never falls through to
+semantic lookup."
+  (let ((section (get-text-property (point) 'pilish-tool-section)))
+    (or (get-text-property (point) 'pilish-tool-output-footer)
+        (get-text-property (point) 'pilish-conversation-tree)
+        (get-text-property (point) 'pilish-thinking-footer)
+        (eq section 'children) (eq (car-safe section) 'child)
+        (and (get-text-property (point) 'pilish-startup-banner)
+             (not (get-text-property (point) 'pilish-startup-source))))))
+
 (defun pilish--file-target-at-point ()
   "Return the file target at point, or nil.
 Resolution priority is authoritative hot/cold tool metadata, semantic Markdown
@@ -9508,23 +9559,30 @@ never falls through.  Semantic lookup is explicitly tri-state, so an owned
 non-file, reference, or malformed link also never falls through to a path-like
 label.
 Child sections and output footers have no file-navigation authority."
-  (let ((section (get-text-property (point) 'pilish-tool-section)))
-    (unless (or (get-text-property (point) 'pilish-tool-output-footer)
-                (get-text-property (point) 'pilish-conversation-tree)
-                (get-text-property (point) 'pilish-thinking-footer)
-                (eq section 'children) (eq (car-safe section) 'child)
-                (and (get-text-property (point) 'pilish-startup-banner)
-                     (not (get-text-property (point) 'pilish-startup-source))))
-      (if-let* ((overlay (pilish--tool-overlay-at-point)))
-          (pilish--tool-file-target overlay)
-        (if-let* ((cold-block (pilish--cold-tool-block-at-point)))
-            (pilish--cold-tool-file-target cold-block)
-          (pcase (pilish--semantic-link-file-target-at-point)
-            (`(:status :owned-valid :target ,target) target)
-            (`(:status :owned-invalid) nil)
-            (`(:status :not-a-link . ,properties)
-             (pilish--text-file-target-at-point
-              (plist-get properties :markdown-code-span)))))))))
+  (unless (pilish--target-lookup-suppressed-p)
+    (if-let* ((overlay (pilish--tool-overlay-at-point)))
+        (pilish--tool-file-target overlay)
+      (if-let* ((cold-block (pilish--cold-tool-block-at-point)))
+          (pilish--cold-tool-file-target cold-block)
+        (pcase (pilish--semantic-link-file-target-at-point)
+          (`(:status :owned-valid :target ,target) target)
+          (`(:status :owned-invalid) nil)
+          (`(:status :not-a-link . ,properties)
+           (pilish--text-file-target-at-point
+            (plist-get properties :markdown-code-span))))))))
+
+(defun pilish--link-url-at-point ()
+  "Return the URL destination of the Markdown link owning point, or nil.
+Authority matches `pilish--file-target-at-point': hot and cold tool blocks,
+conversation trees, thinking footers, and generated banner text never
+contribute URLs, and neither does any strict file target.  Only an owned
+inline link or image whose complete destination carries an explicit URL
+scheme qualifies; see `pilish--semantic-link-url' for the exact grammar and
+text derivation."
+  (unless (or (pilish--target-lookup-suppressed-p)
+              (pilish--tool-overlay-at-point)
+              (pilish--cold-tool-block-at-point))
+    (plist-get (pilish--semantic-link-file-target-at-point) :url)))
 
 (defconst pilish--shell-execution-buffer-variables
   '(process-environment exec-path shell-file-name shell-command-switch
@@ -9907,19 +9965,27 @@ placement.  With prefix argument TOGGLE, invert the opener request."
         (pilish--visit-file-target target toggle))))))
 
 (defun pilish-copy-file-path ()
-  "Copy the shell-local path for the strict file target at point.
+  "Copy the shell-local path or URL for the strict target at point.
 Path resolution matches `pilish-shell-command-at-point': local paths are
 absolute, while paths in remote sessions use the remote shell's namespace
 without a TRAMP prefix.  Line, column, range, and link-fragment metadata are
-not part of the path.  The `kill-ring' value is unquoted pathname text, not
-shell syntax."
+not part of the path.  A Markdown link whose destination carries an explicit
+URL scheme — `https:', `file:', `mailto:' — copies that URL instead, with
+Markdown backslash escapes resolved and percent escapes verbatim.  The
+`kill-ring' value is unquoted literal text, not shell syntax."
   (interactive)
-  (let* ((target (or (pilish--file-target-at-point)
-                     (user-error "No file at point")))
-         (path (pilish--file-target-shell-path target)))
-    (kill-new path)
-    (message "Pi: Copied %s"
-             (pilish--escape-control-chars-for-display path))))
+  (if-let* ((target (pilish--file-target-at-point))
+            (path (pilish--file-target-shell-path target)))
+      (progn
+        (kill-new path)
+        (message "Pi: Copied %s"
+                 (pilish--escape-control-chars-for-display path)))
+    (if-let* ((url (pilish--link-url-at-point)))
+        (progn
+          (kill-new url)
+          (message "Pi: Copied %s"
+                   (pilish--escape-control-chars-for-display url)))
+      (user-error "No file at point"))))
 
 ;;;; Diff Overlay Highlighting
 

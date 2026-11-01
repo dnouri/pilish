@@ -694,7 +694,7 @@ The main buffers:
 | =g=                       | snapshot     | Reread this observer's saved conversation   |
 | =q=                       | snapshot     | Close only this saved observer              |
 | =!=                       | chat         | Run shell command on file at point          |
-| =w=                       | chat         | Copy the shell-local file path              |
+| =w=                       | chat         | Copy the file path or link URL at point    |
 | =n= / =p=                 | chat         | Navigate user messages                      |
 | =f=                       | chat         | Fork from the turn at point                 |
 | =q=                       | chat         | Quit session                                |
@@ -1073,7 +1073,7 @@ Chat buffer (motion state):
 |-----------+-----------------------------------------|
 | =n= / =p= | next / previous message                 |
 | =f=       | fork session at point                   |
-| =w=       | copy shell-local file path at point     |
+| =w=       | copy file path or link URL at point     |
 | =TAB=     | toggle tool/thinking section            |
 | =RET=     | open Pi session link or visit file      |
 | =C-c ]= / =C-c [= | next or previous Pi session link        |
@@ -1252,6 +1252,16 @@ namespace without an Emacs TRAMP prefix.  Line, column, range, and
 link-fragment metadata are excluded, and the kill-ring value is the
 literal, unquoted pathname, so spaces remain spaces and no =@= prompt
 marker is added.
+
+A Markdown link whose destination carries an explicit URL scheme copies
+that URL instead of failing.  =[report](file:///tmp/report.md)= copies
+=file:///tmp/report.md=, and =[repo](https://github.com/dnouri/pilish)=
+copies the web address, with =mailto:= and similar schemes treated the
+same way.  The URL keeps its percent escapes exactly as written, while
+Markdown backslash escapes and angle quoting around the destination are
+resolved.  Activation follows the link label, like =RET=.  Links with
+fragment-only, protocol-relative, empty, or reference destinations, and
+URL-looking text inside tool blocks, still have no copy target.
 
 ** Extension support
 
