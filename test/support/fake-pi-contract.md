@@ -285,6 +285,24 @@ Required fields currently consumed by Emacs rendering:
 - `result`
 - `isError`
 
+Optional execution timing is scenario data, not measured by the harness.
+`tool_stream.duration_ms`, when present, is a nonnegative integer (including
+zero). The fake emits the exact top-level wire field `durationMs` on
+`tool_execution_end` and the identical field on its correlated `toolResult`
+message, never inside `result` or `details`. Missing or null configuration
+omits the field; no clock-derived value is invented. The message is preserved
+unchanged through `get_messages`, saved v3 JSONL, `switch_session`, and frontend
+reload/resume history. Existing untimed fixtures stay untimed.
+
+The `tool-duration` fixture uses bash, a 3500 ms execution pause, and recorded
+`durationMs: 125000`. This leaves time for the frontend's real production timer
+to display `Elapsed 0s` and `Elapsed 1s`, then replace its local estimate with
+`Took 2m 5s`. `execution_delay_ms` controls only the pause between the optional
+partial result and execution end; it defaults to `delay_ms`. Neither that pause
+nor the recorded value claims a real command ran. Read/edit/write duration
+policy remains a frontend concern; optional timing does not create rows for
+those tools.
+
 ### One literal nested-tool replay
 
 `nested-tools.json` uses `prompt.type: "nested_tools"` and an ordered

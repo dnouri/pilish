@@ -140,6 +140,8 @@ class ToolStreamPrompt:
     result_text: str = ""
     assistant_text: str = ""
     delay_ms: int = 30
+    execution_delay_ms: int = 30
+    duration_ms: int | None = None
     echo_user: bool = True
 
 
@@ -290,6 +292,11 @@ def load_scenario(path: Path, name: str) -> Scenario:
             message_text=prompt_data.get("message_text"),
         )
     elif prompt_type == "tool_stream":
+        duration_ms = prompt_data.get("duration_ms")
+        if duration_ms is not None and (
+            type(duration_ms) is not int or duration_ms < 0
+        ):
+            raise ValueError("tool_stream duration_ms must be a nonnegative integer")
         prompt = ToolStreamPrompt(
             type="tool_stream",
             tool_name=prompt_data["tool_name"],
@@ -298,6 +305,10 @@ def load_scenario(path: Path, name: str) -> Scenario:
             result_text=prompt_data.get("result_text", ""),
             assistant_text=prompt_data.get("assistant_text", ""),
             delay_ms=int(prompt_data.get("delay_ms", 30)),
+            execution_delay_ms=int(
+                prompt_data.get("execution_delay_ms", prompt_data.get("delay_ms", 30))
+            ),
+            duration_ms=duration_ms,
             echo_user=bool(prompt_data.get("echo_user", True)),
         )
     elif prompt_type == "nested_tools":
@@ -922,10 +933,15 @@ class FakePiHarness:
                     ),
                 }
             )
-        if not self._sleep_ms(behavior.delay_ms, abortable=True):
+        if not self._sleep_ms(behavior.execution_delay_ms, abortable=True):
             self._finish_aborted_run()
             return
         result = self._tool_result_payload(behavior.result_text)
+        timing = (
+            {"durationMs": behavior.duration_ms}
+            if behavior.duration_ms is not None
+            else {}
+        )
         self._write_json(
             {
                 "type": "tool_execution_end",
@@ -933,6 +949,7 @@ class FakePiHarness:
                 "toolName": behavior.tool_name,
                 "result": result,
                 "isError": False,
+                **timing,
             }
         )
         tool_result_message: JsonDict = {
@@ -940,6 +957,7 @@ class FakePiHarness:
             "toolCallId": tool_call_id,
             "toolName": behavior.tool_name,
             **result,
+            **timing,
             "isError": False,
             "timestamp": now_ms(),
         }
