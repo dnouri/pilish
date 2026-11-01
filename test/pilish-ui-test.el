@@ -723,6 +723,37 @@ Closes the category from issue #234: any instance without a usable
         (pilish-test--kill-session-buffers root)
         (delete-other-windows)))))
 
+(ert-deftest pilish-test-chat-i-opens-and-focuses-input ()
+  "Pressing `i' in the chat window opens and focuses the input window.
+The gesture works without the Evil integration, mirroring
+`pilish-evil-insert-input'."
+  (let ((root "/tmp/pilish-test-chat-i-open-input/"))
+    (make-directory root t)
+    (cl-letf (((symbol-function 'project-current) (lambda (&rest _) nil))
+              ((symbol-function 'pilish--start-process) (lambda (_) nil)))
+      (unwind-protect
+          (let* ((chat (pilish--setup-session root nil))
+                 (input (buffer-local-value 'pilish--input-buffer chat)))
+            (delete-other-windows)
+            (pilish--display-buffers chat input t)
+            (select-window (get-buffer-window chat))
+            (should (eq (key-binding "i") #'pilish-open-input))
+            ;; `i' from a chat-only layout opens a soft-dedicated input
+            ;; window below the chat window and selects it.
+            (execute-kbd-macro "i")
+            (let ((input-win (get-buffer-window input)))
+              (should input-win)
+              (should (eq (selected-window) input-win))
+              (should (eq 'side (window-dedicated-p input-win)))
+              ;; From the chat window with input visible, `i' focuses the
+              ;; existing input window instead of splitting another one.
+              (select-window (get-buffer-window chat))
+              (execute-kbd-macro "i")
+              (should (eq (selected-window) (get-buffer-window input)))
+              (should (= 2 (length (window-list nil 'no-mini))))))
+          (pilish-test--kill-session-buffers root)
+          (delete-other-windows)))))
+
 (ert-deftest pilish-test-send-hides-input-window-on-demand ()
   "Sending hides the input window when display is `on-demand'."
   (let ((root "/tmp/pilish-test-send-hide/")
