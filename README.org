@@ -696,6 +696,7 @@ The main buffers:
 | =!=                       | chat         | Run shell command on file at point          |
 | =w=                       | chat         | Copy the file path or link URL at point    |
 | =n= / =p=                 | chat         | Navigate user messages                      |
+| =i=                       | chat         | Open or focus the input window              |
 | =f=                       | chat         | Fork from the turn at point                 |
 | =q=                       | chat         | Quit session                                |
 | =C-c C-n=                 | chat         | New session                                 |
@@ -981,12 +982,12 @@ Choose one of three input window display styles:
 ;; (setopt pilish-input-window-display 'always)
 
 ;; Show the input pane when a session launches and while composing;
-;; hide it after each send and reopen it with M-x pilish-open-input:
+;; hide it after each send and press i in the chat window to reopen it:
 (setopt pilish-input-window-display 'on-demand)
 
-;; Start sessions with only the chat window visible; open the input on
-;; demand (M-x pilish-open-input, or `i'/`a' under Evil) and have it
-;; hide again after each send:
+;; Start sessions with only the chat window visible; press i in the
+;; chat window to open the input on demand and have it hide again after
+;; each send:
 ;; (setopt pilish-input-window-display 'hidden)
 #+end_src
 

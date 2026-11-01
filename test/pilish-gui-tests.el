@@ -456,7 +456,10 @@ and sending with \\`C-c C-c' returns it to one line."
               (chat-win (pilish-gui-test-chat-window)))
           (should (eq (not (null (pilish-gui-test-input-window)))
                       (eq pilish-input-window-display 'on-demand)))
-          (execute-kbd-macro (kbd "M-x pilish-open-input RET"))
+          ;; `i' is a chat-window gesture; in the input buffer it keeps
+          ;; typing.  Select the chat window first, as a reader would.
+          (select-window chat-win)
+          (execute-kbd-macro (kbd "i"))
           (should (eq (current-buffer) input-buf))
           (should (= (window-body-height (selected-window)) 1))
           (execute-kbd-macro (kbd "o n e RET t w o RET t h r e e"))
@@ -464,7 +467,7 @@ and sending with \\`C-c C-c' returns it to one line."
           (should (= (window-body-height (selected-window)) 3))
           (execute-kbd-macro (kbd "C-x 0"))
           (should-not (pilish-gui-test-input-window))
-          (execute-kbd-macro (kbd "M-x pilish-open-input RET"))
+          (execute-kbd-macro (kbd "i"))
           (should (= (window-body-height (selected-window)) 3))
           (should (equal (buffer-string) "one\ntwo\nthree"))
           (pilish-gui-test--large-evidence
@@ -479,7 +482,7 @@ and sending with \\`C-c C-c' returns it to one line."
           (pilish-gui-test--large-evidence
            (format "fit-%s-sent" pilish-input-window-display)
            (list :input-visible nil :chat-selected t))
-          (execute-kbd-macro (kbd "M-x pilish-open-input RET"))
+          (execute-kbd-macro (kbd "i"))
           (should (eq (current-buffer) input-buf))
           (should (equal (buffer-string) ""))
           (should (= (window-body-height (selected-window)) 1))

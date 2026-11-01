@@ -661,6 +661,7 @@ Return nil when PATH is not a string."
     (define-key map (kbd "C-c C-t") #'pilish-cycle-thinking)
     (define-key map (kbd "C-c C-y") #'pilish-copy-last-message)
     (define-key map (kbd "f") #'pilish-fork-at-point)
+    (define-key map (kbd "i") #'pilish-open-input)
     (define-key map (kbd "!") #'pilish-shell-command-at-point)
     (define-key map (kbd "w") #'pilish-copy-file-path)
     map)
