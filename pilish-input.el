@@ -253,7 +253,9 @@ markup visibility, mode identity, and keybindings.  Set
       ;; Users see exactly what they type — never hide markup in input.
       (setq-local md-ts-hide-markup nil)
       (md-ts--set-hide-markup nil)))
-  (setq-local header-line-format '(:eval (pilish--header-line-string)))
+  ;; The input window hosts the session header line only when
+  ;; `pilish-header-line-location' says so; chat buffers own it by default.
+  (pilish--apply-header-line-location)
   ;; Reset inherited completions (text-mode adds ispell, etc.) — our
   ;; input buffer should only offer slash commands, file refs, and paths.
   (setq-local completion-at-point-functions nil)

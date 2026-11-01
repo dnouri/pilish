@@ -148,6 +148,67 @@
     (should (pilish-gui-test-input-window))
     (should (pilish-gui-test-verify-layout))))
 
+(defun pilish-gui-test--window-header-p (window)
+  "Return non-nil when WINDOW displays a header line.
+A window shows a header line exactly when its total height exceeds
+its body height by more than the mode line."
+  (> (- (window-total-height window) (window-body-height window)) 1))
+
+(ert-deftest pilish-gui-test-session-header-line-lives-in-chat-window ()
+  "The session header line renders above the chat, not the input.
+Setting `pilish-header-line-location' to `input' moves the header
+line between the live windows."
+  (pilish-gui-test-with-fresh-session
+    (:backend fake :fake-scenario "prompt-lifecycle")
+    (let* ((chat (plist-get pilish-gui-test--session :chat-buffer))
+           (input (plist-get pilish-gui-test--session :input-buffer))
+           (chat-win (pilish-gui-test-chat-window))
+           (input-win (pilish-gui-test-input-window)))
+      (should (pilish-gui-test-session-active-p))
+      ;; Default: the chat window owns and paints the header line.
+      (should (equal '(:eval (pilish--header-line-string))
+                     (buffer-local-value 'header-line-format chat)))
+      (should-not (buffer-local-value 'header-line-format input))
+      (should (pilish-gui-test--window-header-p chat-win))
+      (should-not (pilish-gui-test--window-header-p input-win))
+      (let ((text (with-selected-window chat-win
+                    (format-mode-line header-line-format))))
+        (should (string-match-p "Fake Model" text))
+        (should (string-match-p "idle" text)))
+      (pilish-gui-test--large-evidence
+       "header-in-chat"
+       (list :chat-header (with-selected-window chat-win
+                            (format-mode-line header-line-format))
+             :chat-has-header (pilish-gui-test--window-header-p chat-win)
+             :input-has-header (pilish-gui-test--window-header-p input-win)))
+      ;; Moving the option relocates the header line in live windows.
+      (customize-set-variable 'pilish-header-line-location 'input)
+      (redisplay t)
+      (should-not (buffer-local-value 'header-line-format chat))
+      (should (equal '(:eval (pilish--header-line-string))
+                     (buffer-local-value 'header-line-format input)))
+      (should-not (pilish-gui-test--window-header-p chat-win))
+      (should (pilish-gui-test--window-header-p input-win))
+      (let ((text (with-selected-window input-win
+                    (format-mode-line header-line-format))))
+        (should (string-match-p "Fake Model" text))
+        (should (string-match-p "idle" text)))
+      (pilish-gui-test--large-evidence
+       "header-in-input"
+       (list :input-header (with-selected-window input-win
+                             (format-mode-line header-line-format))
+             :chat-has-header (pilish-gui-test--window-header-p chat-win)
+             :input-has-header (pilish-gui-test--window-header-p input-win)))
+      ;; `none' removes the header line from both live windows.
+      (customize-set-variable 'pilish-header-line-location 'none)
+      (redisplay t)
+      (should-not (buffer-local-value 'header-line-format chat))
+      (should-not (buffer-local-value 'header-line-format input))
+      (should-not (pilish-gui-test--window-header-p chat-win))
+      (should-not (pilish-gui-test--window-header-p input-win))
+      ;; Leave the global option at its default for later tests.
+      (customize-set-variable 'pilish-header-line-location 'chat))))
+
 (ert-deftest pilish-gui-test-reply-details-keyboard-help-and-safe-quit ()
   "Production keys select Help, reuse its window, and leave a live draft alone."
   (pilish-gui-test-with-fresh-session
@@ -3018,10 +3079,16 @@ keep their recovery keys on screen too."
   (let* ((pixel (pos-visible-in-window-p position window t))
          (inside (window-inside-pixel-edges window))
          (edges (window-pixel-edges window))
-         (y (+ (nth 1 inside) (nth 1 pixel) (/ (frame-char-height) 2)
-               (* (or row-offset 0) (frame-char-height)))))
-    (cl-loop for x from (car edges) below (car inside)
-             for hit = (posn-at-x-y x y (window-frame window) t)
+         ;; Probe WINDOW directly so coordinates never depend on which
+         ;; window is selected.  X is relative to the window's left edge
+         ;; (WHOLE=t); Y is relative to the window's text area, whose top
+         ;; includes any header line exactly like `pos-visible-in-window-p'
+         ;; does, so the position's own Y needs no adjustment.
+         (y (+ (nth 1 pixel) (/ (frame-char-height) 2)
+               (* (or row-offset 0) (frame-char-height))))
+         (right (- (car inside) (car edges))))
+    (cl-loop for x from 0 below right
+             for hit = (posn-at-x-y x y window t)
              when (and hit (eq (posn-window hit) window)
                        (eq (posn-area hit) 'left-margin)
                        (posn-string hit))
@@ -3055,7 +3122,9 @@ keep their recovery keys on screen too."
             (let* ((edges (window-pixel-edges window))
                    (inside (window-inside-pixel-edges window))
                    (pixel (pos-visible-in-window-p (point) window t))
-                   (y (+ (nth 1 inside) (nth 1 pixel) (/ (frame-char-height) 2)))
+                   ;; See `pilish-gui-test--tool-margin-position': Y is
+                   ;; window-relative, not text-edge-relative.
+                   (y (+ (nth 1 pixel) (/ (frame-char-height) 2)))
                    (blank (posn-at-x-y (1+ (car edges)) (- y (frame-char-height)) (window-frame window) t))
                    (continuation (posn-at-x-y (1+ (car edges)) (+ y (frame-char-height)) (window-frame window) t)))
               (should-not (posn-string blank))

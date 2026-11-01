@@ -137,8 +137,8 @@ This one-time step needs a C compiler (=gcc= or =cc=).
 Type a prompt such as =explain what this project does= in the bottom
 window and press =C-c C-c=.  Your text appears in the chat under a
 =You= heading, and Pi's reply streams in under =Assistant=.
-The header line above the input tracks the model, activity phase,
-cost, and context usage while it works.
+The header line at the top of the chat window tracks the model,
+activity phase, cost, and context usage while it works.
 
 Pilish approves projects by default.  Pi does not show its project
 trust prompt in RPC mode, so Pilish starts Pi with =--approve= and
@@ -194,9 +194,10 @@ old-name settings do not carry over automatically.
 Write prompts in the bottom input window and read replies in the top
 chat window.  You can keep writing while Pi replies.
 
-The input header shows the model, thinking level, activity, cost,
-context usage, session name, and any extension status or attached
-image.  Click the model or thinking level to change it.  =queued N=
+The header line at the top of the chat window shows the model,
+thinking level, activity, cost, context usage, session name, and any
+extension status or attached image.  Click the model or thinking
+level to change it.  =queued N=
 shows known pending messages.  Hover it for follow-up and steering
 previews.  The count can lag and disappears at zero, which does not
 mean Pi has finished.
@@ -217,7 +218,9 @@ model settings, skills, and custom commands.
 If Pi works silently for five minutes, the header shows a warning
 such as =thinking (no output 5m)=.  Quiet tools and healthy subagents
 can produce no output.  See Troubleshooting to change or disable
-this warning.
+this warning.  To keep the header above the input window instead, as
+in earlier Pilish versions, set =pilish-header-line-location= to
+=input=.
 
 #+html: <details>
 #+html: <summary><strong>Queue status reference</strong></summary>
@@ -362,7 +365,7 @@ counts and, once the message finishes, its timestamp and provenance.
 Tool details can include a command or path hint and the saved result
 timestamp.  Unfinished blocks, shared headings, and trailing
 separators have no block details.  Block metadata does not appear on
-hover.  Links, controls, input headers, browsers, and
+hover.  Links, controls, session headers, browsers, and
 menus retain their own hover help.  Reply stream durations and output
 rates remain approximate and live-only.  Reload or resume drops these
 measurements.  Tool execution times use Pi's recorded durations when
@@ -797,11 +800,11 @@ project-local Pi files for Emacs sessions.
 #+html: <summary><strong>The header shows <code>thinking (no output 5m)</code></strong></summary>
 
 After five minutes without output while Pi is working or compacting,
-the input header warns with text such as =thinking (no output 5m)=.
+the header warns with text such as =thinking (no output 5m)=.
 The warning does not stop the operation.  Quiet tools and healthy
 subagents can work without output, so silence does not prove a hang.
 Idle and sending sessions are not monitored.  Hiding the input also
-hides the warning.
+hides the warning when the header lives there.
 
 =pilish-session-inactivity-timeout= defaults to =300= seconds.  Set a
 positive number to change the threshold, or =nil= to disable it:
@@ -820,7 +823,7 @@ Any nonempty parent stdout counts as output, including replies,
 repeated tool progress, and partial or malformed output.  Stderr does
 not count.  One sibling's output keeps the shared clock fresh.
 Timing uses approximate wall time.  Suspend, clock changes, or a
-blocked Emacs can shift it.  Active sessions refresh the input header
+blocked Emacs can shift it.  Active sessions refresh the header
 once a second when Emacs can service its timers.
 
 Timeout changes apply at the next header refresh.  Reenabling keeps
@@ -986,6 +989,21 @@ Choose one of three input window display styles:
 ;; hide again after each send:
 ;; (setopt pilish-input-window-display 'hidden)
 #+end_src
+
+The session header line sits at the top of the chat window by
+default.  Put it back above the input window, as in earlier Pilish
+versions, or remove it entirely — including the inactivity warning,
+which appears nowhere else — with:
+
+#+begin_src emacs-lisp
+(setopt pilish-header-line-location 'input)
+;; or, for no session header line at all:
+;; (setopt pilish-header-line-location 'none)
+#+end_src
+
+Changing the option moves the header line in existing sessions too;
+model, thinking, activity, cost, context, queue, session name,
+extension status, and image details all follow it.
 
 Less common tuning knobs:
 

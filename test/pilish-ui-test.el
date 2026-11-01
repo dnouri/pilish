@@ -4043,7 +4043,6 @@ Binds `chat-win', `input-win' and `input-buf' for use in BODY."
             (should (equal '("do not submit")
                            (buffer-local-value 'pilish--followup-queue chat)))
             (should-not (buffer-local-value 'pilish--aborted chat))
-            (should-not (buffer-local-value 'header-line-format chat))
             (should (equal chat-text (with-current-buffer chat (buffer-string))))
             (should (equal input-text (with-current-buffer input (buffer-string))))
             (should (eq window (selected-window)))))))))
@@ -4069,7 +4068,10 @@ Binds `chat-win', `input-win' and `input-buf' for use in BODY."
       (pilish-test--assert-inactivity input "thinking (no output 1m)"))))
 
 (ert-deftest pilish-test-inactivity-refresh-is-active-only-and-not-a-stats-poll ()
-  "Initial and repeating real ticks refresh only input, without stats or work."
+  "Initial and repeating real ticks refresh only the session pair.
+Both the chat and input buffer repaint, because either may own the
+header line under `pilish-header-line-location'.  No stats or other
+work happens on a tick."
   (pilish-test-with-rpc-session (chat input proc commands)
     (let ((pilish-session-inactivity-timeout 0.02) observer refreshed notices)
       (unwind-protect
@@ -4085,7 +4087,7 @@ Binds `chat-win', `input-win' and `input-buf' for use in BODY."
               (cl-letf (((symbol-function 'force-mode-line-update)
                          (lambda (&optional all)
                            (push (list (current-buffer) all
-                                       (when (eq (current-buffer) input)
+                                       (when (memq (current-buffer) (list chat input))
                                          (pilish--header-line-string)))
                                  refreshed)))
                         ((symbol-function 'pilish--refresh-header)
@@ -4098,12 +4100,15 @@ Binds `chat-win', `input-win' and `input-buf' for use in BODY."
                            (lambda () (>= (length refreshed) 2)) 10 0.05))))
               (dolist (sample refreshed)
                 (ert-info ((format "autonomous refresh=%S" sample))
-                  (should (eq input (car sample)))
+                  (should (memq (car sample) (list chat input)))
                   (should-not (cadr sample))
                   (let* ((header (nth 2 sample))
                          (start (string-match "thinking (no output" header)))
                     (should start)
                     (should (eq 'warning (get-text-property start 'face header))))))
+              (ert-info ((format "refreshed buffers=%S" (mapcar #'car refreshed)))
+                (should (memq chat (mapcar #'car refreshed)))
+                (should (memq input (mapcar #'car refreshed))))
               (should (equal last (process-get proc 'pilish-last-output-time)))
               (should (equal state (buffer-local-value 'pilish--state chat))))
             (should-not notices)

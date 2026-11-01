@@ -167,7 +167,7 @@ An integer specifies an absolute number of lines.
 A float between 0.0 and 1.0 (exclusive) specifies a fraction of the
 total window height, e.g. 0.3 means 30% for input.
 The symbol `fit' sizes the window to its draft: one text line plus the
-header and mode lines when empty, growing with the draft up to
+window's header and mode lines when empty, growing with the draft up to
 `pilish-input-window-max-height' and shrinking again after sending.
 This is a global option for all sessions; buffer-local values are not
 supported.  In `fit' mode the input can be shorter than
@@ -181,10 +181,10 @@ supported.  In `fit' mode the input can be shorter than
   "Largest height of an input window that fits its draft.
 Applies when `pilish-input-window-height' is `fit'.  An integer is a
 number of lines; a float between 0.0 and 1.0 is a fraction of the chat
-and input windows' combined height.  The height includes the header
-and mode lines, and the chat window keeps at least `window-min-height'
-lines.  Longer drafts scroll.  This is a global option for all sessions;
-buffer-local values are not supported."
+and input windows' combined height.  The height includes any header
+and mode lines the window shows, and the chat window keeps at least
+`window-min-height' lines.  Longer drafts scroll.  This is a global
+option for all sessions; buffer-local values are not supported."
   :type '(choice (natnum :tag "Lines")
                  (float :tag "Fraction (0.0–1.0)"))
   :group 'pilish)
@@ -1147,6 +1147,9 @@ Reserve at least one left column and preserve each window's larger margins."
   (setq-local pilish--model-change-generation 0)
   (setq-local pilish--model-change-active-token nil)
   (setq-local pilish--local-user-message-region nil)
+  ;; The chat window hosts the session header line unless
+  ;; `pilish-header-line-location' assigns it to the input window.
+  (pilish--apply-header-line-location)
   (add-hook 'window-size-change-functions
             #'pilish--maybe-rebalance-windows)
   (add-hook 'kill-buffer-query-functions
@@ -1589,9 +1592,11 @@ One of \"thinking\", \"replying\", \"running\",
 Always populated; normally rendered in a fixed-width slot.")
 
 (defvar-local pilish--inactivity-timer nil
-  "Active-session timer invalidating only the linked input header.
+  "Active-session timer invalidating only the session header line.
 Keep refreshing even when the warning option is nil, so reenabling it
-while Pi is silent needs neither a setter nor an RPC.")
+while Pi is silent needs neither a setter nor an RPC.  The repaint
+reaches every window that shows the header line, whichever buffer
+owns it under `pilish-header-line-location'.")
 
 (defun pilish--inactivity-eligible-p ()
   "Return whether this chat owns a live streaming or compacting process."
@@ -1639,13 +1644,11 @@ Arming never overwrites the stdout receipt that preceded a state event."
                                                 'pilish-last-output-time)))
                          (when (and last (< now last))
                            (process-put pilish--process 'pilish-last-output-time now)))
-                       (when (buffer-live-p pilish--input-buffer)
-                         (with-current-buffer pilish--input-buffer
-                           (force-mode-line-update))))))))
+                       (pilish--force-header-line-update chat))))))
               pilish--inactivity-timer timer)))))
 
 (defun pilish--inactivity-status (phase)
-  "Format PHASE for this chat's input header, without changing any state."
+  "Format PHASE for the session header line, without changing any state."
   (let* ((last (and (pilish--inactivity-eligible-p)
                     (process-get pilish--process 'pilish-last-output-time)))
          (age (and last (max 0 (- (float-time) last)))))
@@ -2230,7 +2233,7 @@ height of INPUT-WIN and CHAT-WIN, which bounds it."
   "Resize INPUT-WIN to fit its draft when `pilish-input-window-height' is `fit'.
 INPUT-WIN must be directly below its chat window; other layouts and
 height settings are left alone.  The height covers the draft's screen
-lines plus the header and mode lines, up to
+lines plus any header and mode lines the window shows, up to
 `pilish-input-window-max-height'.  A height preserved with
 `window-preserve-size' moves to the new size."
   (when-let* (((eq pilish-input-window-height 'fit))
@@ -3197,6 +3200,76 @@ Removes common prefixes like \"Claude \" and suffixes like \" (latest)\"."
 
 ;;; Header-Line Formatting
 
+;; Declared bare so the placement helpers below may be defined before
+;; `pilish-header-line-location'; Emacs 30 runs a defcustom's :set
+;; function while the defcustom form itself is evaluated.
+(defvar pilish-header-line-location)
+
+(defun pilish--header-line-format ()
+  "Return the `header-line-format' value for the current buffer, or nil.
+Chat buffers own the session header line when
+`pilish-header-line-location' is `chat'; input buffers own it when
+the location is `input'.  Under `none', and in buffers of any other
+mode, no buffer owns it."
+  (when (pcase pilish-header-line-location
+          ('chat (derived-mode-p 'pilish-chat-mode))
+          ('input (derived-mode-p 'pilish-input-mode)))
+    '(:eval (pilish--header-line-string))))
+
+(defun pilish--apply-header-line-location ()
+  "Give this buffer the session header line it owns, or none.
+`pilish-header-line-location' decides between chat and input
+buffers; buffers of any other mode are left untouched.  Owned
+header lines repaint immediately."
+  (when (or (derived-mode-p 'pilish-chat-mode)
+            (derived-mode-p 'pilish-input-mode))
+    (setq-local header-line-format (pilish--header-line-format))
+    (force-mode-line-update)))
+
+(defun pilish--set-header-line-location (option value)
+  "Set OPTION to VALUE, moving session header lines in live buffers.
+Setter for `pilish-header-line-location'.  Also runs when the option
+definition itself is loaded, so it tolerates modes that are not yet
+defined: buffers of unknown major modes keep their header line."
+  (set-default option value)
+  (dolist (buf (buffer-list))
+    (when (buffer-live-p buf)
+      (with-current-buffer buf
+        (pilish--apply-header-line-location)))))
+
+(defcustom pilish-header-line-location 'chat
+  "Which window shows the session header line.
+The header line tracks the model, thinking level, activity phase,
+cost, context usage, session name, queued messages, extension
+status, and any attached prompt image.
+
+When `chat' (the default), the header line appears at the top of the
+chat window.  When `input', it appears above the input window, as
+in Pilish versions before this option existed.  When `none', no
+session header line is shown; the `waiting for Pi' note and the
+inactivity warning appear nowhere else, so they go with it.
+
+Setting this option moves the header line in existing sessions;
+new sessions use the current value when their buffers are created.
+This is a global option for all sessions; buffer-local values are
+not supported."
+  :type '(choice (const :tag "Top of the chat window (default)" chat)
+                 (const :tag "Above the input window" input)
+                 (const :tag "No header line" none))
+  :set #'pilish--set-header-line-location
+  :group 'pilish)
+
+(defun pilish--force-header-line-update (chat-buf)
+  "Repaint session header-line displays linked to CHAT-BUF.
+Covers both the chat and the input buffer, because either owns the
+header line under `pilish-header-line-location'."
+  (let ((input-buf (and (buffer-live-p chat-buf)
+                        (buffer-local-value 'pilish--input-buffer chat-buf))))
+    (dolist (buf (list chat-buf input-buf))
+      (when (buffer-live-p buf)
+        (with-current-buffer buf
+          (force-mode-line-update))))))
+
 (defvar pilish--header-model-map
   (let ((map (make-sparse-keymap)))
     (define-key map [header-line mouse-1] #'pilish-select-model)
@@ -3367,8 +3440,10 @@ when no extension info exists."
       (format " │ image: %s (%s)" name size))))
 
 (defun pilish--header-line-string ()
-  "Return formatted header-line string for input buffer.
-Accesses state from the linked chat buffer."
+  "Return the session header-line string for the current buffer.
+Chat buffers render their own state; input buffers read state from
+their linked chat buffer.  The draft prompt image always comes from
+the session's input buffer."
   (let* ((chat-buf (cond
                     ;; In input buffer with valid link to chat
                     ((and pilish--chat-buffer (buffer-live-p pilish--chat-buffer))
@@ -3378,6 +3453,11 @@ Accesses state from the linked chat buffer."
                      (current-buffer))
                     ;; No valid chat buffer yet
                     (t nil)))
+         (input-buf (or (and chat-buf
+                             (buffer-live-p
+                              (buffer-local-value 'pilish--input-buffer chat-buf))
+                             (buffer-local-value 'pilish--input-buffer chat-buf))
+                        (current-buffer)))
          (state (and chat-buf (buffer-local-value 'pilish--state chat-buf)))
          (stats (and chat-buf (buffer-local-value 'pilish--cached-stats chat-buf)))
          (ext-status (and chat-buf (buffer-local-value 'pilish--extension-status chat-buf)))
@@ -3418,26 +3498,23 @@ Accesses state from the linked chat buffer."
      (pilish--header-format-context-group session-name)
      (pilish--header-format-extension-group ext-status working-message)
      (pilish--header-format-prompt-image
-      (pilish--get-prompt-image)))))
+      (pilish--get-prompt-image input-buf)))))
 
 ;;; State Management
 
 (defun pilish--refresh-header ()
   "Refresh header-line by fetching and caching session stats."
   (when-let* ((proc (pilish--get-process))
-             (chat-buf (pilish--get-chat-buffer)))
-    (let ((input-buf (buffer-local-value 'pilish--input-buffer chat-buf)))
-      (pilish--rpc-async proc '(:type "get_session_stats")
-                     (lambda (response)
-                       (when (eq (plist-get response :success) t)
-                         (when (buffer-live-p chat-buf)
-                           (with-current-buffer chat-buf
-                             (setq pilish--cached-stats (plist-get response :data))))
-                         ;; Update the input buffer's header line
-                         (when (buffer-live-p input-buf)
-                           (dolist (win (get-buffer-window-list input-buf nil t))
-                             (with-selected-window win
-                               (force-mode-line-update))))))))))
+              (chat-buf (pilish--get-chat-buffer)))
+    (pilish--rpc-async proc '(:type "get_session_stats")
+                   (lambda (response)
+                     (when (eq (plist-get response :success) t)
+                       (when (buffer-live-p chat-buf)
+                         (with-current-buffer chat-buf
+                           (setq pilish--cached-stats (plist-get response :data))))
+                       ;; Repaint the windows that own the header line
+                       (when (buffer-live-p chat-buf)
+                         (pilish--force-header-line-update chat-buf)))))))
 
 (defun pilish--apply-state-response (chat-buf response)
   "Apply get_state RESPONSE to CHAT-BUF.

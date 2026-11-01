@@ -91,14 +91,14 @@
 ;; thinking, or tool block.  C-h . shows quick help in both transcripts,
 ;; with native link and control help first.  Reply, thinking, and tool
 ;; metadata does not appear on automatic hover.  Other hover behavior,
-;; including native chat controls, input headers, browsers, and menus,
+;; including native chat controls, session headers, browsers, and menus,
 ;; is unchanged.
 ;;
 ;; Editor Features:
 ;;   - File reference (@): Type @ to search project files (respects .gitignore)
 ;;   - Path completion (Tab): Complete relative paths, ../, ~/, etc.
 ;;   - Prompt image: Attach one content-sniffed raster image to a direct,
-;;     idle, non-slash prompt; the input header shows its name and size.
+;;     idle, non-slash prompt; the session header shows its name and size.
 ;;   - Message queuing: Submit text messages while agent is working:
 ;;       C-c C-c  queues follow-up (delivered after agent completes)
 ;;       C-c C-s  queues steering (interrupts after current tool)
