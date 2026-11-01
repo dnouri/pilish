@@ -301,7 +301,8 @@ usage when declared; =? ctx= means unknown context usage.  Each saved
 chat has one link at its first occurrence, on the title when present.
 Later resume occurrences stay visible as plain text.  Output folds do
 not hide the tree.  Older declarations without titles or stats keep
-their original label-led rows.
+their original label-led rows.  Titles, stats, and recursive trees
+need =pi-submarine= 0.7 or later.
 
 Completed subagent results include the producer's =Task:= and
 =Ran N turns= lines in the result body, with final stats in the tree.
