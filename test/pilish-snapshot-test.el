@@ -480,9 +480,11 @@
         (pilish--handle-display-event
          (append '(:type "tool_execution_start" :toolCallId "call" :toolName "delegate_work")
                  (when nested '(:parentToolCallId "owner"))))
-        (pilish--handle-display-event
-         (append (list :type "tool_execution_end" :toolCallId "call" :toolName "delegate_work" :result result)
-                 (when nested '(:parentToolCallId "owner"))))
+        (condition-case err
+            (pilish--handle-display-event
+             (append (list :type "tool_execution_end" :toolCallId "call" :toolName "delegate_work" :result result)
+                     (when nested '(:parentToolCallId "owner"))))
+          (error (message "PROBE-END-ERR: %S" err)))
         (when nested
           (pilish--handle-display-event
            '(:type "tool_execution_end" :toolCallId "owner" :toolName "codemode" :result (:content []))))
@@ -492,16 +494,18 @@
                        '(("reviewer" "child" "/saved/parent.jsonl"))))
         (dolist (pilish-copy-raw-markdown '(nil t))
           (let ((copy (filter-buffer-substring (line-beginning-position) (line-end-position))))
-            (should (string-suffix-p " · Pi session: reviewer" copy))
+            (should (equal "reviewer" copy))
             (should (equal-including-properties copy (substring-no-properties copy)))))
         (call-interactively (key-binding (kbd "TAB")))
         (search-forward "Done")
         (let ((start (- (point) (length "Done"))))
-          (search-forward "Pi sessions: reviewer")
+          (search-forward "Pi sessions · 1 chat")
+          (search-forward "reviewer")
           (dolist (pilish-copy-raw-markdown '(nil t))
             (let ((copy (filter-buffer-substring start (point))))
               (should (string-prefix-p "Done\n\n**Details**\n" copy))
-              (should (string-suffix-p "\n\nPi sessions: reviewer" copy))
+              (should (string-match-p "Pi sessions · 1 chat" copy))
+              (should (string-suffix-p "\nreviewer" copy))
               (should (equal-including-properties copy (substring-no-properties copy))))))))))
 
 (ert-deftest pilish-test-snapshot-session-link-face ()
@@ -537,8 +541,9 @@
       (let ((plain (buffer-substring-no-properties (point-min) (point-max))))
         (pilish--display-tool-update
          (list :content content :details '(:savedConversations :null)) block)
-        (should (equal (buffer-substring-no-properties (point-min) (point-max)) plain)))
+        (should-not (equal (buffer-substring-no-properties (point-min) (point-max)) plain)))
       (goto-char (point-min))
+      (search-forward "unavailable")
       (search-forward "unavailable")
       (let ((position (- (point) (length "unavailable"))))
         (should-not (button-at position))
@@ -558,16 +563,17 @@
       (pilish--display-tool-update first block)
       (let ((painted (buffer-substring-no-properties (point-min) (point-max))))
         (pilish--queue-tool-update "call" second)
-        (should (equal (mapcar #'cadr (pilish-test--snapshot-name-rows)) '("first" "first")))
+        (should (equal (mapcar #'cadr (pilish-test--snapshot-name-rows)) '("first")))
         (cl-letf (((symbol-function 'input-pending-p) (lambda (&optional _) nil)))
           (pilish--flush-tool-updates (current-buffer)))
         (should (equal (buffer-substring-no-properties (point-min) (point-max)) painted))
-        (should (equal (mapcar #'cadr (pilish-test--snapshot-name-rows)) '("second" "second")))
+        (should (equal (mapcar #'cadr (pilish-test--snapshot-name-rows)) '("second")))
         (pilish--display-tool-update
          (list :content (vector (list :type "text" :text text))
                :details '(:savedConversations :null)) block)
         (should-not (pilish-test--snapshot-name-rows))
         (goto-char (point-min))
+        (search-forward "unavailable")
         (search-forward "unavailable")
         (should (stringp (get-text-property (1- (point)) 'pilish-subagent-name)))
         (should-not (button-at (1- (point))))))))
@@ -590,7 +596,7 @@
       (call-interactively (key-binding (kbd "TAB")))
       (should (equal (mapcar (lambda (row) (list (car row) (cadr row)))
                             (pilish-test--snapshot-name-rows))
-                     '(("same" "child-id") ("same" "child-id"))))
+                     '(("same" "child-id"))))
       (should (string-match-p "\\*\\*Details\\*\\*" (buffer-string)))
       (goto-char (point-min))
       (search-forward "same task word")
@@ -614,16 +620,16 @@
   (with-temp-buffer
     (pilish-chat-mode)
     (setq pilish--state '(:session-file "/saved/root.jsonl"))
-    (let* ((labels (pilish--saved-conversation-labels
-                    "any_tool" [] (pilish-test--saved-details "child-id" "long-name")))
-           (text (pilish--saved-conversation-output "Ordinary long-name output" labels))
-           (slice (plist-get (pilish--truncate-to-visual-lines labels 2 4) :content)))
-      (should (pilish--snapshot-target-p (get-text-property (string-search "long-name" text 30) 'pilish-subagent-name text)))
+    (let* ((catalog (pilish--conversation-capture
+                     "any_tool" [] (pilish-test--saved-details "child-id" "long-name")))
+           (tree (pilish--conversation-tree catalog))
+           (start (string-search "long-name" tree))
+           (label (substring tree start (+ start (length "long-name"))))
+           (slice (plist-get (pilish--truncate-to-visual-lines label 2 4) :content)))
+      (should (pilish--snapshot-target-p (get-text-property 0 'pilish-subagent-name label)))
       (should-not (text-property-not-all 0 (length slice) 'pilish-subagent-name nil slice))
       (should-not (text-property-any 0 (length slice) 'face 'link slice))
-      (should (equal-including-properties
-               (pilish--saved-conversation-output "Ordinary long-name output" nil)
-               "Ordinary long-name output")))))
+      (should-not (pilish--conversation-tree nil)))))
 
 (ert-deftest pilish-test-snapshot-names-navigation-skips-hidden-and-unavailable ()
   (with-temp-buffer
@@ -733,11 +739,11 @@
                            (original (and view (plist-get (pilish--tool-output-view-snapshot view) :text))))
                       (should (stringp original))
                       (should (string-prefix-p "## Subagent result\nSaved answer\n\n**Details**\n" original))
-                      (should (string-suffix-p "\n\nPi sessions: saved child" original))
-                      (should (= (length (split-string original "\n")) 19))
-                      (should (= (plist-get (pilish--tool-output-view-excerpt view) :hidden-lines) 18)))
+                      (should-not (string-match-p "Pi sessions" original))
+                      (should (= (length (split-string original "\n")) 17))
+                      (should (= (plist-get (pilish--tool-output-view-excerpt view) :hidden-lines) 16)))
                     (should (equal (pilish-test--snapshot-name-rows) (list (list "saved child" "child-id" anchor))))
-                    (should (string-match-p "^… 18 more lines$" (buffer-string)))
+                    (should (string-match-p "^… 16 more lines$" (buffer-string)))
                     (let ((plain (buffer-substring-no-properties (point-min) (point-max))))
                       (goto-char (point-min))
                       (execute-kbd-macro (kbd "C-c ]"))
@@ -1016,15 +1022,15 @@
     (pilish-chat-mode)
     (setq pilish--state '(:session-file "/saved/root.jsonl"))
     (let* ((wire "Log: /tmp/subagents.md\n- same (0 turns): working")
-           (painted (pilish--saved-conversation-output
-                     wire (pilish--saved-conversation-labels
-                           "any_tool" [] (pilish-test--saved-details "child-id" "same"))))
+           (painted (concat wire "\n" (pilish--conversation-tree
+                                      (pilish--conversation-capture
+                                       "any_tool" [] (pilish-test--saved-details "child-id" "same")))))
            (inhibit-read-only t))
       (should (equal-including-properties wire "Log: /tmp/subagents.md\n- same (0 turns): working"))
       (insert painted)
       (should (equal (pilish-test--snapshot-name-rows) '(("same" "child-id" "/saved/root.jsonl"))))
       (erase-buffer)
-      (insert (pilish--saved-conversation-output wire nil))
+      (insert wire)
       (should (equal (buffer-substring-no-properties (point-min) (point-max)) wire))
       (should-not (pilish-test--snapshot-name-rows)))))
 
@@ -1037,8 +1043,8 @@
            (call (pilish--make-nested-call
                   :id "native-call" :name "subagent" :source 'event :status 'ok
                   :arguments '(:agent "alias" :task "same task")
-                  :saved-labels (pilish--saved-conversation-labels
-                                 "subagent" [] (pilish-test--saved-details "child-id" "saved child"))
+                  :conversations (pilish--conversation-capture
+                                  "subagent" [] (pilish-test--saved-details "child-id" "saved child"))
                   :result '(:content [(:type "text" :text "Saved")])))
            (overlay (pilish--tool-block-overlay block)))
       (pilish--enable-compound-tool block args)
@@ -1092,7 +1098,7 @@
           (should (string-match-p "grandchild" (buffer-string)))
           (should-not (pilish-test--snapshot-name-rows))
           (should-not (text-property-not-all (point-min) (point-max) 'pilish-subagent-name nil))
-          (should-not (plist-get presentation :saved-labels)))))))
+          (should-not (plist-get presentation :conversations)))))))
 
 (ert-deftest pilish-test-snapshot-neutral-history-duplicate-labels-cold-openers ()
   (pilish-test--with-saved-conversation-files
@@ -1128,7 +1134,7 @@
                 (goto-char (overlay-start overlay))
                 (call-interactively (key-binding (kbd "TAB")))
                 (should (equal (mapcar #'cadr (pilish-test--snapshot-name-rows))
-                               '("worker-17" "worker-42" "worker-17" "worker-42")))
+                               '("worker-17" "worker-42")))
                 (pilish--cool-tool-overlay overlay)
                 (font-lock-ensure)
                 (pilish--restore-tool-properties (point-min) (point-max)))
@@ -1260,10 +1266,10 @@
           (pilish--display-tool-update
            (list :content content :details (list :savedConversations second)) block)
           (should (equal (buffer-substring-no-properties (point-min) (point-max)) plain))
-          (should (equal (mapcar #'cadr (pilish-test--snapshot-name-rows)) '("worker-42" "worker-42"))))
+          (should (equal (mapcar #'cadr (pilish-test--snapshot-name-rows)) '("worker-42"))))
         (pilish--display-tool-end "delegate_work" nil content nil nil block)
         (should-not (pilish-test--snapshot-name-rows))
-        (should-not (string-match-p "Pi session:" (buffer-string)))))))
+        (should-not (string-match-p "Pi sessions" (buffer-string)))))))
 
 (ert-deftest pilish-test-snapshot-neutral-malformed-declarations-are-disk-free-and-inert ()
   (pilish-test--with-saved-conversation-files
@@ -1314,12 +1320,14 @@
         (should (= adapter-calls 0))
         (let* ((presentation (pilish--tool-result-presentation
                               "delegate_work" nil [] (list :savedConversations good) nil))
-               (labels (plist-get presentation :saved-labels)))
-          (should (equal (substring-no-properties labels) "worker-17"))
-          (should (pilish--snapshot-target-p (get-text-property 0 'pilish-subagent-name labels)))
+               (tree (pilish--conversation-tree (plist-get presentation :conversations)))
+               (start (string-search "worker-17" tree))
+               (label (substring tree start (+ start (length "worker-17")))))
+          (should (equal (substring-no-properties label) "worker-17"))
+          (should (pilish--snapshot-target-p (get-text-property 0 'pilish-subagent-name label)))
           (should-not (text-property-not-all
                        0 3 'pilish-subagent-name nil
-                       (pilish--remove-clipped-subagent-names labels (substring labels 0 3)))))))))
+                       (pilish--remove-clipped-subagent-names label (substring label 0 3)))))))))
 
 (ert-deftest pilish-test-snapshot-stale-branded-details-produce-no-links ()
   (pilish-test--with-saved-conversation-files
@@ -1333,7 +1341,7 @@
          "delegate_work" nil content
          (list :pilish (list :savedConversations declaration)) nil block)
         (should (string-match-p "Legacy branded receipt" (buffer-string)))
-        (should-not (string-match-p "Pi sessions:" (buffer-string)))
+        (should-not (string-match-p "Pi sessions" (buffer-string)))
         (should-not (pilish-test--snapshot-name-rows))
         (should-not (text-property-not-all (point-min) (point-max) 'pilish-subagent-name nil))))))
 
@@ -1437,8 +1445,11 @@
                             "other_producer" nil [(:type "text" :text "Unrelated tool output survives")]
                             nil nil)))
         (should (string-prefix-p "Unrelated tool output survives" (plist-get presentation :text)))
-        (should (equal (substring-no-properties (plist-get presentation :saved-labels)) "unavailable"))
-        (should-not (get-text-property 0 'button (plist-get presentation :saved-labels)))))))
+        (let ((catalog (plist-get presentation :conversations)))
+          (should (pilish--conversation-catalog-error catalog))
+          (should-not (text-property-not-all
+                       0 (length (pilish--conversation-tree catalog)) 'button nil
+                       (pilish--conversation-tree catalog))))))))
 
 (ert-deftest pilish-test-snapshot-valid-capture-is-disk-free-and-copied ()
   (with-temp-buffer
@@ -1457,10 +1468,13 @@
                 ((symbol-function 'file-readable-p) (lambda (&rest _) (ert-fail "Capture probed disk")))
                 ((symbol-function 'file-exists-p) (lambda (&rest _) (ert-fail "Capture probed disk")))
                 ((symbol-function 'file-in-directory-p) (lambda (&rest _) (ert-fail "Capture checked containment"))))
-        (setq labels (pilish--saved-conversation-labels "subagent" content details)))
+        (setq labels (pilish--conversation-tree
+                      (pilish--conversation-capture "subagent" content details))))
       (dolist (string (list anchor id root file label)) (aset string 0 ?X))
-      (let ((target (get-text-property 0 'pilish-subagent-name labels)))
-        (should (equal (substring-no-properties labels) "reviewer %s%d"))
+      (let* ((start (string-search "reviewer %s%d" labels))
+             (target (get-text-property start 'pilish-subagent-name labels)))
+        (should (equal (substring-no-properties (substring labels start (+ start (length "reviewer %s%d"))))
+                       "reviewer %s%d"))
         (should (equal (pilish--snapshot-target-anchor-file target) "/saved/parent.jsonl"))
         (should (equal (pilish--snapshot-target-session-id target) "child-id"))
         (should (equal (pilish--snapshot-target-root target) "/saved/ledger"))
@@ -1502,24 +1516,23 @@
     (should (cl-every (lambda (row) (equal (cadr row) "final-child"))
                       (pilish-test--snapshot-name-rows)))))
 
-(ert-deftest pilish-test-snapshot-header-labels-survive-repaint-with-literal-percents ()
+(ert-deftest pilish-test-snapshot-body-labels-survive-header-repaint-with-literal-percents ()
   (with-temp-buffer
     (pilish-chat-mode)
     (setq pilish--state '(:session-file "/saved/parent.jsonl"))
-    (let* ((block (pilish--display-tool-start "delegate_work" '(:task "100% complete %s%d") "call"))
-           (labels (pilish--saved-conversation-labels
-                    "delegate_work" [] (pilish-test--saved-details "first" "reviewer %s%d"))))
-      (pilish--annotate-saved-conversation-header block labels)
+    (let ((block (pilish--display-tool-start "delegate_work" '(:task "100% complete %s%d") "call")))
+      (pilish--display-tool-update
+       (list :content [] :details (pilish-test--saved-details "first" "reviewer %s%d")) block)
       (let ((plain (buffer-substring-no-properties (point-min) (point-max))))
-        (setq labels (pilish--saved-conversation-labels
-                      "delegate_work" [] (pilish-test--saved-details "second" "reviewer %s%d")))
-        (pilish--annotate-saved-conversation-header block labels)
+        (pilish--display-tool-update
+         (list :content [] :details (pilish-test--saved-details "second" "reviewer %s%d")) block)
+        (pilish--display-tool-update-header "delegate_work" '(:task "100% complete %s%d") block)
         (should (equal (buffer-substring-no-properties (point-min) (point-max)) plain))
         (should (equal (pilish-test--snapshot-name-rows)
                        '(("reviewer %s%d" "second" "/saved/parent.jsonl")))))
-      (pilish--annotate-saved-conversation-header block nil)
+      (pilish--display-tool-update '(:content []) block)
       (should-not (pilish-test--snapshot-name-rows))
-      (should-not (string-match-p "Pi session:" (buffer-string))))))
+      (should-not (string-match-p "Pi sessions" (buffer-string))))))
 
 (ert-deftest pilish-test-snapshot-neutral-strict-v3-identity-and-full-branch ()
   (pilish-test--with-saved-conversation-files
@@ -1604,7 +1617,7 @@
                 (pilish-test--search-output-control)
                 (button-activate (button-at (1- (point))))
                 (should (equal (mapcar #'cadr (pilish-test--snapshot-name-rows))
-                               '("worker-17" "worker-42" "worker-17" "worker-42")))
+                               '("worker-17" "worker-42")))
                 (pilish--handle-display-event '(:type "tool_execution_end" :toolCallId "owner" :toolName "codemode" :result (:content [])))
                 (pilish--cool-tool-overlay overlay)
                 (should-not (pilish--nested-call-result call))
@@ -2413,5 +2426,353 @@
             (should (eq (window-buffer second) staged))))
       (when (buffer-live-p old) (kill-buffer old))
       (when (buffer-live-p staged) (kill-buffer staged)))))
+
+(defun pilish-test--snapshot-catalog (declaration)
+  "Capture DECLARATION against a fixed parent without reading a save."
+  (let ((pilish--state '(:session-file "/saved/parent.jsonl")))
+    (pilish--conversation-capture "delegate_work" [] (list :savedConversations declaration))))
+
+(defun pilish-test--snapshot-catalog-rows (catalog)
+  "Return CATALOG's actionable tree labels through the ordinary text properties."
+  (with-temp-buffer
+    (insert (pilish--conversation-tree catalog))
+    (pilish-test--snapshot-name-rows)))
+
+(ert-deftest pilish-test-snapshot-recursive-prototype-catalog-and-tree ()
+  "Six invocation rows form five chats, with one inert tester resume."
+  (let* ((catalog (pilish-test--snapshot-catalog (pilish-test--recursive-conversation-declaration)))
+         (rows (pilish--conversation-catalog-occurrences catalog))
+         (actions (pilish-test--snapshot-catalog-rows catalog))
+         (tester (nth 3 rows))
+         (resume (nth 4 rows)))
+    (should (= (hash-table-count (pilish--conversation-catalog-sessions catalog)) 5))
+    (should (= (length rows) 6))
+    (should (eq (pilish--conversation-occurrence-session tester)
+                (pilish--conversation-occurrence-session resume)))
+    (should (eq (pilish--conversation-session-primary
+                 (pilish--conversation-occurrence-session tester)) tester))
+    (should (equal (mapcar #'car actions) '("Coordinate review" "Explore files" "Review protocol" "Run tests" "Review interface")))
+    (should (= (length (delete-dups (mapcar #'cadr actions))) 5))
+    (with-temp-buffer
+      (insert (pilish--conversation-tree catalog))
+      (should (equal (pilish--visible-text (point-min) (point-max))
+                     (concat "Pi sessions · 5 chats\nCoordinate review (coordinator) · 6 turns · 42% ctx\n"
+                             "├─ Explore files (explorer) · 2 turns · ? ctx\n"
+                             "├─ Review protocol (reviewer #a17c) · 4 turns · 18% ctx\n"
+                             "│  ├─ Run tests (tester) · 3 turns · 25% ctx\n"
+                             "│  └─ Rerun tests (tester) · resumed · same chat · 2 turns · 31% ctx\n"
+                             "└─ Review interface (reviewer #b92e)\n")))
+      (goto-char (point-min))
+      (search-forward "#a17c")
+      (should-not (button-at (1- (point))))
+      (should-not (get-text-property (1- (point)) 'pilish-subagent-name))
+      (goto-char (point-min))
+      (search-forward "Coordinate review")
+      (should (button-at (1- (point))))
+      (should (get-text-property (1- (point)) 'pilish-subagent-name))
+      (search-forward "(coordinator)")
+      (should-not (button-at (1- (point))))
+      (should-not (get-text-property (1- (point)) 'pilish-subagent-name))
+      (search-forward "42% ctx")
+      (should-not (button-at (1- (point))))
+      (should-not (get-text-property (1- (point)) 'face))
+      (should-not (get-text-property (1- (point)) 'pilish-subagent-name))
+      (search-forward "└─ Rerun tests")
+      (should-not (button-at (1- (point))))
+      (search-forward "(tester) · resumed")
+      (should-not (button-at (1- (point))))
+      (should-not (get-text-property (1- (point)) 'pilish-subagent-name))
+      (let* ((fractional (pilish-test--recursive-conversation-declaration))
+             (first (aref (plist-get fractional :items) 0)))
+        (setf (plist-get (plist-get first :stats) :contextPercent) 41.714285714285715)
+        (with-temp-buffer
+          (insert (pilish--conversation-tree (pilish-test--snapshot-catalog fractional)))
+          (goto-char (point-min))
+          (should (search-forward "Coordinate review (coordinator) · 6 turns · 42% ctx")))))))
+
+(ert-deftest pilish-test-snapshot-recursive-old-v2-tree-unchanged ()
+  "Declarations without decoration keep the exact legacy tree text."
+  (let ((declaration (pilish-test--recursive-conversation-declaration)))
+    (setf (plist-get declaration :items)
+          (vconcat (mapcar (lambda (row)
+                             (cl-loop for (key value) on row by #'cddr
+                                      unless (memq key '(:title :stats)) append (list key value)))
+                           (append (plist-get declaration :items) nil))))
+    (with-temp-buffer
+      (insert (pilish--conversation-tree (pilish-test--snapshot-catalog declaration)))
+      (let ((expected (concat "Pi sessions · 5 chats\ncoordinator\n├─ explorer\n"
+                              "├─ reviewer #a17c\n│  ├─ tester\n"
+                              "│  └─ tester · resumed · same chat\n└─ reviewer #b92e\n")))
+        (should (equal (pilish--visible-text (point-min) (point-max)) expected))
+        (should (equal (buffer-substring-no-properties (point-min) (point-max))
+                       (concat "~~~\n" expected "~~~\n")))))))
+
+(ert-deftest pilish-test-snapshot-recursive-invalid-decoration-preserves-links ()
+  "Invalid optional decoration is omitted without changing chat identity."
+  (dolist (value '(nil :null 42 "" "two\nlines" "bidi\u202etitle"))
+    (let* ((declaration (pilish-test--recursive-conversation-declaration))
+           (row (aref (plist-get declaration :items) 0)))
+      (setf (plist-get row :title) value)
+      (let* ((catalog (pilish-test--snapshot-catalog declaration))
+             (occurrence (car (pilish--conversation-catalog-occurrences catalog))))
+        (should-not (pilish--conversation-occurrence-title occurrence))
+        (should (= 5 (length (pilish-test--snapshot-catalog-rows catalog)))))))
+  (dolist (value '(nil :null 42 [] (:turns "3" :contextPercent 10)
+                      (:turns 3) (:turns 3 :contextPercent "10")
+                      (:turns -3 :contextPercent 10) (:turns 3 :contextPercent 140)
+                      (:turns 1000001 :contextPercent 10)))
+    (let* ((declaration (pilish-test--recursive-conversation-declaration))
+           (row (aref (plist-get declaration :items) 0)))
+      (setf (plist-get row :stats) value)
+      (let ((catalog (pilish-test--snapshot-catalog declaration)))
+        (should-not (pilish--conversation-occurrence-stats
+                     (car (pilish--conversation-catalog-occurrences catalog))))
+        (should (= 5 (length (pilish-test--snapshot-catalog-rows catalog))))))))
+
+(ert-deftest pilish-test-snapshot-recursive-v1-is-flat-legacy ()
+  "Old multi-item declarations keep both chats and claim no recursive coverage."
+  (let* ((catalog (pilish-test--snapshot-catalog
+                   '(:version 1 :root "/saved/ledger"
+                     :items [(:sessionId "one-a17c" :file "a" :label "reviewer")
+                             (:sessionId "two-b92e" :file "b" :label "reviewer")]))))
+    (should (= (pilish--conversation-catalog-version catalog) 1))
+    (should-not (pilish--conversation-catalog-coverage catalog))
+    (should (= (length (pilish--conversation-catalog-roots catalog)) 2))
+    (should (equal (mapcar #'cadr (pilish-test--snapshot-catalog-rows catalog)) '("one-a17c" "two-b92e")))
+    (with-temp-buffer
+      (insert (pilish--conversation-tree catalog))
+      (should (equal (pilish--visible-text (point-min) (point-max))
+                     "Pi sessions · 2 chats\nreviewer #a17c\nreviewer #b92e\n")))))
+
+(ert-deftest pilish-test-snapshot-duplicate-label-suffixes-expand-until-distinct ()
+  "Equal four-character suffixes expand without changing either exact target."
+  (let* ((catalog (pilish-test--snapshot-catalog
+                   '(:version 1 :root "/saved/ledger"
+                     :items [(:sessionId "session-a-abcd" :file "a" :label "reviewer")
+                             (:sessionId "session-b-abcd" :file "b" :label "reviewer")])))
+         (actions (pilish-test--snapshot-catalog-rows catalog)))
+    (should (equal (mapcar #'cadr actions) '("session-a-abcd" "session-b-abcd")))
+    (with-temp-buffer
+      (insert (pilish--conversation-tree catalog))
+      (should (equal (pilish--visible-text (point-min) (point-max))
+                     "Pi sessions · 2 chats\nreviewer #a-abcd\nreviewer #b-abcd\n")))))
+
+(ert-deftest pilish-test-snapshot-recursive-capture-copies-without-io ()
+  "Identity, labels, ancestry and saves are copied before any filesystem boundary."
+  (require 'tramp)
+  (let* ((declaration (pilish-test--recursive-conversation-declaration))
+         (anchor (copy-sequence "/ssh:bastion|sudo:host:/sessions/parent.jsonl"))
+         (pilish--state (list :session-file anchor))
+         catalog)
+    (let ((comp-enable-subr-trampolines nil))
+      (cl-letf (((symbol-function 'insert-file-contents) (lambda (&rest _) (ert-fail "Capture read a save")))
+                ((symbol-function 'file-readable-p) (lambda (&rest _) (ert-fail "Capture probed a save")))
+                ((symbol-function 'file-exists-p) (lambda (&rest _) (ert-fail "Capture probed a save")))
+                ((symbol-function 'file-attributes) (lambda (&rest _) (ert-fail "Capture statted a save")))
+                ((symbol-function 'file-truename) (lambda (&rest _) (ert-fail "Capture resolved a save")))
+                ((symbol-function 'file-in-directory-p) (lambda (&rest _) (ert-fail "Capture checked containment"))))
+        (setq catalog (pilish--conversation-capture "renamed_tool" [] (list :savedConversations declaration)))))
+    (should-not (pilish--conversation-catalog-error catalog))
+    (let ((before (pilish--conversation-tree catalog)))
+      (dolist (string (append (list anchor (plist-get declaration :root) (plist-get declaration :coverage))
+                              (cl-loop for row across (plist-get declaration :items)
+                                       append (list (plist-get row :id) (plist-get row :parentId)
+                                                    (plist-get row :kind) (plist-get row :sessionId)
+                                                    (plist-get row :label) (plist-get row :title)
+                                                    (plist-get (plist-get row :save) :file)
+                                                    (plist-get (plist-get row :save) :readiness)))))
+        (when (stringp string) (aset string 0 ?X)))
+      (setf (plist-get (plist-get (aref (plist-get declaration :items) 0) :stats) :turns) 999)
+      (should (equal-including-properties before (pilish--conversation-tree catalog)))
+      (should (equal (pilish--conversation-catalog-root catalog) "/ssh:bastion|sudo:host:/saved/ledger"))
+      (should (= (length (pilish-test--snapshot-catalog-rows catalog)) 5)))))
+
+(ert-deftest pilish-test-snapshot-recursive-explicit-precedence-and-adapters ()
+  "Adapters keep all three arguments, and cannot override an explicit bad field."
+  (let* ((declaration (pilish-test--recursive-conversation-declaration))
+         (content [(:type "text" :text "Producer receipt")])
+         (details '(:other "metadata"))
+         (calls 0)
+         (pilish--state '(:session-file "/saved/parent.jsonl"))
+         (pilish-saved-conversation-functions
+          (list (lambda (name observed-content observed-details)
+                  (cl-incf calls)
+                  (should (equal name "custom_producer"))
+                  (should (eq content observed-content))
+                  (should (eq details observed-details))
+                  declaration))))
+    (should (= (length (pilish-test--snapshot-catalog-rows
+                        (pilish--conversation-capture "custom_producer" content details))) 5))
+    (dolist (bad '(nil :null 7 [] (:version 99)))
+      (setq details (list :savedConversations bad))
+      (should (pilish--conversation-catalog-error
+               (pilish--conversation-capture "custom_producer" content details))))
+    (should (= calls 1))))
+
+(ert-deftest pilish-test-snapshot-recursive-association-conflicts-preserve-siblings ()
+  "Neither side of an association conflict wins, in either declaration order."
+  (dolist (conflict '(session file both))
+    (dolist (reverse-p '(nil t))
+      (let* ((declaration (pilish-test--recursive-conversation-declaration))
+             (items (plist-get declaration :items)))
+        (when (memq conflict '(session both))
+          (setf (plist-get (plist-get (aref items 4) :save) :file) "other-tester.jsonl"))
+        (when (memq conflict '(file both))
+          (setf (plist-get (plist-get (aref items 5) :save) :file) "reviewer-a.jsonl"))
+        (when reverse-p (setf (plist-get declaration :items) (vconcat (reverse (append items nil)))))
+        (let* ((catalog (pilish-test--snapshot-catalog declaration))
+               (actions (pilish-test--snapshot-catalog-rows catalog)))
+          (should-not (pilish--conversation-catalog-error catalog))
+          (should (= (length actions) (pcase conflict ('session 4) ('file 3) ('both 2))))
+          (dolist (row (pilish--conversation-catalog-occurrences catalog))
+            (let ((session (pilish--conversation-occurrence-session row)))
+              (when (or (and (memq conflict '(session both))
+                             (string-suffix-p "f046" (pilish--conversation-session-id session)))
+                        (and (memq conflict '(file both))
+                             (equal (pilish--conversation-occurrence-label row) "reviewer")))
+                (should (pilish--conversation-session-reason session))
+                (should-not (pilish--conversation-session-target session))
+                (should-not (member (pilish--conversation-session-id session) (mapcar #'cadr actions)))))))))))
+
+(ert-deftest pilish-test-snapshot-recursive-invalid-graphs-reject-the-declaration ()
+  "Dangling parents, multiple roots, duplicate occurrence IDs and cycles fail closed."
+  (dolist (case '(dangling multiple-roots duplicate-id root-cycle disconnected-cycle missing-parent unsupported))
+    (let* ((declaration (pilish-test--recursive-conversation-declaration))
+           (items (plist-get declaration :items)))
+      (pcase case
+        ('dangling (setf (plist-get (aref items 1) :parentId) "missing"))
+        ('multiple-roots (setf (plist-get (aref items 1) :parentId) :null))
+        ('duplicate-id (setf (plist-get (aref items 1) :id) "episode-coordinator"))
+        ('root-cycle (setf (plist-get (aref items 0) :parentId) "episode-coordinator"))
+        ('disconnected-cycle (setf (plist-get (aref items 2) :parentId) "episode-tester"))
+        ('missing-parent (setf (aref items 1)
+                               '(:id "no-parent" :kind "start" :sessionId "child"
+                                 :save (:kind "pi-v3" :file "child" :readiness "checked"))))
+        ('unsupported (setf (plist-get declaration :version) 3)))
+      (let ((catalog (pilish-test--snapshot-catalog declaration)))
+        (should (pilish--conversation-catalog-error catalog))
+        (should-not (pilish-test--snapshot-catalog-rows catalog))))))
+
+(ert-deftest pilish-test-snapshot-recursive-row-and-utf8-bounds ()
+  "The 1024-row and 4096-byte limits accept their edges without recursive calls."
+  (let* ((items (vconcat
+                 (cl-loop for index below 1024
+                          collect (list :id (format "o%d" index)
+                                        :parentId (if (zerop index) :null (format "o%d" (1- index)))
+                                        :kind "start" :sessionId (format "s%d" index)
+                                        :save (list :kind "pi-v3" :file (format "%d.jsonl" index)
+                                                    :readiness "checked")))))
+         (declaration (list :version 2 :root "/saved/ledger" :coverage "complete" :items items))
+         (max-lisp-eval-depth 200)
+         (catalog (pilish-test--snapshot-catalog declaration)))
+    (should-not (pilish--conversation-catalog-error catalog))
+    (should (= (length (pilish-test--snapshot-catalog-rows catalog)) 1024))
+    (setf (plist-get declaration :items) (vconcat items (vector (aref items 0))))
+    (should (pilish--conversation-catalog-error (pilish-test--snapshot-catalog declaration))))
+  (dolist (value (list (make-string 4096 ?x) (make-string 1024 #x1f600)))
+    (let ((declaration (pilish-test--recursive-conversation-declaration)))
+      (setf (plist-get (aref (plist-get declaration :items) 1) :label) value)
+      (should (= (length (pilish-test--snapshot-catalog-rows (pilish-test--snapshot-catalog declaration))) 5))
+      (setf (plist-get (aref (plist-get declaration :items) 1) :label) (concat value "x"))
+      (should (= (length (pilish-test--snapshot-catalog-rows (pilish-test--snapshot-catalog declaration))) 4))))
+  (dolist (field '(:id :parentId :sessionId :label :file :reason :root))
+    (let* ((declaration (pilish-test--recursive-conversation-declaration))
+           (row (aref (plist-get declaration :items) 1))
+           (huge (make-string 1025 #x1f600)))
+      (pcase field
+        (:root (setf (plist-get declaration :root) huge))
+        (:file (setf (plist-get (plist-get row :save) :file) huge))
+        (:reason (setf (plist-get row :save) (list :kind "unavailable" :reason huge)))
+        (_ (setf (plist-get row field) huge)))
+      (let ((catalog (pilish-test--snapshot-catalog declaration)))
+        (if (memq field '(:id :parentId :root))
+            (should (pilish--conversation-catalog-error catalog))
+          (should (= (length (pilish-test--snapshot-catalog-rows catalog)) 4)))))))
+
+(ert-deftest pilish-test-snapshot-recursive-malformed-saves-and-labels-are-inert ()
+  "Bad save payloads and unsafe text cannot withdraw valid siblings."
+  (dolist (save '(nil :null t [] "not an object" (:kind "pi-v3" :file "a" :readiness :null)
+                     (:kind "pi-v3" :file "../escape" :readiness "checked")
+                     (:kind "pi-v3" :file "a\\b" :readiness "checked")
+                     (:kind "pi-v3" :file "~/escape" :readiness "checked")
+                     (:kind "pi-v3" :file "a//b" :readiness "checked")
+                     (:kind "pi-v3" :file "/absolute" :readiness "checked")
+                     (:kind "unavailable" :reason "") (:kind "future" :file "a")))
+    (let ((declaration (pilish-test--recursive-conversation-declaration)))
+      (setf (plist-get (aref (plist-get declaration :items) 1) :save) save)
+      (should (= (length (pilish-test--snapshot-catalog-rows (pilish-test--snapshot-catalog declaration))) 4))))
+  (dolist (label '(nil :null 42 "" "two\nlines" "nul\0label" "bidi\u202elabel" "line\u2028separator"))
+    (let ((declaration (pilish-test--recursive-conversation-declaration)))
+      (setf (plist-get (aref (plist-get declaration :items) 1) :label) label)
+      (should (= (length (pilish-test--snapshot-catalog-rows (pilish-test--snapshot-catalog declaration))) 4)))))
+
+(ert-deftest pilish-test-snapshot-recursive-unavailable-parent-and-resumed-save ()
+  "An unavailable chat stays named; valid children and later checked saves work."
+  (let* ((declaration (pilish-test--recursive-conversation-declaration))
+         (items (plist-get declaration :items)))
+    (setf (plist-get (aref items 0) :save) '(:kind "unavailable" :reason "No save was written")
+          (plist-get (aref items 3) :save) '(:kind "unavailable" :reason "Not yet saved"))
+    (let* ((catalog (pilish-test--snapshot-catalog declaration))
+           (actions (pilish-test--snapshot-catalog-rows catalog)))
+      (should (= (length actions) 4))
+      (should (equal (mapcar #'car actions) '("Explore files" "Review protocol" "Run tests" "Review interface")))
+      (with-temp-buffer
+        (insert (pilish--conversation-tree catalog))
+        (goto-char (point-min))
+        (search-forward "Coordinate review")
+        (should-not (button-at (1- (point))))
+        (should (equal (get-text-property (1- (point)) 'help-echo) "No save was written"))
+        (search-forward "(coordinator)")
+        (should-not (button-at (1- (point))))
+        (should-not (get-text-property (1- (point)) 'help-echo))
+        (should (string-match-p "Coordinate review (coordinator) · unavailable · 6 turns · 42% ctx\n├─ Explore files"
+                                (pilish--visible-text (point-min) (point-max))))))))
+
+(ert-deftest pilish-test-snapshot-recursive-persisted-v2-opens-every-exact-chat ()
+  "Ordinary saved tool results replay all five independent targets from disk."
+  (pilish-test--with-snapshot-files
+    (let* ((declaration (pilish-test--recursive-conversation-declaration root))
+           (items (plist-get declaration :items))
+           (details (list :savedConversations declaration))
+           snapshot observer)
+      (seq-doseq (row items)
+        (let ((file (plist-get (plist-get row :save) :file)) (id (plist-get row :sessionId)))
+          (pilish-test--snapshot-write
+           (expand-file-name file root)
+           (list (list :type "session" :version 3 :id id :cwd directory)
+                 (pilish-test--snapshot-message "answer" nil (concat "Saved exact chat " id))))))
+      (pilish-test--snapshot-write
+       child (list header '(:type "message" :id "call" :parentId :null
+                            :message (:role "assistant" :content [(:type "toolCall" :id "worker"
+                                                                   :name "subagent" :arguments ())]))
+                   (list :type "message" :id "result" :parentId "call"
+                         :message (list :role "toolResult" :toolCallId "worker" :content [] :details details))))
+      (save-window-excursion
+        (unwind-protect
+            (progn
+              (setq snapshot (pilish-open-subagent-snapshot target))
+              (should (= (length (pilish-test--snapshot-name-rows)) 5))
+              (let ((expected (pilish-test--snapshot-name-rows)))
+                (pilish--cool-completed-tool-blocks
+                 (pilish--tool-block-overlays-in-region (point-min) (point-max)))
+                (font-lock-flush)
+                (font-lock-ensure)
+                (should (equal (pilish-test--snapshot-name-rows) expected))
+                (dolist (row expected)
+                  (goto-char (point-min))
+                  (while (not (equal (cadr row)
+                                    (when-let* ((value (get-text-property (point) 'pilish-subagent-name))
+                                                ((pilish--snapshot-target-p value)))
+                                      (pilish--snapshot-target-session-id value))))
+                    (pilish-next-subagent-name))
+                  (call-interactively (key-binding (kbd "RET")))
+                  (setq observer (current-buffer))
+                  (should (derived-mode-p 'pilish-snapshot-mode))
+                  (should (equal (pilish--snapshot-target-session-id
+                                  (pilish--snapshot-observer-target pilish--snapshot-observer)) (cadr row)))
+                  (should (string-match-p (concat "Saved exact chat " (cadr row)) (buffer-string)))
+                  (pilish-snapshot-quit)
+                  (switch-to-buffer snapshot))))
+          (pilish-test--kill-live-buffers observer snapshot))))))
 
 (provide 'pilish-snapshot-test)
