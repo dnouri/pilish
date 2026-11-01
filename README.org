@@ -992,10 +992,13 @@ Choose one of three input window display styles:
 
 The session header line sits at the top of the chat window by
 default.  Put it back above the input window, as in earlier Pilish
-versions, with:
+versions, or remove it entirely — including the inactivity warning,
+which appears nowhere else — with:
 
 #+begin_src emacs-lisp
 (setopt pilish-header-line-location 'input)
+;; or, for no session header line at all:
+;; (setopt pilish-header-line-location 'none)
 #+end_src
 
 Changing the option moves the header line in existing sessions too;

@@ -5206,7 +5206,7 @@ Pi handles command expansion on the server side."
 (ert-deftest pilish-test-input-mode-has-header-line-only-on-request ()
   "Input mode owns the header line only when located there.
 The default location is the chat window, so a fresh input buffer
-has no header line of its own."
+has no header line of its own; `none' owns it nowhere."
   (with-temp-buffer
     (pilish-input-mode)
     (should-not header-line-format))
@@ -5214,7 +5214,11 @@ has no header line of its own."
     (with-temp-buffer
       (pilish-input-mode)
       (should (equal '(:eval (pilish--header-line-string))
-                     header-line-format)))))
+                     header-line-format))))
+  (let ((pilish-header-line-location 'none))
+    (with-temp-buffer
+      (pilish-input-mode)
+      (should-not header-line-format))))
 
 (ert-deftest pilish-test-chat-mode-has-header-line-by-default ()
   "Chat mode owns the session header line by default."
@@ -5222,10 +5226,11 @@ has no header line of its own."
     (pilish-chat-mode)
     (should (equal '(:eval (pilish--header-line-string))
                    header-line-format)))
-  (let ((pilish-header-line-location 'input))
-    (with-temp-buffer
-      (pilish-chat-mode)
-      (should-not header-line-format))))
+  (dolist (location '(input none))
+    (let ((pilish-header-line-location location))
+      (with-temp-buffer
+        (pilish-chat-mode)
+        (should-not header-line-format)))))
 
 (ert-deftest pilish-test-header-line-location-moves-live-buffers ()
   "Customizing the location moves an existing session's header line.
@@ -5253,6 +5258,10 @@ buffers in place; unrelated modes keep their own header lines."
           (should-not (buffer-local-value 'header-line-format chat))
           (should (equal '(:eval (pilish--header-line-string))
                          (buffer-local-value 'header-line-format input)))
+          (customize-set-variable 'pilish-header-line-location 'none)
+          (should (eq 'none pilish-header-line-location))
+          (should-not (buffer-local-value 'header-line-format chat))
+          (should-not (buffer-local-value 'header-line-format input))
           (customize-set-variable 'pilish-header-line-location 'chat)
           (should (equal '(:eval (pilish--header-line-string))
                          (buffer-local-value 'header-line-format chat)))

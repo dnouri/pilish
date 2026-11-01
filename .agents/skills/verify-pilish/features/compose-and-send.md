@@ -5,7 +5,7 @@ Pilish opens a chat and input pair, then sends consecutive prompts without losin
 ## Sub-features
 
 - `compose-layout` opens a live session with chat and input windows.
-- `compose-header` renders the session header line at the top of the chat window by default, keeps it out of the input window, and moves it between the live windows when `pilish-header-line-location` is set to `input`.
+- `compose-header` renders the session header line at the top of the chat window by default, keeps it out of the input window, moves it between the live windows when `pilish-header-line-location` is set to `input`, and removes it from both windows when set to `none`.
 - `compose-send` submits a prompt and displays its reply.
 - `compose-sequential` submits a second prompt after the first turn and returns to idle.
 - `compose-fit-input` sizes a `fit` input window to the typed draft, stops at its cap, refits on frame-width changes, and shrinks after sending.
@@ -15,7 +15,7 @@ Pilish opens a chat and input pair, then sends consecutive prompts without losin
 
 - Run `M-x pilish` from a project directory.
 - Read the model, thinking level, activity, cost, and context status in the header line above the chat, and click model or thinking level there.
-- Set `pilish-header-line-location` to `input` to move the header line above the input window, as in earlier Pilish versions, in existing sessions without restarting them.
+- Set `pilish-header-line-location` to `input` to move the header line above the input window, as in earlier Pilish versions, or to `none` to remove it, in existing sessions without restarting them.
 - Enter a prompt in the input buffer and press `C-c C-c`.
 - Enter and send another prompt after the first reply.
 - Set the global `pilish-input-window-height` option to `fit`, type a multi-line draft, resize the frame, and press `C-c C-c`.

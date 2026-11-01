@@ -3209,7 +3209,8 @@ Removes common prefixes like \"Claude \" and suffixes like \" (latest)\"."
   "Return the `header-line-format' value for the current buffer, or nil.
 Chat buffers own the session header line when
 `pilish-header-line-location' is `chat'; input buffers own it when
-the location is `input'.  Buffers of any other mode never own it."
+the location is `input'.  Under `none', and in buffers of any other
+mode, no buffer owns it."
   (when (pcase pilish-header-line-location
           ('chat (derived-mode-p 'pilish-chat-mode))
           ('input (derived-mode-p 'pilish-input-mode)))
@@ -3244,14 +3245,17 @@ status, and any attached prompt image.
 
 When `chat' (the default), the header line appears at the top of the
 chat window.  When `input', it appears above the input window, as
-in Pilish versions before this option existed.
+in Pilish versions before this option existed.  When `none', no
+session header line is shown; the `waiting for Pi' note and the
+inactivity warning appear nowhere else, so they go with it.
 
 Setting this option moves the header line in existing sessions;
 new sessions use the current value when their buffers are created.
 This is a global option for all sessions; buffer-local values are
 not supported."
   :type '(choice (const :tag "Top of the chat window (default)" chat)
-                 (const :tag "Above the input window" input))
+                 (const :tag "Above the input window" input)
+                 (const :tag "No header line" none))
   :set #'pilish--set-header-line-location
   :group 'pilish)
 

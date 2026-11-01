@@ -199,6 +199,13 @@ line between the live windows."
                              (format-mode-line header-line-format))
              :chat-has-header (pilish-gui-test--window-header-p chat-win)
              :input-has-header (pilish-gui-test--window-header-p input-win)))
+      ;; `none' removes the header line from both live windows.
+      (customize-set-variable 'pilish-header-line-location 'none)
+      (redisplay t)
+      (should-not (buffer-local-value 'header-line-format chat))
+      (should-not (buffer-local-value 'header-line-format input))
+      (should-not (pilish-gui-test--window-header-p chat-win))
+      (should-not (pilish-gui-test--window-header-p input-win))
       ;; Leave the global option at its default for later tests.
       (customize-set-variable 'pilish-header-line-location 'chat))))
 
