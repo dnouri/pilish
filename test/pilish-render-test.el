@@ -8462,6 +8462,112 @@ See https://github.com/dnouri/pilish/issues/176."
       (when (process-live-p one) (delete-process one))
       (delete-process two))))
 
+(ert-deftest pilish-test-extension-ui-editor-release-restores-windows ()
+  "Every editor close path restores the prompt window and preserves its mode."
+  (dolist (action '(submit cancel kill stop exit))
+    (save-window-excursion
+      (let ((process (make-pipe-process :name "pilish-editor-release" :noquery t
+                                        :sentinel #'pilish--process-sentinel))
+            (draft (generate-new-buffer " *pilish-editor-draft*"))
+            editor responses)
+        (unwind-protect
+            (cl-letf (((symbol-function 'pilish--send-extension-ui-response)
+                       (lambda (_proc response) (push response responses))))
+              (delete-other-windows)
+              (switch-to-buffer draft)
+              (emacs-lisp-mode)
+              (insert "unsent draft")
+              (setq editor (pilish--extension-ui-editor
+                            (pilish-test--editor-request "release" "editor text")
+                            process))
+              (should (= 2 (length (window-list))))
+              (pcase action
+                ('submit (pilish-editor-submit))
+                ('cancel (pilish-editor-cancel))
+                ('kill (kill-buffer editor))
+                ('stop (pilish--close-process-editors process))
+                ('exit (delete-process process)))
+              (should-not (buffer-live-p editor))
+              (should (= 1 (length (window-list))))
+              (should (eq (window-buffer) draft))
+              (should (equal (with-current-buffer draft (buffer-string)) "unsent draft"))
+              (should (eq (buffer-local-value 'major-mode draft) 'emacs-lisp-mode))
+              (should (equal responses
+                             (unless (eq action 'exit)
+                               (list (append '(:type "extension_ui_response" :id "release")
+                                             (if (eq action 'submit)
+                                                 '(:value "editor text")
+                                               '(:cancelled t))))))))
+          (when (buffer-live-p editor) (kill-buffer editor))
+          (kill-buffer draft)
+          (when (process-live-p process) (delete-process process)))))))
+
+(ert-deftest pilish-test-extension-ui-editor-mode-change-retains-text ()
+  "Mode changes cancel once, retain text, and leave the prompt's mode alone."
+  (dolist (mode '(text-mode pilish-editor-mode))
+    (save-window-excursion
+      (let ((process (make-pipe-process :name "pilish-editor-mode" :noquery t))
+            (draft (generate-new-buffer " *pilish-editor-draft*"))
+            editor responses)
+        (unwind-protect
+            (cl-letf (((symbol-function 'pilish--send-extension-ui-response)
+                       (lambda (_proc response) (push response responses))))
+              (delete-other-windows)
+              (switch-to-buffer draft)
+              (emacs-lisp-mode)
+              (insert "unsent draft")
+              (setq editor (pilish--extension-ui-editor
+                            (pilish-test--editor-request "mode" "keep this text")
+                            process))
+              (funcall mode)
+              (should (buffer-live-p editor))
+              (should (eq (buffer-local-value 'major-mode editor) mode))
+              (should (equal (with-current-buffer editor (buffer-string)) "keep this text"))
+              (should-not (get-buffer-window editor t))
+              (should (= 1 (length (window-list))))
+              (should (eq (window-buffer) draft))
+              (should (eq (buffer-local-value 'major-mode draft) 'emacs-lisp-mode))
+              (should (equal (with-current-buffer draft (buffer-string)) "unsent draft"))
+              (should-not (process-get process 'pilish-editor-buffers))
+              (should-not (memq #'pilish--editor-release
+                                (buffer-local-value 'kill-buffer-hook editor)))
+              (should-not (memq #'pilish--editor-release
+                                (buffer-local-value 'change-major-mode-hook editor)))
+              (kill-buffer editor)
+              (should (equal responses
+                             '((:type "extension_ui_response" :id "mode" :cancelled t)))))
+          (when (buffer-live-p editor) (kill-buffer editor))
+          (kill-buffer draft)
+          (delete-process process))))))
+
+(ert-deftest pilish-test-extension-ui-editor-submit-cleans-up-after-send-error ()
+  "A failed response still closes the captured editor, not a selected draft."
+  (dolist (command '(pilish-editor-submit pilish-editor-cancel))
+    (save-window-excursion
+      (let ((process (make-pipe-process :name "pilish-editor-error" :noquery t))
+            (draft (generate-new-buffer " *pilish-editor-draft*"))
+            editor responses)
+        (unwind-protect
+            (progn
+              (delete-other-windows)
+              (switch-to-buffer draft)
+              (setq editor (pilish--extension-ui-editor
+                            (pilish-test--editor-request "error") process))
+              (cl-letf (((symbol-function 'pilish--send-extension-ui-response)
+                         (lambda (_proc response)
+                           (push response responses)
+                           (set-buffer draft)
+                           (error "Send failed"))))
+                (should-error (funcall command)))
+              (should-not (buffer-live-p editor))
+              (should (buffer-live-p draft))
+              (should (= 1 (length responses)))
+              (should (= 1 (length (window-list))))
+              (should-not (process-get process 'pilish-editor-buffers)))
+          (when (buffer-live-p editor) (kill-buffer editor))
+          (when (buffer-live-p draft) (kill-buffer draft))
+          (delete-process process))))))
+
 ;; W1 Task 1 fixture: a valid supported-dialog request. File-local to these tests.
 (defun pilish-test--extension-dialog-request (method &optional id)
   "Return a supported METHOD request with ID, defaulting to METHOD."
