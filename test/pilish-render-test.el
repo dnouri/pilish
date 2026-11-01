@@ -8436,24 +8436,313 @@ See https://github.com/dnouri/pilish/issues/176."
         (should (equal (plist-get response-sent :id) "req-9"))
         (should (eq (plist-get response-sent :cancelled) t))))))
 
-(ert-deftest pilish-test-extension-ui-editor-cancels ()
-  "extension_ui_request editor method sends cancelled (not supported)."
-  (let ((response-sent nil))
-    (cl-letf (((symbol-function 'pilish--send-extension-ui-response)
-               (lambda (_proc msg)
-                 (setq response-sent msg)))
-              ((symbol-function 'message) #'ignore))
-      (with-temp-buffer
-        (pilish-chat-mode)
-        (let ((pilish--process t))
-          (pilish--handle-extension-ui-request
-           '(:type "extension_ui_request"
-             :id "req-10"
-             :method "editor"
-             :title "Edit:"
-             :prefill "some text")))
-        (should response-sent)
-        (should (eq (plist-get response-sent :cancelled) t))))))
+(defun pilish-test--editor-request (id &optional prefill)
+  "Return an editor request with ID and PREFILL."
+  (list :type "extension_ui_request" :id id :method "editor"
+        :title "Edit:" :prefill prefill))
+
+(ert-deftest pilish-test-extension-ui-editor-submits-edited-text ()
+  "An editor request opens a separate prefilled buffer whose text is sent once."
+  (let ((process (make-pipe-process :name "pilish-editor-submit" :noquery t))
+        (draft (generate-new-buffer " *pilish-editor-draft*"))
+        responses editor)
+    (unwind-protect
+        (cl-letf (((symbol-function 'pop-to-buffer) #'ignore)
+                  ((symbol-function 'pilish--send-extension-ui-response)
+                   (lambda (proc response) (push (cons proc response) responses))))
+          (with-current-buffer draft (insert "unsent draft"))
+          (with-temp-buffer
+            (pilish-chat-mode)
+            (setq pilish--process process
+                  pilish--input-buffer draft)
+            (pilish--handle-extension-ui-request
+             (pilish-test--editor-request "req-10" "first\nsecond")))
+          (setq editor (car (process-get process 'pilish-editor-buffers)))
+          (should (buffer-live-p editor))
+          (should (string-prefix-p "*pilish-editor: Edit:*" (buffer-name editor)))
+          (with-current-buffer editor
+            (should (eq major-mode 'pilish-editor-mode))
+            (should (equal (buffer-string) "first\nsecond"))
+            (should (= (point) (point-max)))
+            (should-not responses)
+            (insert "\nthird")
+            (pilish-editor-submit))
+          (should-not (buffer-live-p editor))
+          (should-not (process-get process 'pilish-editor-buffers))
+          (should (equal responses
+                         `((,process :type "extension_ui_response" :id "req-10"
+                                     :value "first\nsecond\nthird"))))
+          (should (equal (with-current-buffer draft (buffer-string)) "unsent draft")))
+      (when (buffer-live-p editor) (kill-buffer editor))
+      (kill-buffer draft)
+      (delete-process process))))
+
+(ert-deftest pilish-test-extension-ui-editor-cancels-once ()
+  "Cancelling or killing an editor sends exactly one cancellation."
+  (let ((process (make-pipe-process :name "pilish-editor-cancel" :noquery t))
+        responses editors)
+    (unwind-protect
+        (cl-letf (((symbol-function 'pop-to-buffer) #'ignore)
+                  ((symbol-function 'pilish--send-extension-ui-response)
+                   (lambda (_proc response) (push response responses))))
+          (let ((cancelled (pilish--extension-ui-editor
+                            (pilish-test--editor-request "cancel" "kept") process))
+                (killed (pilish--extension-ui-editor
+                         (pilish-test--editor-request "kill") process)))
+            (setq editors (list cancelled killed))
+            (with-current-buffer cancelled (pilish-editor-cancel))
+            (kill-buffer killed)
+            (should-not (buffer-live-p cancelled))
+            (should-not (process-get process 'pilish-editor-buffers))
+            (should (equal (reverse responses)
+                           '((:type "extension_ui_response" :id "cancel" :cancelled t)
+                             (:type "extension_ui_response" :id "kill" :cancelled t))))))
+      (dolist (editor editors)
+        (when (buffer-live-p editor) (kill-buffer editor)))
+      (delete-process process))))
+
+(ert-deftest pilish-test-extension-ui-editor-cleanup-is-process-owned ()
+  "Process exit closes only that process's editors; live cleanup cancels."
+  (let ((one (make-pipe-process :name "pilish-editor-one" :noquery t
+                                :sentinel #'pilish--process-sentinel))
+        (two (make-pipe-process :name "pilish-editor-two" :noquery t))
+        editor-one editor-two responses)
+    (unwind-protect
+        (cl-letf (((symbol-function 'pop-to-buffer) #'ignore)
+                  ((symbol-function 'pilish--send-extension-ui-response)
+                   (lambda (process response) (push (cons process response) responses))))
+          (setq editor-one (pilish--extension-ui-editor
+                            (pilish-test--editor-request "one") one)
+                editor-two (pilish--extension-ui-editor
+                            (pilish-test--editor-request "two") two))
+          (delete-process one)
+          (should-not (buffer-live-p editor-one))
+          (should (buffer-live-p editor-two))
+          ;; A dead process cannot receive a cancellation.
+          (should-not responses)
+          (pilish--close-process-editors two)
+          (should-not (buffer-live-p editor-two))
+          (should (equal responses
+                         `((,two :type "extension_ui_response" :id "two" :cancelled t))))
+          (should (process-live-p two)))
+      (when (buffer-live-p editor-one) (kill-buffer editor-one))
+      (when (buffer-live-p editor-two) (kill-buffer editor-two))
+      (when (process-live-p one) (delete-process one))
+      (delete-process two))))
+
+(ert-deftest pilish-test-extension-ui-editor-release-restores-windows ()
+  "Every editor close path restores the prompt window and preserves its mode."
+  (dolist (action '(submit cancel kill stop exit))
+    (save-window-excursion
+      (let ((process (make-pipe-process :name "pilish-editor-release" :noquery t
+                                        :sentinel #'pilish--process-sentinel))
+            (draft (generate-new-buffer " *pilish-editor-draft*"))
+            editor responses)
+        (unwind-protect
+            (cl-letf (((symbol-function 'pilish--send-extension-ui-response)
+                       (lambda (_proc response) (push response responses))))
+              (delete-other-windows)
+              (switch-to-buffer draft)
+              (emacs-lisp-mode)
+              (insert "unsent draft")
+              (setq editor (pilish--extension-ui-editor
+                            (pilish-test--editor-request "release" "editor text")
+                            process))
+              (should (= 2 (length (window-list))))
+              (pcase action
+                ('submit (pilish-editor-submit))
+                ('cancel (pilish-editor-cancel))
+                ('kill (kill-buffer editor))
+                ('stop (pilish--close-process-editors process))
+                ('exit (delete-process process)))
+              (should-not (buffer-live-p editor))
+              (should (= 1 (length (window-list))))
+              (should (eq (window-buffer) draft))
+              (should (equal (with-current-buffer draft (buffer-string)) "unsent draft"))
+              (should (eq (buffer-local-value 'major-mode draft) 'emacs-lisp-mode))
+              (should (equal responses
+                             (unless (eq action 'exit)
+                               (list (append '(:type "extension_ui_response" :id "release")
+                                             (if (eq action 'submit)
+                                                 '(:value "editor text")
+                                               '(:cancelled t))))))))
+          (when (buffer-live-p editor) (kill-buffer editor))
+          (kill-buffer draft)
+          (when (process-live-p process) (delete-process process)))))))
+
+(ert-deftest pilish-test-extension-ui-editor-mode-change-retains-text ()
+  "Mode changes cancel once, retain text, and leave the prompt's mode alone."
+  (dolist (mode '(text-mode pilish-editor-mode))
+    (save-window-excursion
+      (let ((process (make-pipe-process :name "pilish-editor-mode" :noquery t))
+            (draft (generate-new-buffer " *pilish-editor-draft*"))
+            editor responses)
+        (unwind-protect
+            (cl-letf (((symbol-function 'pilish--send-extension-ui-response)
+                       (lambda (_proc response) (push response responses))))
+              (delete-other-windows)
+              (switch-to-buffer draft)
+              (emacs-lisp-mode)
+              (insert "unsent draft")
+              (setq editor (pilish--extension-ui-editor
+                            (pilish-test--editor-request "mode" "keep this text")
+                            process))
+              (funcall mode)
+              (should (buffer-live-p editor))
+              (should (eq (buffer-local-value 'major-mode editor) mode))
+              (should (equal (with-current-buffer editor (buffer-string)) "keep this text"))
+              (should-not (get-buffer-window editor t))
+              (should (= 1 (length (window-list))))
+              (should (eq (window-buffer) draft))
+              (should (eq (buffer-local-value 'major-mode draft) 'emacs-lisp-mode))
+              (should (equal (with-current-buffer draft (buffer-string)) "unsent draft"))
+              (should-not (process-get process 'pilish-editor-buffers))
+              (should-not (memq #'pilish--editor-release
+                                (buffer-local-value 'kill-buffer-hook editor)))
+              (should-not (memq #'pilish--editor-release
+                                (buffer-local-value 'change-major-mode-hook editor)))
+              (kill-buffer editor)
+              (should (equal responses
+                             '((:type "extension_ui_response" :id "mode" :cancelled t)))))
+          (when (buffer-live-p editor) (kill-buffer editor))
+          (kill-buffer draft)
+          (delete-process process))))))
+
+(defun pilish-test--editor-release-after-cancellation-failure (action)
+  "Check that editor ACTION finishes after cancellation error or quit."
+  (dolist (failure '(error quit))
+    (save-window-excursion
+      (let ((process (make-pipe-process :name "pilish-editor-failure" :noquery t))
+            (draft (generate-new-buffer " *pilish-editor-draft*"))
+            editor responses)
+        (unwind-protect
+            (cl-letf (((symbol-function 'pilish--send-extension-ui-response)
+                       (lambda (_proc response)
+                         (push response responses)
+                         (signal failure nil))))
+              (delete-other-windows)
+              (switch-to-buffer draft)
+              (emacs-lisp-mode)
+              (insert "unsent draft")
+              (setq editor (pilish--extension-ui-editor
+                            (pilish-test--editor-request "failure" "keep this text")
+                            process))
+              (should
+               (eq (condition-case nil
+                       (progn
+                         (pcase action
+                           ('kill (kill-buffer editor))
+                           ('mode (text-mode)))
+                         :returned)
+                     ((error quit) :escaped))
+                   :returned))
+              (should-not (process-get process 'pilish-editor-buffers))
+              (should (= 1 (length (window-list))))
+              (should (eq (window-buffer) draft))
+              (should (equal (with-current-buffer draft (buffer-string)) "unsent draft"))
+              (should (eq (buffer-local-value 'major-mode draft) 'emacs-lisp-mode))
+              (if (eq action 'kill)
+                  (should-not (buffer-live-p editor))
+                (should (buffer-live-p editor))
+                (should (eq (buffer-local-value 'major-mode editor) 'text-mode))
+                (should (equal (with-current-buffer editor (buffer-string)) "keep this text"))
+                (should-not (buffer-local-value 'pilish--editor-request-id editor))
+                (should-not (buffer-local-value 'pilish--editor-process editor))
+                (should-not (memq #'pilish--editor-release
+                                  (buffer-local-value 'kill-buffer-hook editor)))
+                (should-not (memq #'pilish--editor-release
+                                  (buffer-local-value 'change-major-mode-hook editor)))
+                (kill-buffer editor))
+              (pilish--close-process-editors process)
+              (should (equal responses
+                             '((:type "extension_ui_response" :id "failure" :cancelled t)))))
+          (when (buffer-live-p editor) (kill-buffer editor))
+          (kill-buffer draft)
+          (delete-process process))))))
+
+(ert-deftest pilish-test-extension-ui-editor-kill-contains-cancellation-failures ()
+  "Failed cancellation cannot interrupt killing an editor."
+  (pilish-test--editor-release-after-cancellation-failure 'kill))
+
+(ert-deftest pilish-test-extension-ui-editor-mode-contains-cancellation-failures ()
+  "Failed cancellation cannot interrupt changing an editor's major mode."
+  (pilish-test--editor-release-after-cancellation-failure 'mode))
+
+(ert-deftest pilish-test-extension-ui-editor-stop-contains-cancellation-failures ()
+  "Stop closes every editor and sends Abort despite failed cancellations."
+  (dolist (failure '(error quit))
+    (save-window-excursion
+      (let ((process (make-pipe-process :name "pilish-editor-stop-failure" :noquery t))
+            (draft (generate-new-buffer " *pilish-editor-draft*"))
+            editors events)
+        (unwind-protect
+            (cl-letf (((symbol-function 'pilish--get-process) (lambda () process))
+                      ((symbol-function 'pilish--rpc-async)
+                       (lambda (_proc command _callback)
+                         (push (plist-get command :type) events)))
+                      ((symbol-function 'pilish--send-extension-ui-response)
+                       (lambda (_proc response)
+                         (push response events)
+                         (signal failure nil))))
+              (delete-other-windows)
+              (switch-to-buffer draft)
+              (emacs-lisp-mode)
+              (insert "unsent draft")
+              (dolist (id '("one" "two"))
+                (push (pilish--extension-ui-editor
+                       (pilish-test--editor-request id "editor text") process)
+                      editors))
+              (should
+               (eq (condition-case nil
+                       (progn (pilish--send-abort) :returned)
+                     ((error quit) :escaped))
+                   :returned))
+              (dolist (editor editors)
+                (should-not (buffer-live-p editor)))
+              (should-not (process-get process 'pilish-editor-buffers))
+              (should (= 1 (length (window-list))))
+              (should (eq (window-buffer) draft))
+              (should (equal (with-current-buffer draft (buffer-string)) "unsent draft"))
+              (should (eq (buffer-local-value 'major-mode draft) 'emacs-lisp-mode))
+              (pilish--close-process-editors process)
+              (should (equal (reverse events)
+                             '("clear_queue"
+                               (:type "extension_ui_response" :id "two" :cancelled t)
+                               (:type "extension_ui_response" :id "one" :cancelled t)
+                               "abort"))))
+          (cl-letf (((symbol-function 'pilish--send-extension-ui-response) #'ignore))
+            (dolist (editor editors)
+              (when (buffer-live-p editor) (kill-buffer editor))))
+          (kill-buffer draft)
+          (delete-process process))))))
+
+(ert-deftest pilish-test-extension-ui-editor-submit-cleans-up-after-send-error ()
+  "A failed response still closes the captured editor, not a selected draft."
+  (dolist (command '(pilish-editor-submit pilish-editor-cancel))
+    (save-window-excursion
+      (let ((process (make-pipe-process :name "pilish-editor-error" :noquery t))
+            (draft (generate-new-buffer " *pilish-editor-draft*"))
+            editor responses)
+        (unwind-protect
+            (progn
+              (delete-other-windows)
+              (switch-to-buffer draft)
+              (setq editor (pilish--extension-ui-editor
+                            (pilish-test--editor-request "error") process))
+              (cl-letf (((symbol-function 'pilish--send-extension-ui-response)
+                         (lambda (_proc response)
+                           (push response responses)
+                           (set-buffer draft)
+                           (error "Send failed"))))
+                (should-error (funcall command)))
+              (should-not (buffer-live-p editor))
+              (should (buffer-live-p draft))
+              (should (= 1 (length responses)))
+              (should (= 1 (length (window-list))))
+              (should-not (process-get process 'pilish-editor-buffers)))
+          (when (buffer-live-p editor) (kill-buffer editor))
+          (when (buffer-live-p draft) (kill-buffer draft))
+          (delete-process process))))))
 
 ;; W1 Task 1 fixture: a valid supported-dialog request. File-local to these tests.
 (defun pilish-test--extension-dialog-request (method &optional id)

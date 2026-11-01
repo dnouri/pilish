@@ -27,8 +27,9 @@
 
 ;; Optional Evil integration for Pilish, modeled on how Evil
 ;; and Magit cooperate: the read-only chat buffer starts in motion
-;; state so navigation keys work unmodified, the input buffer starts
-;; in insert state, and `?' opens the transient menu.
+;; state so navigation keys work unmodified, the input buffer and
+;; extension editor buffers start in insert state, and `?' opens the
+;; transient menu.
 ;;
 ;; This file loads automatically when a session is set up while Evil
 ;; is in use; set `pilish-evil-integration' to nil before
@@ -159,8 +160,8 @@ while unbound keys fall through to the mode's own keymap."
   :group 'pilish)
 
 (defcustom pilish-evil-input-state 'insert
-  "Evil state for pi input buffers.
-Used both as the initial state when an input buffer is created and as
+  "Evil state for pi input buffers and extension editor buffers.
+Used both as the initial state when such a buffer is created and as
 the state entered when focusing the input window from the chat
 buffer with `pilish-evil-insert-input' or
 `pilish-evil-append-input'."
@@ -283,6 +284,8 @@ options `pilish-evil-chat-state',
   (evil-set-initial-state 'pilish-chat-mode
                           pilish-evil-chat-state)
   (evil-set-initial-state 'pilish-input-mode
+                          pilish-evil-input-state)
+  (evil-set-initial-state 'pilish-editor-mode
                           pilish-evil-input-state)
   (evil-set-initial-state 'pilish-snapshot-mode 'motion)
   ;; Explicit per-mode entries rather than one entry on the shared

@@ -51,12 +51,14 @@ of the suite."
        ,@body)))
 
 (ert-deftest pilish-evil-test-initial-states ()
-  "Chat buffers start in motion state, input buffers in insert state."
+  "Chat buffers start in motion state; input and editor buffers in insert state."
   (pilish-evil-test--with-evil
    (pilish-evil-setup)
    (should (eq (evil-initial-state 'pilish-chat-mode)
                pilish-evil-chat-state))
    (should (eq (evil-initial-state 'pilish-input-mode)
+               pilish-evil-input-state))
+   (should (eq (evil-initial-state 'pilish-editor-mode)
                pilish-evil-input-state))))
 
 (ert-deftest pilish-evil-test-chat-motion-bindings ()

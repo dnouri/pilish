@@ -1065,6 +1065,43 @@ not claim to distinguish those otherwise identical sending-state traces."
           (should-not pilish--followup-queue)
           (should pilish--aborted))))))
 
+(ert-deftest pilish-test-lifecycle-abort-cancels-editors-before-abort ()
+  "Stop cancels open editor requests between clear_queue and abort.
+Pi's RPC editor request has no abort signal, so only the cancellation
+settles its waiting tool.  The prompt draft is untouched."
+  (let ((process (make-pipe-process :name "pilish-abort-editor" :noquery t))
+        (draft (generate-new-buffer " *pilish-abort-draft*"))
+        commands editor)
+    (unwind-protect
+        (with-temp-buffer
+          (pilish-chat-mode)
+          (setq pilish--status 'streaming
+                pilish--input-buffer draft)
+          (with-current-buffer draft (insert "unsent draft"))
+          (cl-letf (((symbol-function 'pilish--get-process) (lambda () process))
+                    ((symbol-function 'pop-to-buffer) #'ignore)
+                    ((symbol-function 'pilish--refresh-header) #'ignore)
+                    ((symbol-function 'message) #'ignore)
+                    ((symbol-function 'pilish--send-extension-ui-response)
+                     (lambda (_proc response)
+                       (should (eq (plist-get response :cancelled) t))
+                       (push (concat "cancel " (plist-get response :id)) commands)))
+                    ((symbol-function 'pilish--rpc-async)
+                     (lambda (_proc command _callback)
+                       (push (plist-get command :type) commands))))
+            (setq editor (pilish--extension-ui-editor
+                          '(:id "open-editor" :method "editor" :title "Edit")
+                          process))
+            (pilish-abort)
+            (should (equal (reverse commands)
+                           '("clear_queue" "cancel open-editor" "abort")))
+            (should-not (buffer-live-p editor))
+            (should (equal (with-current-buffer draft (buffer-string))
+                           "unsent draft"))))
+      (when (buffer-live-p editor) (kill-buffer editor))
+      (kill-buffer draft)
+      (delete-process process))))
+
 (ert-deftest pilish-test-lifecycle-abort-preflight-stops-eventual-agent-start ()
   "Stop during preflight compaction survives a later accepted prompt and run."
   (pilish-test-with-mock-session "/tmp/pilish-test-lifecycle-abort-preflight/"

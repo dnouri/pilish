@@ -2798,6 +2798,33 @@ SPEC is (SESSION SCENARIO &rest EXTRA-ARGS)."
         (should (equal (plist-get metadata :name)
                        "Fake Harness Session"))))))
 
+(ert-deftest pilish-fake-pi-test-extension-editor-waits-through-abort ()
+  "Editor requests have no timeout and abort alone cannot answer them."
+  (pilish-fake-pi-test-with-process
+      (proc "extension-editor" "--extension-timeout-ms" "1")
+    (pilish-fake-pi-test--send
+     proc '(:id "editor" :type "prompt" :message "/test-editor"))
+    (let ((request (pilish-fake-pi-test--pop-object proc)))
+      (should (equal (plist-get request :method) "editor"))
+      (should-not (plist-member request :timeout))
+      (should-not (pilish-test-wait-until
+                   (lambda () (process-get proc 'fake-pi-objects)) 0.1 0.01 proc))
+      (pilish-fake-pi-test--send proc '(:id "abort" :type "abort"))
+      (let ((response (pilish-fake-pi-test--pop-object proc)))
+        (should (equal (plist-get response :id) "abort"))
+        (should (eq (plist-get response :success) t)))
+      (should-not (pilish-test-wait-until
+                   (lambda () (process-get proc 'fake-pi-objects)) 0.1 0.01 proc))
+      (pilish-fake-pi-test--send
+       proc (list :type "extension_ui_response" :id (plist-get request :id)
+                  :value "Edited through RPC"))
+      (let* ((events (pilish-fake-pi-test--collect-until
+                      proc (lambda (obj) (equal (plist-get obj :id) "editor"))))
+             (custom (car (pilish-fake-pi-test--message-events events "message_end" "custom"))))
+        (should (equal (plist-get (plist-get custom :message) :content) "EDITOR SUBMITTED"))
+        (should (equal (plist-get (plist-get (car (last events)) :data) :disposition)
+                       "handled"))))))
+
 (ert-deftest pilish-fake-pi-test-extension-confirm-zero-timeout-disables-expiry ()
   "An override of 0 disables dialog expiry for manual debugging."
   (pilish-fake-pi-test-with-process

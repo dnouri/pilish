@@ -681,6 +681,17 @@ Calls only the handler registered for this specific process."
         (delete-process stderr-proc))
       (kill-buffer stderr-buf))))
 
+(defun pilish--close-process-editors (process)
+  "Kill the extension editor buffers owned by PROCESS.
+Each killed editor cancels its request while PROCESS is live.  Editors of
+other processes stay open.  A non-process PROCESS is ignored."
+  (when (processp process)
+    (let ((buffers (process-get process 'pilish-editor-buffers)))
+      (process-put process 'pilish-editor-buffers nil)
+      (dolist (buffer buffers)
+        (when (buffer-live-p buffer)
+          (kill-buffer buffer))))))
+
 (defun pilish--handle-process-exit (proc event)
   "Clean up when pi process PROC exits with EVENT.
 Calls pending request callbacks for this process with an error response
@@ -700,6 +711,7 @@ containing EVENT, then clears this process's pending request tables."
     (unwind-protect
         (unwind-protect
             (progn
+              (pilish--close-process-editors proc)
               (when pending
                 (maphash (lambda (_id callback)
                            (funcall callback error-response))

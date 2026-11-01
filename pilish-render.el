@@ -1430,6 +1430,105 @@ completes normally."
              :id id
              :value value)))))
 
+(defvar-local pilish--editor-process nil
+  "Pi process that owns this extension editor buffer.")
+
+(defvar-local pilish--editor-request-id nil
+  "ID of this buffer's unanswered editor request, or nil once answered.")
+
+(defun pilish--editor-respond (cancelled)
+  "Answer the current buffer's editor request once.
+Send the buffer text, or a cancellation when CANCELLED is non-nil.  Mark the
+request answered before sending, so a failed send is never retried."
+  (when-let* ((id pilish--editor-request-id))
+    (setq pilish--editor-request-id nil)
+    (let ((process pilish--editor-process)
+          (text (buffer-substring-no-properties (point-min) (point-max))))
+      (when (processp process)
+        (process-put process 'pilish-editor-buffers
+                     (delq (current-buffer)
+                           (process-get process 'pilish-editor-buffers)))
+        (when (process-live-p process)
+          (pilish--send-extension-ui-response
+           process
+           (append (list :type "extension_ui_response" :id id)
+                   (if cancelled
+                       (list :cancelled t)
+                     (list :value text)))))))))
+
+(defun pilish--editor-release ()
+  "Cancel an unanswered editor request and restore its windows.
+Run before killing the buffer or erasing its ownership on a major-mode
+change.  A mode change retains the text buffer without editor lifecycle
+hooks.  Cancellation errors and quits are contained without retrying the send.
+Never kill here, since the major-mode command must finish safely."
+  (let ((buffer (current-buffer)))
+    (remove-hook 'kill-buffer-hook #'pilish--editor-release t)
+    (remove-hook 'change-major-mode-hook #'pilish--editor-release t)
+    (unwind-protect
+        (condition-case nil
+            (pilish--editor-respond t)
+          ((error quit) nil))
+      (save-current-buffer
+        (quit-windows-on buffer nil nil)))))
+
+(defun pilish-editor-submit ()
+  "Send the editor text to the extension and close the editor.
+The session's prompt draft is not modified."
+  (interactive)
+  (let ((buffer (current-buffer)))
+    (unwind-protect
+        (pilish--editor-respond nil)
+      (kill-buffer buffer))))
+
+(defun pilish-editor-cancel ()
+  "Cancel the extension's editor request and close the editor.
+The session's prompt draft is not modified."
+  (interactive)
+  (let ((buffer (current-buffer)))
+    (unwind-protect
+        (pilish--editor-respond t)
+      (kill-buffer buffer))))
+
+(defvar pilish-editor-mode-map
+  (let ((map (make-sparse-keymap)))
+    (define-key map (kbd "C-c C-c") #'pilish-editor-submit)
+    (define-key map (kbd "C-c C-k") #'pilish-editor-cancel)
+    map)
+  "Keymap for `pilish-editor-mode'.")
+
+(define-derived-mode pilish-editor-mode text-mode "Pi-Editor"
+  "Major mode for answering an extension's multiline editor request.
+\\<pilish-editor-mode-map>\\[pilish-editor-submit] sends the text and \\[pilish-editor-cancel] cancels.
+Killing the buffer or changing its major mode also cancels."
+  (setq-local header-line-format
+              (substitute-command-keys
+               "\\<pilish-editor-mode-map>\\[pilish-editor-submit]: submit   \\[pilish-editor-cancel]: cancel")))
+
+(defun pilish--extension-ui-editor (event proc)
+  "Open an editor buffer for editor request EVENT, responding via PROC.
+The buffer is separate from the prompt draft and holds the request's prefill.
+It answers asynchronously, so Emacs stays usable while it is open.  Stop and
+process exit cancel it through `pilish--close-process-editors'.  Return the
+buffer."
+  (let ((buffer (generate-new-buffer
+                 (format "*pilish-editor: %s*"
+                         (pilish--render-safe-string
+                          (plist-get event :title) "editor")))))
+    (with-current-buffer buffer
+      (pilish-editor-mode)
+      (insert (pilish--render-safe-string (plist-get event :prefill)))
+      (set-buffer-modified-p nil)
+      (setq pilish--editor-process proc
+            pilish--editor-request-id (plist-get event :id))
+      (add-hook 'kill-buffer-hook #'pilish--editor-release nil t)
+      (add-hook 'change-major-mode-hook #'pilish--editor-release nil t))
+    (when (processp proc)
+      (process-put proc 'pilish-editor-buffers
+                   (cons buffer (process-get proc 'pilish-editor-buffers))))
+    (pop-to-buffer buffer)
+    buffer))
+
 (defun pilish--extension-ui-set-editor-text (event)
   "Handle set_editor_text method from EVENT."
   (let ((text (plist-get event :text)))
@@ -1502,6 +1601,7 @@ Dispatches to appropriate handler based on method."
       ("confirm"        (pilish--extension-ui-confirm event proc))
       ("select"         (pilish--extension-ui-select event proc))
       ("input"          (pilish--extension-ui-input event proc))
+      ("editor"         (pilish--extension-ui-editor event proc))
       ("set_editor_text" (pilish--extension-ui-set-editor-text event))
       ("setStatus"      (pilish--extension-ui-set-status event))
       ("setWorkingMessage" (pilish--extension-ui-set-working-message event))

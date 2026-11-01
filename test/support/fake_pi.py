@@ -403,7 +403,12 @@ class FakePiHarness:
             case "prompt":
                 self._handle_prompt(command)
             case "abort":
-                self._stop_active_run()
+                behavior = self.scenario.prompt
+                if not (
+                    isinstance(behavior, ExtensionDialogPrompt)
+                    and behavior.method == "editor"
+                ):
+                    self._stop_active_run()
                 self._respond(command)
             case "clear_queue":
                 steering = self._take_pending_steer()
@@ -1078,6 +1083,8 @@ class FakePiHarness:
 
     def _dialog_timeout_ms(self, behavior: ExtensionDialogPrompt) -> int | None:
         """Return the effective extension dialog timeout for ``behavior``."""
+        if behavior.method == "editor":
+            return None
         if self.extension_timeout_ms is not None:
             return None if self.extension_timeout_ms <= 0 else self.extension_timeout_ms
         return behavior.timeout_ms
