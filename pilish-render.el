@@ -1459,12 +1459,15 @@ request answered before sending, so a failed send is never retried."
   "Cancel an unanswered editor request and restore its windows.
 Run before killing the buffer or erasing its ownership on a major-mode
 change.  A mode change retains the text buffer without editor lifecycle
-hooks.  Never kill here, since the major-mode command must finish safely."
+hooks.  Cancellation errors and quits are contained without retrying the send.
+Never kill here, since the major-mode command must finish safely."
   (let ((buffer (current-buffer)))
     (remove-hook 'kill-buffer-hook #'pilish--editor-release t)
     (remove-hook 'change-major-mode-hook #'pilish--editor-release t)
     (unwind-protect
-        (pilish--editor-respond t)
+        (condition-case nil
+            (pilish--editor-respond t)
+          ((error quit) nil))
       (save-current-buffer
         (quit-windows-on buffer nil nil)))))
 
