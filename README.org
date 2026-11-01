@@ -955,6 +955,9 @@ Here are some common non-default preferences:
 ;; rebalanced on frame resize:
 (setopt pilish-input-window-height 0.25)
 
+;; Or fit the draft in every session, up to 30% of the window pair:
+;; (setopt pilish-input-window-height 'fit)
+
 ;; Copy source Markdown from the chat buffer instead of only visible text:
 (setopt pilish-copy-raw-markdown t)
 
@@ -963,6 +966,10 @@ Here are some common non-default preferences:
 ;; may redirect final placement:
 (setopt pilish-visit-file-other-window nil)
 #+end_src
+
+With =fit=, the input starts at one text line, grows as you type, and
+shrinks after sending.  =pilish-input-window-max-height= sets its cap.
+It also works with either hide-after-send style below.
 
 Choose one of three input window display styles:
 

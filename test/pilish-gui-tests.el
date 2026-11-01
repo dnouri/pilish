@@ -272,6 +272,160 @@ raced a turn that was never submitted."
     (should (pilish-gui-test-chat-contains "Fake reply for: second turn"))
     (should (pilish-gui-test-idle-p))))
 
+(defun pilish-gui-test--settle-input-fit (input-buf)
+  "Wait until INPUT-BUF's pending fit has run, then redisplay."
+  (should (pilish-test-wait-until
+           (lambda ()
+             (not (buffer-local-value 'pilish--fit-input-timer input-buf)))
+           pilish-test-gui-timeout pilish-test-poll-interval))
+  (redisplay t))
+
+(defun pilish-gui-test--input-fit-state (input-win chat-win)
+  "Return INPUT-WIN's fit observations next to CHAT-WIN."
+  (list :window-system window-system
+        :package-user-dir package-user-dir
+        :pilish-ui (symbol-file 'pilish-fit-input-window 'defun)
+        :md-ts-mode (symbol-file 'md-ts-mode 'defun)
+        :frame-width (frame-width (window-frame input-win))
+        :input-width (window-body-width input-win)
+        :input-start (window-start input-win)
+        :input-point (window-point input-win)
+        :input-body (window-body-height input-win)
+        :input-total (window-total-height input-win)
+        :chat-total (window-total-height chat-win)
+        :draft-lines (with-current-buffer (window-buffer input-win)
+                       (count-lines (point-min) (point-max)))))
+
+(ert-deftest pilish-gui-test-input-window-fits-draft ()
+  "A `fit' input window follows a typed draft, stops at its cap, and shrinks.
+The session opens with a one-line input.  Typing three lines grows it to
+three, typing past the cap stops at `pilish-input-window-max-height',
+and sending with \\`C-c C-c' returns it to one line."
+  (let ((pilish-input-window-height 'fit)
+        (pilish-input-window-max-height 0.3))
+    (pilish-gui-test-with-fresh-session
+      (:backend fake :fake-scenario "prompt-lifecycle")
+      (let* ((input-buf (plist-get pilish-gui-test--session :input-buffer))
+             (input-win (pilish-gui-test-input-window))
+             (chat-win (pilish-gui-test-chat-window))
+             (pair-height (lambda ()
+                            (+ (window-total-height chat-win)
+                               (window-total-height input-win)))))
+        (redisplay t)
+        (should (= (window-body-height input-win) 1))
+        (pilish-gui-test--large-evidence
+         "fit-empty" (pilish-gui-test--input-fit-state input-win chat-win))
+        (select-window input-win)
+        (execute-kbd-macro (kbd "o n e RET t w o RET t h r e e"))
+        (pilish-gui-test--settle-input-fit input-buf)
+        (should (= (window-body-height input-win) 3))
+        (should (= (window-start input-win) 1))
+        (pilish-gui-test--large-evidence
+         "fit-three-lines" (pilish-gui-test--input-fit-state input-win chat-win))
+        (dotimes (_ (funcall pair-height))
+          (execute-kbd-macro (kbd "RET x")))
+        (pilish-gui-test--settle-input-fit input-buf)
+        ;; The echo area can change the pair's height, so take it now.
+        (should (= (window-total-height input-win)
+                   (round (* 0.3 (funcall pair-height)))))
+        (should (>= (window-total-height chat-win) window-min-height))
+        ;; The grown window ends at point's line instead of leaving
+        ;; empty rows below it.
+        (should (= (with-current-buffer input-buf
+                     (count-screen-lines (window-start input-win) (point-max)
+                                         t input-win))
+                   (window-body-height input-win)))
+        (pilish-gui-test--large-evidence
+         "fit-capped" (pilish-gui-test--input-fit-state input-win chat-win))
+        (execute-kbd-macro (kbd "C-c C-c"))
+        (should (pilish-gui-test-wait-for-idle))
+        (should (pilish-gui-test-wait-for-chat-settled))
+        (pilish-gui-test--settle-input-fit input-buf)
+        (should (equal (with-current-buffer input-buf (buffer-string)) ""))
+        (should (= (window-body-height input-win) 1))
+        (should (pilish-gui-test-chat-contains "Fake reply for: one"))
+        (pilish-gui-test--large-evidence
+         "fit-after-send" (pilish-gui-test--input-fit-state input-win chat-win))))))
+
+(ert-deftest pilish-gui-test-input-fit-refits-on-frame-resize ()
+  "Real frame width changes rewrap an unchanged draft and refit its window."
+  (let ((pilish-input-window-height 'fit)
+        (pilish-input-window-max-height 0.3)
+        (width (frame-width))
+        (height (frame-height)))
+    (unwind-protect
+        (progn
+          (set-frame-size nil 104 45)
+          (sit-for 0.1)
+          (pilish-gui-test-with-fresh-session
+            (:backend fake :fake-scenario "prompt-lifecycle")
+            (let* ((input-buf (plist-get pilish-gui-test--session :input-buffer))
+                   (input-win (pilish-gui-test-input-window))
+                   (chat-win (pilish-gui-test-chat-window)))
+              (select-window input-win)
+              (execute-kbd-macro (make-string 180 ?x))
+              (pilish-gui-test--settle-input-fit input-buf)
+              (should (= (window-body-height input-win) 2))
+              (pilish-gui-test--large-evidence
+               "fit-wide" (pilish-gui-test--input-fit-state input-win chat-win))
+              (dolist (size '((54 . 4) (104 . 2)))
+                (set-frame-width nil (car size))
+                (should (pilish-test-wait-until
+                         (lambda ()
+                           (redisplay t)
+                           (and (= (frame-width) (car size))
+                                (= (window-body-height input-win) (cdr size))))
+                         pilish-test-gui-timeout pilish-test-poll-interval))
+                (should (= (window-start input-win) 1))
+                (should (equal (with-current-buffer input-buf (buffer-string))
+                               (make-string 180 ?x)))
+                (pilish-gui-test--large-evidence
+                 (if (= (car size) 54) "fit-narrow" "fit-wide-again")
+                 (pilish-gui-test--input-fit-state input-win chat-win))))))
+      (set-frame-size nil width height)
+      (sit-for 0.1))))
+
+(ert-deftest pilish-gui-test-input-fit-with-hide-after-send ()
+  "Fitting composes with both on-demand and hidden input display."
+  (let ((pilish-input-window-height 'fit))
+    (dolist (pilish-input-window-display '(on-demand hidden))
+      (pilish-gui-test-with-fresh-session
+        (:backend fake :fake-scenario "prompt-lifecycle")
+        (let ((input-buf (plist-get pilish-gui-test--session :input-buffer))
+              (chat-win (pilish-gui-test-chat-window)))
+          (should (eq (not (null (pilish-gui-test-input-window)))
+                      (eq pilish-input-window-display 'on-demand)))
+          (execute-kbd-macro (kbd "M-x pilish-open-input RET"))
+          (should (eq (current-buffer) input-buf))
+          (should (= (window-body-height (selected-window)) 1))
+          (execute-kbd-macro (kbd "o n e RET t w o RET t h r e e"))
+          (pilish-gui-test--settle-input-fit input-buf)
+          (should (= (window-body-height (selected-window)) 3))
+          (execute-kbd-macro (kbd "C-x 0"))
+          (should-not (pilish-gui-test-input-window))
+          (execute-kbd-macro (kbd "M-x pilish-open-input RET"))
+          (should (= (window-body-height (selected-window)) 3))
+          (should (equal (buffer-string) "one\ntwo\nthree"))
+          (pilish-gui-test--large-evidence
+           (format "fit-%s-draft" pilish-input-window-display)
+           (pilish-gui-test--input-fit-state (selected-window) chat-win))
+          (execute-kbd-macro (kbd "C-c C-c"))
+          (should (pilish-gui-test-wait-for-idle))
+          (should (pilish-gui-test-wait-for-chat-settled))
+          (should-not (pilish-gui-test-input-window))
+          (should (eq (selected-window) chat-win))
+          (should (pilish-gui-test-chat-contains "Fake reply for: one"))
+          (pilish-gui-test--large-evidence
+           (format "fit-%s-sent" pilish-input-window-display)
+           (list :input-visible nil :chat-selected t))
+          (execute-kbd-macro (kbd "M-x pilish-open-input RET"))
+          (should (eq (current-buffer) input-buf))
+          (should (equal (buffer-string) ""))
+          (should (= (window-body-height (selected-window)) 1))
+          (pilish-gui-test--large-evidence
+           (format "fit-%s-reopened" pilish-input-window-display)
+           (pilish-gui-test--input-fit-state (selected-window) chat-win)))))))
+
 (ert-deftest pilish-gui-test-snapshot-recursive-tree-keyboard-journey ()
   "One recursive body tree survives folds and opens all five exact saved chats."
   (pilish-gui-test-with-fresh-session
