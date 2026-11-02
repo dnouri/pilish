@@ -337,15 +337,13 @@ how expensive each render is on the host.")
     (nreverse metadata)))
 
 (defun pilish-tu-bench--button-count ()
-  "Return the number of non-thinking text buttons in the current buffer.
-Completed thinking remains interactive outside cooled tool blocks."
+  "Return the number of text buttons in the current buffer."
   (let ((position (point-min))
         (count 0))
     (while (< position (point-max))
       (if-let* ((button (button-at position)))
           (progn
-            (unless (get-text-property (button-start button) 'pilish-thinking-footer)
-              (setq count (1+ count)))
+            (setq count (1+ count))
             (setq position (max (1+ position) (button-end button))))
         (setq position (1+ position))))
     count))

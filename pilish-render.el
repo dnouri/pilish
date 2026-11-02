@@ -541,9 +541,10 @@ at most one empty paragraph separator while preserving indentation."
                            first-line
                            (>= (length first-line) 3)
                            (< (length first-line) 72))))
-    (concat (if previewable (format "> Thinking: %s…" first-line) "> Thinking")
-            "\n" (pilish--tool-hidden-line-label
-                   (if previewable (1- line-count) line-count)))))
+    (if previewable
+        (format "> Thinking: %s… (%s)" first-line
+                (pilish--more-lines-label (1- line-count)))
+      (format "> Thinking (%s)" (pilish--thinking-line-count-label line-count)))))
 
 (defun pilish--next-thinking-block-order ()
   "Return the next monotonically increasing completed-thinking block order."
@@ -570,25 +571,8 @@ OBJECT is a rendered string, or nil for the current buffer."
        pilish-thinking-block-display ,display
        rear-nonsticky t) object)
     (pilish--set-details start end details object)
-    (pilish--put-disclosure start end nil nil object)
-    (let* ((text (if object (substring object start end)
-                   (buffer-substring-no-properties start end)))
-           (footer (+ start (1+ (or (string-match "\n[^\n]*\\'" text) -1))))
-           (button (make-text-button
-                    (substring text (- footer start)) nil
-                    'face 'pilish-collapsed-indicator
-                    'action #'pilish--toggle-thinking-button
-                    'keymap pilish--tool-button-map
-                    'follow-link t 'pilish-tool-toggle t
-                    'pilish-thinking-footer t)))
-      (add-text-properties footer end (text-properties-at 0 button) object)
-      (pilish--put-disclosure footer end (eq display 'visible)
-                             #'pilish--toggle-thinking-block-at-point object))))
-
-(defun pilish--toggle-thinking-button (button)
-  "Toggle the exact completed thinking owning BUTTON."
-  (goto-char (button-start button))
-  (pilish--toggle-thinking-block-at-point))
+    (pilish--put-disclosure start end (eq display 'visible)
+                           #'pilish--toggle-thinking-block-at-point object)))
 
 (defun pilish--owned-span-probe-pos (pos property)
   "Return POS or its preceding character inside an owned PROPERTY span."
@@ -672,25 +656,15 @@ non-empty."
            (details (and order (get-text-property 0 'pilish-details text))))
       (when (<= start end)
         (let ((existing (buffer-substring-no-properties start end)))
-          (cond
-           ((equal existing plain-text)
-            (when order
-              (pilish--apply-completed-thinking-properties
-               start end order normalized display details)))
-           ((and (eq display 'visible)
-                 (equal existing (string-remove-suffix "\nShow less" plain-text)))
-            ;; Completion adds only its control, preserving streamed tables.
-            (goto-char end)
-            (insert "\nShow less")
-            (set-marker pilish--thinking-marker (point))
-            (pilish--apply-completed-thinking-properties
-             start (point) order normalized display details))
-           (t
+          (if (equal existing plain-text)
+              (when order
+                (pilish--apply-completed-thinking-properties
+                 start end order normalized display details))
             (goto-char start)
             (pilish--remove-table-overlays start end)
             (delete-region start end)
             (insert text)
-            (set-marker pilish--thinking-marker (point)))))
+            (set-marker pilish--thinking-marker (point))))
         (not (string-empty-p text))))))
 
 (cl-defstruct (pilish--thinking-stream
@@ -9606,14 +9580,12 @@ Return nil outside a cold tool.  Any chat restriction is restored exactly."
 
 (defun pilish--target-lookup-suppressed-p ()
   "Return non-nil when point sits in a region without target authority.
-Child sections and output footers, conversation trees, thinking footers, and
-generated startup banners without known source metadata suppress both strict
-file-target and link-URL resolution, so their content never falls through to
-semantic lookup."
+Child sections and output footers, conversation trees, and generated startup
+banners without known source metadata suppress both strict file-target and
+link-URL resolution, so their content never falls through to semantic lookup."
   (let ((section (get-text-property (point) 'pilish-tool-section)))
     (or (get-text-property (point) 'pilish-tool-output-footer)
         (get-text-property (point) 'pilish-conversation-tree)
-        (get-text-property (point) 'pilish-thinking-footer)
         (eq section 'children) (eq (car-safe section) 'child)
         (and (get-text-property (point) 'pilish-startup-banner)
              (not (get-text-property (point) 'pilish-startup-source))))))
@@ -9642,8 +9614,8 @@ Child sections and output footers have no file-navigation authority."
 (defun pilish--link-url-at-point ()
   "Return the URL destination of the Markdown link owning point, or nil.
 Authority matches `pilish--file-target-at-point': hot and cold tool blocks,
-conversation trees, thinking footers, and generated banner text never
-contribute URLs, and neither does any strict file target.  Only an owned
+conversation trees, and generated banner text never contribute URLs, and
+neither does any strict file target.  Only an owned
 inline link or image whose complete destination carries an explicit URL
 scheme qualifies; see `pilish--semantic-link-url' for the exact grammar and
 text derivation."
@@ -10264,7 +10236,7 @@ Returns nil when NORMALIZED has no visible completed-thinking content."
       (pilish--propertize-completed-thinking
        (pcase display
          ('hidden (pilish--thinking-hidden-stub normalized))
-         (_ (concat (pilish--thinking-blockquote-text normalized) "\nShow less")))
+         (_ (pilish--thinking-blockquote-text normalized)))
        (or block-order (pilish--next-thinking-block-order))
        normalized
        display

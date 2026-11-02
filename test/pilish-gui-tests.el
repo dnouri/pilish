@@ -1077,9 +1077,9 @@ and sending with \\`C-c C-c' returns it to one line."
                 (dolist (request requests)
                   (should (<= (car request)
                               (1+ (window-body-height (cadr request))))))
-                (should (equal (concat (string-remove-suffix "\n" text) "Show less\n\n")
-                               (buffer-substring-no-properties (point-min) (point-max))))
-                (should (> (buffer-chars-modified-tick) chars-tick))
+                (should (equal text (buffer-substring-no-properties
+                                     (point-min) (point-max))))
+                (should (= chars-tick (buffer-chars-modified-tick)))
                 (should (pilish--thinking-block-at-pos thinking-start)))
               (redisplay t)
               (should (= start (window-start reader)))
@@ -1996,7 +1996,7 @@ Return the selected editor buffer."
 ;;;; Tool Toggle Tests
 
 (ert-deftest pilish-gui-test-tool-toggle-expand-collapse-cycle ()
-  "Bottom controls accept TAB, RET and native margin hits at standard widths.
+  "Tool controls and thinking carets accept keyboard and mouse toggles.
 Capture text/image ordering, completed thinking and both cold projections."
   (require 'pilish-arguments-test)
   (let ((width (frame-width)) (height (frame-height))
@@ -2072,22 +2072,21 @@ Capture text/image ordering, completed thinking and both cold projections."
                       (execute-kbd-macro (kbd "RET"))
                       (should (string-match-p "Line 20" (buffer-string)))
                       ;; Thinking's normalized three source lines conceal two, not
-                      ;; the extra input blank lines or the continuation row.
+                      ;; the extra input blank lines.
                       (goto-char (point-min))
-                      (re-search-forward "^… 2 more lines$")
+                      (re-search-forward "^> Thinking: Plan the work… (2 more lines)$")
                       (beginning-of-line)
-                      (should (get-text-property (point) 'pilish-thinking-footer))
+                      (should-not (button-at (point)))
+                      (should (get-text-property (point) 'pilish-disclosure-hit))
                       (let ((hit (pilish-gui-test--tool-margin-position window (point))))
                         (should hit)
                         (pilish--disclosure-click (list 'mouse-1 hit)))
-                      (goto-char (point-min))
-                      (re-search-forward "^Show less$")
-                      (beginning-of-line)
-                      (should (get-text-property (point) 'pilish-thinking-footer))
+                      (should (string-match-p "> Check the result\n\nread /tmp/test\\.txt"
+                                              (buffer-string)))
                       (capture "thinking-expanded")
-                      (re-search-forward "^Show less$")
+                      (re-search-forward "^> Check the result$")
                       (beginning-of-line)
-                      (execute-kbd-macro (kbd "RET"))
+                      (execute-kbd-macro (kbd "TAB"))
                       (should-not (string-match-p "^> Check the result" (buffer-string)))
                       (let ((other (pilish--display-tool-start "read" '(:path "/tmp/second.txt") "other")))
                         (pilish--display-tool-end "read" '(:path "/tmp/second.txt")
