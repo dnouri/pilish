@@ -327,9 +327,6 @@ session controls and do not update automatically.  Press =g= or run
 last good view and shows a stale note until a later =g= succeeds.
 Press =q= to close only that snapshot.
 
-#+caption: A recursive subagent tree in a parent session.  This example uses scripted replies.
-[[file:assets/pi-session-view.png]]
-
 #+html: <details>
 #+html: <summary><strong>Saved conversation reference</strong></summary>
 
@@ -1621,6 +1618,10 @@ Troubleshooting entry about finding the =pi= executable.
 
 Start with [[file:AGENTS.md][AGENTS.md]] for module ownership and the contribution workflow.
 Run =make help= for supported targets and their prerequisites.
+
+Keep review screenshots and recordings in =tmp/= and attach them to pull
+requests.  They do not belong in Git.  The =assets/= directory contains the
+logo used by the package and this README.
 
 ** Run checks locally
 
