@@ -145,6 +145,10 @@ Zero keeps the original single-delta tool boundary check.")
   "SD-BACKLOG-COMPLETE-CONTROL"
   "Unique wire marker terminating the deliberately collected backlog.")
 
+(defconst pilish-sd-bench--run-return-receipt-marker
+  "SD-RUN-RETURN-RECEIPT"
+  "Normalized marker for one valid, dynamically timed run-return receipt.")
+
 (defvar pilish-sd-bench--phase "setup"
   "Current benchmark phase recorded with `process-filter' rows.")
 (defvar pilish-sd-bench--current-filter-id nil
@@ -582,7 +586,17 @@ Zero keeps the original single-delta tool boundary check.")
             collect (cons 'payload (pilish-sd-bench--backlog-line index)))
    (list '(omit . "")
          (cons 'tool (concat "$ " (pilish-sd-bench--tool-command)))
+         '(omit . "")
+         (cons 'receipt pilish-sd-bench--run-return-receipt-marker)
          '(omit . ""))))
+
+(defun pilish-sd-bench--run-return-receipt-line-p (line)
+  "Return non-nil when LINE is one well-formed dynamic return receipt."
+  (string-match-p
+   (concat "\\` Returned [0-9]\\{4\\}-[0-9]\\{2\\}-[0-9]\\{2\\} "
+           "[0-9]\\{2\\}:[0-9]\\{2\\} · Took "
+           "[0-9.]+[smh]\\(?: [0-9.]+[smh]\\)*\\'")
+   line))
 
 (defun pilish-sd-bench--actual-projection (chat-buf)
   "Return CHAT-BUF's exact normalized visible stream-span projection.
@@ -617,6 +631,11 @@ other visible line is retained so unexpected text fails projection equality."
                      normalized))
               ('tool
                (push (if (equal line (concat "bash " (substring (cdr spec) 2)))
+                         (cdr spec)
+                       line)
+                     normalized))
+              ('receipt
+               (push (if (pilish-sd-bench--run-return-receipt-line-p line)
                          (cdr spec)
                        line)
                      normalized))
@@ -729,7 +748,7 @@ the settled rendered buffer."
            "exact-stream-payload-visible-projection"
            (equal projection expected-projection)
            (format "expected %d lines/%s, got %d lines/%s"
-                   (+ delta-events 1)
+                   (length (split-string expected-projection "\n"))
                    (secure-hash 'sha256 expected-projection)
                    (if (string-empty-p projection)
                        0 (length (split-string projection "\n")))
@@ -1248,9 +1267,7 @@ the settled rendered buffer."
            :projection
            (list :exact (pilish-sd-bench--json-bool
                          (equal projection expected))
-                 :expectedLines (+ pilish-sd-bench-timer-text-deltas
-                                   pilish-sd-bench-thinking-deltas
-                                   pilish-sd-bench-backlog-deltas 1)
+                 :expectedLines (length (split-string expected "\n"))
                  :actualLines (if (string-empty-p projection)
                                   0 (length (split-string projection "\n")))
                  :expectedSha256 (secure-hash 'sha256 expected)

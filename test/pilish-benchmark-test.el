@@ -70,7 +70,8 @@
    '("Show less" "")
    (cl-loop for i below 20 collect
             (format "SD-BACKLOG-%04d value-%05d" i (mod (+ 20240817 (* i 6151)) 100000)))
-   (list "" (concat prefix pilish-benchmark-test--command) "")))
+   (list "" (concat prefix pilish-benchmark-test--command) ""
+         " Returned 2026-11-01 22:54 · Took 1.4s" "")))
 
 (defun pilish-benchmark-test--read-json (file)
   "Parse actual artifact FILE with distinct null and false values."
@@ -214,8 +215,10 @@ STREAM chooses the stream engine rather than the tool engine."
 (ert-deftest pilish-test-benchmark-stream-exact-contract ()
   "Accept only complete supported titles and reject damaged stream spans."
   (let* ((good (pilish-benchmark-test--stream-lines "$ "))
-         (slot (- (length good) 2))
+         (slot (- (length good) 4))
          (title (nth slot good))
+         (receipt-slot (- (length good) 2))
+         (receipt (nth receipt-slot good))
          (file (make-temp-file "pilish-stream-oracle-" nil ".json")))
     (unwind-protect
         (progn
@@ -242,7 +245,10 @@ STREAM chooses the stream engine rather than the tool engine."
                      (extra-byte . ,(concat title "x"))
                      (duplicate . duplicate) (omitted . omitted)
                      (reordered . reordered) (extra-text . extra-text)
-                     (wrong-ordinal . wrong-ordinal)))
+                     (wrong-ordinal . wrong-ordinal)
+                     (missing-receipt . missing-receipt)
+                     (duplicate-receipt . duplicate-receipt)
+                     (malformed-receipt . " Returned not-a-time · Took 1.4s")))
             (ert-info ((format "Stream corruption %s" (car case)))
               (let ((lines (copy-sequence good)))
                 (pcase (cdr case)
@@ -251,6 +257,9 @@ STREAM chooses the stream engine rather than the tool engine."
                   ('reordered (cl-rotatef (nth 2 lines) (nth 3 lines)))
                   ('extra-text (setq lines (append lines '("unexpected visible text"))))
                   ('wrong-ordinal (cl-rotatef (nth slot lines) (nth (1- slot) lines)))
+                  ('missing-receipt (setf (nth receipt-slot lines) ""))
+                  ('duplicate-receipt (setq lines (append lines (list receipt))))
+                  ('malformed-receipt (setf (nth receipt-slot lines) replacement))
                   (replacement (setf (nth slot lines) replacement)))
                 (let* ((metrics (pilish-benchmark-test--stream-metrics
                                  (concat pilish-benchmark-test--anchor (string-join lines "\n")) file))
@@ -410,30 +419,35 @@ STREAM chooses the stream engine rather than the tool engine."
                             (plist-get metrics :checks)))))))
 
 (ert-deftest pilish-test-benchmark-production-stream-canary ()
-  "Project a real rendered stream against an independent full-title oracle."
-  (let ((pilish-thinking-display 'visible))
-    (with-temp-buffer
-      (pilish-chat-mode)
-      (pilish--display-user-message "run the deterministic stream-delta benchmark")
-      (pilish--handle-display-event '(:type "agent_start"))
-      (pilish--handle-display-event '(:type "message_start" :message (:role "assistant")))
-      (pilish--display-message-delta
-       (concat (string-join (seq-subseq (pilish-benchmark-test--stream-lines "$ ") 2 14) "\n") "\n"))
-      (pilish--display-thinking-start)
-      (pilish--display-thinking-delta
-       (concat (string-join
-                (mapcar (lambda (line) (substring line 2))
-                        (seq-subseq (pilish-benchmark-test--stream-lines "$ ") 15 21)) "\n") "\n"))
-      (pilish--display-thinking-end nil)
-      (pilish--display-message-delta
-       (concat (string-join (seq-subseq (pilish-benchmark-test--stream-lines "$ ") 23 43) "\n") "\n"))
-      (pilish-test--send-toolcall-message-update
-       "toolcall_end" 0
-       (list (pilish-test--toolcall "boundary" "bash" (list :command pilish-benchmark-test--command))))
-      (font-lock-ensure (point-min) (point-max))
-      (let* ((actual (substring-no-properties (pilish--visible-text (point-min) (point-max))))
-             (metrics (pilish-benchmark-test--stream-metrics actual)))
-        (pilish-benchmark-test--assert-verdict metrics "exact-stream-payload-visible-projection" t t)))))
+  "Project a real rendered stream and return receipt against the full oracle."
+  (let ((pilish-thinking-display 'visible)
+        (now (- (float-time (encode-time 0 0 54 22 1 11 2026)) 1.4)))
+    (cl-letf (((symbol-function 'current-time) (lambda () (seconds-to-time now))))
+      (with-temp-buffer
+        (pilish-chat-mode)
+        (pilish--display-user-message "run the deterministic stream-delta benchmark")
+        (pilish--handle-display-event '(:type "agent_start"))
+        (pilish--handle-display-event '(:type "message_start" :message (:role "assistant")))
+        (pilish--display-message-delta
+         (concat (string-join (seq-subseq (pilish-benchmark-test--stream-lines "$ ") 2 14) "\n") "\n"))
+        (pilish--display-thinking-start)
+        (pilish--display-thinking-delta
+         (concat (string-join
+                  (mapcar (lambda (line) (substring line 2))
+                          (seq-subseq (pilish-benchmark-test--stream-lines "$ ") 15 21)) "\n") "\n"))
+        (pilish--display-thinking-end nil)
+        (pilish--display-message-delta
+         (concat (string-join (seq-subseq (pilish-benchmark-test--stream-lines "$ ") 23 43) "\n") "\n"))
+        (pilish-test--send-toolcall-message-update
+         "toolcall_end" 0
+         (list (pilish-test--toolcall "boundary" "bash" (list :command pilish-benchmark-test--command))))
+        (setq now (float-time (encode-time 0 0 54 22 1 11 2026)))
+        (pilish--handle-display-event '(:type "agent_end" :messages []))
+        (pilish--handle-display-event '(:type "agent_settled"))
+        (font-lock-ensure (point-min) (point-max))
+        (let* ((actual (substring-no-properties (pilish--visible-text (point-min) (point-max))))
+               (metrics (pilish-benchmark-test--stream-metrics actual)))
+          (pilish-benchmark-test--assert-verdict metrics "exact-stream-payload-visible-projection" t t))))))
 
 (ert-deftest pilish-test-benchmark-production-cooling-canary ()
   "Read real execution titles and outputs through the cooling verdict."
