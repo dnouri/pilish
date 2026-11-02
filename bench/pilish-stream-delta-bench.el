@@ -581,7 +581,7 @@ Zero keeps the original single-delta tool boundary check.")
    '((omit . ""))
    (cl-loop for index below pilish-sd-bench-thinking-deltas
             collect (cons 'thinking (pilish-sd-bench--thinking-line index)))
-   '((omit . "Show less") (omit . ""))
+   '((omit . ""))
    (cl-loop for index below pilish-sd-bench-backlog-deltas
             collect (cons 'payload (pilish-sd-bench--backlog-line index)))
    (list '(omit . "")

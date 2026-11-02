@@ -3372,7 +3372,7 @@ The tree is built iteratively to avoid recursion in test setup."
         (should (eq 'all (pilish--tool-output-view-selection
                           (pilish-test--output-view
                            (pilish--find-toggle-button-in-region (point-min) (point-max) 'output)))))
-        (should (string-match-p "^Show less$" text))
+        (should (string-match-p "> Second paragraph\\.\n\nFinal answer\\." text))
         (should-not (string-match-p "^Output$\\|[▸▾]" text))))))
 
 (ert-deftest pilish-test-menu-model-description-uses-short-name ()

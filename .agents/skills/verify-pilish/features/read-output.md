@@ -1,11 +1,11 @@
 # Read streamed output
 
-The chat renders streamed Markdown and changes thinking display without losing the reader's place. It preserves reading positions, follows the tail on request, and rewraps hot tables after a resize. Completed thinking and long tool output use bottom continuation controls. Bash and subagent footers, including resumed subagent calls, show live elapsed time, then Pi's recorded duration when available. A settled run adds a transient right-aligned return timestamp and whole-run duration. Completed replies, thinking, and tools expose literal details through explicit Help and echo-area commands. This metadata does not appear on automatic hover; other hover behavior is unchanged.
+The chat renders streamed Markdown and changes thinking display without losing the reader's place. It preserves reading positions, follows the tail on request, and rewraps hot tables after a resize. Completed thinking uses a margin caret and TAB. Long tool output uses bottom continuation controls. Bash and subagent footers, including resumed subagent calls, show live elapsed time, then Pi's recorded duration when available. A settled run adds a transient right-aligned return timestamp and whole-run duration. Completed replies, thinking, and tools expose literal details through explicit Help and echo-area commands. This metadata does not appear on automatic hover; other hover behavior is unchanged.
 
 ## Sub-features
 
 - `output-stream` renders streamed write-tool content without exposing fence markers.
-- `output-thinking` changes completed thinking display in two windows and toggles one block from its bottom control.
+- `output-thinking` changes completed thinking display in two windows and toggles one block with its caret or TAB.
 - `output-duration` advances live bash and subagent timing, including resumed calls, then restores the same recorded duration after reload or resume.
 - `output-return-receipt` records when the current run returned control and its total observed duration, aligns the receipt in unequal windows, retains earlier receipts, and omits them after reload or resume.
 - `output-scroll` preserves a scrolled-back view while output arrives and keeps tail-following windows at the end.
@@ -18,7 +18,7 @@ The chat renders streamed Markdown and changes thinking display without losing t
 
 - Read write-tool content as it streams into the chat.
 - Run `M-x pilish-toggle-thinking-display` to change completed thinking display.
-- Press `TAB` or `RET` on a thinking or tool footer, or click its left-margin caret.
+- Press `TAB` inside completed thinking or click its left-margin caret. Press `TAB` or `RET` on a tool footer, or click its left-margin caret.
 - Watch `Elapsed` advance during bash or subagent execution, including resumed calls, and change to `Took …` on completion. Live labels use whole seconds below a minute and minutes or hours above it.
 - When Pi returns control, read the right-aligned `Returned YYYY-MM-DD HH:MM · Took …` receipt below the run. Below a minute it shows one decimal, like recorded tool times. The neutral receipt also follows aborted and failed runs. Continue with another prompt to retain separate receipts. Reload or resume to omit these transient observations while keeping recorded tool durations.
 - Scroll back with ordinary Emacs scrolling commands while new output arrives.

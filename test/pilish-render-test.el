@@ -1305,7 +1305,7 @@ execution cannot retain a temporary record on this setup's evaluator stack."
       (should (equal (pilish-test--hover-displayed-help "anchor")
                      (pilish-test--hover-reply-help)))
       (goto-char (car (pilish--thinking-block-bounds-at-pos
-                      (pilish-test--hover-pos "Thinking\n"))))
+                      (pilish-test--hover-pos "Thinking"))))
       (pilish-toggle-tool-section)
       (font-lock-flush)
       (font-lock-ensure)
@@ -4402,7 +4402,7 @@ Models may send \\n\\n before thinking content too."
       (let ((text (buffer-string)))
         (should (string-match-p
                  (regexp-quote
-                  "> Thinking: Crafting response style…\n… 2 more lines")
+                  "> Thinking: Crafting response style… (2 more lines)")
                  text))
         (should-not (string-match-p "> Crafting response style" text))))))
 
@@ -4418,9 +4418,7 @@ Models may send \\n\\n before thinking content too."
        (concat long-line "\nSecond line"))
       (pilish--display-thinking-end "")
       (let ((text (buffer-string)))
-        (should (string-match-p
-                 (regexp-quote "> Thinking\n… 2 more lines")
-                 text))
+        (should (string-match-p (regexp-quote "> Thinking (2 lines)") text))
         (should-not (string-match-p long-line text))))))
 
 (ert-deftest pilish-test-hidden-thinking-falls-back-when-first-line-is-too-short ()
@@ -4432,9 +4430,8 @@ Models may send \\n\\n before thinking content too."
       (pilish--display-thinking-start)
       (pilish--display-thinking-delta "ok\nSecond line")
       (pilish--display-thinking-end "")
-      (should (string-match-p
-               (regexp-quote "> Thinking\n… 2 more lines")
-               (buffer-string))))))
+      (should (string-match-p (regexp-quote "> Thinking (2 lines)")
+                              (buffer-string))))))
 
 (ert-deftest pilish-test-hidden-thinking-preview-can-be-disabled ()
   "Collapsed thinking can always use the generic hidden label when configured."
@@ -4449,38 +4446,42 @@ Models may send \\n\\n before thinking content too."
       (pilish--display-thinking-end "")
       (let ((text (buffer-string)))
         (should (string-match-p
-                 (regexp-quote "> Thinking\n… 3 more lines")
+                 (regexp-quote "> Thinking (3 lines)")
                  text))
         (should-not (string-match-p "Thinking: Crafting response style" text))))))
 
-(ert-deftest pilish-test-thinking-bottom-control-counts-normalized-source-lines ()
-  "Only normalized source lines count, never wraps, wrappers or footer rows."
-  (dolist (case `(("\n\nConsider this\n\n\n\nCheck that\n\n" t "… 2 more lines")
-                  ("\n\nConsider this\n\n\n\nCheck that\n\n" nil "… 3 more lines")
-                  ("One thought" t "… 1 more line")
-                  (,(make-string 300 ?x) t "… 1 more line")))
-    (pcase-let ((`(,raw ,preview ,label) case))
+(ert-deftest pilish-test-thinking-caret-and-tab-toggle-without-footer-controls ()
+  "Thinking keeps its caret and TAB toggle without footer buttons or rows."
+  (dolist (case `(("\n\nConsider this\n\n\n\nCheck that\n\n" t
+                   "> Thinking: Consider this… (2 more lines)")
+                  ("\n\nConsider this\n\n\n\nCheck that\n\n" nil
+                   "> Thinking (3 lines)")
+                  ("One thought" t "> Thinking (1 line)")
+                  (,(make-string 300 ?x) t "> Thinking (1 line)")))
+    (pcase-let ((`(,raw ,preview ,stub) case))
       (let ((pilish-thinking-hidden-preview preview))
         (with-temp-buffer
           (pilish-chat-mode)
           (setq pilish--thinking-display 'hidden)
           (pilish--render-history-thinking raw)
-          (let* ((normalized (pilish--thinking-normalize-text raw))
-                 (footer (text-property-any (point-min) (point-max) 'pilish-thinking-footer t))
-                 (button (button-at footer)))
-            (should (equal (button-label button) label))
-            (should (get-text-property footer 'pilish-disclosure-hit))
-            (should-not (get-text-property (point-min) 'pilish-disclosure-hit))
-            (goto-char footer)
-            (should-not (pilish--file-target-at-point))
-            (button-activate button)
-            (should (string-prefix-p (concat (pilish--thinking-blockquote-text normalized)
-                                             "\nShow less")
-                                     (buffer-string)))
-            (goto-char (text-property-any (point-min) (point-max) 'pilish-thinking-footer t))
-            (should (looking-at-p "Show less"))
-            (button-activate (button-at (point)))
-            (should (string-match-p (concat "^" (regexp-quote label) "$")
+          (let ((normalized (pilish--thinking-normalize-text raw)))
+            (should (string-match-p (concat "^" (regexp-quote stub) "$")
+                                    (buffer-string)))
+            (should-not (text-property-any (point-min) (point-max)
+                                           'pilish-thinking-footer t))
+            (should-not (button-at (point-min)))
+            (should (get-text-property (point-min) 'pilish-disclosure-hit))
+            (goto-char (point-min))
+            (pilish-toggle-tool-section)
+            (should (string-match-p
+                     (regexp-quote (pilish--thinking-blockquote-text normalized))
+                     (buffer-string)))
+            (should-not (string-match-p "^Show less$" (buffer-string)))
+            (should-not (text-property-not-all (point-min) (point-max) 'button nil))
+            (should (get-text-property (point-min) 'pilish-disclosure-hit))
+            (goto-char (point-min))
+            (pilish-toggle-tool-section)
+            (should (string-match-p (concat "^" (regexp-quote stub) "$")
                                     (buffer-string)))))))))
 
 (ert-deftest pilish-test-visible-thinking-stays-expanded-on-end ()
@@ -4494,6 +4495,7 @@ Models may send \\n\\n before thinking content too."
       (pilish--display-thinking-end "")
       (let ((text (buffer-string)))
         (should (string-match-p "> Need to double-check\\." text))
+        (should-not (string-match-p "^Show less$" text))
         (should-not (string-match-p
                      (regexp-quote
                       (pilish-test--collapsed-thinking-stub
@@ -4795,8 +4797,8 @@ Models may send \\n\\n before thinking content too."
             (should (eq (plist-get metadata :display) display))
             (should (equal (buffer-substring-no-properties start (plist-get metadata :end))
                            (if (eq display 'visible)
-                               ">   é> \t\n> \n> 終\r\nShow less"
-                             "> Thinking\n… 3 more lines"))))
+                               ">   é> \t\n> \n> 終\r"
+                             "> Thinking (3 lines)"))))
           (should-not pilish--thinking-raw)
           (should-not pilish--thinking-stream)
           (should-not pilish--thinking-marker)
@@ -4985,7 +4987,7 @@ because it inserts at the end, while a full rewrite would lose it."
        '(:type "message_update"
          :assistantMessageEvent (:type "thinking_end" :content "")))
       (let ((text (buffer-string)))
-        (should (string-match-p "Reviewing docs\nShow less\n\nread /tmp/AGENTS\\.md" text))
+        (should (string-match-p "Reviewing docs\n\nread /tmp/AGENTS\\.md" text))
         (should-not (string-match-p "Reviewing docs\n\n\n" text))))))
 
 (ert-deftest pilish-test-thinking-after-text-has-blank-line-separator ()
@@ -25378,14 +25380,11 @@ events where the header text hasn't changed."
       (let ((before (buffer-string)))
         (pilish--replace-thinking-region
          (pilish--completed-thinking-rendered-from-normalized "first\n\nlast" 0 'visible))
-        (should (equal (concat (substring-no-properties before) "\nShow less")
+        (should (equal (substring-no-properties before)
                        (buffer-substring-no-properties (point-min) (point-max))))
-        (should-not (get-text-property (point-min) 'pilish-disclosure-hit))
+        (should-not (button-at (point-min)))
+        (should (get-text-property (point-min) 'pilish-disclosure-hit))
         (goto-char (point-min))
-        (search-forward "Show less")
-        (beginning-of-line)
-        (should (button-at (point)))
-        (should (get-text-property (point) 'pilish-disclosure-hit))
         (pilish-toggle-tool-section)
         (should-not (string-match-p "[▸▾]\\|hidden" (buffer-string)))
         (should (eq pilish--thinking-display pilish-thinking-display))))))
