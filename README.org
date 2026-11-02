@@ -212,6 +212,15 @@ run is settling, =C-c C-s= queues a local follow-up instead, sent
 when Pi is ready for another prompt.  Press =C-c C-k=
 (=M-x pilish-abort=) to abort the current response or compaction.
 
+When Pi returns control, a quiet right-aligned receipt such as =Returned
+2026-11-01 20:43 · Took 45m 12s= appears beneath the completed run. The
+timestamp uses your local time. The duration starts when Pi starts the run
+and stops when no automatic work remains, including tool calls, retries,
+compaction, and continuations. The neutral receipt also appears after aborted
+or failed runs. Receipts remain in the current transcript. They are transient
+display observations, so rebuilding or reloading saved history omits them
+rather than guessing from message timestamps.
+
 Press =C-c C-p= for the transient menu to find session commands,
 model settings, skills, and custom commands.
 

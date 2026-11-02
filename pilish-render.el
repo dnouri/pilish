@@ -264,6 +264,22 @@ still marked for fontification at the next redisplay."
 The timestamp matches the final message, never a heading/content index.  Local
 samples are display-only and cleared at completion, teardown and rebuild.")
 
+(defvar-local pilish--run-started-at nil
+  "First observed `agent_start' for the run currently withholding control.
+This is a local wall-clock sample in seconds.  It survives low-level
+`agent_end', retries, compaction and continuations, and clears only at an
+accepted settlement or an ownership reset.  Painted return receipts are
+ordinary transcript text and are not tracked here.")
+
+(defun pilish--reset-run-clock ()
+  "Forget the unfinished run's start without deleting painted receipts."
+  (setq pilish--run-started-at nil))
+
+(defun pilish--note-run-start (time)
+  "Record TIME as the current run's first observed start, if not already set."
+  (unless pilish--run-started-at
+    (setq pilish--run-started-at time)))
+
 (defvar-local pilish--pending-tool-details nil
   "Call-ID associations awaiting timestamped toolResult messages this run.
 Values are weak references to existing finalized tool records: details must not
@@ -1762,9 +1778,10 @@ which asks upfront before any buffers are touched."
 Updates buffer-local state and renders display updates."
   ;; Sample before state updates or rendering, never on deltas or remote
   ;; user/toolResult lifecycle events.  Tool starts permit live estimates;
-  ;; only assistant stream timing uses two local endpoints.
+  ;; assistant messages and run boundaries use two local endpoints.
   (let ((boundary-time
-         (when (or (equal (plist-get event :type) "tool_execution_start")
+         (when (or (member (plist-get event :type)
+                           '("agent_start" "agent_settled" "tool_execution_start"))
                    (and (member (plist-get event :type) '("message_start" "message_end"))
                         (equal (plist-get (plist-get event :message) :role) "assistant")))
            (float-time (current-time)))))
@@ -1782,11 +1799,21 @@ Updates buffer-local state and renders display updates."
         (pilish--flush-stream-deltas))
       (when (and settlement-released
                  (equal (plist-get event :type) "agent_settled"))
-        (when pilish--aborted
-          (pilish--clear-followup-queue))
-        (pilish--set-aborted nil)
-        (pilish--set-activity-phase "idle")
-        (pilish--process-followup-queue))
+        ;; Consume the clock before fallible presentation.  The receipt belongs
+        ;; before idle hooks and follow-ups, either of which may start new work.
+        (let ((run-started-at pilish--run-started-at))
+          (pilish--reset-run-clock)
+          (when pilish--aborted
+            (pilish--clear-followup-queue))
+          (pilish--set-aborted nil)
+          (when run-started-at
+            (condition-case err
+                (pilish--display-run-return run-started-at boundary-time)
+              (error
+               (message "Pi: Could not display return receipt: %s"
+                        (error-message-string err)))))
+          (pilish--set-activity-phase "idle")
+          (pilish--process-followup-queue)))
       (when (memq delta-kind '(text thinking))
         (when (eq delta-kind 'text)
           (pilish--set-activity-phase "replying"))
@@ -1800,6 +1827,7 @@ Updates buffer-local state and renders display updates."
           (guard (plist-member event :parentToolCallId)))
      (pilish--handle-nested-tool-event event boundary-time))
     ("agent_start"
+     (pilish--note-run-start boundary-time)
      (pilish--clear-live-details-state)
      (pilish--note-prompt-start)
      (pilish--display-agent-start)
@@ -1998,6 +2026,12 @@ Updates buffer-local state and renders display updates."
         (tool-call-id (pilish--queue-tool-update tool-call-id partial-result))
         (t (pilish--display-tool-update partial-result nil)))))
     ("compaction_start"
+     ;; A manual compaction owns a separate operation.  If an extension starts
+     ;; it while an older run awaits settlement, core will finish here at idle
+     ;; rather than accept that older settlement.  Do not leak the old start
+     ;; into the next prompt; automatic compaction remains part of the run.
+     (when (equal (plist-get event :reason) "manual")
+       (pilish--reset-run-clock))
      (when pilish--aborted
        (pilish--send-abort))
      (pilish--set-activity-phase "compact")
@@ -2123,6 +2157,7 @@ invalidated first.  Tree-sitter overlays are left alone."
   (pilish--cancel-tool-update-flush)
   (pilish--cancel-stream-delta-flush)
   (pilish--clear-live-details-state)
+  (pilish--reset-run-clock)
   (pilish--reset-thinking-state)
   (pilish--release-nested-tool-state)
   (remove-overlays (point-min) (point-max) 'pilish-tool-block t)
@@ -4225,6 +4260,39 @@ With TENTHS, show one decimal place below a minute; otherwise use whole seconds.
                       (format "%ds" whole-seconds)))
      ((< minutes 60) (format "%dm %ds" minutes (% whole-seconds 60)))
      (t (format "%dh %dm %ds" (/ minutes 60) (% minutes 60) (% whole-seconds 60))))))
+
+(defun pilish--run-return-label (started-at returned-at)
+  "Format the observed run STARTED-AT and RETURNED-AT wall-clock samples.
+Clamp a backward wall-clock adjustment to zero, matching live tool estimates."
+  (format "Returned %s · Took %s"
+          (pilish--format-message-timestamp (seconds-to-time returned-at))
+          (pilish--format-tool-duration-seconds
+           (max 0 (- returned-at started-at)) t)))
+
+(defun pilish--display-run-return (started-at returned-at)
+  "Append a transient receipt for a run from STARTED-AT to RETURNED-AT.
+The row uses the inert tool-footer layout protocol without tool ownership.
+Canonical history has no run timing data, so replay deliberately omits it."
+  (let* ((label (pilish--run-return-label started-at returned-at))
+         (align-width (1+ (string-width label))))
+    (pilish--append-to-chat
+     (concat
+      "\n"
+      (propertize " "
+                  'face 'pilish-tool-duration
+                  'font-lock-face 'pilish-tool-duration
+                  'display (pilish--tool-footer-align-display align-width)
+                  'pilish-run-receipt t
+                  'pilish-tool-output-footer 'return-receipt
+                  'pilish-tool-footer-align-width align-width
+                  'rear-nonsticky t)
+      (propertize label
+                  'face 'pilish-tool-duration
+                  'font-lock-face 'pilish-tool-duration
+                  'pilish-run-receipt t
+                  'pilish-tool-output-footer 'return-receipt
+                  'rear-nonsticky t)
+      "\n"))))
 
 (defun pilish--format-recorded-tool-time (timing)
   "Format recorded TIMING using Pi's seconds, minutes and hours convention."

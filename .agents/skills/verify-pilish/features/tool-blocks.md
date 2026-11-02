@@ -1,12 +1,13 @@
 # Work with tool blocks
 
-Tool output stays inside its owning block. Output and completed thinking use bottom continuation controls. Bash and subagent footers show live elapsed time and retain Pi's recorded final duration. Arguments and child output fold independently. Completed blocks retain readable content, inert timing, and explicit details after cooling. Tool metadata does not appear on automatic hover. Native control hover is unchanged.
+Tool output stays inside its owning block. Output and completed thinking use bottom continuation controls. Bash and subagent footers, including resumed subagent calls, show live elapsed time and retain Pi's recorded final duration. Arguments and child output fold independently. Completed blocks retain readable content, inert timing, and explicit details after cooling. Tool metadata does not appear on automatic hover. Native control hover is unchanged.
 
 ## Sub-features
 
 - `tool-output` displays fake tool output in its tool block.
 - `tool-bottom-control` expands and collapses output from its bottom button or left-margin caret.
 - `tool-duration` advances live timing and keeps the recorded final value beside output in all fold states and window sizes.
+- `tool-run-view` shows a running subagent's task title and agent on one line and its activity, last-activity age, turns, and context on a second. The age becomes a quiet marker after `pilish-subagent-quiet-after-seconds`.
 - `tool-fold` toggles output and argument folds independently with native actions.
 - `tool-viewport` preserves independent readers and keeps a following window filled as tool output grows and contracts.
 - `tool-point` keeps a reader on surviving text and uses the body start when replacement deletes the text under point.
@@ -17,7 +18,7 @@ Tool output stays inside its owning block. Output and completed thinking use bot
 
 - Run a prompt that produces tool output.
 - Press `TAB` or `RET` on a bottom output control, or click its left-margin caret. Use the argument-row controls independently.
-- Watch `Elapsed` advance during bash or subagent execution and change to `Took …` on completion. Live labels use whole seconds below a minute and minutes or hours above it. Resize the frame or show the chat in unequal windows.
+- Watch `Elapsed` advance during bash or subagent execution, including resumed calls, and change to `Took …` on completion. Live labels use whole seconds below a minute and minutes or hours above it. Resize the frame or show the chat in unequal windows.
 - Scroll and recenter the chat in two windows.
 - Read text after a live tool block while its output updates.
 - Place point inside preview text that a later preview or final result replaces.
@@ -50,6 +51,7 @@ Preconditions:
 - The cursor-stability and replacement-view tests use synthetic chat buffers. They do not provide fake-subprocess or PNG evidence.
 - PNG capture requires `x-export-frames`. Missing PNGs make a screenshot requirement blocked even when the assertions pass.
 - Judge output within its owning block. A matching string elsewhere in the transcript is not evidence.
-- Only bash and subagent show inline duration rows. Read, edit, write, and other tools stay quiet. Missing recorded values stay quiet rather than falling back to the local clock.
+- Only `bash`, `subagent`, and `subagent_resume` show inline duration rows. Read, edit, write, and other tools stay quiet. Missing recorded values stay quiet rather than falling back to the local clock.
+- A whole-run return receipt uses the same face and right-edge layout but is not tool output. The read-output journey owns its behavior and evidence.
 - A narrow sibling can stack a shared footer in wider sibling windows too. Each duration still aligns to its own window's right edge.
 - The details journey uses synthetic saved tool data inside a live fake-backed chat. Unit and fake-backed tests separately check live and recorded timing, the absence of custom metadata from native hover properties, and native-help coexistence. Headless PGTK cannot prove physical hover.

@@ -1,0 +1,16 @@
+{
+  "description": "A paced bash run whose tool footer and whole-run return receipt have distinct timings.",
+  "commands": [],
+  "prompt": {
+    "type": "tool_stream",
+    "tool_name": "bash",
+    "tool_args": {"command": "make test-render"},
+    "partial_result_text": "Running focused tests…\n",
+    "result_text": "All focused tests passed.\n",
+    "assistant_text": "The rendering fix is complete. The focused tests pass.",
+    "delay_ms": 100,
+    "execution_delay_ms": 1200,
+    "duration_ms": 1200,
+    "echo_user": true
+  }
+}

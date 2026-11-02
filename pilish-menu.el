@@ -351,6 +351,7 @@ Return the parsed metadata, or nil when SESSION-FILE was not a pi session."
   "Reset all session-specific state for a new session.
 Call this when starting a new session to ensure no stale state persists."
   (pilish--cancel-tool-times)
+  (pilish--reset-run-clock)
   (pilish--reset-inactivity-observation)
   (dolist (marker (list pilish--message-start-marker
                         pilish--streaming-marker

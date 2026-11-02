@@ -140,6 +140,10 @@ timer can show `Elapsed 0s` and
 acquire a duration row. Frontend policy still excludes read/edit/write rows,
 even when a backend supplies timing.
 
+`run-return-receipt.json` paces a fake bash run for 1200 ms and records the same
+1200 ms for the tool. Its separate whole-run receipt uses locally observed
+lifecycle time, so the two labels have related but independently measured values.
+
 ## `nested_tools`
 
 `nested-tools.json` is one bounded literal wire replay. Its `prompt` has only
