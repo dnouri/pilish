@@ -17,6 +17,10 @@
 # Local scratch directory
 tmp/
 
+# Review images belong in tmp/ and pull request attachments, not the package.
+/assets/*
+!/assets/pilish-logo.svg
+
 # Local pi prompts and config
 .pi/
 .deps-stamp

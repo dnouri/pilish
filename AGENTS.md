@@ -39,4 +39,5 @@ For RPC changes, consult the Pi source that matches `PI_VERSION` in the Makefile
 - Name tests after their owning suite, such as `pilish-test-...` or `pilish-gui-test-...`.
 - Require `pilish-test-common` in module test files that use shared fixtures.
 - Install the pre-commit hook with `make install-hooks`. It runs `make check`.
+- Keep review screenshots and recordings in `tmp/` and attach them to pull requests, not Git. `assets/` contains the shipped logo, not review evidence.
 - Stage files explicitly with `git add <specific-files>`. Run `git status` before committing and keep test artifacts out of the commit.
