@@ -1532,13 +1532,7 @@ buffer."
     (when text
       (setq text (ansi-color-filter-apply
                   (pilish--render-safe-string text))))
-    (if text
-        (setq pilish--extension-status
-              (cons (cons key text)
-                    (assoc-delete-all key pilish--extension-status)))
-      (setq pilish--extension-status
-            (assoc-delete-all key pilish--extension-status)))
-    (force-mode-line-update t)))
+    (pilish--set-extension-status key text)))
 
 ;; Pi RPC currently suppresses this method; retain client protocol support.
 (defun pilish--extension-ui-set-working-message (event)

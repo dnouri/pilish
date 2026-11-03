@@ -726,6 +726,58 @@ and sending with \\`C-c C-c' returns it to one line."
           (when (buffer-live-p help) (kill-buffer help))
           (when (buffer-live-p snapshot) (kill-buffer snapshot)))))))
 
+(ert-deftest pilish-gui-test-session-accessors-preserve-draft-and-focus ()
+  "Read-only inspection agrees from chat and input without sending or focusing."
+  (pilish-gui-test-with-fresh-session
+    (:backend fake :fake-scenario "prompt-lifecycle")
+    (pilish-gui-test-send "Check session inspection")
+    (let* ((chat (plist-get pilish-gui-test--session :chat-buffer))
+           (input (plist-get pilish-gui-test--session :input-buffer))
+           (process (plist-get pilish-gui-test--session :process))
+           (session-file (pilish-session-file chat))
+           (parent-text (with-current-buffer chat (buffer-string)))
+           (parent-bytes (with-temp-buffer
+                           (insert-file-contents-literally session-file)
+                           (buffer-string)))
+           (draft "Unsent API draft\nStill here")
+           (accessors '(pilish-session-directory pilish-session-name
+                        pilish-session-title pilish-session-file
+                        pilish-session-model pilish-session-context-usage
+                        pilish-session-queued-prompts pilish-session-busy-p
+                        pilish-session-running-tools pilish-session-extension-status)))
+      (select-window (pilish-gui-test-input-window))
+      (execute-kbd-macro (vconcat "Unsent API draft" (kbd "RET") "Still here"))
+      (let ((selected (selected-window))
+            (point (point)))
+        (cl-letf (((symbol-function 'pilish--send-string)
+                   (lambda (&rest _) (ert-fail "Inspection sent RPC"))))
+          (dolist (buffer (list chat input (buffer-name chat) (buffer-name input)))
+            (should (eq (pilish-session-chat-buffer buffer) chat))
+            (should (eq (pilish-session-input-buffer buffer) input))
+            (should (eq (pilish-session-process buffer) process)))
+          (dolist (accessor accessors)
+            (should (equal (funcall accessor chat) (funcall accessor input)))
+            (should (equal (funcall accessor) (funcall accessor input))))
+          (should (pilish-session-exists-p (pilish-session-directory)))
+          (should (plist-get (pilish-session-model) :id))
+          (should-not (pilish-session-busy-p)))
+        (should (eq (selected-window) selected))
+        (should (= (point) point)))
+      (pilish-gui-test--large-evidence
+       "session-api-inspection"
+       (list :selected-buffer (buffer-name (window-buffer (selected-window)))
+             :directory (pilish-session-directory input)
+             :file session-file :model (pilish-session-model input)
+             :draft-hash (with-current-buffer input (secure-hash 'sha256 (buffer-string)))
+             :window-system window-system :package-user-dir package-user-dir
+             :api-library (symbol-file 'pilish-session-chat-buffer)))
+      (should (process-live-p process))
+      (should (equal (with-current-buffer chat (buffer-string)) parent-text))
+      (should (equal (with-current-buffer input (buffer-string)) draft))
+      (should (equal (with-temp-buffer
+                       (insert-file-contents-literally session-file) (buffer-string))
+                     parent-bytes)))))
+
 (ert-deftest pilish-gui-test-snapshot-refresh-keyboard-g ()
   "Pressing g in a snapshot observer rereads and republishes it in place."
   (pilish-gui-test-with-fresh-session
@@ -1795,6 +1847,60 @@ rear-advance overlay before assistant text continues after the tool block."
     (:backend fake :fake-scenario "extension-message")
     (pilish-gui-test-send "/test-message")
     (should (pilish-gui-test-chat-contains "Test message from extension"))))
+
+(ert-deftest pilish-gui-test-extension-status-functions-follow-header ()
+  "Status functions see each change the header line shows, and the reset."
+  (pilish-gui-test-with-fresh-session
+    (:backend fake :fake-scenario "extension-status")
+    (let* ((chat (plist-get pilish-gui-test--session :chat-buffer))
+           (chat-win (pilish-gui-test-chat-window))
+           (calls nil)
+           (record (lambda (buffer key text)
+                     (push (list (eq buffer chat) key text) calls)))
+           (header (lambda ()
+                     (redisplay t)
+                     (with-selected-window chat-win
+                       (format-mode-line header-line-format)))))
+      (add-hook 'pilish-extension-status-functions record)
+      (unwind-protect
+          (progn
+            (pilish-gui-test-send "/test-status")
+            (should (pilish-gui-test-chat-contains "Statuses set"))
+            (should (string-match-p "⏸ plan · synced" (funcall header)))
+            (should (equal (pilish-session-extension-status chat)
+                           '(("plan" . "⏸ plan") ("git" . "synced"))))
+            ;; Clearing the never-set "stale" status reports nothing.
+            (should (equal (reverse calls)
+                           '((t "git" "synced") (t "plan" "⏸ plan"))))
+            (pilish-gui-test--large-evidence
+             "status-set"
+             (list :header (funcall header)
+                   :statuses (pilish-session-extension-status chat)
+                   :calls (reverse calls)))
+            ;; The same statuses again change nothing and report nothing.
+            (setq calls nil)
+            (pilish-gui-test-send "/test-status")
+            (should-not calls)
+            (should (string-match-p "⏸ plan · synced" (funcall header)))
+            ;; A new session clears the header and reports each cleared key.
+            (select-window chat-win)
+            (pilish-gui-test--large-command (kbd "C-c C-n") 'pilish-new-session)
+            (should (pilish-test-wait-until
+                     (lambda ()
+                       (with-current-buffer chat
+                         (and (not (pilish--session-transition-active-p))
+                              (not (pilish-session-extension-status chat)))))
+                     pilish-test-gui-timeout pilish-test-poll-interval))
+            (should (equal (reverse calls) '((t "plan" nil) (t "git" nil))))
+            (let ((text (funcall header)))
+              (should-not (string-match-p "synced\\|plan" text))
+              (should (string-match-p "idle" text)))
+            (pilish-gui-test--large-evidence
+             "status-cleared"
+             (list :header (funcall header)
+                   :statuses (pilish-session-extension-status chat)
+                   :calls (reverse calls))))
+        (remove-hook 'pilish-extension-status-functions record)))))
 
 (ert-deftest pilish-gui-test-extension-confirm-response-displayed ()
   "Fake extension confirm response triggers the displayed follow-up message."
