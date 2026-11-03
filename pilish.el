@@ -142,9 +142,10 @@ Evil states apply to them."
 
 (defvar pilish-session-environment-functions nil
   "Functions that supply environment overrides for a session's Pi process.
-Each function is called with the chat buffer and the session directory
-when the session starts its first process, and returns an alist of
-\(NAME . VALUE) entries, where a nil VALUE removes NAME.  Pilish keeps
+Each function is called for interactive and background sessions with the
+chat buffer and directory when the session starts its first process,
+and returns an alist of \(NAME . VALUE) entries, where a nil VALUE
+removes NAME.  Pilish keeps
 the combined result for the session, so `pilish-reload' starts its new
 process with the same environment.  Earlier entries win: environment
 passed to `pilish-start-session' first, then functions in hook order.
@@ -281,12 +282,20 @@ overrides, where a nil VALUE removes NAME; it takes precedence over
 `pilish-session-environment-functions'.  Both apply only to this
 session's processes, and `pilish-reload' keeps them.
 
-Startup neither prompts nor waits for Pi.  A missing Pi executable or
-essential tree-sitter grammar, an invalid name, directory or SESSION-FILE
-is an error that leaves no session behind.  Pi's own startup errors and
-a failed resume are reported in the chat buffer and echo area, as for
-interactive sessions.  To show the session, run \\[pilish] from its
-directory, with a prefix argument for a named session."
+Pilish neither prompts to install dependencies nor waits for Pi.
+Returning a buffer does not mean Pi has answered the initial state
+request or finished resuming;
+this function provides no readiness callback.  A missing Pi executable
+or essential tree-sitter grammar, an invalid name, directory or
+SESSION-FILE is an error that leaves no session behind.  Pi's later
+startup errors appear in the chat; a failed resume is reported in the
+echo area, as for interactive sessions.  To show the session, run
+\\[pilish] from its directory, with a prefix argument for a named session.
+
+Remote directories use the existing TRAMP process launcher and path
+rules.  TRAMP may prompt for authentication, and dependency checks and
+file reads may block on remote access; non-displaying does not mean
+all setup is asynchronous."
   (unless (or (null name)
               (and (stringp name) (not (string-empty-p name))))
     (error "Pilish: session name must be nil or a nonempty string: %S"
