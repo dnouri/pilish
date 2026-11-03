@@ -1553,6 +1553,46 @@ Track busy sessions for your own mode-line or tab display:
           #'my-pi-track-busy-sessions)
 #+end_src
 
+** Starting sessions from Lisp
+
+=pilish-start-session= starts a session without showing it or asking
+anything, for packages that manage several Pi sessions.  It returns the
+chat buffer at once; Pi starts in the background.
+
+#+begin_src emacs-lisp
+;; The directory's default session, as M-x pilish would start it.
+(pilish-start-session "~/src/project/" nil)
+
+;; A named session with its own Pi arguments and environment.
+(pilish-start-session "~/src/project/" "reviewer"
+                      :args '("--thinking" "high")
+                      :environment '(("MY_EXTENSION_ROLE" . "review")))
+
+;; Resume a saved conversation; its recorded directory is the default.
+(pilish-start-session nil "resumed" :session-file "/path/to/session.jsonl")
+#+end_src
+
+The session behaves like one started interactively; =M-x pilish= (with
+a prefix argument and the name for a named session) shows it.  Its
+arguments follow =pilish-extra-args=, and its environment applies only
+to its own Pi processes.  =pilish-reload= keeps both.  Starting a
+session that already exists is an error.  So is a missing Pi
+executable or essential grammar: unlike =M-x pilish=, it never offers
+to install them.
+
+To give every session, interactive or not, extra environment, add a
+function to =pilish-session-environment-functions=.  It receives the
+chat buffer and the directory before the session's first Pi process
+starts and returns an alist of =(NAME . VALUE)= entries; a nil value
+removes the variable.  Environment passed to =pilish-start-session=
+takes precedence.
+
+#+begin_src emacs-lisp
+(add-hook 'pilish-session-environment-functions
+          (lambda (chat _dir)
+            (list (cons "MY_PI_SESSION" (buffer-name chat)))))
+#+end_src
+
 ** Installation details
 
 MELPA (with [[https://elpa.gnu.org/][GNU ELPA]] added for =compat=)

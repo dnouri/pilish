@@ -549,9 +549,10 @@ handled, even when the response failed."
   "Reload the current session by restarting the pi process.
 Useful for reloading extensions, skills, prompts, and themes after
 editing them, or when the pi process has died or become unresponsive.
-Starts a fresh process, switches it back to the cached session file, then
-replaces the old process, refreshes state and commands, and rebuilds the chat
-buffer from session history."
+Starts a fresh process with the session's own arguments and environment
+\(see `pilish-start-session'), switches it back to the cached session
+file, then replaces the old process, refreshes state and commands, and
+rebuilds the chat buffer from session history."
   (interactive)
   (let* ((chat-buf (pilish--get-chat-buffer))
          (session-file (and chat-buf
@@ -578,7 +579,11 @@ buffer from session history."
                                session-file dir))
                 (old-proc pilish--process))
             (setq pilish--status 'idle)
-            (let* ((new-proc (pilish--start-process dir))
+            (let* ((new-proc (pilish--start-process
+                              dir
+                              (plist-get pilish--launch-options :args)
+                              (plist-get pilish--launch-options
+                                         :environment)))
                    (generation (pilish--begin-session-transition
                                 new-proc)))
               (when (processp new-proc)

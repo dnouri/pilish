@@ -746,12 +746,14 @@ This is useful for testing extensions or passing additional flags.")
       ('no-approve '("--no-approve"))
       (_ (error "Invalid pilish-project-trust-policy: %S" policy)))))
 
-(defun pilish--pi-command ()
-  "Return the argv used to start Pi in RPC mode."
+(defun pilish--pi-command (&optional args)
+  "Return the argv used to start Pi in RPC mode.
+ARGS are this process's own arguments, appended last."
   (append pilish-executable
           '("--mode" "rpc")
           pilish-extra-args
-          (pilish--project-trust-args)))
+          (pilish--project-trust-args)
+          args))
 
 (defun pilish--remote-start-command (command)
   "Return a remote shell wrapper COMMAND that emits the ready marker.
@@ -762,16 +764,22 @@ COMMAND is passed as `$0' and `$@' to preserve the original argv exactly."
                          pilish--remote-ready-marker)))
           command))
 
-(defun pilish--start-process (directory)
+(defun pilish--start-process (directory &optional args environment)
   "Start pi RPC process in DIRECTORY.
+ARGS are extra command-line arguments for this process only.  ENVIRONMENT
+is an alist of (NAME . VALUE) overrides for this process only; a nil VALUE
+removes NAME, and an earlier entry wins over a later one for the same NAME.
 Returns the process object."
   (let* ((default-directory directory)
+         (process-environment (copy-sequence process-environment))
          (remote-start-p (pilish--remote-prefix directory))
-         (command (pilish--pi-command))
+         (command (pilish--pi-command args))
          (process-command (if remote-start-p
                               (pilish--remote-start-command command)
                             command))
          (stderr-buf (generate-new-buffer " *pilish-stderr*")))
+    (dolist (entry (reverse environment))
+      (setenv (car entry) (cdr entry)))
     (condition-case err
         (let ((proc (make-process
                      :name "pi"
