@@ -6997,6 +6997,33 @@ TAB and whole-chat hiding leave it unchanged; TAB falls through to the outline."
         (should (string-match-p "^> \\*\\*Third step\\*\\*$" (buffer-string)))
         (should-not (string-match-p (regexp-quote stub) (buffer-string)))))))
 
+(ert-deftest pilish-test-long-single-paragraph-thinking-still-folds ()
+  "One long paragraph counts its width, so it folds while a short line does not."
+  (let ((pilish-thinking-display 'hidden))
+    (pcase-dolist (`(,thinking . ,foldable)
+                   `((,(make-string 10000 ?x) . t)
+                     (,(make-string 161 ?x) . t)
+                     (,(make-string 160 ?x) . nil)))
+      (with-temp-buffer
+        (pilish-chat-mode)
+        (pilish--display-agent-start)
+        (pilish--display-thinking-start)
+        (pilish--display-thinking-delta thinking)
+        (pilish--display-thinking-end "")
+        (let* ((start (text-property-not-all (point-min) (point-max)
+                                             'pilish-thinking-block nil))
+               (block (pilish--thinking-block-metadata-at-pos start)))
+          (should (eq (plist-get block :display) (if foldable 'hidden 'visible)))
+          (should (eq (and (get-text-property start 'pilish-disclosure-hit) t)
+                      foldable))
+          (when foldable
+            (should (equal (buffer-substring-no-properties
+                            start (plist-get block :end))
+                           "> Thinking (1 line)"))
+            (goto-char start)
+            (pilish-toggle-tool-section)
+            (should (string-search thinking (buffer-string)))))))))
+
 (ert-deftest pilish-test-thinking-details-count-non-blank-lines ()
   "Thinking details and hidden stubs count non-blank lines only."
   (should (equal (pilish--format-thinking-details nil "**A**\n\n**B**")

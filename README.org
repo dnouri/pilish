@@ -1185,7 +1185,8 @@ expand or collapse it.  Live thinking cannot be collapsed.  Completed
 thinking with fewer than =pilish-thinking-fold-min-lines= non-blank
 lines (default 3), such as a one-heading reasoning summary, always
 stays expanded and has no caret: a stub would hide most of it while
-saving at most a few rows.
+saving at most a few rows.  Lines longer than 80 columns count once per
+80 columns, so one long paragraph still folds.
 
 ** Markdown tables
 

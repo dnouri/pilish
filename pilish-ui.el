@@ -397,11 +397,13 @@ by buffer rebuilds, reloads, or whole-chat display-mode changes."
 
 (defcustom pilish-thinking-fold-min-lines 3
   "Minimum number of non-blank lines for completed thinking to fold.
-Shorter completed thinking, such as the one-heading reasoning summaries
-some providers send, always stays expanded: it has no disclosure caret,
-`TAB' does not collapse it, and `hidden' display leaves it visible,
-because a stub would hide most of it while saving at most a few rows.
-Set this to 1 to make all completed thinking foldable."
+A line longer than 80 columns counts once per started 80 columns, so a
+long paragraph still folds.  Shorter completed thinking, such as the
+one-heading reasoning summaries some providers send, always stays
+expanded: it has no disclosure caret, `TAB' does not collapse it, and
+`hidden' display leaves it visible, because a stub would hide most of it
+while saving at most a few rows.  Set this to 1 to make all completed
+thinking foldable."
   :type 'natnum
   :group 'pilish)
 

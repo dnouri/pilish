@@ -528,10 +528,23 @@ at most one empty paragraph separator while preserving indentation."
   "Return the number of non-blank lines in NORMALIZED thinking."
   (length (split-string normalized "\n" t "[ \t]*")))
 
+(defconst pilish--thinking-fold-line-width 80
+  "Columns that count as one line when deciding whether thinking folds.")
+
+(defun pilish--thinking-fold-line-count (normalized)
+  "Return the fold size of NORMALIZED thinking in nominal lines.
+Each non-blank line counts once per started
+`pilish--thinking-fold-line-width' columns, so a long paragraph counts
+as the rows it needs rather than as one line."
+  (let ((count 0))
+    (dolist (line (split-string normalized "\n" t "[ \t]*") count)
+      (setq count (+ count (max 1 (ceiling (string-width line)
+                                           (float pilish--thinking-fold-line-width))))))))
+
 (defun pilish--thinking-foldable-p (normalized)
   "Return non-nil when completed NORMALIZED thinking can be collapsed.
 See `pilish-thinking-fold-min-lines'."
-  (>= (pilish--thinking-content-line-count normalized)
+  (>= (pilish--thinking-fold-line-count normalized)
       pilish-thinking-fold-min-lines))
 
 (defun pilish--thinking-first-content-line (normalized)
