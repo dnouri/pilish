@@ -309,7 +309,7 @@ This ensures all files get code fences for consistent display."
         (make-backup-files nil))
     (unwind-protect
         (cl-letf (((symbol-function 'project-current) (lambda (&rest _) nil))
-                  ((symbol-function 'pilish--start-process) (lambda (_) nil)))
+                  ((symbol-function 'pilish--start-process) (lambda (&rest _) nil)))
           (setq chat (pilish--setup-session root nil)
                 input (buffer-local-value 'pilish--input-buffer chat))
           (setq file (pilish-test--write-chat-buffer
@@ -578,7 +578,7 @@ Closes the category from issue #234: any instance without a usable
   (let ((default-directory "/tmp/pilish-test-proc1/")
         (fake-proc 'mock-process))
     (cl-letf (((symbol-function 'project-current) (lambda (&rest _) nil))
-              ((symbol-function 'pilish--start-process) (lambda (_) fake-proc))
+              ((symbol-function 'pilish--start-process) (lambda (&rest _) fake-proc))
               ((symbol-function 'pilish--display-buffers) #'ignore))
       (unwind-protect
           (progn
@@ -593,7 +593,7 @@ Closes the category from issue #234: any instance without a usable
   (let ((default-directory "/tmp/pilish-test-proc2/")
         (fake-proc 'mock-process))
     (cl-letf (((symbol-function 'project-current) (lambda (&rest _) nil))
-              ((symbol-function 'pilish--start-process) (lambda (_) fake-proc))
+              ((symbol-function 'pilish--start-process) (lambda (&rest _) fake-proc))
               ((symbol-function 'pilish--display-buffers) #'ignore))
       (unwind-protect
           (progn
@@ -609,7 +609,7 @@ Closes the category from issue #234: any instance without a usable
         (all-frames-args nil))
     (make-directory root t)
     (cl-letf (((symbol-function 'project-current) (lambda (&rest _) nil))
-              ((symbol-function 'pilish--start-process) (lambda (_) nil)))
+              ((symbol-function 'pilish--start-process) (lambda (&rest _) nil)))
       (unwind-protect
           (let* ((chat (pilish--setup-session root nil))
                  (input (buffer-local-value 'pilish--input-buffer chat))
@@ -656,7 +656,7 @@ Closes the category from issue #234: any instance without a usable
   (let ((root "/tmp/pilish-test-dedicated/"))
     (make-directory root t)
     (cl-letf (((symbol-function 'project-current) (lambda (&rest _) nil))
-              ((symbol-function 'pilish--start-process) (lambda (_) nil)))
+              ((symbol-function 'pilish--start-process) (lambda (&rest _) nil)))
       (unwind-protect
           (let* ((chat (pilish--setup-session root nil))
                  (input (buffer-local-value 'pilish--input-buffer chat)))
@@ -672,7 +672,7 @@ Closes the category from issue #234: any instance without a usable
   (let ((root "/tmp/pilish-test-display-chat-only/"))
     (make-directory root t)
     (cl-letf (((symbol-function 'project-current) (lambda (&rest _) nil))
-              ((symbol-function 'pilish--start-process) (lambda (_) nil)))
+              ((symbol-function 'pilish--start-process) (lambda (&rest _) nil)))
       (unwind-protect
           (let* ((chat (pilish--setup-session root nil))
                  (input (buffer-local-value 'pilish--input-buffer chat)))
@@ -688,7 +688,7 @@ Closes the category from issue #234: any instance without a usable
   (let ((root "/tmp/pilish-test-open-input-split/"))
     (make-directory root t)
     (cl-letf (((symbol-function 'project-current) (lambda (&rest _) nil))
-              ((symbol-function 'pilish--start-process) (lambda (_) nil)))
+              ((symbol-function 'pilish--start-process) (lambda (&rest _) nil)))
       (unwind-protect
           (let* ((chat (pilish--setup-session root nil))
                  (input (buffer-local-value 'pilish--input-buffer chat)))
@@ -778,7 +778,7 @@ window; the default still splits below the chat."
   (let ((root "/tmp/pilish-test-open-input-focus/"))
     (make-directory root t)
     (cl-letf (((symbol-function 'project-current) (lambda (&rest _) nil))
-              ((symbol-function 'pilish--start-process) (lambda (_) nil)))
+              ((symbol-function 'pilish--start-process) (lambda (&rest _) nil)))
       (unwind-protect
           (let* ((chat (pilish--setup-session root nil))
                  (input (buffer-local-value 'pilish--input-buffer chat)))
@@ -798,7 +798,7 @@ The gesture works without the Evil integration, mirroring
   (let ((root "/tmp/pilish-test-chat-i-open-input/"))
     (make-directory root t)
     (cl-letf (((symbol-function 'project-current) (lambda (&rest _) nil))
-              ((symbol-function 'pilish--start-process) (lambda (_) nil)))
+              ((symbol-function 'pilish--start-process) (lambda (&rest _) nil)))
       (unwind-protect
           (let* ((chat (pilish--setup-session root nil))
                  (input (buffer-local-value 'pilish--input-buffer chat)))
@@ -828,7 +828,7 @@ The gesture works without the Evil integration, mirroring
         (pilish-input-window-display 'on-demand))
     (make-directory root t)
     (cl-letf (((symbol-function 'project-current) (lambda (&rest _) nil))
-              ((symbol-function 'pilish--start-process) (lambda (_) nil))
+              ((symbol-function 'pilish--start-process) (lambda (&rest _) nil))
               ((symbol-function 'pilish--prepare-and-send) #'ignore))
       (unwind-protect
           (let* ((chat (pilish--setup-session root nil))
@@ -849,7 +849,7 @@ The gesture works without the Evil integration, mirroring
         (pilish-input-window-display 'always))
     (make-directory root t)
     (cl-letf (((symbol-function 'project-current) (lambda (&rest _) nil))
-              ((symbol-function 'pilish--start-process) (lambda (_) nil))
+              ((symbol-function 'pilish--start-process) (lambda (&rest _) nil))
               ((symbol-function 'pilish--prepare-and-send) #'ignore))
       (unwind-protect
           (let* ((chat (pilish--setup-session root nil))
@@ -872,7 +872,7 @@ without an input window."
         (pilish-input-window-display 'hidden))
     (make-directory root t)
     (cl-letf (((symbol-function 'project-current) (lambda (&rest _) nil))
-              ((symbol-function 'pilish--start-process) (lambda (_) nil)))
+              ((symbol-function 'pilish--start-process) (lambda (&rest _) nil)))
       (unwind-protect
           (let* ((chat (pilish--setup-session root nil))
                  (input (buffer-local-value 'pilish--input-buffer chat)))
@@ -889,7 +889,7 @@ without an input window."
         (pilish-input-window-display 'hidden))
     (make-directory root t)
     (cl-letf (((symbol-function 'project-current) (lambda (&rest _) nil))
-              ((symbol-function 'pilish--start-process) (lambda (_) nil))
+              ((symbol-function 'pilish--start-process) (lambda (&rest _) nil))
               ((symbol-function 'pilish--prepare-and-send) #'ignore))
       (unwind-protect
           (let* ((chat (pilish--setup-session root nil))
@@ -910,7 +910,7 @@ without an input window."
         (all-frames-args nil))
     (make-directory root t)
     (cl-letf (((symbol-function 'project-current) (lambda (&rest _) nil))
-              ((symbol-function 'pilish--start-process) (lambda (_) nil)))
+              ((symbol-function 'pilish--start-process) (lambda (&rest _) nil)))
       (unwind-protect
           (progn
             (delete-other-windows)
@@ -1900,7 +1900,7 @@ Buffer is read-only with `inhibit-read-only' used for insertion.
         (original-default (default-value 'other-window-scroll-buffer)))
     (make-directory root t)
     (cl-letf (((symbol-function 'project-current) (lambda (&rest _) nil))
-              ((symbol-function 'pilish--start-process) (lambda (_) nil))
+              ((symbol-function 'pilish--start-process) (lambda (&rest _) nil))
               ((symbol-function 'pilish--display-buffers) #'ignore))
       (unwind-protect
           (progn
@@ -1924,7 +1924,7 @@ Buffer is read-only with `inhibit-read-only' used for insertion.
     (make-directory root-a t)
     (make-directory root-b t)
     (cl-letf (((symbol-function 'project-current) (lambda (&rest _) nil))
-              ((symbol-function 'pilish--start-process) (lambda (_) nil))
+              ((symbol-function 'pilish--start-process) (lambda (&rest _) nil))
               ((symbol-function 'pilish--display-buffers) #'ignore))
       (unwind-protect
           (progn

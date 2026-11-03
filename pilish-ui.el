@@ -1377,6 +1377,12 @@ of the current session in the selected frame."
 (defvar-local pilish--process nil
   "The pi RPC subprocess for this session.")
 
+(defvar-local pilish--launch-options nil
+  "How this session starts its Pi processes, or nil before the first one.
+A plist with :args, extra Pi arguments, and :environment, an alist of
+\(NAME . VALUE) overrides, as `pilish--start-process' accepts them.
+Reload starts its new process with the same options.")
+
 (defvar-local pilish--process-version nil
   "Detected pi CLI version for the current process.")
 
