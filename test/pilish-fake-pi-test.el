@@ -30,7 +30,7 @@
                  (concat (or (process-get proc 'fake-pi-raw-output) "") output))
     (process-put proc 'fake-pi-partial (cdr result))
     (dolist (line lines)
-      (if-let ((json (pilish--parse-json-line line)))
+      (if-let* ((json (pilish--parse-json-line line)))
           (push json new-objects)
         (push line new-invalid)))
     (process-put proc 'fake-pi-objects (nconc objects (nreverse new-objects)))

@@ -24,7 +24,7 @@
 
 (defun pilish-gui-test--table-display-strings (beg end)
   "Return ordered table overlay display strings between BEG and END."
-  (when-let ((buf (plist-get pilish-gui-test--session :chat-buffer)))
+  (when-let* ((buf (plist-get pilish-gui-test--session :chat-buffer)))
     (with-current-buffer buf
       (mapcar (lambda (ov) (overlay-get ov 'display))
               (sort (seq-filter
@@ -2825,7 +2825,7 @@ Return observations suitable for the graphical evidence file."
                      bytes (with-temp-buffer (insert-file-contents-literally file) (buffer-string)))
                (should (string-match-p "\"durationMs\":[[:space:]]*125000" bytes))
                ;; Keep the saved JSONL as evidence outside the disposable fake root.
-               (when-let ((directory (getenv "G1_CAPTURE")))
+               (when-let* ((directory (getenv "G1_CAPTURE")))
                  (copy-file file (expand-file-name "duration-session.jsonl" directory) t))
                (select-window (get-buffer-window chat))
                (pilish-gui-test--large-command (kbd "C-c C-n") 'pilish-new-session)
@@ -3808,7 +3808,7 @@ keep their recovery keys on screen too."
 
 (defun pilish-gui-test--large-evidence (name value)
   "Save test-owned VALUE under NAME when graphical evidence is requested."
-  (when-let ((directory (getenv "G1_CAPTURE")))
+  (when-let* ((directory (getenv "G1_CAPTURE")))
     (make-directory directory t)
     (with-temp-file (expand-file-name (concat name ".el") directory)
       (prin1 value (current-buffer)))
@@ -3949,7 +3949,7 @@ FAILURE permits an expected user error, whose native post hook may not run."
           (let ((q p))
             (while (< q end)
               (dolist (property '(line-prefix wrap-prefix))
-                (when-let ((prefix (get-text-property q property)))
+                (when-let* ((prefix (get-text-property q property)))
                   (when (stringp prefix)
                     (should-not (text-property-not-all 0 (length prefix) 'pilish-disclosure-hit nil prefix)))))
               (setq q (next-property-change q nil end)))))
