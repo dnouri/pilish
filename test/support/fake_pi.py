@@ -426,8 +426,10 @@ class FakePiHarness:
                     self._stop_active_run()
                 self._respond(command)
             case "clear_queue":
-                steering = self._take_pending_steer()
-                self._write_json({"type": "queue_update", "steering": [], "followUp": []})
+                with self._session_lock:
+                    steering = self._take_pending_steer(announce=False)
+                    # Like Pi, clearing announces the queue even when empty.
+                    self._write_queue_update()
                 self._respond(
                     command,
                     data={"steering": [steering] if steering is not None else [], "followUp": []},
@@ -613,6 +615,8 @@ class FakePiHarness:
         with self._session_lock:
             self._pending_steer_message = str(command["message"])
             self.state.pending_message_count = 1
+            # Like Pi, the queue update precedes the queued acknowledgment.
+            self._write_queue_update()
         self._respond(command, data={"disposition": "queued"})
 
     def _handle_new_session(self, command: JsonDict) -> None:
@@ -729,8 +733,14 @@ class FakePiHarness:
         emitted_messages: list[JsonDict] = []
         current_message = message
         current_images = prompt_images
+        dequeued = False
         self._write_json({"type": "agent_start"})
         while True:
+            if dequeued:
+                # Pi removes queued text just before its user message starts.
+                with self._session_lock:
+                    self._write_queue_update()
+                dequeued = False
             completed, assistant_message = self._emit_text_turn(
                 current_message,
                 behavior=behavior,
@@ -746,7 +756,7 @@ class FakePiHarness:
                 if assistant_message:
                     self._persist_assistant_message(assistant_message)
                     self._write_json({"type": "message_end", "message": assistant_message})
-                pending_steer = self._take_pending_steer()
+                pending_steer = self._take_pending_steer(announce=False)
                 self._finish_run(
                     [assistant_message] if assistant_message else [],
                     settled=pending_steer is None,
@@ -758,14 +768,16 @@ class FakePiHarness:
                 emitted_messages = []
                 current_message = pending_steer
                 current_images = ()
+                dequeued = True
                 self._write_json({"type": "agent_start"})
                 continue
             emitted_messages.append(assistant_message)
-            pending_steer = self._take_pending_steer()
+            pending_steer = self._take_pending_steer(announce=False)
             if pending_steer is None:
                 break
             current_message = pending_steer
             current_images = ()
+            dequeued = True
         self._finish_run(emitted_messages)
 
     def _emit_text_turn(
@@ -1191,12 +1203,33 @@ class FakePiHarness:
         self._run_thread = thread
         thread.start()
 
-    def _take_pending_steer(self) -> str | None:
-        """Return and clear the queued steering message, if any."""
+    def _write_queue_update(self) -> None:
+        """Emit the single steering slot as a queue snapshot.
+
+        Callers hold the session lock, so concurrent writers emit snapshots in
+        the order they changed the slot and the last one is current.
+        """
+        message = self._pending_steer_message
+        self._write_json(
+            {
+                "type": "queue_update",
+                "steering": [message] if message is not None else [],
+                "followUp": [],
+            }
+        )
+
+    def _take_pending_steer(self, *, announce: bool = True) -> str | None:
+        """Return and clear the queued steering message, if any.
+
+        With ANNOUNCE, discarding a queued message emits the emptied queue.
+        Consumers that deliver the message announce it themselves later.
+        """
         with self._session_lock:
             message = self._pending_steer_message
             self._pending_steer_message = None
             self.state.pending_message_count = 0
+            if announce and message is not None:
+                self._write_queue_update()
             return message
 
     def _finish_run(self, messages: list[JsonDict], *, settled: bool = True) -> None:
