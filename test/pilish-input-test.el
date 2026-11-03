@@ -3107,6 +3107,101 @@ This ensures history loads correctly when callback runs in arbitrary context."
 
 ;;; Input History
 
+;; Pi-style arrows: `pilish-input-arrow-history'
+
+(defmacro pilish-test--with-arrow-input (text &rest body)
+  "Run BODY in a displayed input buffer holding TEXT with history old, new."
+  (declare (indent 1) (debug t))
+  `(let ((buf (generate-new-buffer "*pilish-test-arrows*"))
+         (pilish-input-arrow-history t))
+     (unwind-protect
+         (save-window-excursion
+           (set-window-buffer (selected-window) buf)
+           (with-current-buffer buf
+             (pilish-input-mode)
+             (setq truncate-lines nil)
+             (pilish--history-add "old")
+             (pilish--history-add "new")
+             (insert ,text)
+             ,@body))
+       (kill-buffer buf))))
+
+(defun pilish-test--arrow (key)
+  "Run the command KEY is bound to in the current input buffer."
+  (call-interactively (key-binding key)))
+
+(ert-deftest pilish-test-arrow-history-browses-from-empty-input ()
+  "<up> recalls prompts with point at the start; <down> returns to the draft."
+  (pilish-test--with-arrow-input ""
+    (pilish-test--arrow [up])
+    (should (equal (buffer-string) "new"))
+    (should (bobp))
+    (pilish-test--arrow [up])
+    (should (equal (buffer-string) "old"))
+    (pilish-test--arrow [down])
+    (should (equal (buffer-string) "new"))
+    (pilish-test--arrow [down])
+    (should (equal (buffer-string) ""))))
+
+(ert-deftest pilish-test-arrow-history-moves-within-draft-first ()
+  "Inside a draft the arrows move point; history starts from its start."
+  (pilish-test--with-arrow-input "line one\nline two"
+    ;; Last line: <up> keeps its usual binding.
+    (should (eq (key-binding [up]) #'previous-line))
+    (goto-char 4)
+    (pilish-test--arrow [up])
+    (should (= (point) (point-min)))
+    (should (equal (buffer-string) "line one\nline two"))
+    (pilish-test--arrow [up])
+    (should (equal (buffer-string) "new"))
+    (pilish-test--arrow [down])
+    (should (equal (buffer-string) "line one\nline two"))
+    (goto-char (point-min))
+    (should (eq (key-binding [down]) #'next-line))
+    (goto-char (point-max))
+    (pilish-test--arrow [down])
+    (should (equal (buffer-string) "line one\nline two"))
+    (should (eobp))))
+
+(ert-deftest pilish-test-arrow-history-counts-wrapped-screen-lines ()
+  "A wrapped line's rows count: only its first and last rows browse."
+  (pilish-test--with-arrow-input (make-string (* 3 (window-body-width)) ?x)
+    ;; Point at the end sits on the last of several screen rows.
+    (should (> (count-screen-lines (point-min) (point-max)) 1))
+    (should (eq (key-binding [up]) #'previous-line))
+    (should (eq (key-binding [down]) #'pilish-input-history-down))
+    (goto-char (point-min))
+    (should (eq (key-binding [up]) #'pilish-input-history-up))
+    (should (eq (key-binding [down]) #'next-line))
+    ;; A middle row of the same logical line keeps both usual bindings.
+    (vertical-motion 1)
+    (should-not (bobp))
+    (should (eq (key-binding [up]) #'previous-line))
+    (should (eq (key-binding [down]) #'next-line))))
+
+(ert-deftest pilish-test-arrow-history-keeps-edited-recall ()
+  "Editing a recalled prompt makes it the draft that <down> returns to."
+  (pilish-test--with-arrow-input ""
+    (pilish-test--arrow [up])
+    (goto-char (point-max))
+    (insert " edited")
+    (pilish-test--arrow [down])
+    (should (equal (buffer-string) "new edited"))
+    (should (eobp))
+    (pilish-test--arrow [up])
+    (should (bobp))
+    (pilish-test--arrow [up])
+    (should (equal (buffer-string) "new"))
+    (pilish-test--arrow [down])
+    (should (equal (buffer-string) "new edited"))))
+
+(ert-deftest pilish-test-arrow-history-off-keeps-movement ()
+  "Without `pilish-input-arrow-history' the arrows keep their bindings."
+  (pilish-test--with-arrow-input ""
+    (let ((pilish-input-arrow-history nil))
+      (should (eq (key-binding [up]) #'previous-line))
+      (should (eq (key-binding [down]) #'next-line)))))
+
 (ert-deftest pilish-test-history-add-to-ring ()
   "pilish--history-add adds input to ring."
   (let ((pilish--input-ring nil))
