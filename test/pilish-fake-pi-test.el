@@ -1402,11 +1402,12 @@ SPEC is (SESSION SCENARIO &rest EXTRA-ARGS)."
         (pilish-fake-pi-test--wait-or-fail
          proc (lambda () (member "Pi: Steering acknowledged as queued" notices))
          "queued steering acknowledgment")
-        ;; The bounded fake does not publish steering queue snapshots.  Its
-        ;; acknowledgment must not manufacture an input-header queue count.
-        (should-not (pilish--process-queue-snapshot proc))
+        ;; Pi's queue snapshot precedes the acknowledgment and drives the count.
+        (should (equal (pilish--process-queue-snapshot proc)
+                       '(:type "queue_update" :steering ["queued steering"]
+                         :followUp [])))
         (with-current-buffer input
-          (should-not (string-match-p " queued [0-9]+" (pilish--header-line-string))))
+          (should (string-match-p " queued 1\\_>" (pilish--header-line-string))))
         (pilish-fake-pi-test--wait-or-fail
          proc (lambda () (with-current-buffer chat
                            (and (eq pilish--status 'idle)
@@ -1420,9 +1421,12 @@ SPEC is (SESSION SCENARIO &rest EXTRA-ARGS)."
           (should (= 2 (pilish-test--count-matches "^You · " (buffer-string))))
           (should-not pilish--followup-queue)
           (should-not pilish--local-user-message))
+        (should (equal (pilish--process-queue-snapshot proc)
+                       '(:type "queue_update" :steering [] :followUp [])))
         (with-current-buffer input
           (should (equal (buffer-string) "newer draft"))
-          (should (= 4 (ring-length pilish--input-ring))))
+          (should (= 4 (ring-length pilish--input-ring)))
+          (should-not (string-match-p " queued [0-9]+" (pilish--header-line-string))))
         (should (= 1 (cl-count "Pi: Steering acknowledged as queued" notices :test #'equal)))
         (let* ((response (pilish--rpc-sync proc '(:type "get_messages")
                                            pilish-fake-pi-test--timeout))
@@ -1748,6 +1752,64 @@ SPEC is (SESSION SCENARIO &rest EXTRA-ARGS)."
         (should (equal (mapcar (lambda (message) (plist-get message :text))
                                (append messages nil))
                        '("initial turn" "keep queued turn")))))))
+
+(ert-deftest pilish-fake-pi-test-steering-slot-emits-queue-updates ()
+  "Each steering-slot change emits one queue snapshot; handled input none."
+  (pilish-fake-pi-test-with-process
+      (proc "input-dispositions" "--pre-start-delay-ms" "1000")
+    (cl-labels ((exchange (command)
+                 (pilish-fake-pi-test--send proc command)
+                 (pilish-fake-pi-test--collect-until
+                  proc (lambda (obj)
+                         (and (equal (plist-get obj :type) "response")
+                              (equal (plist-get obj :id)
+                                     (plist-get command :id))))))
+                (queued (events text)
+                  (should (equal (pilish-fake-pi-test--event-types events)
+                                 '("queue_update" "response")))
+                  (should (equal (car events)
+                                 `(:type "queue_update" :steering [,text]
+                                   :followUp [])))
+                  (should (equal (plist-get (plist-get (cadr events) :data)
+                                            :disposition)
+                                 "queued")))
+                (unqueued (events)
+                  (should (equal (pilish-fake-pi-test--event-types events)
+                                 '("response")))))
+      (unqueued (exchange '(:id "idle" :type "steer" :message "no run")))
+      (exchange '(:id "normal" :type "prompt" :message "initial turn"))
+      (queued (exchange '(:id "steer" :type "steer" :message "steered"))
+              "steered")
+      ;; The bounded slot holds only the newest text.
+      (queued (exchange '(:id "replace" :type "prompt" :message "replacement"
+                          :streamingBehavior "steer"))
+              "replacement")
+      (dolist (type '("steer" "prompt"))
+        (unqueued (exchange `(:id ,(concat "handled-" type) :type ,type
+                              :message "consume without a run"
+                              :streamingBehavior "steer"))))
+      (unqueued (exchange '(:id "follow-up" :type "prompt" :message "later"
+                            :streamingBehavior "followUp")))
+      (let ((state (car (last (exchange '(:id "state" :type "get_state"))))))
+        (should (= (plist-get (plist-get state :data) :pendingMessageCount) 1)))
+      (let* ((events (pilish-fake-pi-test--collect-until
+                      proc (lambda (obj)
+                             (equal (plist-get obj :type) "agent_settled"))))
+             (types (pilish-fake-pi-test--event-types events))
+             (users (pilish-fake-pi-test--message-events
+                     events "message_start" "user"))
+             (update-index (seq-position types "queue_update")))
+        (should (equal (pilish-fake-pi-test--events-of-type events "queue_update")
+                       '((:type "queue_update" :steering [] :followUp []))))
+        ;; Delivery empties the queue just before the steered user message.
+        (should (eq (nth (1+ update-index) events) (cadr users)))
+        (should (equal (mapcar (lambda (event)
+                                 (plist-get (aref (plist-get (plist-get event :message)
+                                                             :content)
+                                                  0)
+                                            :text))
+                               users)
+                       '("initial turn" "replacement")))))))
 
 (ert-deftest pilish-fake-pi-test-lifecycle-emits-settled-after-final-run ()
   "The fake backend emits agent_settled after agent_end and is then idle."
@@ -2546,11 +2608,17 @@ SPEC is (SESSION SCENARIO &rest EXTRA-ARGS)."
         (should (= 1 (cl-count "agent_settled" types :test #'equal)))
         (should (= (if clear 1 2) (cl-count "agent_end" types :test #'equal)))
         (should (= (if clear 0 1) (cl-count "agent_start" types :test #'equal)))
-        (when clear
-          (should (equal (plist-get clear-response :data)
-                         '(:steering ["queued"] :followUp [])))
-          (should (equal (pilish-fake-pi-test--events-of-type events "queue_update")
-                         '((:type "queue_update" :steering [] :followUp []))))))
+        ;; Queueing announces the slot; clearing or delivery announces it empty.
+        (should (equal (pilish-fake-pi-test--events-of-type events "queue_update")
+                       '((:type "queue_update" :steering ["queued"] :followUp [])
+                         (:type "queue_update" :steering [] :followUp []))))
+        (if clear
+            (should (equal (plist-get clear-response :data)
+                           '(:steering ["queued"] :followUp [])))
+          ;; The aborted run's continuation takes the slot after its own start.
+          (let ((tail (member "agent_start" types)))
+            (should (equal (seq-take tail 3)
+                           '("agent_start" "queue_update" "message_start"))))))
       (let ((state (pilish-fake-pi-test--rpc proc '(:type "get_state"))))
         (should (eq (plist-get (plist-get state :data) :isStreaming) :false))))))
 
