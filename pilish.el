@@ -333,5 +333,41 @@ If no session exists, signal an error."
        chat-buf input-buf
        (pilish--input-window-on-demand-p))))))
 
+;;;; Programmatic Submission
+
+(defun pilish-submit-prompt (chat-buffer text callback &optional behavior)
+  "Submit TEXT to CHAT-BUFFER without changing its input draft.
+CHAT-BUFFER must be a live Pilish chat buffer with a live Pi process.
+TEXT must be a nonblank string.  BEHAVIOR is \"followUp\" (the default)
+or \"steer\" and selects Pi's queue when it is busy.  Always use RPC
+prompt so extension commands can execute immediately, even while busy.
+
+CALLBACK receives the response plist: success means accepted, queued,
+or handled, not finished.  Pi reports its queue through `queue_update';
+this function never uses Pilish's local follow-up queue.  Process exit
+reports failure through CALLBACK.  Invalid arguments, an unavailable
+process, or a send failure signal synchronously instead.
+
+Submission does not edit the input buffer, consume its image, add to
+prompt history, display windows, or move focus.  Normal Pi output and
+extension UI requests are still processed.  The return value is unspecified."
+  (unless (and (buffer-live-p chat-buffer)
+               (with-current-buffer chat-buffer
+                 (derived-mode-p 'pilish-chat-mode)))
+    (error "Not a live Pilish chat buffer: %S" chat-buffer))
+  (unless (and (stringp text) (not (string-blank-p text)))
+    (error "Prompt must be a nonblank string"))
+  (unless (member behavior '(nil "followUp" "steer"))
+    (error "Invalid prompt behavior: %S" behavior))
+  (unless (functionp callback)
+    (error "Prompt callback must be a function"))
+  (let ((proc (buffer-local-value 'pilish--process chat-buffer)))
+    (unless (and (processp proc) (process-live-p proc))
+      (error "Pi process is unavailable"))
+    (pilish--rpc-async
+     proc (list :type "prompt" :message text
+                :streamingBehavior (or behavior "followUp"))
+     callback)))
+
 (provide 'pilish)
 ;;; pilish.el ends here

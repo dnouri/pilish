@@ -841,6 +841,218 @@ still mock the RPC boundary, so the process is never used for I/O."
       (pilish-test--kill-live-buffers input-buf chat-buf)
       (delete-directory session-dir t))))
 
+;;; Programmatic Submission
+
+(defun pilish-test--submission-draft-state (input)
+  "Return the protected draft and history state in INPUT."
+  (with-current-buffer input
+    (list (buffer-string) (point) (buffer-modified-p)
+          (copy-tree pilish--draft-prompt-image)
+          (and pilish--input-ring (ring-elements pilish--input-ring))
+          pilish--input-ring-index pilish--input-saved)))
+
+(ert-deftest pilish-test-submit-prompt-sends-rpc-without-owning-draft ()
+  "Idle and busy submissions go straight to Pi without UI queue ownership."
+  (pcase-let ((`(,chat ,input ,proc)
+               (pilish-test--make-open-session-command-buffers)))
+    (unwind-protect
+        (progn
+          (with-current-buffer input
+            (insert "Unsent draft\nwith a second line")
+            (goto-char 4)
+            (setq pilish--draft-prompt-image '(:data "bytes" :mimeType "image/png"))
+            (pilish--history-add "Older prompt")
+            (setq pilish--input-ring-index 0 pilish--input-saved "Saved draft"))
+          (dolist (status '(idle sending streaming compacting))
+            (dolist (behavior '(nil "followUp" "steer"))
+              (let ((before (pilish-test--submission-draft-state input))
+                    (origin (current-buffer))
+                    (window (selected-window))
+                    wire result)
+                (with-current-buffer chat
+                  (setq pilish--status status))
+                (cl-letf (((symbol-function 'pilish--send-string)
+                           (lambda (process text)
+                             (should (eq process proc))
+                             (setq wire (pilish--parse-json-line text)))))
+                  (pilish-submit-prompt
+                   chat "  API prompt\n" (lambda (r) (setq result r)) behavior))
+                (should (equal (plist-get wire :type) "prompt"))
+                (should (equal (plist-get wire :message) "  API prompt\n"))
+                (should (equal (plist-get wire :streamingBehavior)
+                               (or behavior "followUp")))
+                (should-not (plist-member wire :images))
+                (should-not result)
+                (pilish--dispatch-response
+                 proc (list :type "response" :id (plist-get wire :id)
+                            :success t :data '(:disposition "queued")))
+                (should (eq (plist-get result :success) t))
+                (should (equal (pilish-test--submission-draft-state input) before))
+                (should (eq (current-buffer) origin))
+                (should (eq (selected-window) window))
+                (with-current-buffer chat
+                  (should (eq pilish--status status))
+                  (should-not pilish--followup-queue)
+                  (should-not pilish--prompt-wait))))))
+      (pilish-test--kill-live-buffers input chat))))
+
+(ert-deftest pilish-test-submit-prompt-validates-before-sending ()
+  "Invalid requests never enter the wire or disturb the draft."
+  (should (fboundp 'pilish-submit-prompt))
+  (pcase-let ((`(,chat ,input ,proc)
+               (pilish-test--make-open-session-command-buffers)))
+    (unwind-protect
+        (let ((before (pilish-test--submission-draft-state input)))
+          (cl-letf (((symbol-function 'pilish--send-string)
+                     (lambda (&rest _) (ert-fail "Invalid prompt sent"))))
+            (dolist (args `((nil "text" ignore)
+                            (,input "text" ignore)
+                            (,chat nil ignore)
+                            (,chat "" ignore)
+                            (,chat " \n\t" ignore)
+                            (,chat "text" nil)
+                            (,chat "text" ignore "invalid")))
+              (should-error (apply #'pilish-submit-prompt args)))
+            (with-current-buffer chat (setq pilish--process nil))
+            (should-error (pilish-submit-prompt chat "text" #'ignore))
+            (with-current-buffer chat (setq pilish--process proc))
+            (delete-process proc)
+            (should-error (pilish-submit-prompt chat "text" #'ignore)))
+          (should (equal (pilish-test--submission-draft-state input) before)))
+      (pilish-test--kill-live-buffers input chat))))
+
+(ert-deftest pilish-test-submit-prompt-rejection-does-not-restore-over-draft ()
+  "A rejected or handled request passes its response to the caller unchanged."
+  (pcase-let ((`(,chat ,input ,proc)
+               (pilish-test--make-open-session-command-buffers)))
+    (unwind-protect
+        (progn
+          (with-current-buffer input (insert "Keep this newer draft"))
+          (dolist (response '((:type "response" :success :false :error "Rejected")
+                              (:type "response" :success t
+                               :data (:disposition "handled"))))
+            (let ((before (pilish-test--submission-draft-state input))
+                  wire result)
+              (cl-letf (((symbol-function 'pilish--send-string)
+                         (lambda (_ text)
+                           (setq wire (pilish--parse-json-line text)))))
+                (pilish-submit-prompt
+                 chat "/extension" (lambda (r) (setq result r))))
+              (let ((reply (append response (list :id (plist-get wire :id)))))
+                (pilish--dispatch-response proc reply)
+                (should (eq result reply)))
+              (should (equal (pilish-test--submission-draft-state input) before)))))
+      (pilish-test--kill-live-buffers input chat))))
+
+(ert-deftest pilish-test-submit-prompt-send-failure-cleans-request ()
+  "A synchronous send failure signals, preserving draft and pending tables."
+  (should (fboundp 'pilish-submit-prompt))
+  (pcase-let ((`(,chat ,input ,proc)
+               (pilish-test--make-open-session-command-buffers)))
+    (unwind-protect
+        (let ((before (pilish-test--submission-draft-state input)) called)
+          (cl-letf (((symbol-function 'pilish--send-string)
+                     (lambda (&rest _) (error "Send failed"))))
+            (should-error
+             (pilish-submit-prompt chat "text" (lambda (_) (setq called t)))))
+          (should-not called)
+          (should (= 0 (hash-table-count (pilish--get-pending-requests proc))))
+          (should (= 0 (hash-table-count (pilish--get-pending-command-types proc))))
+          (should (equal (pilish-test--submission-draft-state input) before)))
+      (pilish-test--kill-live-buffers input chat))))
+
+(ert-deftest pilish-test-submit-prompt-process-exit-reports-failure ()
+  "Exit settles a submitted prompt through the ordinary core callback path."
+  (pcase-let ((`(,chat ,input ,proc)
+               (pilish-test--make-open-session-command-buffers)))
+    (unwind-protect
+        (let ((before (pilish-test--submission-draft-state input)) responses)
+          (cl-letf (((symbol-function 'pilish--send-string) #'ignore))
+            (pilish-submit-prompt chat "text" (lambda (r) (push r responses))))
+          (delete-process proc)
+          (pilish--handle-process-exit proc "connection closed\n")
+          (should (= 1 (length responses)))
+          (should (eq (plist-get (car responses) :success) :false))
+          (should (plist-get (car responses) :processExit))
+          (should (equal (pilish-test--submission-draft-state input) before)))
+      (pilish-test--kill-live-buffers input chat))))
+
+(ert-deftest pilish-test-submit-prompt-fake-draft-and-queue ()
+  "The subprocess reports acceptance, queue and rejection with the draft intact."
+  (let* ((root (file-name-as-directory (make-temp-file "pilish-submit-" t)))
+         (default-directory root)
+         (fixture (pilish-test--read-json-fixture "fake-pi/input-dispositions.json"))
+         (pilish-executable (pilish-test-fake-pi-executable))
+         (pilish-extra-args (list "--scenario" "api" "--scenario-dir" root
+                                 "--session-dir" root))
+         chat input proc)
+    (unwind-protect
+        (progn
+          ;; Keep the busy window long enough for the assertions, not a sleep
+          ;; in the test: every wait below watches an observed state or reply.
+          (plist-put (plist-get fixture :prompt) :delay_ms 100)
+          (plist-put (plist-get fixture :prompt) :chunk_count 10)
+          (with-temp-file (expand-file-name "api.json" root)
+            (insert (json-serialize fixture)))
+          (setq chat (pilish--setup-session root)
+                input (buffer-local-value 'pilish--input-buffer chat)
+                proc (buffer-local-value 'pilish--process chat))
+          (should (pilish-test-wait-until
+                   (lambda ()
+                     (= 0 (hash-table-count (pilish--get-pending-requests proc))))
+                   5 0.01 proc))
+          (with-current-buffer input
+            (insert "My unsent draft\nStill composing")
+            (goto-char 5)
+            (setq pilish--draft-prompt-image '(:data "draft-bytes" :mimeType "image/png"))
+            (pilish--history-add "Previous local prompt")
+            (set-buffer-modified-p nil))
+          (let ((before (pilish-test--submission-draft-state input))
+                started rejected queued handled)
+            (pilish-submit-prompt chat "API first" (lambda (r) (setq started r)))
+            (should (pilish-test-wait-until
+                     (lambda ()
+                       (and started (eq (buffer-local-value 'pilish--status chat)
+                                        'streaming)))
+                     5 0.01 proc))
+            (should (equal (plist-get (plist-get started :data) :disposition) "started"))
+            ;; The bounded fake rejects busy follow-ups.  Test that rejection
+            ;; is returned, not hidden by silently queuing it in the frontend.
+            (pilish-submit-prompt chat "Fake unsupported follow-up"
+                                  (lambda (r) (setq rejected r)))
+            (should (pilish-test-wait-until (lambda () rejected) 5 0.01 proc))
+            (should (eq (plist-get rejected :success) :false))
+            (pilish-submit-prompt chat "API steer" (lambda (r) (setq queued r)) "steer")
+            (should (pilish-test-wait-until
+                     (lambda ()
+                       (and queued
+                            (equal (plist-get (pilish--process-queue-snapshot proc)
+                                              :steering)
+                                   ["API steer"])))
+                     5 0.01 proc))
+            (should (equal (plist-get (plist-get queued :data) :disposition) "queued"))
+            (pilish-submit-prompt chat "consume without a run"
+                                  (lambda (r) (setq handled r)))
+            (should (pilish-test-wait-until (lambda () handled) 5 0.01 proc))
+            (should (equal (plist-get (plist-get handled :data) :disposition) "handled"))
+            (should (equal (pilish-test--submission-draft-state input) before))
+            (should (pilish-test-wait-until
+                     (lambda ()
+                       (and (eq (buffer-local-value 'pilish--status chat) 'idle)
+                            (with-current-buffer chat
+                              (string-match-p "Steered fake reply for: API steer"
+                                              (buffer-string)))))
+                     5 0.01 proc))
+            (should (equal (plist-get (pilish--process-queue-snapshot proc) :steering) []))
+            (should (equal (pilish-test--submission-draft-state input) before))
+            (should-not (buffer-local-value 'pilish--followup-queue chat))
+            (should-not (buffer-local-value 'pilish--prompt-wait chat))
+            (should-not (get-buffer-window-list chat nil t))
+            (should-not (get-buffer-window-list input nil t))))
+      (when (and proc (process-live-p proc)) (delete-process proc))
+      (pilish-test--kill-live-buffers input chat)
+      (delete-directory root t))))
+
 ;;; DWIM & Toggle
 
 (ert-deftest pilish-test-dwim-reuses-existing-session ()
