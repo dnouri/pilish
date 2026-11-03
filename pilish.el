@@ -371,7 +371,9 @@ CALLBACK receives the response plist: success means accepted, queued,
 or handled, not finished.  Pi reports its queue through `queue_update';
 this function never uses Pilish's local follow-up queue.  Process exit
 reports failure through CALLBACK.  Invalid arguments, an unavailable
-process, or a send failure signal synchronously instead.
+process, an active session transition (reload, resume, new session or
+fork), or a send failure signal synchronously instead.  Transitions
+refuse submission before any RPC is scheduled.
 
 Submission does not edit the input buffer, consume its image, add to
 prompt history, display windows, or move focus.  Normal Pi output and
@@ -380,6 +382,8 @@ extension UI requests are still processed.  The return value is unspecified."
                (with-current-buffer chat-buffer
                  (derived-mode-p 'pilish-chat-mode)))
     (error "Not a live Pilish chat buffer: %S" chat-buffer))
+  (when (pilish--session-transition-active-p chat-buffer)
+    (error "Cannot submit prompt while session is switching"))
   (unless (and (stringp text) (not (string-blank-p text)))
     (error "Prompt must be a nonblank string"))
   (unless (member behavior '(nil "followUp" "steer"))
