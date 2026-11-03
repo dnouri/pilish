@@ -1533,6 +1533,33 @@ restore a nested saved-conversation tree after reload unless its producer
 persists the declaration in another supported field.  It never infers the
 missing references from run metadata, output, or the pi-submarine manifest.
 
+** Programmatic prompts
+
+Integrations can call =(pilish-submit-prompt CHAT TEXT CALLBACK &optional BEHAVIOR)=
+with a live Pilish chat buffer.  It sends the supplied nonblank text directly
+through Pi's RPC =prompt= command without editing the input draft, consuming an
+attached image, changing prompt history, or selecting a window.  Pi's ordinary
+output and extension UI requests still run.
+
+=BEHAVIOR= is ="followUp"= (the default) or ="steer"= when Pi is busy.
+Pi owns this queue and reports it through =queue_update=; Pilish does not
+hold a local follow-up.  Using =prompt= also lets extension commands execute
+immediately while busy, rather than waiting in a local queue.
+
+=CALLBACK= receives Pi's response plist.  =:success t= means accepted, queued,
+or handled (see =:data :disposition=), not that a run finished.  Process exit
+reports failure to the callback.  Invalid arguments, no live process, or a
+send failure signal synchronously.  Nothing is retried automatically.
+
+#+begin_src emacs-lisp
+(pilish-submit-prompt
+ chat "Review the current changes"
+ (lambda (response)
+   (unless (eq (plist-get response :success) t)
+     (message "Pi rejected the prompt: %s" (plist-get response :error))))
+ "steer")
+#+end_src
+
 ** Activity phase hooks
 
 For custom UI changes tied to activity, add functions to
