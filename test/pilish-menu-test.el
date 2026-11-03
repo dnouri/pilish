@@ -3587,6 +3587,59 @@ The tree is built iteratively to avoid recursion in test setup."
       (should (equal (cadr commands) '(:type "get_state"))))
     (should (equal last-message "Pi: Thinking level: medium"))))
 
+(ert-deftest pilish-test-thinking-refresh-ignores-stale-state-after-switch ()
+  "A delayed thinking query cannot overwrite the completed switch's state."
+  (pilish-test-with-rpc-session (chat _input proc commands)
+    (pilish--refresh-thinking-level-state proc chat)
+    (let ((old-request (car commands)))
+      (pilish--refresh-session-state proc chat)
+      (pilish--dispatch-response
+       proc (list :type "response" :command "get_state"
+                  :id (plist-get (car commands) :id) :success t
+                  :data '(:sessionFile "/tmp/thinking-new.jsonl"
+                          :thinkingLevel "high" :isStreaming :false)))
+      (should-not (pilish--session-transition-active-p chat))
+      (pilish--dispatch-response
+       proc (list :type "response" :command "get_state"
+                  :id (plist-get old-request :id) :success t
+                  :data '(:sessionFile "/tmp/thinking-old.jsonl"
+                          :thinkingLevel "low" :isStreaming t)))
+      (with-current-buffer chat
+        (should (equal (plist-get pilish--state :session-file)
+                       "/tmp/thinking-new.jsonl"))
+        (should (equal (plist-get pilish--state :thinking-level) "high"))
+        (should (eq pilish--status 'idle)))
+      (should (= (hash-table-count
+                  (process-get proc 'pilish-pending-requests)) 0)))))
+
+(ert-deftest pilish-test-thinking-refresh-ignores-replaced-process ()
+  "A reply from the old process cannot replace its successor's state."
+  (pilish-test-with-rpc-session (chat _input proc commands)
+    (pilish--refresh-thinking-level-state proc chat)
+    (with-current-buffer chat
+      (pilish--set-process nil)
+      (pilish--apply-state-response
+       chat '(:success t :data (:sessionFile "/tmp/replacement.jsonl"
+                               :thinkingLevel "high"))))
+    (pilish--dispatch-response
+     proc (list :type "response" :command "get_state"
+                :id (plist-get (car commands) :id) :success t
+                :data '(:sessionFile "/tmp/old-process.jsonl"
+                        :thinkingLevel "low")))
+    (with-current-buffer chat
+      (should (equal (plist-get pilish--state :session-file)
+                     "/tmp/replacement.jsonl"))
+      (should (equal (plist-get pilish--state :thinking-level) "high")))))
+
+(ert-deftest pilish-test-thinking-refresh-defers-during-session-transition ()
+  "Only the transition's own query may refresh an unconfirmed session."
+  (pilish-test-with-rpc-session (chat _input proc commands)
+    (with-current-buffer chat
+      (pilish--begin-session-transition proc))
+    (pilish--refresh-thinking-level-state proc chat)
+    (should-not commands)
+    (should (pilish--session-transition-active-p chat))))
+
 (ert-deftest pilish-test-select-thinking-noop-when-unchanged ()
   "Thinking selector does not send RPC when the user picks the current level."
   (let (rpc-called)

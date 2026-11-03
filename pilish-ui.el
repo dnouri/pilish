@@ -232,6 +232,23 @@ NEW-PHASE when session buffers are relinked or reset."
   :type 'hook
   :group 'pilish)
 
+(defcustom pilish-session-identity-functions nil
+  "Functions called with CHAT-BUFFER after its session identity changes.
+Identity consists of the saved session file, stable session directory and
+chat buffer name.  The first successful state response also notifies.
+Repeated state responses with the same identity do not notify.  Session
+transitions coalesce state and buffer changes until the transition finishes.
+If a transition's state refresh fails, wait for a successful state response
+before notifying; do not publish new buffer names with a stale session file.
+
+Functions run after Pilish applies state or retargets its buffer pair;
+manual buffer renames are observed at the next such update.  The process
+may be stopped and the input buffer may be missing.  Observers should not
+change session identity themselves.  Errors are reported as warnings and
+remaining observers still run, unless `debug-on-error' is non-nil."
+  :type 'hook
+  :group 'pilish)
+
 (defcustom pilish-separator-width 72
   "Total width of section separators in chat buffer."
   :type 'natnum
@@ -1509,6 +1526,9 @@ cannot apply older session identity or header state over a newer session view.")
 (defvar-local pilish--session-transition-process nil
   "Process allowed to complete the active session transition.")
 
+(defvar-local pilish--session-identity-state-pending nil
+  "Non-nil until a state response confirms a transition's session identity.")
+
 (defun pilish--set-session-transition-generation (generation)
   "Set session-transition GENERATION for the current chat buffer."
   (setq pilish--session-transition-generation generation))
@@ -1520,7 +1540,8 @@ Optional PROC may complete the transition before it becomes the current process.
   (let ((next (1+ (or pilish--session-transition-generation 0))))
     (pilish--set-session-transition-generation next)
     (setq pilish--session-transition-active t
-          pilish--session-transition-process proc)
+          pilish--session-transition-process proc
+          pilish--session-identity-state-pending t)
     next))
 
 (defun pilish--finish-session-transition (generation)
@@ -1528,7 +1549,8 @@ Optional PROC may complete the transition before it becomes the current process.
   (when (= generation pilish--session-transition-generation)
     (setq pilish--session-transition-active nil
           pilish--session-transition-process nil)
-    (pilish--reconcile-inactivity-timer)))
+    (pilish--reconcile-inactivity-timer)
+    (pilish--note-session-identity)))
 
 (defun pilish--session-transition-active-p (&optional chat-buf)
   "Return non-nil when CHAT-BUF is switching sessions or forking."
@@ -2162,7 +2184,9 @@ Return nil to abort the exit."
       (with-current-buffer input-buf
         (setq default-directory dir)
         (rename-buffer (pilish--buffer-name :input dir session))
-        (pilish--set-chat-buffer chat-buf)))))
+        (pilish--set-chat-buffer chat-buf)))
+    (with-current-buffer chat-buf
+      (pilish--note-session-identity))))
 
 ;;;; Display
 
@@ -3520,6 +3544,31 @@ the session's input buffer."
                        (when (buffer-live-p chat-buf)
                          (pilish--force-header-line-update chat-buf)))))))
 
+(defvar-local pilish--announced-session-identity nil
+  "Session identity last reported to `pilish-session-identity-functions'.")
+
+(defun pilish--note-session-identity ()
+  "Notify observers of the current chat's changed, coherent session identity.
+Defer notification until an active session transition finishes."
+  (when (and (derived-mode-p 'pilish-chat-mode)
+             (not pilish--session-transition-active)
+             (not pilish--session-identity-state-pending))
+    (let ((identity (list (plist-get pilish--state :session-file)
+                          (pilish--chat-session-directory)
+                          (buffer-name))))
+      (unless (equal identity pilish--announced-session-identity)
+        (setq pilish--announced-session-identity identity)
+        (let ((chat-buffer (current-buffer)))
+          (dolist (function pilish-session-identity-functions)
+            (condition-case-unless-debug err
+                (funcall function chat-buffer)
+              (error
+               (display-warning
+                'pilish
+                (format "Session identity function %S failed: %s"
+                        function (error-message-string err))
+                :error)))))))))
+
 (defun pilish--apply-state-response (chat-buf response)
   "Apply get_state RESPONSE to CHAT-BUF.
 Updates buffer-local state variables and refreshes mode-line.
@@ -3547,7 +3596,9 @@ Safely handles dead buffers by checking liveness first."
           (setq pilish--status new-status
                 pilish--state new-state)))
       (pilish--reconcile-inactivity-timer)
-      (force-mode-line-update t))))
+      (force-mode-line-update t)
+      (setq pilish--session-identity-state-pending nil)
+      (pilish--note-session-identity))))
 
 ;;;; Sending Infrastructure
 
