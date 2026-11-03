@@ -8263,6 +8263,90 @@ since we don't display them locally. Let pi's message_start handle it."
        :statusText nil))
     (should-not (assoc "my-ext" pilish--extension-status))))
 
+(ert-deftest pilish-test-extension-status-functions-follow-setstatus-events ()
+  "Status functions report each changed status from Pi's stdout, once."
+  (pilish-test-with-rpc-session (chat input proc _commands)
+    (let (calls)
+      (with-current-buffer chat
+        (setq-local pilish-extension-status-functions
+                    (list (lambda (buffer key text)
+                            (push (list buffer key text
+                                        (pilish-session-extension-status
+                                         buffer key))
+                                  calls)))))
+      (cl-flet ((status (key &optional text)
+                  (append (list :type "extension_ui_request" :id key
+                                :method "setStatus" :statusKey key)
+                          (and text (list :statusText text)))))
+        (pilish-test--stdout proc
+                             (status "git" "synced")
+                             (status "git" "synced")
+                             (status "plan" "\e[38;5;226m⏸ plan\e[39m")
+                             (status "absent")
+                             (status "git")))
+      ;; Each change arrives after it is applied; repeats and absent clears
+      ;; call nothing.
+      (should (equal (reverse calls)
+                     `((,chat "git" "synced" "synced")
+                       (,chat "plan" "⏸ plan" "⏸ plan")
+                       (,chat "git" nil nil))))
+      (should (equal (pilish-session-extension-status chat)
+                     '(("plan" . "⏸ plan"))))
+      ;; The header line still shows the remaining status.
+      (should (string-match-p "⏸ plan"
+                              (with-current-buffer input
+                                (pilish--header-line-string)))))))
+
+(ert-deftest pilish-test-extension-status-accessor-returns-copies ()
+  "Changing returned or reported statuses leaves the session's status intact."
+  (with-temp-buffer
+    (pilish-chat-mode)
+    (let ((chat (current-buffer))
+          reported)
+      (setq-local pilish-extension-status-functions
+                  (list (lambda (_buffer key text)
+                          (aset key 0 ?X)
+                          (aset text 0 ?X)
+                          (setq reported text))))
+      (pilish--handle-extension-ui-request
+       '(:type "extension_ui_request" :id "1" :method "setStatus"
+         :statusKey "git" :statusText "synced"))
+      (should (equal reported "Xynced"))
+      (let ((all (pilish-session-extension-status chat))
+            (text (pilish-session-extension-status chat "git")))
+        (should (equal all '(("git" . "synced"))))
+        (aset (caar all) 0 ?X)
+        (aset (cdar all) 0 ?X)
+        (setcdr (car all) "replaced")
+        (aset text 0 ?X))
+      (should (equal pilish--extension-status '(("git" . "synced"))))
+      (should (equal (pilish-session-extension-status chat "git") "synced"))
+      (should-not (pilish-session-extension-status chat "other"))
+      (with-temp-buffer
+        (setq-local pilish--extension-status '(("git" . "not a chat")))
+        (should-not (pilish-session-extension-status (current-buffer))))
+      (let ((dead (generate-new-buffer " *dead*")))
+        (kill-buffer dead)
+        (should-not (pilish-session-extension-status dead "git"))))))
+
+(ert-deftest pilish-test-extension-status-function-errors-are-isolated ()
+  "A failing status function warns; later functions and the status still apply."
+  (with-temp-buffer
+    (pilish-chat-mode)
+    (let (warnings seen)
+      (setq-local pilish-extension-status-functions
+                  (list (lambda (&rest _) (error "Broken consumer"))
+                        (lambda (_buffer key text) (push (cons key text) seen))))
+      (cl-letf (((symbol-function 'display-warning)
+                 (lambda (_type message &rest _) (push message warnings))))
+        (let ((debug-on-error nil))
+          (pilish--handle-extension-ui-request
+           '(:type "extension_ui_request" :id "1" :method "setStatus"
+             :statusKey "git" :statusText "synced"))))
+      (should (equal seen '(("git" . "synced"))))
+      (should (equal pilish--extension-status '(("git" . "synced"))))
+      (should (string-match-p "Broken consumer" (car warnings))))))
+
 (ert-deftest pilish-test-extension-ui-set-working-message ()
   "extension_ui_request setWorkingMessage stores working text."
   (with-temp-buffer

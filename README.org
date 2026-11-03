@@ -1291,6 +1291,35 @@ status text in the header line to see the exact =statusKey=, which you
 can use to change the font for that extension's status text using
 =pilish-extension-status-faces=.
 
+*** Extension status hooks
+
+To show extension statuses somewhere else, such as a tab bar or a
+session list, read them with =pilish-session-extension-status= and
+follow changes with =pilish-extension-status-functions=.  Each function
+receives:
+
+#+begin_src emacs-lisp
+(CHAT-BUFFER KEY TEXT)
+#+end_src
+
+=KEY= is the =statusKey= and =TEXT= the new text without ANSI colors,
+or nil when the status was cleared.  Setting a status to its current
+text calls nothing.  Starting a new session clears every status and
+calls the functions once per cleared key.  The functions run after the
+change, so the accessor already returns =TEXT=.
+
+=(pilish-session-extension-status CHAT-BUFFER KEY)= returns one status's
+text; without =KEY= it returns an alist of all statuses in header-line
+order.  Both return copies.
+
+#+begin_src emacs-lisp
+(defun my-pi-message-plan-mode (chat key text)
+  (when (equal key "plan-mode")
+    (message "%s: %s" (buffer-name chat) (or text "plan mode off"))))
+
+(add-hook 'pilish-extension-status-functions #'my-pi-message-plan-mode)
+#+end_src
+
 *** Publishing saved conversations
 
 Return =details.savedConversations= from any tool that saves Pi

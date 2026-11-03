@@ -1,11 +1,12 @@
 # Compose and send
 
-Pilish opens a chat and input pair, then sends consecutive prompts without losing the later submission. With a fitted input height, the input window follows the draft.
+Pilish opens a chat and input pair, then sends consecutive prompts without losing the later submission. With a fitted input height, the input window follows the draft. Extension statuses appear in the header line, and status functions follow each change.
 
 ## Sub-features
 
 - `compose-layout` opens a live session with chat and input windows.
 - `compose-header` renders the session header line at the top of the chat window by default, keeps it out of the input window, moves it between the live windows when `pilish-header-line-location` is set to `input`, and removes it from both windows when set to `none`.
+- `compose-extension-status` shows statuses that an extension command sets in the header line, reports each change once to `pilish-extension-status-functions`, and clears both on a new session.
 - `compose-send` submits a prompt and displays its reply.
 - `compose-sequential` submits a second prompt after the first turn and returns to idle.
 - `compose-fit-input` sizes a `fit` input window to the typed draft, stops at its cap, refits on frame-width changes, and shrinks after sending.
@@ -16,6 +17,7 @@ Pilish opens a chat and input pair, then sends consecutive prompts without losin
 - Run `M-x pilish` from a project directory.
 - Read the model, thinking level, activity, cost, and context status in the header line above the chat, and click model or thinking level there.
 - Set `pilish-header-line-location` to `input` to move the header line above the input window, as in earlier Pilish versions, or to `none` to remove it, in existing sessions without restarting them.
+- Add a function to `pilish-extension-status-functions`, run an extension command that calls `ctx.ui.setStatus`, for example the fake `/test-status` command, then press `C-c C-n` in the chat window.
 - Enter a prompt in the input buffer and press `C-c C-c`.
 - Enter and send another prompt after the first reply.
 - Set the global `pilish-input-window-height` option to `fit`, type a multi-line draft, resize the frame, and press `C-c C-c`.
@@ -33,8 +35,9 @@ Preconditions:
 - **Fit the input to a draft.** Run `G1_CAPTURE="$RUN_DIR/fit" ./test/run-gui-tests.sh --headless pilish-gui-test-input-window-fits-draft 2>&1 | tee "$RUN_DIR/fit.log"`. Record `fit.exit`. The test types three lines and then more lines than the cap with real keys, sends with `C-c C-c`, and asserts one draft line at start, three lines, the capped height ending at point's line, and one line after the reply. It writes `fit-empty`, `fit-three-lines`, `fit-capped`, and `fit-after-send` observations and PNG frames.
 - **Resize an unchanged draft.** Run `G1_CAPTURE="$RUN_DIR/resize" ./test/run-gui-tests.sh --headless pilish-gui-test-input-fit-refits-on-frame-resize 2>&1 | tee "$RUN_DIR/resize.log"`. Record `resize.exit`. The graphical frame changes from 104 to 54 columns and back. Without another edit, the same draft grows from two to four text rows and returns to two. It writes `fit-wide`, `fit-narrow`, and `fit-wide-again` observations and PNG frames.
 - **Compose on demand.** Run `G1_CAPTURE="$RUN_DIR/display" ./test/run-gui-tests.sh --headless pilish-gui-test-input-fit-with-hide-after-send 2>&1 | tee "$RUN_DIR/display.log"`. Record `display.exit`. The test checks both display styles at launch, closes and reopens a three-line draft with keys, sends with `C-c C-c`, verifies the input disappears, and reopens an empty one-line input by pressing `i` in the chat window. It writes `fit-on-demand-draft`, `fit-on-demand-sent`, `fit-on-demand-reopened`, and the corresponding `fit-hidden-*` observations and PNG frames.
-- **Check the logs.** Require zero statuses, `PASS: TEST-NAME` for each named test, and `0 skipped` in every log. For each stem `layout`, `header`, `send`, `fit`, `resize`, and `display`, run `test "$(cat "$RUN_DIR/STEM.exit")" -eq 0` and `test -s "$RUN_DIR/STEM.log"`, replacing `STEM` with the stem.
-- **Check the captures.** Run `test -s "$RUN_DIR/header/header-in-chat.el"`, `test -s "$RUN_DIR/header/header-in-chat.png"`, `test -s "$RUN_DIR/header/header-in-input.el"`, `test -s "$RUN_DIR/header/header-in-input.png"`, `test -s "$RUN_DIR/fit/fit-capped.el"`, `test -s "$RUN_DIR/fit/fit-capped.png"`, `test -s "$RUN_DIR/resize/fit-narrow.el"`, `test -s "$RUN_DIR/resize/fit-narrow.png"`, `test -s "$RUN_DIR/resize/fit-wide-again.el"`, `test -s "$RUN_DIR/resize/fit-wide-again.png"`, `test -s "$RUN_DIR/display/fit-on-demand-reopened.el"`, `test -s "$RUN_DIR/display/fit-on-demand-reopened.png"`, `test -s "$RUN_DIR/display/fit-hidden-reopened.el"`, and `test -s "$RUN_DIR/display/fit-hidden-reopened.png"`.
+- **Follow extension statuses.** Run `G1_CAPTURE="$RUN_DIR/status" ./test/run-gui-tests.sh --headless pilish-gui-test-extension-status-functions-follow-header 2>&1 | tee "$RUN_DIR/status.log"`. Record `status.exit`. The test sends `/test-status` twice and presses `C-c C-n` in the chat window. It asserts both statuses in the chat window's header line, one function call per set status and none for the repeat or for clearing an unset status, then two clearing calls and a header line without statuses after the new session. It writes `status-set` and `status-cleared` observations and PNG frames.
+- **Check the logs.** Require zero statuses, `PASS: TEST-NAME` for each named test, and `0 skipped` in every log. For each stem `layout`, `header`, `status`, `send`, `fit`, `resize`, and `display`, run `test "$(cat "$RUN_DIR/STEM.exit")" -eq 0` and `test -s "$RUN_DIR/STEM.log"`, replacing `STEM` with the stem.
+- **Check the captures.** Run `test -s "$RUN_DIR/status/status-set.png"`, `test -s "$RUN_DIR/status/status-cleared.png"`, `test -s "$RUN_DIR/header/header-in-chat.el"`, `test -s "$RUN_DIR/header/header-in-chat.png"`, `test -s "$RUN_DIR/header/header-in-input.el"`, `test -s "$RUN_DIR/header/header-in-input.png"`, `test -s "$RUN_DIR/fit/fit-capped.el"`, `test -s "$RUN_DIR/fit/fit-capped.png"`, `test -s "$RUN_DIR/resize/fit-narrow.el"`, `test -s "$RUN_DIR/resize/fit-narrow.png"`, `test -s "$RUN_DIR/resize/fit-wide-again.el"`, `test -s "$RUN_DIR/resize/fit-wide-again.png"`, `test -s "$RUN_DIR/display/fit-on-demand-reopened.el"`, `test -s "$RUN_DIR/display/fit-on-demand-reopened.png"`, `test -s "$RUN_DIR/display/fit-hidden-reopened.el"`, and `test -s "$RUN_DIR/display/fit-hidden-reopened.png"`.
 
 ## Gotchas
 

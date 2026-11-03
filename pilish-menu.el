@@ -363,7 +363,6 @@ Call this when starting a new session to ensure no stale state persists."
         pilish--cached-stats nil
         pilish--assistant-header-shown nil
         pilish--local-user-message nil
-        pilish--extension-status nil
         pilish--working-message nil
         pilish--pre-compaction-status nil
         pilish--in-code-block nil
@@ -393,7 +392,9 @@ Call this when starting a new session to ensure no stale state persists."
   (when pilish--tool-args-cache
     (clrhash pilish--tool-args-cache))
   (when pilish--live-tool-blocks
-    (clrhash pilish--live-tool-blocks)))
+    (clrhash pilish--live-tool-blocks))
+  ;; Last, so status functions observe a completely reset session.
+  (pilish--clear-extension-statuses))
 
 (defun pilish--clear-chat-buffer ()
   "Clear the chat buffer and display fresh startup header.

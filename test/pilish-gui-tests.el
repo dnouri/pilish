@@ -1917,6 +1917,60 @@ rear-advance overlay before assistant text continues after the tool block."
     (pilish-gui-test-send "/test-message")
     (should (pilish-gui-test-chat-contains "Test message from extension"))))
 
+(ert-deftest pilish-gui-test-extension-status-functions-follow-header ()
+  "Status functions see each change the header line shows, and the reset."
+  (pilish-gui-test-with-fresh-session
+    (:backend fake :fake-scenario "extension-status")
+    (let* ((chat (plist-get pilish-gui-test--session :chat-buffer))
+           (chat-win (pilish-gui-test-chat-window))
+           (calls nil)
+           (record (lambda (buffer key text)
+                     (push (list (eq buffer chat) key text) calls)))
+           (header (lambda ()
+                     (redisplay t)
+                     (with-selected-window chat-win
+                       (format-mode-line header-line-format)))))
+      (add-hook 'pilish-extension-status-functions record)
+      (unwind-protect
+          (progn
+            (pilish-gui-test-send "/test-status")
+            (should (pilish-gui-test-chat-contains "Statuses set"))
+            (should (string-match-p "⏸ plan · synced" (funcall header)))
+            (should (equal (pilish-session-extension-status chat)
+                           '(("plan" . "⏸ plan") ("git" . "synced"))))
+            ;; Clearing the never-set "stale" status reports nothing.
+            (should (equal (reverse calls)
+                           '((t "git" "synced") (t "plan" "⏸ plan"))))
+            (pilish-gui-test--large-evidence
+             "status-set"
+             (list :header (funcall header)
+                   :statuses (pilish-session-extension-status chat)
+                   :calls (reverse calls)))
+            ;; The same statuses again change nothing and report nothing.
+            (setq calls nil)
+            (pilish-gui-test-send "/test-status")
+            (should-not calls)
+            (should (string-match-p "⏸ plan · synced" (funcall header)))
+            ;; A new session clears the header and reports each cleared key.
+            (select-window chat-win)
+            (pilish-gui-test--large-command (kbd "C-c C-n") 'pilish-new-session)
+            (should (pilish-test-wait-until
+                     (lambda ()
+                       (with-current-buffer chat
+                         (and (not (pilish--session-transition-active-p))
+                              (not (pilish-session-extension-status chat)))))
+                     pilish-test-gui-timeout pilish-test-poll-interval))
+            (should (equal (reverse calls) '((t "plan" nil) (t "git" nil))))
+            (let ((text (funcall header)))
+              (should-not (string-match-p "synced\\|plan" text))
+              (should (string-match-p "idle" text)))
+            (pilish-gui-test--large-evidence
+             "status-cleared"
+             (list :header (funcall header)
+                   :statuses (pilish-session-extension-status chat)
+                   :calls (reverse calls))))
+        (remove-hook 'pilish-extension-status-functions record)))))
+
 (ert-deftest pilish-gui-test-extension-confirm-response-displayed ()
   "Fake extension confirm response triggers the displayed follow-up message."
   (pilish-gui-test-with-fresh-session

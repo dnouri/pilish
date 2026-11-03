@@ -1982,7 +1982,85 @@ canonical history, so rebuilding now would erase that visible turn."
 
 (defvar-local pilish--extension-status nil
   "Alist of extension status messages for header-line display.
-Keys are extension identifiers (strings), values are status text.")
+Keys are extension identifiers (strings), values are status text.
+Change it only through `pilish--set-extension-status' and
+`pilish--clear-extension-statuses', which run
+`pilish-extension-status-functions'.")
+
+(defcustom pilish-extension-status-functions nil
+  "Functions called after an extension status of a session changed.
+Each function is called with three arguments:
+
+  CHAT-BUFFER KEY TEXT
+
+KEY is the extension's `statusKey' and TEXT its new status text, or nil
+when the status was cleared.  A session reset, such as starting a new
+session, clears every status and calls the functions once per cleared
+KEY.  Setting a status to its current text calls nothing.
+
+The functions run in CHAT-BUFFER after the change is complete, so
+`pilish-session-extension-status' already returns TEXT.  KEY and TEXT
+are copies.  An error in one function is reported as a warning and does
+not stop the others.  This is an abnormal hook."
+  :type 'hook
+  :group 'pilish)
+
+(defun pilish-session-extension-status (chat-buffer &optional key)
+  "Return the extension status of the session in CHAT-BUFFER.
+With KEY, return that status's text, or nil when it is not set.
+Without KEY, return an alist of (KEY . TEXT) for every status, in
+header-line order.  The result is a copy: changing it does not change
+the session.  Return nil when CHAT-BUFFER is not a live chat buffer.
+`pilish-extension-status-functions' report changes."
+  (when (and (buffer-live-p chat-buffer)
+             (provided-mode-derived-p
+              (buffer-local-value 'major-mode chat-buffer) 'pilish-chat-mode))
+    (let ((statuses (buffer-local-value 'pilish--extension-status chat-buffer)))
+      (if key
+          (copy-sequence (cdr (assoc key statuses)))
+        (mapcar (lambda (status)
+                  (cons (copy-sequence (car status))
+                        (copy-sequence (cdr status))))
+                statuses)))))
+
+(defun pilish--run-extension-status-functions (key text)
+  "Run `pilish-extension-status-functions' for KEY and TEXT in this buffer.
+User functions are isolated so a customization error cannot break event
+handling."
+  (let ((chat-buffer (current-buffer)))
+    (dolist (fn pilish-extension-status-functions)
+      (condition-case-unless-debug err
+          (funcall fn chat-buffer (copy-sequence key) (copy-sequence text))
+        (error
+         (display-warning
+          'pilish
+          (format "Extension status function %S failed: %s"
+                  fn (error-message-string err))
+          :error))))))
+
+(defun pilish--set-extension-status (key text)
+  "Set extension status KEY to TEXT in the current chat buffer.
+Nil TEXT clears the status.  Run `pilish-extension-status-functions'
+when the text changed."
+  (let ((old (cdr (assoc key pilish--extension-status))))
+    (setq pilish--extension-status
+          (assoc-delete-all key pilish--extension-status))
+    (when text
+      (push (cons key text) pilish--extension-status))
+    (force-mode-line-update t)
+    (unless (equal old text)
+      (pilish--run-extension-status-functions key text))))
+
+(defun pilish--clear-extension-statuses ()
+  "Clear every extension status in the current chat buffer.
+Run `pilish-extension-status-functions' once per cleared key, in
+header-line order, after all statuses are cleared."
+  (let ((keys (mapcar #'car pilish--extension-status)))
+    (setq pilish--extension-status nil)
+    (when keys
+      (force-mode-line-update t))
+    (dolist (key keys)
+      (pilish--run-extension-status-functions key nil))))
 
 (defvar-local pilish--working-message nil
   "Transient extension working message for header-line display.")

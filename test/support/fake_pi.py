@@ -27,8 +27,8 @@ prompt behaviors:
     debugging.
 
 ``custom_message``
-    A slash command that optionally emits one visible custom message without a
-    full assistant turn.
+    A slash command that optionally sets extension statuses and emits one
+    visible custom message without a full assistant turn.
 
 ``tool_stream``
     Emits the streamed tool-call and tool-execution event surface, then ends
@@ -127,6 +127,7 @@ class CustomMessagePrompt:
     type: Literal["custom_message"]
     command_name: str
     message_text: str | None = None
+    statuses: tuple[tuple[str, str | None], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -290,6 +291,10 @@ def load_scenario(path: Path, name: str) -> Scenario:
             type="custom_message",
             command_name=prompt_data["command_name"],
             message_text=prompt_data.get("message_text"),
+            statuses=tuple(
+                (str(status["key"]), status.get("text"))
+                for status in prompt_data.get("statuses", [])
+            ),
         )
     elif prompt_type == "tool_stream":
         duration_ms = prompt_data.get("duration_ms")
@@ -827,7 +832,18 @@ class FakePiHarness:
         command_text: str,
         behavior: CustomMessagePrompt,
     ) -> None:
-        """Run a slash command that may emit one visible custom message."""
+        """Run a slash command that may set statuses and emit one custom message."""
+        for key, text in behavior.statuses:
+            # Like Pi's RPC mode, a cleared status omits `statusText'.
+            request: JsonDict = {
+                "type": "extension_ui_request",
+                "id": f"status-{uuid.uuid4().hex[:8]}",
+                "method": "setStatus",
+                "statusKey": key,
+            }
+            if text is not None:
+                request["statusText"] = text
+            self._write_json(request)
         if not behavior.message_text:
             return
         followup = self._build_custom_message(
