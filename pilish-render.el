@@ -53,6 +53,7 @@
 
 ;; Forward references for functions in other modules
 (declare-function pilish-compact "pilish-menu" (&optional custom-instructions))
+(declare-function pilish--seed-input-history "pilish-input" (input-buffer messages))
 (declare-function pilish-open-subagent-snapshot "pilish-snapshot" (&optional target))
 ;; Declare the Emacs 29 minimum API.  Adding Emacs 30's optional TAG here makes
 ;; its byte compiler pad three-argument calls, producing incompatible bytecode.
@@ -10664,7 +10665,8 @@ Note: When called from async callbacks, pass CHAT-BUF explicitly."
     (with-current-buffer chat-buf
       (pilish--set-canonical-messages messages)
       (pilish--replay-history chat-buf messages
-                              (concat (pilish--format-startup-header) "\n")))))
+                              (concat (pilish--format-startup-header) "\n"))
+      (pilish--seed-input-history pilish--input-buffer messages))))
 
 (cl-defstruct (pilish--history-parser-restart
                (:constructor pilish--make-history-parser-restart))
