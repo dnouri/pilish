@@ -1553,6 +1553,34 @@ Track busy sessions for your own mode-line or tab display:
           #'my-pi-track-busy-sessions)
 #+end_src
 
+** Reloading from Lisp
+
+=pilish-reload= accepts an optional =CALLBACK= when called from Lisp.
+Pilish calls it exactly once with the outcome:
+
+- =nil= after the fresh Pi process owns the session, its state and
+  history have both been refreshed, and the history is shown in the
+  chat.
+- A string otherwise: the reload failed, Pi cancelled the session
+  switch, or a newer session change or a killed chat superseded it.  A
+  failed state or history refresh fails the reload even though the fresh
+  process has already replaced the old one.
+
+The callback may run before =pilish-reload= returns, for example when
+the chat has no session file.  With a callback, errors are passed to
+it rather than signaled.  An error inside the callback becomes a
+warning and does not change the reload.  Without a callback,
+=pilish-reload= behaves as it does interactively.
+
+#+begin_src emacs-lisp
+(defun my-pi-reload-then-say-so ()
+  "Reload the current session and report when it is ready."
+  (interactive)
+  (pilish-reload
+   (lambda (failure)
+     (message "Reload %s" (or failure "finished")))))
+#+end_src
+
 ** Installation details
 
 MELPA (with [[https://elpa.gnu.org/][GNU ELPA]] added for =compat=)
