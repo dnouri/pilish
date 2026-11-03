@@ -1573,6 +1573,37 @@ Track busy sessions for your own mode-line or tab display:
           #'my-pi-track-busy-sessions)
 #+end_src
 
+** Process event and exit hooks
+
+Dependent packages can observe RPC traffic without advising the process
+filter.  =pilish-process-event-functions= receives =(PROCESS EVENT)= for
+non-response events, after core queue bookkeeping but before the display
+handler.  Return nil to observe; non-nil consumes the event and stops
+later handlers.  Consuming a lifecycle event also skips the display
+handler's session-state updates, so the consumer must own those effects.
+The filter's current buffer need not be the chat.  Removing the process
+from Emacs's process table (for example with =delete-process=) stops later
+handlers and the rest of that filter batch.  An OS exit alone does not
+discard final stdout, including an exit during event handling.
+
+=pilish-unhandled-event-functions= receives =EVENT= in the chat buffer
+only for the chat's current process and types with no display case, after
+the ordinary state update and stream flush.  Types stop reaching it when
+Pilish gains a display case for them.  Its return values are ignored.
+This can handle a new producer event without replacing Pilish's known
+event handling.
+
+=pilish-process-exit-functions= receives =(PROCESS RESPONSE)= after editor
+cleanup and pending RPC callbacks/tables, before the frontend exit handler
+and stderr release.  =RESPONSE= is the same error plist given to pending
+callbacks, including =:processExit=, =:exitCode= and optional =:stderr=.
+Return values are ignored.  Editor cleanup and pending callbacks report
+errors and quits so later cleanup can proceed.  All three hooks treat
+incoming plists as read-only and report handler errors and quits without
+blocking later handlers or ordinary cleanup.  They do not authorize
+attachment to another process or provide renderer rollback or
+process-start/reload replacement.
+
 ** Installation details
 
 MELPA (with [[https://elpa.gnu.org/][GNU ELPA]] added for =compat=)
