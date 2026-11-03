@@ -30,7 +30,7 @@ SELECTOR ?=
 # Example: make test VERBOSE=1
 VERBOSE ?=
 
-.PHONY: test test-unit test-core test-ui test-render test-arguments test-table test-input test-menu test-browse test-jsonl test-snapshot test-build test-answer
+.PHONY: test test-unit test-core test-ui test-render test-terminal-image test-arguments test-table test-input test-menu test-browse test-jsonl test-snapshot test-build test-answer
 .PHONY: test-integration test-integration-fake test-integration-real test-integration-ci test-integration-ci-real test-gui test-gui-ci test-all
 .PHONY: bench bench-batch bench-reload-resume bench-reload-resume-batch bench-reload-resume-smoke
 .PHONY: bench-tool-update bench-tool-update-batch bench-tool-update-smoke
@@ -45,6 +45,7 @@ help:
 	@echo "  make test-core        Core/RPC tests only"
 	@echo "  make test-ui          UI foundation tests only"
 	@echo "  make test-render      Render tests only"
+	@echo "  make test-terminal-image Terminal image tests only"
 	@echo "  make test-arguments   Bounded argument projection tests only"
 	@echo "  make test-table       Table decoration tests only"
 	@echo "  make test-input       Input buffer tests only"
@@ -129,6 +130,7 @@ test: .deps-stamp
 		-l pilish-ui-test \
 		-l pilish-render-test \
 		-l pilish-answer-test \
+		-l pilish-terminal-image-test \
 		-l pilish-arguments-test \
 		-l pilish-benchmark-test \
 		-l pilish-table-test \
@@ -169,6 +171,8 @@ test-render: .deps-stamp
 	@$(BATCH_TEST) -l pilish-render-test $(ERT_RUN)
 test-answer: .deps-stamp
 	@$(BATCH_TEST) -l pilish-answer-test $(ERT_RUN)
+test-terminal-image: .deps-stamp
+	@$(BATCH_TEST) -l pilish-terminal-image-test $(ERT_RUN)
 
 test-arguments: .deps-stamp
 	@$(BATCH_TEST) -l pilish-arguments-test $(ERT_RUN)
@@ -374,7 +378,7 @@ ollama-status:
 
 check-parens:
 	@echo "=== Check Parens ==="
-	@OUTPUT=$$($(BATCH) --eval '(condition-case err (dolist (f (list "scripts/pilish-build.el" "scripts/install-deps.el" "scripts/install-ts-grammars.el" "pilish-core.el" "pilish-jsonl.el" "pilish-grammars.el" "pilish-ui.el" "pilish-answer.el" "pilish-table.el" "pilish-render.el" "pilish-snapshot.el" "pilish-input.el" "pilish-menu.el" "pilish-browse.el" "pilish-evil.el" "pilish.el")) (with-current-buffer (find-file-noselect f) (check-parens) (message "%s OK" f))) (user-error (message "FAIL: %s" (error-message-string err)) (kill-emacs 1)))' 2>&1); \
+	@OUTPUT=$$($(BATCH) --eval '(condition-case err (dolist (f (list "scripts/pilish-build.el" "scripts/install-deps.el" "scripts/install-ts-grammars.el" "pilish-core.el" "pilish-jsonl.el" "pilish-grammars.el" "pilish-ui.el" "pilish-answer.el" "pilish-table.el" "pilish-terminal-image.el" "pilish-render.el" "pilish-snapshot.el" "pilish-input.el" "pilish-menu.el" "pilish-browse.el" "pilish-evil.el" "pilish.el")) (with-current-buffer (find-file-noselect f) (check-parens) (message "%s OK" f))) (user-error (message "FAIL: %s" (error-message-string err)) (kill-emacs 1)))' 2>&1); \
 	echo "$$OUTPUT" | grep -E "OK$$|FAIL:"; \
 	echo "$$OUTPUT" | grep -q "FAIL:" && exit 1 || true
 
@@ -386,7 +390,7 @@ compile: .deps-stamp
 		--eval "(package-initialize)" \
 		$(LOCAL_LOAD_PATH) \
 		--eval "(setq byte-compile-error-on-warn t)" \
-		-f batch-byte-compile scripts/pilish-build.el scripts/install-deps.el scripts/install-ts-grammars.el pilish-core.el pilish-jsonl.el pilish-grammars.el pilish-ui.el pilish-answer.el pilish-table.el pilish-render.el pilish-snapshot.el pilish-input.el pilish-menu.el pilish-browse.el pilish-evil.el pilish.el
+		-f batch-byte-compile scripts/pilish-build.el scripts/install-deps.el scripts/install-ts-grammars.el pilish-core.el pilish-jsonl.el pilish-grammars.el pilish-ui.el pilish-answer.el pilish-table.el pilish-terminal-image.el pilish-render.el pilish-snapshot.el pilish-input.el pilish-menu.el pilish-browse.el pilish-evil.el pilish.el
 
 lint: lint-checkdoc lint-package
 
@@ -404,6 +408,7 @@ lint-checkdoc:
 		--eval "(checkdoc-file \"pilish-ui.el\")" \
 		--eval "(checkdoc-file \"pilish-answer.el\")" \
 		--eval "(checkdoc-file \"pilish-table.el\")" \
+		--eval "(checkdoc-file \"pilish-terminal-image.el\")" \
 		--eval "(checkdoc-file \"pilish-render.el\")" \
 		--eval "(checkdoc-file \"pilish-snapshot.el\")" \
 		--eval "(checkdoc-file \"pilish-input.el\")" \
@@ -426,7 +431,7 @@ lint-package:
 		            (package-install 'package-lint)))" \
 		--eval "(require 'package-lint)" \
 		--eval "(setq package-lint-main-file \"pilish.el\")" \
-		-f package-lint-batch-and-exit pilish.el pilish-ui.el pilish-answer.el pilish-table.el pilish-render.el pilish-snapshot.el pilish-input.el pilish-menu.el pilish-browse.el pilish-core.el pilish-jsonl.el pilish-grammars.el
+		-f package-lint-batch-and-exit pilish.el pilish-ui.el pilish-answer.el pilish-table.el pilish-terminal-image.el pilish-render.el pilish-snapshot.el pilish-input.el pilish-menu.el pilish-browse.el pilish-core.el pilish-jsonl.el pilish-grammars.el
 
 check: compile lint test
 
