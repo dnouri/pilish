@@ -46,6 +46,7 @@
 (require 'pilish-conversations)
 (require 'pilish-table)
 (require 'pilish-answer)
+(require 'pilish-terminal-image)
 (require 'cl-lib)
 (require 'ansi-color)
 (require 'image)
