@@ -44,7 +44,7 @@ Keep implementation ownership out of the map. The feature file names user paths,
 ## Features
 
 - [Compose and send](./compose-and-send.md) covers session layout, header-line placement, consecutive prompt submission, fitted input height, and hide-after-send composing.
-- [Read streamed output](./read-output.md) covers streaming, thinking display, scrolling, table resizing, live and recorded durations, transient run-return receipts, and completed-block inspection.
+- [Read streamed output](./read-output.md) covers streaming, thinking display, scrolling, table resizing, live and recorded durations, transient run-return receipts, completed-block inspection, and image previews prepared before graphical display.
 - [Work with tool blocks](./tool-blocks.md) covers tool output, bottom controls, durations, explicit tool details, native folds, child arguments, cursor stability, and cooling.
 - [Browse and resume sessions](./sessions.md) covers session and tree browser actions plus browser-based resume.
 - [Open saved conversations](./saved-conversations.md) covers recursive saved-chat trees, independent observers, completed-block inspection, recorded durations, refresh, failure retention, and observer-only quit.
