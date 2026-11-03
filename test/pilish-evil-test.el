@@ -175,7 +175,46 @@ of the suite."
      (should map)
      (should (eq (lookup-key map (kbd "RET")) #'pilish-send))
      (should (eq (lookup-key map "q") #'pilish-evil-close-input))
-     (should (eq (lookup-key map "?") #'pilish-menu)))))
+     (should (eq (lookup-key map "?") #'pilish-menu))
+     ;; Raw entries: `key-binding' would apply the arrows' filters.
+     (should (equal (alist-get 'up (cdr map)) pilish--input-arrow-up-binding))
+     (should (equal (alist-get 'down (cdr map))
+                    pilish--input-arrow-down-binding)))))
+
+(ert-deftest pilish-evil-test-input-arrow-history-in-states ()
+  "Pi-style arrows browse at draft edges in normal and insert state.
+On other screen lines they fall through to Evil's line motions in
+normal state and the usual line motions in insert state."
+  (pilish-evil-test--with-evil
+   (pilish-evil-setup)
+   (let ((buf (generate-new-buffer "*pilish-evil-test-arrows*"))
+         (pilish-input-arrow-history t))
+     (unwind-protect
+         (save-window-excursion
+           (set-window-buffer (selected-window) buf)
+           (with-current-buffer buf
+             (pilish-input-mode)
+             (evil-local-mode 1)
+             (insert "one\ntwo\nthree")
+             (pcase-dolist (`(,state ,up ,down)
+                            '((normal evil-previous-line evil-next-line)
+                              (insert previous-line next-line)))
+               (evil-change-state state)
+               (goto-char (point-min))
+               (should (eq (key-binding [up]) #'pilish-input-history-up))
+               (should (eq (key-binding [down]) down))
+               (forward-line 1)
+               (should (eq (key-binding [up]) up))
+               (should (eq (key-binding [down]) down))
+               (goto-char (point-max))
+               (should (eq (key-binding [up]) up))
+               (should (eq (key-binding [down])
+                           #'pilish-input-history-down)))
+             (let ((pilish-input-arrow-history nil))
+               (evil-normal-state)
+               (goto-char (point-min))
+               (should (eq (key-binding [up]) #'evil-previous-line)))))
+       (kill-buffer buf)))))
 
 (ert-deftest pilish-evil-test-copy-raw-markdown-default ()
   "Setup copies raw markdown buffer-locally in chat buffers by default."

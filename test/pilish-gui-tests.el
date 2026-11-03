@@ -333,6 +333,69 @@ raced a turn that was never submitted."
     (should (pilish-gui-test-chat-contains "Fake reply for: second turn"))
     (should (pilish-gui-test-idle-p))))
 
+(defun pilish-gui-test--arrow-state (input-win)
+  "Return the draft, point and point's screen row in INPUT-WIN."
+  (with-current-buffer (window-buffer input-win)
+    (list :window-system window-system
+          :input-width (window-body-width input-win)
+          :text (buffer-string)
+          :point (window-point input-win)
+          :screen-row (cdr (posn-col-row
+                            (posn-at-point (window-point input-win) input-win)))
+          :screen-rows (count-screen-lines (point-min) (point-max)
+                                           t input-win))))
+
+(ert-deftest pilish-gui-test-input-arrow-history-at-draft-edges ()
+  "Pi-style arrows move through a wrapped draft, then browse sent prompts.
+With `pilish-input-arrow-history', <up> on lower screen rows of one
+wrapped line moves point; on the first row it goes to the start, then
+recalls prompts.  <down> moves forward and returns the draft unchanged."
+  (let ((pilish-input-arrow-history t))
+    (pilish-gui-test-with-fresh-session
+      (:backend fake :fake-scenario "prompt-lifecycle")
+      (pilish-gui-test-send "first prompt")
+      (pilish-gui-test-send "second prompt")
+      (let* ((input-win (pilish-gui-test-input-window))
+             (draft (mapconcat #'identity
+                               (make-list (window-body-width input-win)
+                                          "wrapped")
+                               " "))
+             (state (lambda () (pilish-gui-test--arrow-state input-win))))
+        (select-window input-win)
+        (execute-kbd-macro draft)
+        (redisplay t)
+        (should (equal (buffer-string) draft))
+        (should (= (count-lines (point-min) (point-max)) 1))
+        (let ((rows (plist-get (funcall state) :screen-rows)))
+          (should (>= rows 3))
+          (pilish-gui-test--large-evidence "arrow-draft" (funcall state))
+          ;; Rows below the first: <up> is an ordinary line motion.
+          (dotimes (row (1- rows))
+            (execute-kbd-macro [up])
+            (redisplay t)
+            (should (equal (buffer-string) draft))
+            (should (= (plist-get (funcall state) :screen-row)
+                       (- rows row 2))))
+          (should-not (bobp))
+          (pilish-gui-test--large-evidence "arrow-first-row" (funcall state))
+          ;; First row: to the draft's start, then into history.
+          (execute-kbd-macro [up])
+          (should (bobp))
+          (should (equal (buffer-string) draft))
+          (execute-kbd-macro [up])
+          (redisplay t)
+          (should (equal (buffer-string) "second prompt"))
+          (pilish-gui-test--large-evidence "arrow-recalled" (funcall state))
+          (execute-kbd-macro [up])
+          (should (equal (buffer-string) "first prompt"))
+          (execute-kbd-macro [down])
+          (should (equal (buffer-string) "second prompt"))
+          (execute-kbd-macro [down])
+          (redisplay t)
+          (should (equal (buffer-string) draft))
+          (pilish-gui-test--large-evidence "arrow-draft-restored"
+                                           (funcall state)))))))
+
 (defun pilish-gui-test--settle-input-fit (input-buf)
   "Wait until INPUT-BUF's pending fit has run, then redisplay."
   (should (pilish-test-wait-until
