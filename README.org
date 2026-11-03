@@ -1485,7 +1485,8 @@ The first successful state response notifies too; repeated unchanged
 responses do not.  Resume, fork and reload coalesce their state and buffer
 updates until the session transition finishes.  If its state refresh
 fails, notification waits for a successful state response so it does not
-combine new buffer names with a stale saved file.  A manual buffer rename
+combine new buffer names with a stale saved file.  Earlier background
+state replies cannot confirm a newer transition.  A manual buffer rename
 (including saving a transcript with =write-file=) is observed on the next
 state refresh or retarget, not immediately.
 
