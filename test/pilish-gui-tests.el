@@ -389,6 +389,75 @@ raced a turn that was never submitted."
     (should (pilish-gui-test-chat-contains "Fake reply for: second turn"))
     (should (pilish-gui-test-idle-p))))
 
+(defun pilish-gui-test--send-while-busy-state ()
+  "Return send-while-busy observations for the current session."
+  (let ((chat-buf (plist-get pilish-gui-test--session :chat-buffer))
+        (input-buf (plist-get pilish-gui-test--session :input-buffer)))
+    (list :window-system window-system
+          :send-while-busy pilish-send-while-busy
+          :status (buffer-local-value 'pilish--status chat-buf)
+          :followup-queue (buffer-local-value 'pilish--followup-queue chat-buf)
+          :draft (with-current-buffer input-buf (buffer-string))
+          :chat (with-current-buffer chat-buf
+                  (buffer-substring-no-properties (point-min) (point-max))))))
+
+(ert-deftest pilish-gui-test-send-while-busy-steers-and-meta-return-queues ()
+  "With `pilish-send-while-busy' set to `steer', keys steer or queue.
+While Pi streams, \\`C-c C-c' steers the run and Alt+Enter queues a
+follow-up that is sent as the next prompt once Pi finishes."
+  (let ((pilish-send-while-busy 'steer)
+        (width (frame-width))
+        (height (frame-height)))
+    (unwind-protect
+        (progn
+          (set-frame-size nil 80 45)
+          (sit-for 0.1)
+          (pilish-gui-test-with-fresh-session
+            (:backend fake :fake-scenario "input-dispositions")
+            (let ((chat-buf (plist-get pilish-gui-test--session :chat-buffer))
+                  (input-buf (plist-get pilish-gui-test--session :input-buffer))
+                  (proc (plist-get pilish-gui-test--session :process)))
+              (select-window (pilish-gui-test-input-window))
+              (execute-kbd-macro (kbd "f i r s t SPC t u r n C-c C-c"))
+              (should (pilish-test-wait-until
+                       (lambda () (eq (buffer-local-value 'pilish--status chat-buf)
+                                      'streaming))
+                       pilish-test-gui-timeout pilish-test-poll-interval proc))
+              (execute-kbd-macro (kbd "s t e e r SPC n o w C-c C-c"))
+              (should (equal (with-current-buffer input-buf (buffer-string)) ""))
+              (should-not (buffer-local-value 'pilish--followup-queue chat-buf))
+              (execute-kbd-macro (kbd "t h e n SPC s u m m a r i z e M-<return>"))
+              (should (equal (with-current-buffer input-buf (buffer-string)) ""))
+              (should (equal (buffer-local-value 'pilish--followup-queue chat-buf)
+                             '("then summarize")))
+              (pilish-gui-test--large-evidence
+               "busy-sends" (pilish-gui-test--send-while-busy-state))
+              (should (pilish-test-wait-until
+                       (lambda ()
+                         (and (eq (buffer-local-value 'pilish--status chat-buf) 'idle)
+                              (pilish-gui-test-chat-contains
+                               "Fake reply for: then summarize")))
+                       pilish-test-gui-timeout pilish-test-poll-interval proc))
+              (should (pilish-gui-test-wait-for-chat-settled))
+              ;; The steering joins the first run; the follow-up starts the
+              ;; next run after that run returns control.
+              (with-current-buffer chat-buf
+                (let ((case-fold-search nil)
+                      (text (buffer-substring-no-properties (point-min) (point-max))))
+                  (should (< (string-match "^steer now$" text)
+                             (string-match "Steered fake reply for: steer now" text)
+                             (string-match "^ *Returned " text)
+                             (string-match "^then summarize$" text)))))
+              (with-selected-window (pilish-gui-test-chat-window)
+                (goto-char (point-min))
+                (re-search-forward "^first turn$")
+                (forward-line -3)
+                (set-window-start nil (point)))
+              (pilish-gui-test--large-evidence
+               "after-run" (pilish-gui-test--send-while-busy-state)))))
+      (set-frame-size nil width height)
+      (sit-for 0.1))))
+
 (defun pilish-gui-test--settle-input-fit (input-buf)
   "Wait until INPUT-BUF's pending fit has run, then redisplay."
   (should (pilish-test-wait-until

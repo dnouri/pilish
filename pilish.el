@@ -57,8 +57,10 @@
 ;;
 ;; Key Bindings:
 ;;   Input buffer:
-;;     C-c C-c        Send prompt (queues text as follow-up if busy)
+;;     C-c C-c        Send prompt (queues text as follow-up if busy;
+;;                    steers instead with `pilish-send-while-busy')
 ;;     C-c C-s        Queue steering (interrupts after current tool; busy only)
+;;     M-RET          Send prompt, or always queue as follow-up if busy
 ;;     C-c C-k        Abort current operation
 ;;     C-c C-p        Open menu
 ;;     C-c C-r        Browse sessions
@@ -100,8 +102,10 @@
 ;;   - Prompt image: Attach one content-sniffed raster image to a direct,
 ;;     idle, non-slash prompt; the session header shows its name and size.
 ;;   - Message queuing: Submit text messages while agent is working:
-;;       C-c C-c  queues follow-up (delivered after agent completes)
+;;       C-c C-c  queues follow-up (delivered after agent completes),
+;;                or steers when `pilish-send-while-busy' is `steer'
 ;;       C-c C-s  queues steering (interrupts after current tool)
+;;       M-RET    queues follow-up whatever that option says
 ;;     Image-bearing drafts refuse these busy paths and remain intact.
 ;;
 ;; Press C-c C-p for the full transient menu with model selection,
