@@ -207,6 +207,15 @@ UI, set =pilish-send-while-busy= to =steer=.  See
 [[file:#prompt-queues][Prompt queues and run status]] for delivery rules and
 exceptions.
 
+Optionally set =pilish-send-on-double-return= to a time window in
+seconds, for example =0.5=.  Two consecutive =RET=s at the end of the
+draft then send it, removing the first newline.  A single =RET=, a
+slower second =RET=, or =C-u RET= still inserts newlines.  Editing or
+moving between the two keys breaks the gesture, and buffered input
+(such as an unbracketed paste) does not arm it.  The default is =nil=:
+=RET= keeps its ordinary binding.  The option also works in Evil
+insert state; normal-state =RET= still sends immediately.
+
 #+html: <a id="reading-output"></a>
 ** Read replies and tool output
 
