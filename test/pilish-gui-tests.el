@@ -148,6 +148,51 @@
     (should (pilish-gui-test-input-window))
     (should (pilish-gui-test-verify-layout))))
 
+(ert-deftest pilish-gui-test-session-identity-observes-new-and-resume ()
+  "Observers follow real fake-backed new-session, resume and buffer rename."
+  (let* ((seen nil)
+         (pilish-session-identity-functions
+          (list (lambda (chat)
+                  (with-current-buffer chat
+                    (push (list (plist-get pilish--state :session-file)
+                                (pilish--chat-session-directory)
+                                (buffer-name)) seen))))))
+    (pilish-gui-test-with-fresh-session
+      (:backend fake :fake-scenario "prompt-lifecycle")
+      (let* ((chat (plist-get pilish-gui-test--session :chat-buffer))
+             (process (plist-get pilish-gui-test--session :process))
+             (initial-file (with-current-buffer chat
+                             (plist-get pilish--state :session-file))))
+        (should (= (length seen) 1))
+        (should (equal (caar seen) initial-file))
+        (pilish-gui-test-send "Observe this session identity")
+        (select-window (pilish-gui-test-chat-window))
+        (pilish-gui-test--large-command (kbd "C-c C-n") 'pilish-new-session)
+        (should (pilish-test-wait-until
+                 (lambda () (= (length seen) 2)) 5 0.01 process))
+        (should-not (equal (caar seen) initial-file))
+        (should (equal (cdar seen) (cdadr seen)))
+        (pilish-gui-test--large-evidence "identity-after-new" (reverse seen))
+        ;; Opening the original saved file uses the same session buffer pair.
+        (pilish-open-session-file initial-file)
+        (should (pilish-test-wait-until
+                 (lambda () (= (length seen) 3)) 5 0.01 process))
+        (should (equal (caar seen) initial-file))
+        (should (eq chat (plist-get pilish-gui-test--session :chat-buffer)))
+        (let* ((backend (plist-get pilish-gui-test--session :backend))
+               (pilish-executable (plist-get backend :executable))
+               (pilish-extra-args (plist-get backend :extra-args)))
+          (with-current-buffer chat
+            (rename-buffer " *identity-observer-renamed*" t)
+            ;; Reload's state refresh observes the ordinary Emacs buffer rename.
+            (call-interactively #'pilish-reload))
+          (should (pilish-test-wait-until
+                   (lambda () (= (length seen) 4)) 5 0.01)))
+        (should (equal (caar seen) initial-file))
+        (should (equal (nth 2 (car seen)) " *identity-observer-renamed*"))
+        (pilish-gui-test--large-evidence "identity-after-resume-and-rename"
+                                         (reverse seen))))))
+
 (defun pilish-gui-test--window-header-p (window)
   "Return non-nil when WINDOW displays a header line.
 A window shows a header line exactly when its total height exceeds
