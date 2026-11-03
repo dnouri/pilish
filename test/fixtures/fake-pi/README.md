@@ -86,6 +86,12 @@ user entry. `/test-noop` acknowledges as handled without emitting messages,
 lifecycle events, or session entries. These fixtures replay extension-like
 wire behavior; they do not execute extensions.
 
+Optional `session_name` and `thinking_level` model an extension calling
+`pi.setSessionName` and `pi.setThinkingLevel` in that order. Each appends its
+session entry and emits `session_info_changed` or `thinking_level_changed`
+before the acknowledgment; an unchanged thinking level emits nothing, as in
+Pi. `/test-session-metadata` (`extension-session-metadata.json`) uses both.
+
 Example:
 
 ```json

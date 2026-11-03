@@ -28,7 +28,9 @@ prompt behaviors:
 
 ``custom_message``
     A slash command that optionally emits one visible custom message without a
-    full assistant turn.
+    full assistant turn.  It can also rename the session and change the
+    thinking level the way an extension's ``pi.setSessionName`` and
+    ``pi.setThinkingLevel`` do, with Pi's change events.
 
 ``tool_stream``
     Emits the streamed tool-call and tool-execution event surface, then ends
@@ -127,6 +129,8 @@ class CustomMessagePrompt:
     type: Literal["custom_message"]
     command_name: str
     message_text: str | None = None
+    session_name: str | None = None
+    thinking_level: str | None = None
 
 
 @dataclass(frozen=True)
@@ -290,6 +294,8 @@ def load_scenario(path: Path, name: str) -> Scenario:
             type="custom_message",
             command_name=prompt_data["command_name"],
             message_text=prompt_data.get("message_text"),
+            session_name=prompt_data.get("session_name"),
+            thinking_level=prompt_data.get("thinking_level"),
         )
     elif prompt_type == "tool_stream":
         duration_ms = prompt_data.get("duration_ms")
@@ -828,6 +834,31 @@ class FakePiHarness:
         behavior: CustomMessagePrompt,
     ) -> None:
         """Run a slash command that may emit one visible custom message."""
+        if behavior.session_name is not None:
+            # Pi's setSessionName appends the entry, then reports the name.
+            self._append_session_entry(
+                {"type": "session_info", "name": behavior.session_name},
+                prefix="session-info",
+            )
+            self._write_json(
+                {"type": "session_info_changed", "name": behavior.session_name}
+            )
+        if (
+            behavior.thinking_level is not None
+            and behavior.thinking_level != self.state.thinking_level
+        ):
+            # Pi's setThinkingLevel reports only an actual change.
+            self.state.thinking_level = behavior.thinking_level
+            self._append_session_entry(
+                {
+                    "type": "thinking_level_change",
+                    "thinkingLevel": behavior.thinking_level,
+                },
+                prefix="thinking-level",
+            )
+            self._write_json(
+                {"type": "thinking_level_changed", "level": behavior.thinking_level}
+            )
         if not behavior.message_text:
             return
         followup = self._build_custom_message(

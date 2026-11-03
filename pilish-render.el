@@ -2044,7 +2044,16 @@ Updates buffer-local state and renders display updates."
     ("extension_error"
      (pilish--display-extension-error event))
     ("extension_ui_request"
-     (pilish--handle-extension-ui-request event)))))
+     (pilish--handle-extension-ui-request event))
+    ("thinking_level_changed"
+     ;; Protocol state already took the new level; repaint the header.
+     (force-mode-line-update t))
+    ("session_info_changed"
+     ;; Pi sends the current name after any rename, including an extension's
+     ;; `pi.setSessionName'.  An absent name means it was cleared.
+     (setq pilish--session-name
+           (pilish--normalize-string-or-null (plist-get event :name)))
+     (force-mode-line-update t)))))
 
 
 ;;;; Tool Output
