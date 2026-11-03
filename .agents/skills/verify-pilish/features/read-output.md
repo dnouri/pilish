@@ -14,6 +14,7 @@ The chat renders streamed Markdown, reveals or hides its source markup on demand
 - `output-table-kill` keeps the cursor at the visual end of a wrapped row after `C-k`.
 - `output-block-details` inspects completed reply, thinking, and tool details without changing the session or draft.
 - `output-link-copy` copies a URL destination or a shell-local file path from a chat link with `w`.
+- `output-image-before-gui` displays images prepared before a graphical client connects, without a history reload.
 
 ## How to get to it (user POV)
 
@@ -31,6 +32,7 @@ The chat renders streamed Markdown, reveals or hides its source markup on demand
 - Press `C-h .` for an echo-area peek. Native link and control help keeps priority.
 - Place point on a Markdown link label and press `w` to copy the URL destination, or the shell-local path for a local file link.
 - Press `q` in Help to return to the chat or saved snapshot.
+- Open a chat prepared before a graphical client connected. Its image previews appear without a tool toggle or history reload; terminal frames keep the labels.
 - Native chat links and controls retain their hover help and click actions. Input headers, browsers, and menus keep their existing hover behavior.
 
 ## Driving it with Pilish harnesses
@@ -52,13 +54,15 @@ Preconditions:
 - **Observe duration and restoration.** Run `G1_CAPTURE="$RUN_DIR/duration" ./test/run-gui-tests.sh --headless pilish-gui-test-fake-duration-live-reload-and-resume 2>&1 | tee "$RUN_DIR/duration.log"`. Record `duration.exit`. The fake bash stream advances through real `Elapsed` timers, settles on `Took 2m 5s`, and keeps that recorded value through bottom-control actions, browser resume, and process reload. The final timer stays stopped.
 - **Read run-return receipts.** Run `G1_CAPTURE="$RUN_DIR/return-receipt" ./test/run-gui-tests.sh --headless pilish-gui-test-run-return-receipt-responsive-and-transient 2>&1 | tee "$RUN_DIR/return-receipt.log"`. Record `return-receipt.exit`. The test sends through `C-c C-c`, checks the recorded tool duration and the receipt's own label, aligns the receipt at 104 and 54 columns and in unequal sibling windows, sends a second run, then reloads. The two live receipts remain in order until reload; recorded tool time survives it, but return receipts do not.
 - **Copy link targets.** Run `./test/run-gui-tests.sh --headless pilish-gui-test-copy-link-targets-with-w 2>&1 | tee "$RUN_DIR/link-copy.log"`. Record `link-copy.exit`. Real `w` presses on `https:`, `file:`, and absolute-path link labels push the URL, the `file:` URL, and the absolute pathname into the kill ring.
-- **Check the proof.** Require zero statuses and nonempty logs for all fourteen commands. Require `fake-duration-elapsed-1.png`, `fake-duration-recorded.png`, `fake-duration-resumed.png`, `fake-duration-reloaded.png`, and their matching `.el` files under `$RUN_DIR/duration`. Under `$RUN_DIR/return-receipt`, require `run-return-wide.png`, `run-return-narrow.png`, `run-return-independent-edges.png`, `run-return-second.png`, `run-return-reloaded.png`, and their matching `.el` files. Use the evidence pattern from the skill.
+- **Show previously prepared images.** Run `G1_CAPTURE="$RUN_DIR/images" ./test/run-gui-tests.sh --headless pilish-gui-test-image-render-before-graphical-display 2>&1 | tee "$RUN_DIR/images.log"`. Record `images.exit`. With graphical-window detection temporarily disabled, real PNG and standalone read-SVG results are prepared in hidden buffers. `switch-to-buffer` then shows the same display specs using real decoders, without a tool toggle or history reload. Require `image-before-gui-png.png`, `image-before-gui-svg.png`, and their matching `.el` files under `$RUN_DIR/images`.
+- **Check the proof.** Require zero statuses and nonempty logs for all fifteen commands. Require `fake-duration-elapsed-1.png`, `fake-duration-recorded.png`, `fake-duration-resumed.png`, `fake-duration-reloaded.png`, and their matching `.el` files under `$RUN_DIR/duration`. Under `$RUN_DIR/return-receipt`, require `run-return-wide.png`, `run-return-narrow.png`, `run-return-independent-edges.png`, `run-return-second.png`, `run-return-reloaded.png`, and their matching `.el` files. Use the evidence pattern from the skill.
 
 ## Gotchas
 
 - The markup test inserts a deterministic assistant message, then uses the real menu key sequence in both directions. It checks visible-text projections and Markdown properties, not PNG pixels.
+- The image journey simulates the absence of graphical windows only while preparing previews; it is not a real daemon/client or terminal-protocol test. It checks both real decoders and the retained display specs. Unit tests separately check that terminal windows never supply pixel dimensions.
 - The thinking test invokes the real toggle command directly. Do not describe it as a keystroke test.
-- Most tests in this feature assert text, properties, and window state without PNG evidence. The duration and return-receipt journeys save the required frames listed above.
+- Most tests in this feature assert text, properties, and window state without PNG evidence. The duration, return-receipt and image journeys save the required frames listed above.
 - Cold tables intentionally remain unchanged during the hot-tail resize test.
 - The table `C-k` test uses a real key sequence and cursor coordinates. It does not save PNG evidence.
 - The `details` menu suffix appears only for transcript-origin menus. It does not appear in the input-origin menu.
