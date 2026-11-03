@@ -1607,6 +1607,76 @@ unanswered.  SETUP is passed to `pilish-test--with-reload-chat', whose
      setup)
     (nreverse outcomes)))
 
+(ert-deftest pilish-test-reload-without-callback-discards-superseded-process ()
+  "An interactive reload's late switch cannot leak Pi or unlock its successor."
+  ;; Stock reproduction: reload twice before either switch_session replies,
+  ;; then deliver the first reply.  No new public callback API is involved.
+  (pilish-test--with-reload-chat
+   (lambda (_chat-buf old-proc)
+     (pilish-reload)
+     (let ((first-proc (car pilish-test--reload-processes)))
+       (pilish-reload)
+       (let ((second-proc (car pilish-test--reload-processes))
+             (generation pilish--session-transition-generation))
+         (should (process-live-p first-proc))
+         (should (process-live-p second-proc))
+         (pilish-test--reload-respond
+          first-proc "switch_session" pilish-test--reload-switched)
+         (should-not (process-live-p first-proc))
+         (should (process-live-p second-proc))
+         (should (process-live-p old-proc))
+         (should (eq pilish--process old-proc))
+         (should (= generation pilish--session-transition-generation))
+         (should (pilish--session-transition-active-p))
+         ;; The newer reload still owns its independent completion/cleanup.
+         (pilish-test--reload-respond
+          second-proc "switch_session" '(:success :false :error "declined"))
+         (should-not (process-live-p second-proc))
+         (should (eq pilish--process old-proc))
+         (should-not (pilish--session-transition-active-p)))))))
+
+(ert-deftest pilish-test-reload-without-callback-send-error-keeps-input-usable ()
+  "A failed switch write releases the transition and preserves ordinary input."
+  ;; Exercise the real RPC registration/write error path with no reload
+  ;; callback.  Stock master unwinds out of reload without releasing its guard.
+  (let ((rpc-async (symbol-function 'pilish--rpc-async)))
+    (pilish-test--with-reload-chat
+     (lambda (chat-buf old-proc)
+       (let ((input (generate-new-buffer " *pilish-reload-send-error-input*"))
+             (sent nil))
+         (unwind-protect
+             (progn
+               (pilish--set-input-buffer input)
+               (with-current-buffer input
+                 (pilish-input-mode)
+                 (pilish--set-chat-buffer chat-buf)
+                 (insert "Keep this draft"))
+               (cl-letf (((symbol-function 'pilish--rpc-async) rpc-async)
+                         ((symbol-function 'process-send-string)
+                          (lambda (proc text)
+                            (should (eq proc (car pilish-test--reload-processes)))
+                            (should (string-match-p "switch_session" text))
+                            (error "Switch pipe closed"))))
+                 (should-error (pilish-reload)))
+               (should-not (pilish--session-transition-active-p))
+               (let ((failed-proc (car pilish-test--reload-processes)))
+                 (should-not (process-live-p failed-proc))
+                 (should (= 0 (hash-table-count
+                               (pilish--get-pending-requests failed-proc)))))
+               (should (eq pilish--process old-proc))
+               (should (process-live-p old-proc))
+               (with-current-buffer input
+                 (should (equal (buffer-string) "Keep this draft"))
+                 (cl-letf (((symbol-function 'pilish--prepare-and-send)
+                            (lambda (text &optional _queued)
+                              (setq sent text))))
+                   (pilish-send)))
+               (should (equal sent "Keep this draft")))
+           (when (buffer-live-p input)
+             (with-current-buffer input (pilish--set-chat-buffer nil))
+             (pilish--set-input-buffer nil)
+             (kill-buffer input))))))))
+
 (ert-deftest pilish-test-reload-callback-settles-once-on-every-path ()
   "Reload calls its callback exactly once, with nil only after success."
   (let ((history '(:success t :data (:messages [])))
