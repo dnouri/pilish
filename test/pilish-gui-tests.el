@@ -726,126 +726,57 @@ and sending with \\`C-c C-c' returns it to one line."
           (when (buffer-live-p help) (kill-buffer help))
           (when (buffer-live-p snapshot) (kill-buffer snapshot)))))))
 
-(ert-deftest pilish-gui-test-session-accessors-view-file-keyboard ()
-  "Public inspection leaves focus alone; file viewing owns a separate observer."
+(ert-deftest pilish-gui-test-session-accessors-preserve-draft-and-focus ()
+  "Read-only inspection agrees from chat and input without sending or focusing."
   (pilish-gui-test-with-fresh-session
     (:backend fake :fake-scenario "prompt-lifecycle")
     (pilish-gui-test-send "Check session inspection")
-    (pilish-test--with-snapshot-files
-      (pilish-test--snapshot-write
-       child (list header (pilish-test--snapshot-message "leaf" nil "Saved API answer")))
-      (let* ((chat (plist-get pilish-gui-test--session :chat-buffer))
-             (input (plist-get pilish-gui-test--session :input-buffer))
-             (process (plist-get pilish-gui-test--session :process))
-             (parent-window (get-buffer-window chat))
-             (session-file (pilish-session-file chat))
-             (parent-text (with-current-buffer chat (buffer-string)))
-             (parent-bytes (with-temp-buffer
-                             (insert-file-contents-literally session-file)
-                             (buffer-string)))
-             (saved-bytes (with-temp-buffer
-                            (insert-file-contents-literally child) (buffer-string)))
-             (draft "Unsent API draft\nStill here")
-             (send-string (symbol-function 'pilish--send-string))
-             commands snapshots snapshot first observer-window)
-        (unwind-protect
-            (progn
-              (select-window (pilish-gui-test-input-window))
-              (execute-kbd-macro (vconcat "Unsent API draft" (kbd "RET") "Still here"))
-              ;; Resolving either buffer and reading values never changes focus.
-              (let ((selected (selected-window))
-                    (point (point))
-                    (accessors '(pilish-session-directory pilish-session-name
-                                 pilish-session-title pilish-session-file
-                                 pilish-session-model pilish-session-context-usage
-                                 pilish-session-queued-prompts pilish-session-busy-p)))
-                (dolist (buffer (list chat input))
-                  (should (eq (pilish-session-chat-buffer buffer) chat))
-                  (should (eq (pilish-session-input-buffer buffer) input))
-                  (should (eq (pilish-session-process buffer) process)))
-                (dolist (accessor accessors)
-                  (should (equal (funcall accessor chat) (funcall accessor input))))
-                (should (eq (pilish-session-chat-buffer) chat))
-                (should (eq (pilish-session-input-buffer) input))
-                (should (pilish-session-exists-p (pilish-session-directory)))
-                (should (stringp session-file))
-                (should (plist-get (pilish-session-model) :id))
-                (should-not (pilish-session-busy-p))
-                (should (eq (selected-window) selected))
-                (should (= (point) point)))
-              (pilish-gui-test--large-evidence
-               "session-api-inspection"
-               (list :selected-buffer (buffer-name (window-buffer (selected-window)))
-                     :directory (pilish-session-directory input)
-                     :file session-file :model (pilish-session-model input)
-                     :draft-hash (with-current-buffer input (secure-hash 'sha256 (buffer-string)))
-                     :window-system window-system :package-user-dir package-user-dir
-                     :api-library (symbol-file 'pilish-session-chat-buffer)))
-              ;; Observe the normal wire seam: opening and rereading send no RPC.
-              (cl-letf (((symbol-function 'pilish--send-string)
-                         (lambda (proc line)
-                           (push (pilish--parse-json-line line) commands)
-                           (funcall send-string proc line))))
-                (dotimes (_ 2)
-                  (select-window parent-window)
-                  (execute-kbd-macro
-                   (vconcat (kbd "M-x pilish-view-session-file RET C-a C-k")
-                            child (kbd "RET")))
-                  (setq snapshot (current-buffer))
-                  (push snapshot snapshots)
-                  (unless first (setq first snapshot))
-                  (setq observer-window (selected-window))
-                  (should (derived-mode-p 'pilish-snapshot-mode))
-                  (should buffer-read-only)
-                  (should-not buffer-file-name)
-                  (should-not (pilish-session-chat-buffer))
-                  (should-not (pilish-session-process))
-                  (should-not (eq observer-window parent-window))
-                  (should (eq (window-buffer parent-window) chat))
-                  (should (string-match-p "Saved API answer" (buffer-string))))
-                (should-not (eq snapshot first))
-                (should (equal (with-temp-buffer
-                                 (insert-file-contents-literally child) (buffer-string))
-                               saved-bytes))
-                (pilish-gui-test--large-evidence
-                 "session-api-observer"
-                 (list :independent-observers (length (delete-dups (copy-sequence snapshots)))
-                       :selected-mode major-mode :read-only buffer-read-only
-                       :parent-live (process-live-p process)
-                       :draft-hash (with-current-buffer input (secure-hash 'sha256 (buffer-string)))
-                       :commands commands))
-                (execute-kbd-macro (kbd "g"))
-                (should (eq snapshot (current-buffer)))
-                (pilish-test--snapshot-write
-                 child (list header
-                             (pilish-test--snapshot-message "leaf" nil "Saved API answer")
-                             (pilish-test--snapshot-message "later" "leaf" "Refreshed API answer")))
-                (execute-kbd-macro (kbd "g"))
-                (should-not (buffer-live-p snapshot))
-                (setq snapshot (window-buffer observer-window))
-                (push snapshot snapshots)
-                (should (eq (current-buffer) snapshot))
-                (should (string-match-p "Refreshed API answer" (buffer-string)))
-                (should (with-current-buffer first
-                          (not (string-match-p "Refreshed API answer" (buffer-string)))))
-                (pilish-gui-test--large-evidence
-                 "session-api-refreshed"
-                 (list :selected-mode major-mode :read-only buffer-read-only
-                       :content (buffer-substring-no-properties (point-min) (point-max))
-                       :first-observer-unchanged t :commands commands))
-                (execute-kbd-macro (kbd "q"))
-                (should-not (buffer-live-p snapshot))
-                (should (buffer-live-p first))
-                (should-not commands))
-              (should (process-live-p process))
-              (should (eq (pilish-session-process chat) process))
-              (should (equal (pilish-session-file chat) session-file))
-              (should (equal (with-current-buffer chat (buffer-string)) parent-text))
-              (should (equal (with-current-buffer input (buffer-string)) draft))
-              (should (equal (with-temp-buffer
-                               (insert-file-contents-literally session-file) (buffer-string))
-                             parent-bytes)))
-          (apply #'pilish-test--kill-live-buffers snapshots))))))
+    (let* ((chat (plist-get pilish-gui-test--session :chat-buffer))
+           (input (plist-get pilish-gui-test--session :input-buffer))
+           (process (plist-get pilish-gui-test--session :process))
+           (session-file (pilish-session-file chat))
+           (parent-text (with-current-buffer chat (buffer-string)))
+           (parent-bytes (with-temp-buffer
+                           (insert-file-contents-literally session-file)
+                           (buffer-string)))
+           (draft "Unsent API draft\nStill here")
+           (accessors '(pilish-session-directory pilish-session-name
+                        pilish-session-title pilish-session-file
+                        pilish-session-model pilish-session-context-usage
+                        pilish-session-queued-prompts pilish-session-busy-p
+                        pilish-session-running-tools pilish-session-extension-status)))
+      (select-window (pilish-gui-test-input-window))
+      (execute-kbd-macro (vconcat "Unsent API draft" (kbd "RET") "Still here"))
+      (let ((selected (selected-window))
+            (point (point)))
+        (cl-letf (((symbol-function 'pilish--send-string)
+                   (lambda (&rest _) (ert-fail "Inspection sent RPC"))))
+          (dolist (buffer (list chat input (buffer-name chat) (buffer-name input)))
+            (should (eq (pilish-session-chat-buffer buffer) chat))
+            (should (eq (pilish-session-input-buffer buffer) input))
+            (should (eq (pilish-session-process buffer) process)))
+          (dolist (accessor accessors)
+            (should (equal (funcall accessor chat) (funcall accessor input)))
+            (should (equal (funcall accessor) (funcall accessor input))))
+          (should (pilish-session-exists-p (pilish-session-directory)))
+          (should (plist-get (pilish-session-model) :id))
+          (should-not (pilish-session-busy-p)))
+        (should (eq (selected-window) selected))
+        (should (= (point) point)))
+      (pilish-gui-test--large-evidence
+       "session-api-inspection"
+       (list :selected-buffer (buffer-name (window-buffer (selected-window)))
+             :directory (pilish-session-directory input)
+             :file session-file :model (pilish-session-model input)
+             :draft-hash (with-current-buffer input (secure-hash 'sha256 (buffer-string)))
+             :window-system window-system :package-user-dir package-user-dir
+             :api-library (symbol-file 'pilish-session-chat-buffer)))
+      (should (process-live-p process))
+      (should (equal (with-current-buffer chat (buffer-string)) parent-text))
+      (should (equal (with-current-buffer input (buffer-string)) draft))
+      (should (equal (with-temp-buffer
+                       (insert-file-contents-literally session-file) (buffer-string))
+                     parent-bytes)))))
 
 (ert-deftest pilish-gui-test-snapshot-refresh-keyboard-g ()
   "Pressing g in a snapshot observer rereads and republishes it in place."

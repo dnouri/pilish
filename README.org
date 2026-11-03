@@ -1304,13 +1304,17 @@ receives:
 
 =KEY= is the =statusKey= and =TEXT= the new text without ANSI colors,
 or nil when the status was cleared.  Setting a status to its current
-text calls nothing.  Starting a new session clears every status and
-calls the functions once per cleared key.  The functions run after the
+text and properties calls nothing.  Starting a new session clears every
+status and calls the functions once per cleared key.  The functions run after the
 change, so the accessor already returns =TEXT=.
 
-=(pilish-session-extension-status CHAT-BUFFER KEY)= returns one status's
+=(pilish-session-extension-status BUFFER KEY)= returns one status's
 text; without =KEY= it returns an alist of all statuses in header-line
-order.  Both return copies.
+order.  =BUFFER= is optional and follows the session inspection API below:
+chat, linked input, either buffer's name, or the current buffer by default.
+Both return independent copies, including text properties and their nested
+data values (for example a face plist).  Each observer receives its own
+copies, so it cannot alter another observer's arguments or the session.
 
 #+begin_src emacs-lisp
 (defun my-pi-message-plan-mode (chat key text)
@@ -1518,11 +1522,24 @@ process may have exited, so check =process-live-p= before using it.
 The same buffer argument works with =pilish-session-directory=, =-name=
 (the Emacs session suffix), =-title= (Pi's conversation title), =-file=
 (Pi's session file, not a saved Markdown transcript), =-model=,
-=-context-usage=, =-queued-prompts= and =-busy-p=.  These report the latest
-observed state without RPC or disk reads, and return copies of data,
-including nested strings and vectors.  Queue order matches the header:
+=-context-usage=, =-queued-prompts=, =-running-tools=,
+=-extension-status= and =-busy-p=.  These report the latest observed state
+without RPC or disk reads.  Data results are independent copies, including
+nested strings, lists, vectors and hash tables.  Metadata and queue strings
+omit text properties; extension-status strings retain them and copy their
+nested data values.  Buffer and process accessors return the actual handles,
+not copies.  Queue order matches the header:
 backend follow-ups, local follow-ups in FIFO order, then steering.  An
 unreported backend queue is unknown, not necessarily empty.
+
+=-running-tools= lists unfinished root tool call IDs from the live registry
+in unspecified order: announced or executing calls with an observed ID.
+Argument-streaming previews without authoritative IDs are not listed;
+completed, cooled and saved-history blocks do not count.  =-busy-p= uses an
+observed-work policy: pending prompts, session/model changes, compaction,
+non-idle activity, known queues or unfinished tools count.  It is broader
+than the internal send-readiness predicate and is not a fresh backend query.
+Unknown work is not proof of idleness.
 
 =pilish-session-exists-p= takes a directory and optional session name
 (nil for the default session), and checks for existing buffers even when
@@ -1535,14 +1552,6 @@ Pi is stopped.  It does not resolve directory symlinks.
           (plist-get (pilish-session-model chat) :id)
           (pilish-session-busy-p chat))))
 #+end_src
-
-=pilish-view-session-file= opens a Pi-v3 JSONL file in an independent,
-read-only observer in another window and selects it.  It never resumes Pi
-or replaces a live session or draft.  Press =g= to reread that observer's
-captured file identity and =q= to close only the observer.  Reads and
-rendering are synchronous, including for remote files.  Invalid files
-signal an error before display.  To resume instead, use
-=pilish-open-session-file=.
 
 ** Activity phase hooks
 

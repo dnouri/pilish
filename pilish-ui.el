@@ -1980,6 +1980,55 @@ canonical history, so rebuilding now would erase that visible turn."
        (not (pilish--command-pending-p (pilish--get-process) "compact"))
        (null pilish--local-user-message)))
 
+(defun pilish-session-chat-buffer (&optional buffer)
+  "Return the session chat linked to BUFFER, or nil outside a session.
+BUFFER is a buffer or buffer name, defaulting to the current buffer.
+Dead, missing, unrelated and saved snapshot buffers return nil.  An input
+buffer resolves to its live chat even when Pi has stopped.  No process is
+started and no window is displayed or selected."
+  (when-let* ((buffer (get-buffer (or buffer (current-buffer))))
+              ((buffer-live-p buffer)))
+    (with-current-buffer buffer
+      (cond
+       ((derived-mode-p 'pilish-chat-mode) buffer)
+       ((and (derived-mode-p 'pilish-input-mode)
+             (buffer-live-p pilish--chat-buffer)
+             (with-current-buffer pilish--chat-buffer
+               (derived-mode-p 'pilish-chat-mode)))
+        pilish--chat-buffer)))))
+
+(defun pilish--copy-session-value (value &optional properties)
+  "Copy session data VALUE, including nested strings, vectors and hash tables.
+String properties are omitted unless PROPERTIES is non-nil; in that case
+their data values are copied too, as needed for extension status faces."
+  (cond
+   ((stringp value)
+    (let ((copy (substring-no-properties value))
+          (pos 0))
+      (when properties
+        (while (< pos (length value))
+          (let ((end (next-property-change pos value (length value))))
+            (set-text-properties
+             pos end (pilish--copy-session-value
+                      (text-properties-at pos value) t) copy)
+            (setq pos end))))
+      copy))
+   ((consp value) (cons (pilish--copy-session-value (car value) properties)
+                       (pilish--copy-session-value (cdr value) properties)))
+   ((vectorp value)
+    (apply #'vector (mapcar (lambda (item)
+                             (pilish--copy-session-value item properties))
+                           value)))
+   ((hash-table-p value)
+    (let ((copy (copy-hash-table value)))
+      (clrhash copy)
+      (maphash (lambda (key item)
+                 (puthash (pilish--copy-session-value key properties)
+                          (pilish--copy-session-value item properties) copy))
+               value)
+      copy))
+   (t value)))
+
 (defvar-local pilish--extension-status nil
   "Alist of extension status messages for header-line display.
 Keys are extension identifiers (strings), values are status text.
@@ -1996,32 +2045,27 @@ Each function is called with three arguments:
 KEY is the extension's `statusKey' and TEXT its new status text, or nil
 when the status was cleared.  A session reset, such as starting a new
 session, clears every status and calls the functions once per cleared
-KEY.  Setting a status to its current text calls nothing.
+KEY.  Setting a status to its current text and properties calls nothing.
 
 The functions run in CHAT-BUFFER after the change is complete, so
 `pilish-session-extension-status' already returns TEXT.  KEY and TEXT
-are copies.  An error in one function is reported as a warning and does
-not stop the others.  This is an abnormal hook."
+are independent copies for each function, including TEXT's properties and
+nested property values.  An error in one function is reported as a
+warning and does not stop the others.  This is an abnormal hook."
   :type 'hook
   :group 'pilish)
 
-(defun pilish-session-extension-status (chat-buffer &optional key)
-  "Return the extension status of the session in CHAT-BUFFER.
-With KEY, return that status's text, or nil when it is not set.
-Without KEY, return an alist of (KEY . TEXT) for every status, in
-header-line order.  The result is a copy: changing it does not change
-the session.  Return nil when CHAT-BUFFER is not a live chat buffer.
-`pilish-extension-status-functions' report changes."
-  (when (and (buffer-live-p chat-buffer)
-             (provided-mode-derived-p
-              (buffer-local-value 'major-mode chat-buffer) 'pilish-chat-mode))
-    (let ((statuses (buffer-local-value 'pilish--extension-status chat-buffer)))
-      (if key
-          (copy-sequence (cdr (assoc key statuses)))
-        (mapcar (lambda (status)
-                  (cons (copy-sequence (car status))
-                        (copy-sequence (cdr status))))
-                statuses)))))
+(defun pilish-session-extension-status (&optional buffer key)
+  "Return a copy of BUFFER's extension status, or nil without a session.
+BUFFER follows `pilish-session-chat-buffer'.  With KEY, return that
+status's text; without KEY, return an alist of (KEY . TEXT) in header-line
+order.  Text properties, including faces, are retained; their nested data
+values are copied too.  Changing returned data cannot change the session.
+`pilish-extension-status-functions' reports changes.  No RPC is sent."
+  (when-let* ((chat (pilish-session-chat-buffer buffer)))
+    (let ((statuses (buffer-local-value 'pilish--extension-status chat)))
+      (pilish--copy-session-value
+       (if key (cdr (assoc key statuses)) statuses) t))))
 
 (defun pilish--run-extension-status-functions (key text)
   "Run `pilish-extension-status-functions' for KEY and TEXT in this buffer.
@@ -2030,7 +2074,9 @@ handling."
   (let ((chat-buffer (current-buffer)))
     (dolist (fn pilish-extension-status-functions)
       (condition-case-unless-debug err
-          (funcall fn chat-buffer (copy-sequence key) (copy-sequence text))
+          (with-current-buffer chat-buffer
+            (funcall fn chat-buffer (pilish--copy-session-value key)
+                     (pilish--copy-session-value text t)))
         (error
          (display-warning
           'pilish
@@ -2048,7 +2094,7 @@ when the text changed."
     (when text
       (push (cons key text) pilish--extension-status))
     (force-mode-line-update t)
-    (unless (equal old text)
+    (unless (equal-including-properties old text)
       (pilish--run-extension-status-functions key text))))
 
 (defun pilish--clear-extension-statuses ()

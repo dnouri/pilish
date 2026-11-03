@@ -124,31 +124,7 @@
 
 ;;;; Session Inspection
 
-(defun pilish-session-chat-buffer (&optional buffer)
-  "Return the session chat linked to BUFFER, or nil outside a session.
-BUFFER is a buffer or buffer name, defaulting to the current buffer.
-Dead, missing, unrelated and saved snapshot buffers return nil.  An input
-buffer resolves to its live chat even when Pi has stopped.  No process is
-started and no window is displayed or selected."
-  (when-let* ((buffer (get-buffer (or buffer (current-buffer))))
-              ((buffer-live-p buffer)))
-    (with-current-buffer buffer
-      (cond
-       ((derived-mode-p 'pilish-chat-mode) buffer)
-       ((and (derived-mode-p 'pilish-input-mode)
-             (buffer-live-p pilish--chat-buffer)
-             (with-current-buffer pilish--chat-buffer
-               (derived-mode-p 'pilish-chat-mode)))
-        pilish--chat-buffer)))))
-
-(defun pilish--copy-session-value (value)
-  "Copy session data VALUE, including nested strings and vectors."
-  (cond
-   ((stringp value) (substring-no-properties value))
-   ((consp value) (cons (pilish--copy-session-value (car value))
-                        (pilish--copy-session-value (cdr value))))
-   ((vectorp value) (apply #'vector (mapcar #'pilish--copy-session-value value)))
-   (t value)))
+;; Buffer resolution and copying live in pilish-ui for extension-status hooks.
 
 (defun pilish--session-value (buffer variable &optional key)
   "Copy VARIABLE's value from BUFFER's chat, or nil without a chat.
@@ -227,16 +203,34 @@ steering.  Unreported Pi queues are not included."
                  (plist-get snapshot :steering)
                  nil))))))
 
+(defun pilish-session-running-tools (&optional buffer)
+  "Return a copy of BUFFER's known unfinished root tool call IDs.
+BUFFER follows `pilish-session-chat-buffer'.  Order is unspecified.
+The live registry includes announced or executing calls with an observed
+ID, not argument-streaming previews without authoritative IDs.  Completed,
+cooled and saved-history blocks are excluded.  No RPC is sent; an
+unobserved backend tool is unknown, not necessarily absent."
+  (when-let* ((chat (pilish-session-chat-buffer buffer))
+              (live (buffer-local-value 'pilish--live-tool-blocks chat)))
+    (let (ids)
+      (maphash (lambda (id _block)
+                 (push (pilish--copy-session-value id) ids))
+               live)
+      ids)))
+
 (defun pilish-session-busy-p (&optional buffer)
   "Return non-nil when BUFFER's session has active or known queued work.
-BUFFER follows `pilish-session-chat-buffer'.  This includes local pending
-prompts, model/session changes and compaction, not just streamed output.
-Like the header, it reports observed state, not a fresh Pi query."
+BUFFER follows `pilish-session-chat-buffer'.  This observed-work policy
+includes pending prompts, model/session changes, compaction, non-idle
+activity and unfinished
+tools, not just streamed output.  It is broader than the send-readiness
+predicate: known queues also count.  No RPC or fresh Pi query is made."
   (when-let* ((chat (pilish-session-chat-buffer buffer)))
     (and (or (pilish--session-busy-p chat)
              (not (member (buffer-local-value 'pilish--activity-phase chat)
                           '(nil "idle")))
-             (pilish-session-queued-prompts chat))
+             (pilish-session-queued-prompts chat)
+             (pilish-session-running-tools chat))
          t)))
 
 (defun pilish-session-exists-p (directory &optional name)
@@ -251,24 +245,6 @@ resolved through symlinks, matching Pilish's normal session lookup."
                   (with-current-buffer input
                     (derived-mode-p 'pilish-input-mode))))
          t)))
-
-;;;###autoload
-(defun pilish-view-session-file (file)
-  "Open Pi v3 session FILE in a new read-only saved observer and return it.
-Like a saved-conversation link, select the observer in another window.
-This never starts or resumes Pi and never changes any live session or
-draft.  Each call creates an independent observer; \`g' rereads its captured
-file identity.  Invalid or unreadable files signal an error before display.
-Reads and rendering are synchronous, including for remote files."
-  (interactive (list (pilish--read-session-file-name)))
-  (let* ((file (pilish--route-preserving-expand-file-name file))
-         (header (pilish-jsonl-read-session-header file))
-         (target (pilish--snapshot-target-for-pi-v3
-                  file (plist-get header :id)
-                  (file-name-directory file) (file-name-nondirectory file))))
-    (unless target
-      (user-error "Not a readable Pi session: %s" file))
-    (pilish-open-subagent-snapshot target)))
 
 ;;;; Main Entry Point
 
