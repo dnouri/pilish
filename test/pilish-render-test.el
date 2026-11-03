@@ -6162,6 +6162,74 @@ When PARTIAL-TEXT is supplied it must precede the outcome, never be erased."
       (should (< first-pos custom-pos))
       (should (< custom-pos second-pos)))))
 
+(ert-deftest pilish-test-history-marks-headings-and-custom-messages ()
+  "Rendered history carries semantic properties display add-ons can follow.
+Heading lines carry `pilish-heading' with their label; the text of a custom
+message carries `pilish-custom-message', but its separating newline does not."
+  (with-temp-buffer
+    (pilish-chat-mode)
+    (pilish--display-session-history
+     [(:role "user" :content [(:type "text" :text "Question?")]
+       :timestamp 1704067200000)
+      (:role "assistant" :content [(:type "text" :text "Answer.")]
+       :timestamp 1704067201000)
+      (:role "custom" :display t :content "Extension note"
+       :timestamp 1704067201500)
+      (:role "compactionSummary" :summary "Summary text" :tokensBefore 1000
+       :timestamp 1704067202000)]
+     (current-buffer))
+    (let (headings)
+      (save-excursion
+        (goto-char (point-min))
+        (let (match)
+          (while (setq match (text-property-search-forward 'pilish-heading nil nil))
+            (let ((label (prop-match-value match))
+                  (text (buffer-substring-no-properties
+                         (prop-match-beginning match) (prop-match-end match))))
+              (should (string-prefix-p label text))
+              (should (string-match-p "\n=\\{3,\\}\n\\'" text))
+              (push label headings)))))
+      ;; The startup banner heading comes first.
+      (should (equal (nreverse headings)
+                     '("Pilish" "You" "Assistant" "Compaction"))))
+    (goto-char (point-min))
+    (search-forward "Extension note")
+    (should (get-text-property (match-beginning 0) 'pilish-custom-message))
+    (should (get-text-property (1- (match-end 0)) 'pilish-custom-message))
+    (should-not (get-text-property (1- (match-beginning 0)) 'pilish-custom-message))
+    (goto-char (point-min))
+    (search-forward "Answer.")
+    (should-not (get-text-property (match-beginning 0) 'pilish-custom-message))
+    (should-not (get-text-property (match-beginning 0) 'pilish-heading))))
+
+(ert-deftest pilish-test-literal-text-survives-markdown-fontification ()
+  "Text marked `pilish-literal-text' keeps its characters and own faces.
+Markdown fontification of the chat must not hide its markup, turn it into
+links or replace its `font-lock-face'; neighbouring Markdown still renders."
+  (with-temp-buffer
+    (pilish-chat-mode)
+    (let ((inhibit-read-only t))
+      (insert "Assistant **bold**\n\n")
+      (insert (propertize "Pick **one** of [a](b) or __two__\n"
+                          'pilish-literal-text t
+                          'font-lock-face 'pilish-tool-command)))
+    (font-lock-ensure (point-min) (point-max))
+    (pilish--restore-tool-properties (point-min) (point-max))
+    (goto-char (point-min))
+    (search-forward "Pick")
+    (let ((start (match-beginning 0))
+          (end (line-end-position)))
+      (should (equal (buffer-substring-no-properties start end)
+                     "Pick **one** of [a](b) or __two__"))
+      (should-not (text-property-not-all start end 'invisible nil))
+      (should-not (text-property-not-all start end 'display nil))
+      (should-not (text-property-not-all start end 'face 'pilish-tool-command))
+      (should (get-text-property start 'rear-nonsticky)))
+    (goto-char (point-min))
+    (search-forward "**bold**")
+    (should (text-property-not-all (match-beginning 0) (match-end 0)
+                                   'invisible nil))))
+
 (ert-deftest pilish-test-session-history-rebuild-keeps-single-logo-decoration ()
   "A full history rebuild decorates the startup heading exactly once.
 Reloads and resumes reuse `pilish--format-startup-header', so the logo
@@ -21443,7 +21511,7 @@ Regression test: single lines should respect byte limit even with no newlines."
     ;; Should have output, success face, no [error]
     (should (string-match-p "success output" (buffer-string)))
     (let ((ov (car (overlays-at (point-min)))))
-      (should (eq (overlay-get ov 'face) 'pilish-tool-block)))
+      (should (eq (overlay-get ov 'face) 'pilish-tool-block-success)))
     (should-not (string-match-p "\\[error\\]" (buffer-string)))))
 
 (ert-deftest pilish-test-tool-output-survives-message-render ()
@@ -23691,7 +23759,7 @@ Multiple deltas should replace the preview instead of appending forever."
       (should (= 0 (hash-table-count pilish--live-tool-blocks)))
       (should-not pilish--pending-tool-overlay)
       (should (= 1 (length (pilish-test--all-tool-overlays))))
-      (should (eq 'pilish-tool-block
+      (should (eq 'pilish-tool-block-success
                   (overlay-get preview 'face)))
       (should (equal '("final content")
                      (pilish-test--tool-content-lines-from-stream
