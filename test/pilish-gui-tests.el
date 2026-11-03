@@ -331,7 +331,7 @@ line between the live windows."
               (pilish--display-history-messages
                [(:role "assistant" :timestamp 1784817120000 :provider "saved"
                  :model "literal\\[find-file]%"
-                 :content [(:type "thinking" :thinking "GUI private first\nGUI private second")
+                 :content [(:type "thinking" :thinking "GUI private first\nGUI private second\nGUI private third")
                            (:type "toolCall" :id "gui-details" :name "bash"
                             :arguments (:command "printf '\\[find-file]' %"))])
                 (:role "toolResult" :toolCallId "gui-details" :timestamp 1784817120000
@@ -341,7 +341,7 @@ line between the live windows."
               (backward-char)
               (let ((expected (pilish--details-at-point)))
                 (should (string-prefix-p "Thinking · " expected))
-                (should (string-match-p "2 lines" expected))
+                (should (string-match-p "3 lines" expected))
                 (setq help (pilish-gui-test--inspect-block-with-keys "C-c C-p d" expected))
                 (execute-kbd-macro (kbd "TAB"))
                 (should (eq (plist-get (pilish--thinking-block-metadata-at-pos (point)) :display) 'hidden))
@@ -2361,7 +2361,7 @@ Capture text/image ordering, completed thinking and both cold projections."
                   (switch-to-buffer buf)
                   (pilish-chat-mode)
                   (setq pilish--thinking-display 'hidden)
-                  (pilish--render-history-thinking "\nPlan the work\n\n\nCheck the result\n\n")
+                  (pilish--render-history-thinking "\nPlan the work\n\n\nRead the file\n\nCheck the result\n\n")
                   (let* ((block (pilish--display-tool-start "read" '(:path "/tmp/test.txt") "root"))
                          (overlay (pilish--tool-block-overlay block))
                          (window (selected-window)))
@@ -2420,8 +2420,8 @@ Capture text/image ordering, completed thinking and both cold projections."
                       (footer)
                       (execute-kbd-macro (kbd "RET"))
                       (should (string-match-p "Line 20" (buffer-string)))
-                      ;; Thinking's normalized three source lines conceal two, not
-                      ;; the extra input blank lines.
+                      ;; Thinking's three non-blank lines conceal two, not the
+                      ;; blank lines between them.
                       (goto-char (point-min))
                       (re-search-forward "^> Thinking: Plan the work… (2 more lines)$")
                       (beginning-of-line)
@@ -2454,6 +2454,60 @@ Capture text/image ordering, completed thinking and both cold projections."
                 (kill-buffer buf)))))
       (set-frame-size nil width height)
       (sit-for 0.1))))
+
+(ert-deftest pilish-gui-test-short-thinking-stays-visible-without-caret ()
+  "Hidden display collapses long thinking but leaves a short summary readable.
+The summary has no margin caret, and TAB on it reaches the turn outline."
+  (require 'pilish-arguments-test)
+  (let ((buf (generate-new-buffer " *pilish-gui-short-thinking*")))
+    (unwind-protect
+        (save-window-excursion
+          (delete-other-windows)
+          (switch-to-buffer buf)
+          (pilish-chat-mode)
+          (pilish--set-chat-thinking-display 'hidden)
+          (pilish--display-history-messages
+           [(:role "user" :content "Review the build" :timestamp 1784817120000)
+            (:role "assistant" :timestamp 1784817120000
+             :content [(:type "thinking" :thinking "**Reading first 80 lines**")
+                       (:type "text" :text "The header is fine.")
+                       (:type "thinking"
+                        :thinking "Compare the flags.\n\nCheck the linker.\n\nRead the log.")
+                       (:type "text" :text "The linker flags differ.")])])
+          (font-lock-ensure)
+          (let ((window (selected-window))
+                (outline-called nil))
+            (cl-labels ((capture (state)
+                          (pilish-gui-test--large-evidence
+                           (format "short-thinking-%s" state)
+                           (list :state state
+                                 :visible (pilish-arguments-test--visible-text)
+                                 :window-system window-system))))
+              (goto-char (point-min))
+              (search-forward "> **Reading first 80 lines**")
+              (beginning-of-line)
+              (should-not (get-text-property (point) 'pilish-disclosure-hit))
+              (should-not (pilish-gui-test--tool-margin-position window (point)))
+              (re-search-forward "^> Thinking: Compare the flags\\.… (2 more lines)$")
+              (beginning-of-line)
+              (should (pilish-gui-test--tool-margin-position window (point)))
+              (capture "hidden")
+              (goto-char (point-min))
+              (search-forward "Reading first 80 lines")
+              (let ((before (buffer-string)))
+                (cl-letf (((symbol-function 'outline-cycle)
+                           (lambda (&rest _) (setq outline-called t))))
+                  (execute-kbd-macro (kbd "TAB")))
+                (should outline-called)
+                (should (equal before (buffer-string))))
+              (pilish-toggle-thinking-display)
+              (should (string-match-p "^> Read the log\\.$" (buffer-string)))
+              (should (string-match-p "^> \\*\\*Reading first 80 lines\\*\\*$"
+                                      (buffer-string)))
+              (capture "visible"))))
+      (when (buffer-live-p buf)
+        (with-current-buffer buf (set-buffer-modified-p nil))
+        (kill-buffer buf)))))
 
 (defun pilish-gui-test--duration-geometry (window block &optional stacked)
   "Assert BLOCK's actual footer coordinates in WINDOW, expecting STACKED rows.

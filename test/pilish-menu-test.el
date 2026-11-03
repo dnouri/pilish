@@ -3243,6 +3243,7 @@ The tree is built iteratively to avoid recursion in test setup."
 (ert-deftest pilish-test-toggle-thinking-display-overrides-per-block-states ()
   "Whole-buffer toggles apply one display mode to every completed thinking block."
   (let ((pilish-thinking-display 'hidden)
+        (pilish-thinking-fold-min-lines 1)
         shown-message)
     (with-temp-buffer
       (pilish-chat-mode)
@@ -3348,7 +3349,8 @@ The tree is built iteratively to avoid recursion in test setup."
 
 (ert-deftest pilish-test-toggle-thinking-display-keeps-live-custom-message-visible ()
   "Whole-buffer thinking toggles must not delete live custom messages."
-  (let ((pilish-thinking-display 'visible))
+  (let ((pilish-thinking-display 'visible)
+        (pilish-thinking-fold-min-lines 1))
     (with-temp-buffer
       (pilish-chat-mode)
       (pilish--display-session-history

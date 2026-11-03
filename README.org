@@ -1062,6 +1062,9 @@ Less common tuning knobs:
 ;; Hidden thinking uses generic line-count stubs instead of first-line previews:
 ;; (setopt pilish-thinking-hidden-preview nil)
 
+;; Let completed thinking of any length fold (default: 3 non-blank lines):
+;; (setopt pilish-thinking-fold-min-lines 1)
+
 ;; New browser buffers can start elsewhere; existing browsers keep
 ;; their toggled state (see the Sessions and context section):
 ;; (setopt pilish-session-browser-default-scope 'all)
@@ -1178,7 +1181,11 @@ that default persist across restarts, set
 =M-x customize-option=.
 
 Press =TAB= inside completed thinking or click its margin caret to
-expand or collapse it.  Live thinking cannot be collapsed.
+expand or collapse it.  Live thinking cannot be collapsed.  Completed
+thinking with fewer than =pilish-thinking-fold-min-lines= non-blank
+lines (default 3), such as a one-heading reasoning summary, always
+stays expanded and has no caret: a stub would hide most of it while
+saving at most a few rows.
 
 ** Markdown tables
 
