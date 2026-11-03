@@ -122,6 +122,24 @@
 
 (declare-function dired-get-filename "dired" (&optional localp no-error-if-not-filep))
 
+;;;###autoload
+(defun pilish-view-session-file (file)
+  "Open Pi v3 session FILE in a new read-only saved observer and return it.
+Like a saved-conversation link, select the observer in another window.
+This never starts or resumes Pi and never changes any live session or
+draft.  Each call creates an independent observer; \`g' rereads its captured
+file identity.  Invalid or unreadable files signal an error before display.
+Reads and rendering are synchronous, including for remote files."
+  (interactive (list (pilish--read-session-file-name)))
+  (let* ((file (pilish--route-preserving-expand-file-name file))
+         (header (pilish-jsonl-read-session-header file))
+         (target (pilish--snapshot-target-for-pi-v3
+                  file (plist-get header :id)
+                  (file-name-directory file) (file-name-nondirectory file))))
+    (unless target
+      (user-error "Not a readable Pi session: %s" file))
+    (pilish-open-subagent-snapshot target)))
+
 ;;;; Main Entry Point
 
 (defcustom pilish-evil-integration t
