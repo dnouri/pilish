@@ -3278,15 +3278,19 @@ header line under `pilish-header-line-location'."
   (let ((map (make-sparse-keymap)))
     (define-key map [header-line mouse-1] #'pilish-select-model)
     (define-key map [header-line mouse-2] #'pilish-select-model)
+    (define-key map [mode-line mouse-1] #'pilish-select-model)
+    (define-key map [mode-line mouse-2] #'pilish-select-model)
     map)
-  "Keymap for clicking model name in header-line.")
+  "Keymap for clicking the model name in the header or mode line.")
 
 (defvar pilish--header-thinking-map
   (let ((map (make-sparse-keymap)))
     (define-key map [header-line mouse-1] #'pilish-cycle-thinking)
     (define-key map [header-line mouse-2] #'pilish-cycle-thinking)
+    (define-key map [mode-line mouse-1] #'pilish-cycle-thinking)
+    (define-key map [mode-line mouse-2] #'pilish-cycle-thinking)
     map)
-  "Keymap for clicking thinking level in header-line.")
+  "Keymap for clicking the thinking level in the header or mode line.")
 
 (defun pilish--header-format-context (percent context-window)
   "Format context usage for header-line display.
