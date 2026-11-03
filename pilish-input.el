@@ -50,6 +50,16 @@
 
 ;;;; Input History (comint/eshell style)
 
+(defcustom pilish-input-history-from-session nil
+  "Non-nil means include shown session prompts in input history.
+When a session's history is loaded, merge its visible user prompts into
+that input buffer's history, newest prompt first.  Local history entries
+not present in the session remain older.  The input text is unchanged;
+history navigation restarts from that text.  This applies on the next
+history load, including resume and reload, not retroactively."
+  :type 'boolean
+  :group 'pilish)
+
 (defvar pilish--input-ring-size 100
   "Size of the input history ring.")
 
@@ -120,6 +130,31 @@ Restores saved input when moving past newest entry."
             (insert pilish--input-saved)))
       (setq pilish--input-ring-index new-index)
       (insert (ring-ref (pilish--input-ring) new-index)))))
+
+(defun pilish--seed-input-history (input-buffer messages)
+  "Merge user prompts from shown session MESSAGES into INPUT-BUFFER.
+Do nothing unless `pilish-input-history-from-session' is non-nil.
+MESSAGES is a vector of message plists, oldest first.  Repeated loads
+keep the same history rather than appending duplicate copies."
+  (when (and pilish-input-history-from-session
+             (buffer-live-p input-buffer)
+             (vectorp messages))
+    (let (prompts)
+      (seq-doseq (message messages)
+        (when (equal (plist-get message :role) "user")
+          (when-let* ((text (pilish--extract-history-user-message-text message))
+                      ((not (string-blank-p text))))
+            (push text prompts))))
+      (setq prompts (nreverse prompts))
+      (with-current-buffer input-buffer
+        (let ((older (seq-remove
+                      (lambda (entry) (member entry prompts))
+                      (reverse (ring-elements (pilish--input-ring))))))
+          (setq pilish--input-ring (make-ring pilish--input-ring-size)
+                pilish--input-ring-index nil
+                pilish--input-saved nil)
+          (dolist (entry (append older prompts))
+            (pilish--history-add entry)))))))
 
 ;;;; History Isearch
 

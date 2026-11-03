@@ -3023,6 +3023,113 @@ Regression test for #27: history was shared across all sessions."
       (kill-buffer buf1)
       (kill-buffer buf2))))
 
+(ert-deftest pilish-test-seed-history-default-leaves-navigation-alone ()
+  "Session seeding is opt-in and does not disturb local navigation."
+  (let ((pilish-input-history-from-session nil))
+    (with-temp-buffer
+      (pilish-input-mode)
+      (pilish--history-add "local command")
+      (insert "unfinished draft")
+      (pilish-previous-input)
+      (let ((ring pilish--input-ring))
+        (pilish--seed-input-history
+         (current-buffer) [(:role "user" :content "saved prompt")])
+        (should (eq ring pilish--input-ring))
+        (should (= pilish--input-ring-index 0))
+        (should (equal pilish--input-saved "unfinished draft"))
+        (pilish-next-input)
+        (should (equal (buffer-string) "unfinished draft"))))))
+
+(ert-deftest pilish-test-seed-history-merges-visible-prompts-idempotently ()
+  "Only visible user text is merged, with local entries kept older."
+  (let ((pilish-input-history-from-session t)
+        (messages [(:role "user" :content "first prompt")
+                   (:role "assistant" :content "not input")
+                   (:role "toolResult" :content "not input either")
+                   (:role "custom" :content "extension output" :display t)
+                   (:role "user" :content [(:type "image" :data "AA==")])
+                   (:role "user" :content "  \n ")
+                   (:role "user" :content [(:type "text" :text "second prompt")
+                                           (:type "image" :data "AA==")])
+                   (:role "user" :content "second prompt")
+                   (:role "user" :content "first prompt")]))
+    (with-temp-buffer
+      (pilish-input-mode)
+      (pilish--history-add "older command")
+      (pilish--history-add "first prompt")
+      (pilish--history-add "other session prompt")
+      (insert "current draft")
+      (dotimes (_ 2)
+        (pilish--seed-input-history (current-buffer) messages)
+        (should (equal (ring-elements pilish--input-ring)
+                       '("first prompt" "second prompt" "first prompt"
+                         "other session prompt" "older command"))))
+      (should (equal (buffer-string) "current draft"))
+      (dolist (expected '("first prompt" "second prompt" "first prompt"
+                          "other session prompt" "older command"))
+        (pilish-previous-input)
+        (should (equal (buffer-string) expected)))
+      (dotimes (_ 5) (pilish-next-input))
+      (should (equal (buffer-string) "current draft")))))
+
+(ert-deftest pilish-test-seed-history-keeps-ring-bound-and-input-point ()
+  "Seeding respects the history capacity without editing the draft."
+  (let ((pilish-input-history-from-session t)
+        (pilish--input-ring-size 2))
+    (with-temp-buffer
+      (pilish-input-mode)
+      (insert "draft text")
+      (goto-char 3)
+      (let ((tick (buffer-chars-modified-tick)))
+        (pilish--seed-input-history
+         (current-buffer) [(:role "user" :content "one")
+                           (:role "user" :content "two")
+                           (:role "user" :content "three")])
+        (should (equal (ring-elements pilish--input-ring) '("three" "two")))
+        (should (= (buffer-chars-modified-tick) tick))
+        (should (= (point) 3))))))
+
+(ert-deftest pilish-test-seed-history-display-loads-the-linked-input-only ()
+  "A successful history display seeds its input, not an unrelated buffer."
+  (let ((pilish-input-history-from-session t)
+        (input (generate-new-buffer " *pilish-seed-input*")))
+    (unwind-protect
+        (with-temp-buffer
+          (pilish-chat-mode)
+          (setq pilish--input-buffer input)
+          (with-current-buffer input
+            (pilish-input-mode)
+            (insert "draft"))
+          (pilish--display-session-history
+           [(:role "user" :content "resumed prompt")] (current-buffer))
+          (should (string-match-p "resumed prompt" (buffer-string)))
+          (with-current-buffer input
+            (pilish-previous-input)
+            (should (equal (buffer-string) "resumed prompt"))
+            (pilish-next-input)
+            (should (equal (buffer-string) "draft"))))
+      (pilish-test--kill-live-buffers input))))
+
+(ert-deftest pilish-test-seed-history-failed-replay-does-not-change-input ()
+  "Failed history display must not put unshown prompts into input history."
+  (let ((pilish-input-history-from-session t)
+        (input (generate-new-buffer " *pilish-seed-failed-input*")))
+    (unwind-protect
+        (with-temp-buffer
+          (pilish-chat-mode)
+          (setq pilish--input-buffer input)
+          (with-current-buffer input
+            (pilish-input-mode)
+            (pilish--history-add "local prompt"))
+          (cl-letf (((symbol-function 'pilish--replay-history)
+                     (lambda (&rest _) (error "replay failed"))))
+            (should-error
+             (pilish--display-session-history
+              [(:role "user" :content "unshown prompt")] (current-buffer))))
+          (with-current-buffer input
+            (should (equal (ring-elements pilish--input-ring) '("local prompt")))))
+      (pilish-test--kill-live-buffers input))))
+
 ;;; History Isearch (C-r incremental search)
 
 (ert-deftest pilish-test-history-isearch-empty-history-errors ()

@@ -712,6 +712,15 @@ The main buffers:
 | =C-c C-t=                 | chat         | Cycle thinking level                        |
 | =C-c C-y=                 | chat         | Copy last message                           |
 
+By default, prompt history contains only input submitted from that input buffer.
+To also recall user prompts from a resumed or reloaded conversation, enable
+=pilish-input-history-from-session= before loading it.  =M-p= starts with the
+newest saved prompt; =M-n= returns to your draft.  Visible user text is merged,
+not image data or assistant/tool output.  Existing local entries absent from the
+conversation remain older, within the usual 100-entry limit.  Repeated history
+loads do not append duplicate copies.  Loading leaves the input text unchanged
+and restarts navigation from that text.
+
 The browsers:
 
 | Key       | Context        | Description                                                             |
