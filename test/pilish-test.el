@@ -891,9 +891,12 @@ still mock the RPC boundary, so the process is never used for I/O."
                 (should (eq (current-buffer) origin))
                 (should (eq (selected-window) window))
                 (with-current-buffer chat
-                  (should (eq pilish--status status))
+                  (should (eq pilish--status (if (eq status 'idle) 'sending status)))
+                  (should (pilish--session-busy-p))
+                  (should (= 1 (length pilish--prompt-waits)))
                   (should-not pilish--followup-queue)
-                  (should-not pilish--prompt-wait))))))
+                  (should-not pilish--prompt-wait)
+                  (pilish--invalidate-prompt-start-wait))))))
       (pilish-test--kill-live-buffers input chat))))
 
 (ert-deftest pilish-test-submit-prompt-validates-before-sending ()
@@ -1123,6 +1126,7 @@ still mock the RPC boundary, so the process is never used for I/O."
             (should (pilish-test-wait-until
                      (lambda ()
                        (and (eq (buffer-local-value 'pilish--status chat) 'idle)
+                            (not (buffer-local-value 'pilish--prompt-waits chat))
                             (with-current-buffer chat
                               (string-match-p "Steered fake reply for: API steer"
                                               (buffer-string)))))
@@ -1136,6 +1140,442 @@ still mock the RPC boundary, so the process is never used for I/O."
       (when (and proc (process-live-p proc)) (delete-process proc))
       (pilish-test--kill-live-buffers input chat)
       (delete-directory root t))))
+
+(defun pilish-test--api-response (process request success &optional disposition)
+  "Deliver a correlated prompt response for REQUEST from PROCESS."
+  (let ((response (list :type "response" :id (plist-get request :id)
+                        :command "prompt" :success success
+                        :data (list :disposition disposition))))
+    (pilish--dispatch-response process response)
+    response))
+
+(ert-deftest pilish-test-submit-prompt-interleaves-with-user-send ()
+  "Before agent_start, API requests go to Pi while user text stays in the FIFO."
+  (pilish-test-with-rpc-session (chat input proc commands)
+    (pilish-submit-prompt chat "API A" #'ignore)
+    (let ((a (car commands)))
+      (pilish-submit-prompt chat "API B" #'ignore "steer")
+      (let ((b (car commands)))
+        (with-current-buffer input (insert "User follow-up") (pilish-send))
+        (should (= 2 (length commands)))
+        (with-current-buffer chat
+          (should (= 2 (length pilish--prompt-waits)))
+          (should (equal pilish--followup-queue '("User follow-up")))
+          (should (eq pilish--status 'sending))
+          (should-not pilish--prompt-wait))
+        (pilish-test--api-response proc b t "queued")
+        (pilish-test--api-response proc a t "started")
+        (pilish-test--stdout proc '(:type "agent_start")
+                             '(:type "agent_end" :messages [])
+                             '(:type "agent_settled"))
+        ;; A run is not attributed to either outstanding API request.  Keep
+        ;; the user's FIFO blocked until all ambiguous acceptances are probed.
+        (should (= 2 (length commands)))
+        (dotimes (_ 2)
+          (let ((wait (car (buffer-local-value 'pilish--prompt-waits chat))))
+            (pilish--clear-sending-if-no-agent-start
+             chat wait (pilish--prompt-wait-on-no-agent-start wait))
+            (let ((probe (car commands)))
+              (should (equal (plist-get probe :type) "get_state"))
+              (pilish--dispatch-response
+               proc (list :type "response" :id (plist-get probe :id) :success t
+                          :data '(:isStreaming :false :isCompacting :false
+                                  :pendingMessageCount 0))))))
+        ;; Once the local follow-up starts it becomes the distinguished owner.
+        (should (buffer-local-value 'pilish--prompt-wait chat))
+        (should (equal (plist-get (car commands) :message) "User follow-up"))
+        (should (equal (mapcar (lambda (c) (plist-get c :message))
+                              (seq-filter (lambda (c) (equal (plist-get c :type) "prompt"))
+                                          (reverse commands)))
+                       '("API A" "API B" "User follow-up")))))))
+
+(ert-deftest pilish-test-submit-prompt-release-does-not-release-another-request ()
+  "A rejected/handled API response cannot release pending or accepted API B."
+  (dolist (accepted '(nil t))
+    (dolist (result '((:false nil) (t "handled")))
+      (pilish-test-with-rpc-session (chat input proc commands)
+        (with-current-buffer input
+          (insert "Draft with image")
+          (goto-char 4)
+          (setq pilish--draft-prompt-image '(:data "image" :mimeType "image/png"))
+          (pilish--history-add "Old prompt"))
+        (let ((before (pilish-test--submission-draft-state input)))
+          (pilish-submit-prompt chat "API A" #'ignore)
+          (let ((a (car commands)))
+            (pilish-submit-prompt chat "API B" #'ignore)
+            (let ((b (car commands))
+                  (wait (car (buffer-local-value 'pilish--prompt-waits chat))))
+              (when accepted (pilish-test--api-response proc b t "queued"))
+              (pilish-test--api-response proc a (car result) (cadr result))
+              (with-current-buffer chat
+                (should (equal pilish--prompt-waits (list wait)))
+                (should (pilish--session-busy-p))
+                (should (eq pilish--status 'sending)))
+              (with-current-buffer input (pilish-send))
+              (should (= 2 (length commands)))
+              (should (equal before (pilish-test--submission-draft-state input)))
+              (unless accepted (pilish-test--api-response proc b :false))
+              (with-current-buffer chat
+                (if accepted
+                    (should (pilish--prompt-start-current-p wait))
+                  (should-not pilish--prompt-waits)
+                  (should (eq pilish--status 'idle)))))))))))
+
+(ert-deftest pilish-test-submit-prompt-preserves-interactive-owner ()
+  "API cleanup never acquires the interactive echo, image or FIFO ownership."
+  (pilish-test-with-rpc-session (chat input proc commands)
+    (with-current-buffer input (insert "Interactive request") (pilish-send))
+    (let ((interactive (car commands))
+          (owner (buffer-local-value 'pilish--prompt-wait chat)))
+      (with-current-buffer input
+        (insert "New draft")
+        (setq pilish--draft-prompt-image '(:data "image" :mimeType "image/png")))
+      (let ((before (pilish-test--submission-draft-state input)))
+        (with-current-buffer chat (pilish--push-followup "local successor"))
+        (pilish-submit-prompt chat "API A" #'ignore)
+        (let ((api (car commands)))
+          (pilish-test--api-response proc api :false)
+          (with-current-buffer chat
+            (should (eq pilish--prompt-wait owner))
+            (should (equal pilish--prompt-waits (list owner)))
+            (should (equal pilish--followup-queue '("local successor"))))
+          (pilish-test--api-response proc interactive t "started")
+          ;; Concurrency makes an arbitrary echo/start attribution unsafe.
+          (with-current-buffer chat
+            (should-not pilish--local-user-message)
+            (should (eq pilish--prompt-wait owner)))
+          (should (equal before (pilish-test--submission-draft-state input))))))))
+
+(ert-deftest pilish-test-submit-prompt-stale-probe-keeps-new-work ()
+  "A new API request or lifecycle event invalidates an in-flight idle probe."
+  (dolist (change '(new-request run-before-ack))
+    (pilish-test-with-rpc-session (chat input proc commands)
+      (pilish-submit-prompt chat "API A" #'ignore)
+      (let ((a (car commands))
+            (wait (car (buffer-local-value 'pilish--prompt-waits chat))))
+        (pilish-test--api-response proc a t "queued")
+        (pilish--clear-sending-if-no-agent-start chat wait)
+        (let ((probe (car commands)))
+          (if (eq change 'new-request)
+              (pilish-submit-prompt chat "API B" #'ignore)
+            (pilish-test--stdout proc '(:type "agent_start")
+                                 '(:type "agent_end" :messages [])
+                                 '(:type "agent_settled")))
+          (pilish--dispatch-response
+           proc (list :type "response" :id (plist-get probe :id) :success t
+                      :data '(:isStreaming :false :isCompacting :false
+                              :pendingMessageCount 0)))
+          (with-current-buffer chat
+            (should (pilish--prompt-start-current-p wait))
+            (should (pilish--session-busy-p))
+            (should-not (pilish--prompt-wait-started wait))))))))
+
+(ert-deftest pilish-test-submit-prompt-run-before-ack-and-stale-process ()
+  "Late API responses neither attribute another run nor clear a replacement."
+  (pilish-test-with-rpc-session (chat input proc commands)
+    (let (seen)
+      (pilish-submit-prompt chat "API A" (lambda (r) (push r seen)))
+      (let ((a (car commands))
+            (wait (car (buffer-local-value 'pilish--prompt-waits chat))))
+        (pilish-test--stdout proc '(:type "agent_start")
+                             '(:type "agent_end" :messages [])
+                             '(:type "agent_settled"))
+        (pilish-test--api-response proc a t "started")
+        (with-current-buffer chat
+          (should (pilish--prompt-start-current-p wait))
+          (should-not (pilish--prompt-wait-started wait)))
+        (pilish--clear-sending-if-no-agent-start chat wait)
+        (let ((probe (car commands)))
+          (pilish-submit-prompt chat "API B" (lambda (r) (push r seen)))
+          (let ((b (car commands))
+              (replacement (make-pipe-process :name "pilish-api-replacement" :noquery t)))
+          (unwind-protect
+              (progn
+                (with-current-buffer chat
+                  (pilish--invalidate-prompt-start-wait)
+                  (pilish--set-process replacement))
+                (pilish-submit-prompt chat "New owner" #'ignore)
+                (let ((new-wait (car (buffer-local-value 'pilish--prompt-waits chat))))
+                  (pilish-test--api-response proc b :false)
+                  (pilish--dispatch-response
+                   proc (list :type "response" :id (plist-get probe :id) :success t
+                              :data '(:isStreaming :false :isCompacting :false)))
+                  (with-current-buffer chat
+                    (should (equal pilish--prompt-waits (list new-wait)))
+                    (should (eq pilish--status 'sending)))
+                  (should (= 2 (length seen)))))
+            (delete-process replacement))))))))
+
+(ert-deftest pilish-test-submit-prompt-error-and-quit-release-only-owned-request ()
+  "Scheduling errors/quits clean the failed request, not another pending API."
+  (dolist (failure '(error quit))
+    (pilish-test-with-rpc-session (chat input proc commands)
+      (pilish-submit-prompt chat "API A" #'ignore)
+      (let ((wait (car (buffer-local-value 'pilish--prompt-waits chat))) called)
+        (with-current-buffer input (insert "Protected draft"))
+        (let ((before (pilish-test--submission-draft-state input)))
+          (cl-letf (((symbol-function 'pilish--send-string)
+                     (lambda (&rest _) (signal failure '("Scheduling failed")))))
+            (should (eq (condition-case err
+                            (progn (pilish-submit-prompt
+                                    chat "API B" (lambda (_) (setq called t))) nil)
+                          ((error quit) (car err)))
+                        failure)))
+          (should-not called)
+          (should (= 1 (hash-table-count (pilish--get-pending-requests proc))))
+          (with-current-buffer chat
+            (should (equal pilish--prompt-waits (list wait)))
+            (should (eq pilish--status 'sending)))
+          (should (equal before (pilish-test--submission-draft-state input))))))))
+
+(ert-deftest pilish-test-submit-prompt-callback-reentrancy-and-errors ()
+  "Cleanup precedes a reentrant callback, even when that observer then fails."
+  (dolist (failure '(nil error quit))
+    (pilish-test-with-rpc-session (chat input proc commands)
+      (let (new-wait (calls 0))
+        (pilish-submit-prompt
+         chat "Handled" (lambda (_)
+                          (cl-incf calls)
+                          (with-current-buffer chat
+                            (should-not pilish--prompt-waits)
+                            (should (eq pilish--status 'idle)))
+                          (pilish-submit-prompt chat "Reentrant API" #'ignore)
+                          (setq new-wait
+                                (car (buffer-local-value 'pilish--prompt-waits chat)))
+                          (when failure (signal failure '("Observer failed")))))
+        (let ((request (car commands)))
+          (should (eq (condition-case err
+                          (progn (pilish-test--api-response proc request t "handled") nil)
+                        ((error quit) (car err)))
+                      failure))
+          (pilish-test--api-response proc request t "handled")
+          (should (= calls 1))
+          (with-current-buffer chat
+            (should (equal pilish--prompt-waits (list new-wait)))
+            (should (eq pilish--status 'sending)))
+          (should (= 1 (hash-table-count (pilish--get-pending-requests proc)))))))))
+
+(ert-deftest pilish-test-submit-prompt-keeps-attachment-editor-available ()
+  "API ownership does not prevent the user from changing their draft image."
+  (pilish-test-with-rpc-session (chat input _proc _commands)
+    (pilish-submit-prompt chat "API A" #'ignore)
+    (with-current-buffer input
+      (insert "Draft")
+      (setq pilish--draft-prompt-image '(:data "image" :mimeType "image/png"))
+      (pilish-attach-image t)
+      (should-not pilish--draft-prompt-image)
+      (should (equal (buffer-string) "Draft")))))
+
+(ert-deftest pilish-test-submit-prompt-scheduling-failure-releases-user-fifo ()
+  "A reentrant user send remains queued until failed API scheduling releases it."
+  (pilish-test-with-rpc-session (chat input proc commands)
+    (let ((send (symbol-function 'pilish--send-string)) (first t))
+      (cl-letf (((symbol-function 'pilish--send-string)
+                 (lambda (process line)
+                   (if first
+                       (progn
+                         (setq first nil)
+                         (with-current-buffer input
+                           (insert "User successor")
+                           (pilish-send)
+                           (insert "New draft"))
+                         (error "Scheduling failed"))
+                     (funcall send process line)))))
+        (should-error (pilish-submit-prompt chat "Failed API" #'ignore)))
+      (should (= 1 (length commands)))
+      (should (equal (plist-get (car commands) :message) "User successor"))
+      (with-current-buffer input (should (equal (buffer-string) "New draft")))
+      (with-current-buffer chat
+        (should pilish--prompt-wait)
+        (should (equal pilish--prompt-waits (list pilish--prompt-wait))))
+      (should (= 1 (hash-table-count (pilish--get-pending-requests proc)))))))
+
+(ert-deftest pilish-test-submit-prompt-does-not-reopen-completed-interactive-run ()
+  "A rejected API cannot leave a completed but unacknowledged user run sending."
+  (pilish-test-with-rpc-session (chat input proc commands)
+    (with-current-buffer input (insert "User request") (pilish-send))
+    (let ((request (car commands)))
+      (pilish-test--stdout proc '(:type "agent_start")
+                           '(:type "agent_end" :messages [])
+                           '(:type "agent_settled"))
+      (pilish-submit-prompt chat "Rejected API" #'ignore)
+      (pilish-test--api-response proc (car commands) :false)
+      (pilish-test--api-response proc request t "started")
+      (with-current-buffer chat
+        (should-not pilish--prompt-waits)
+        (should (eq pilish--status 'idle))
+        (should-not (pilish--session-busy-p))))))
+
+(ert-deftest pilish-test-submit-prompt-synchronous-callback-error-keeps-acceptance ()
+  "A callback error delivered during scheduling is not a scheduling failure."
+  (pilish-test-with-rpc-session (chat _input proc _commands)
+    (cl-letf (((symbol-function 'pilish--send-string)
+               (lambda (_ line)
+                 (pilish-test--api-response
+                  proc (pilish--parse-json-line line) t "queued"))))
+      (should-error
+       (pilish-submit-prompt chat "API A" (lambda (_) (error "Observer failed")))))
+    (with-current-buffer chat
+      (should (= 1 (length pilish--prompt-waits)))
+      (should (pilish--prompt-wait-accepted (car pilish--prompt-waits)))
+      (should (pilish--session-busy-p)))))
+
+(ert-deftest pilish-test-submit-prompt-exit-settles-every-callback-once ()
+  "Exit detaches every request even when one API callback raises an error/quit."
+  (dolist (failure '(nil error quit))
+    (pilish-test-with-rpc-session (chat input proc commands)
+      (let (seen)
+        (with-current-buffer input
+          (insert "Protected exit draft")
+          (setq pilish--draft-prompt-image '(:data "image" :mimeType "image/png")))
+        (let ((before (pilish-test--submission-draft-state input)))
+          (pilish-submit-prompt chat "API A" (lambda (r) (push r seen)))
+          (pilish-submit-prompt chat "API B"
+                                (lambda (r) (push r seen)
+                                  (when failure (signal failure '("Observer failed")))))
+          ;; The fixture has no sentinel; exercise real exit cleanup explicitly.
+          (delete-process proc)
+          (should (eq (condition-case err
+                          (progn (pilish--handle-process-exit proc "closed\n") nil)
+                        ((error quit) (car err)))
+                      failure))
+          (should (= 2 (length seen)))
+          (should (cl-every (lambda (r) (plist-get r :processExit)) seen))
+          (pilish--handle-process-exit proc "closed\n")
+          (should (= 2 (length seen)))
+          (should (= 0 (hash-table-count (pilish--get-pending-requests proc))))
+          (should (= 0 (hash-table-count (pilish--get-pending-command-types proc))))
+          (with-current-buffer chat
+            (should-not pilish--prompt-waits)
+            (should-not pilish--prompt-start-timer)
+            (should (eq pilish--status 'idle)))
+          (should (equal before (pilish-test--submission-draft-state input))))))))
+
+(ert-deftest pilish-test-submit-prompt-probe-does-not-skip-observed-settlement ()
+  "An idle get_state cannot replace agent_settled after an observed run."
+  (pilish-test-with-rpc-session (chat input proc commands)
+    (pilish-submit-prompt chat "API A" #'ignore)
+    (let ((wait (car (buffer-local-value 'pilish--prompt-waits chat))))
+      (pilish-test--api-response proc (car commands) t "started")
+      (with-current-buffer input (insert "Local successor") (pilish-send))
+      (pilish-test--stdout proc '(:type "agent_start")
+                           '(:type "agent_end" :messages []))
+      (pilish--clear-sending-if-no-agent-start
+       chat wait (pilish--prompt-wait-on-no-agent-start wait))
+      (should (= 1 (length commands)))
+      (with-current-buffer chat
+        (should (eq pilish--status 'sending))
+        (should-not (pilish--session-steerable-p))
+        (should (pilish--prompt-start-current-p wait)))
+      (pilish-test--stdout proc '(:type "agent_settled"))
+      (pilish--clear-sending-if-no-agent-start
+       chat wait (pilish--prompt-wait-on-no-agent-start wait))
+      (let ((probe (car commands)))
+        (should (equal (plist-get probe :type) "get_state"))
+        (pilish--dispatch-response
+         proc (list :type "response" :id (plist-get probe :id) :success t
+                    :data '(:isStreaming :false :isCompacting :false
+                            :pendingMessageCount 0))))
+      (should (equal (plist-get (car commands) :message) "Local successor")))))
+
+(ert-deftest pilish-test-submit-prompt-cleanup-distinguishes-preflight-and-run-work ()
+  "Rejection/handled ends local preflight, not observed run/retry settlement."
+  (dolist (result '((:false nil) (t "handled")))
+    (dolist (stage '(preflight-compaction observed-end observed-retry))
+      (pilish-test-with-rpc-session (chat input proc commands)
+        (with-current-buffer input (insert "Protected draft"))
+        (pcase stage
+          ('observed-end
+           (pilish-test--stdout proc '(:type "agent_start")
+                                '(:type "agent_end" :messages [])))
+          ('observed-retry
+           (pilish-test--stdout proc '(:type "auto_retry_start" :attempt 1
+                                      :errorMessage "Retrying"))))
+        (pilish-submit-prompt chat "API A" #'ignore)
+        (let ((request (car commands))
+              (before (pilish-test--submission-draft-state input)))
+          (when (eq stage 'preflight-compaction)
+            (pilish-test--stdout proc '(:type "compaction_start" :reason "auto")))
+          (pilish-test--api-response proc request (car result) (cadr result))
+          (with-current-buffer chat
+            (should-not pilish--prompt-waits)
+            (should (eq pilish--status
+                        (if (eq stage 'preflight-compaction) 'compacting 'sending))))
+          (when (eq stage 'preflight-compaction)
+            (pilish-test--stdout
+             proc '(:type "compaction_end" :reason "auto" :aborted :false
+                    :result (:tokensBefore 100 :summary "Summary")))
+            (with-current-buffer chat (should (eq pilish--status 'idle))))
+          (should (equal before (pilish-test--submission-draft-state input))))))))
+
+(ert-deftest pilish-test-submit-prompt-exit-preserves-callback-and-cleanup-errors ()
+  "Every request and stderr resource settles while retaining all exit errors."
+  (pilish-test-with-rpc-session (chat _input proc _commands)
+    (let ((stderr (generate-new-buffer " *pilish-api-exit-stderr*")))
+      (process-put proc 'pilish-stderr-buf stderr)
+      (process-put proc 'pilish-exit-handler
+                   (lambda (_) (error "Exit observer failed")))
+      (pilish-submit-prompt chat "API A" (lambda (_) (error "Callback A failed")))
+      (pilish-submit-prompt chat "API B" (lambda (_) (error "Callback B failed")))
+      (delete-process proc)
+      (let ((err (should-error (pilish--handle-process-exit proc "closed\n"))))
+        (dolist (text '("Callback A failed" "Callback B failed" "Exit observer failed"))
+          (should (string-match-p text (error-message-string err)))))
+      (should-not (buffer-live-p stderr))
+      (should-not (process-get proc 'pilish-stderr-buf))
+      (should (= 0 (hash-table-count (pilish--get-pending-requests proc))))
+      (with-current-buffer chat (should-not pilish--prompt-waits)))))
+
+(ert-deftest pilish-test-submit-prompt-ambiguous-interactive-handled-awaits-settlement ()
+  "A late handled response cannot release an ambiguously observed run early."
+  (pilish-test-with-rpc-session (chat input proc commands)
+    (with-current-buffer input (insert "User request") (pilish-send))
+    (let ((interactive (car commands))
+          (wait (buffer-local-value 'pilish--prompt-wait chat)))
+      (pilish-submit-prompt chat "API A" #'ignore)
+      (let ((api (car commands)))
+        (pilish-test--stdout proc '(:type "agent_start")
+                             '(:type "agent_end" :messages []))
+        (with-current-buffer input (insert "Successor") (pilish-send))
+        (pilish-test--api-response proc api :false)
+        (pilish-test--api-response proc interactive t "handled")
+        (should (= 2 (length commands)))
+        (with-current-buffer chat
+          (should (eq pilish--status 'sending))
+          (should (eq pilish--prompt-wait wait)))
+        (pilish-test--stdout proc '(:type "agent_settled"))
+        (pilish--clear-sending-if-no-agent-start
+         chat wait (pilish--prompt-wait-on-no-agent-start wait))
+        (let ((probe (car commands)))
+          (should (equal (plist-get probe :type) "get_state"))
+          (pilish--dispatch-response
+           proc (list :type "response" :id (plist-get probe :id) :success t
+                      :data '(:isStreaming :false :isCompacting :false
+                              :pendingMessageCount 0))))
+        (should (equal (plist-get (car commands) :message) "Successor"))))))
+
+(ert-deftest pilish-test-submit-prompt-exit-preserves-interactive-restoration ()
+  "API exit callbacks leave interactive draft restoration to its own owner."
+  (pilish-test-with-rpc-session (chat input proc commands)
+    (with-current-buffer input (insert "Interactive text") (pilish-send))
+    (pilish-submit-prompt chat "API A" #'ignore)
+    (pilish-submit-prompt chat "API B" #'ignore)
+    (with-current-buffer input (insert "Newer draft"))
+    ;; Even if an API observer runs first it can release only its own record.
+    (let ((request (car commands)))
+      (pilish--dispatch-response
+       proc (list :type "response" :id (plist-get request :id)
+                  :success :false :processExit t :error "closed")))
+    (delete-process proc)
+    (pilish--handle-process-exit proc "closed\n")
+    (with-current-buffer input
+      (should (string-match-p "Interactive text" (buffer-string)))
+      (should (string-match-p "Newer draft" (buffer-string)))
+      (should-not (string-match-p "API [AB]" (buffer-string))))
+    (with-current-buffer chat
+      (should-not pilish--prompt-waits)
+      (should-not pilish--prompt-wait)
+      (should-not pilish--prompt-start-timer))))
 
 ;;; DWIM & Toggle
 

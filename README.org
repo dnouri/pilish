@@ -1485,9 +1485,23 @@ attached image, changing prompt history, or selecting a window.  Pi's ordinary
 output and extension UI requests still run.
 
 =BEHAVIOR= is ="followUp"= (the default) or ="steer"= when Pi is busy.
-Pi owns this queue and reports it through =queue_update=; Pilish does not
-hold a local follow-up.  Using =prompt= also lets extension commands execute
-immediately while busy, rather than waiting in a local queue.
+Pi owns this queue and reports it through =queue_update=; Pilish never stores
+API text in its local follow-up FIFO.  Using =prompt= also lets extension
+commands execute immediately while busy, rather than waiting in a local queue.
+API requests go on the wire in call order and can overtake unsent local user
+follow-ups.  There is no single ordering across that FIFO and Pi's steering
+and follow-up queues.
+
+Each API request reserves prompt-start ownership before its RPC is sent, so a
+user send before =agent_start= takes the ordinary busy path.  Concurrent API
+requests do not replace an interactive send's draft/echo ownership.  Rejection,
+handled-without-run responses and send failures release only their own request;
+exit settles every pending callback even if another callback signals an error.
+Because lifecycle events have no request ID, accepted API requests remain guarded
+until the existing fallback probe confirms idle with no pending input.  Observed
+runs must first reach =agent_settled=.  This can delay local follow-ups by the
+0.5-second fallback interval and the probe round trip, even after acceptance.
+API-only ownership does not lock editing or replacing the draft's image.
 
 =CALLBACK= receives Pi's response plist.  =:success t= means accepted, queued,
 or handled (see =:data :disposition=), not that a run finished.  Process exit

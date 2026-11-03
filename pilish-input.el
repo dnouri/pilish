@@ -369,7 +369,7 @@ replaces the previous draft image."
       (let ((chat-buf (pilish--get-chat-buffer)))
         (when (and (buffer-live-p chat-buf)
                    (with-current-buffer chat-buf
-                     (pilish--prompt-start-wait-active-p)))
+                     (pilish--prompt-start-current-p pilish--prompt-wait)))
           (user-error
            "Cannot change prompt image while prompt acceptance is pending"))
         (if clear

@@ -700,6 +700,7 @@ containing EVENT, then clears this process's pending request tables."
          (pending-types (process-get proc 'pilish-pending-command-types))
          (stderr (pilish--process-stderr-excerpt proc))
          (exit-code (process-exit-status proc))
+         callback-errors callbacks
          (error-response
           (append (list :type "response"
                         :success :false
@@ -711,17 +712,33 @@ containing EVENT, then clears this process's pending request tables."
     (unwind-protect
         (unwind-protect
             (progn
-              (pilish--close-process-editors proc)
+              (condition-case err
+                  (pilish--close-process-editors proc)
+                ((error quit) (push err callback-errors)))
+              ;; Detach before callbacks: a failing or reentrant observer must
+              ;; neither strand another request nor receive a second failure.
               (when pending
-                (maphash (lambda (_id callback)
-                           (funcall callback error-response))
-                         pending)
+                (maphash (lambda (_id callback) (push callback callbacks)) pending)
                 (clrhash pending))
               (when pending-types
-                (clrhash pending-types)))
+                (clrhash pending-types))
+              (dolist (callback (nreverse callbacks))
+                (condition-case err
+                    (funcall callback error-response)
+                  ((error quit) (push err callback-errors)))))
           (when-let* ((handler (process-get proc 'pilish-exit-handler)))
-            (funcall handler error-response)))
-      (pilish--cleanup-process-stderr-buffer proc))))
+            (condition-case err
+                (funcall handler error-response)
+              ((error quit) (push err callback-errors)))))
+      (condition-case err
+          (pilish--cleanup-process-stderr-buffer proc)
+        ((error quit) (push err callback-errors))))
+    (when callback-errors
+      (if (null (cdr callback-errors))
+          (signal (caar callback-errors) (cdar callback-errors))
+        (error "Process exit cleanup failed: %s"
+               (mapconcat #'error-message-string
+                          (nreverse callback-errors) "; "))))))
 
 (defvar pilish-executable)  ; forward decl — core.el cannot require ui.el
 (defvar pilish-project-trust-policy) ; forward decl — defined in ui.el
@@ -815,6 +832,14 @@ Local commands may mark a session busy before the first event arrives,
 for example normal prompt submission and manual compaction during the
 RPC pre-event window.")
 
+(defvar-local pilish--run-generation 0
+  "Generation of observed agent starts and announced retries.
+Unlike compaction, these events supersede a local prompt preflight window.")
+
+(defvar-local pilish--activity-generation 0
+  "Generation of observed lifecycle events, for stale prompt-state probes.
+Local prompt reservation does not advance this counter.")
+
 (defvar-local pilish--pre-compaction-status nil
   "Status that was active before a compaction event sequence.
 Restores the surrounding run or prompt preflight even when compaction fails
@@ -860,6 +885,12 @@ JSON null values, and other non-strings become nil."
 Handles agent lifecycle, message events, compaction, and error/retry events.
 For agent_settled, return non-nil only when waiting work was released."
   (let ((type (plist-get event :type)))
+    (when (member type '("agent_start" "auto_retry_start"))
+      (cl-incf pilish--run-generation))
+    (when (member type '("agent_start" "agent_end" "agent_settled"
+                         "compaction_start" "compaction_end"
+                         "auto_retry_start" "auto_retry_end"))
+      (cl-incf pilish--activity-generation))
     (pcase type
       ("agent_start"
        (setq pilish--status 'streaming)
