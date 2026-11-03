@@ -1258,6 +1258,59 @@ When user aborts, they want to stop everything - including queued messages."
         (when (process-live-p fake-proc)
           (delete-process fake-proc))))))
 
+(defun pilish-test--linked-session-buffers (dir)
+  "Return linked (CHAT . INPUT) buffers for DIR without a process."
+  (let ((chat (generate-new-buffer (format "*pilish-chat:%s*" dir)))
+        (input (generate-new-buffer (format "*pilish-input:%s*" dir))))
+    (with-current-buffer chat (pilish-chat-mode))
+    (with-current-buffer input (pilish-input-mode))
+    (with-current-buffer chat (pilish--set-input-buffer input))
+    (with-current-buffer input (pilish--set-chat-buffer chat))
+    (cons chat input)))
+
+(ert-deftest pilish-test-killing-session-runs-each-kill-hook-once ()
+  "Killing either half runs each buffer's kill hook once, in that buffer."
+  (dolist (killed '(chat input))
+    (ert-info ((format "killing the %s buffer" killed))
+      (let* ((pair (pilish-test--linked-session-buffers "/tmp/kill-once/"))
+             (runs nil))
+        (unwind-protect
+            (progn
+              (dolist (buf (list (car pair) (cdr pair)))
+                (with-current-buffer buf
+                  (add-hook 'kill-buffer-hook
+                            (lambda () (push (cons buf (current-buffer)) runs))
+                            90 t)))
+              (kill-buffer (if (eq killed 'chat) (car pair) (cdr pair)))
+              (should-not (buffer-live-p (car pair)))
+              (should-not (buffer-live-p (cdr pair)))
+              (should (= (length runs) 2))
+              (dolist (run runs)
+                (should (eq (car run) (cdr run)))))
+          (pilish-test--kill-live-buffers (car pair) (cdr pair)))))))
+
+(ert-deftest pilish-test-killing-session-keeps-other-chat-render-state ()
+  "Killing one session's chat leaves another chat's tool overlays alone."
+  (let ((a (pilish-test--linked-session-buffers "/tmp/kill-a/"))
+        (b (pilish-test--linked-session-buffers "/tmp/kill-b/"))
+        (c (pilish-test--linked-session-buffers "/tmp/kill-c/")))
+    (unwind-protect
+        (save-window-excursion
+          (with-current-buffer (car c)
+            (let ((inhibit-read-only t))
+              (insert "tool output\n"))
+            (overlay-put (make-overlay 1 12) 'pilish-tool-block t))
+          ;; Shown C, then B, then A in one window; A's chat is killed.
+          (switch-to-buffer (car c))
+          (switch-to-buffer (car b))
+          (switch-to-buffer (car a))
+          (kill-buffer (car a))
+          (with-current-buffer (car c)
+            (should (seq-find (lambda (ov) (overlay-get ov 'pilish-tool-block))
+                              (overlays-in (point-min) (point-max))))))
+      (pilish-test--kill-live-buffers (car a) (cdr a) (car b) (cdr b)
+                                      (car c) (cdr c)))))
+
 ;;; Message Queuing
 
 (ert-deftest pilish-test-disposition-steer-feedback ()
