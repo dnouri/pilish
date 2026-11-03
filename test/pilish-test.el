@@ -977,6 +977,90 @@ still mock the RPC boundary, so the process is never used for I/O."
           (should (equal (pilish-test--submission-draft-state input) before)))
       (pilish-test--kill-live-buffers input chat))))
 
+(ert-deftest pilish-test-submit-prompt-refuses-session-transitions ()
+  "A transition refuses all behaviors before RPC or draft mutation."
+  (pcase-let ((`(,chat ,input ,proc)
+               (pilish-test--make-open-session-command-buffers)))
+    (unwind-protect
+        (progn
+          (with-current-buffer input
+            (insert "Unsent draft")
+            (goto-char 3)
+            (pilish--history-add "Earlier prompt")
+            (setq pilish--draft-prompt-image '(:data "bytes" :mimeType "image/png")))
+          (with-current-buffer chat
+            (pilish--begin-session-transition proc))
+          (let ((before (pilish-test--submission-draft-state input))
+                sent callback-called)
+            (cl-letf (((symbol-function 'pilish--rpc-async)
+                       (lambda (&rest _) (setq sent t))))
+              (dolist (behavior '(nil "followUp" "steer"))
+                (should-error
+                 (pilish-submit-prompt chat "API text"
+                                       (lambda (_) (setq callback-called t))
+                                       behavior))))
+            (should-not sent)
+            (should-not callback-called)
+            (should (equal (pilish-test--submission-draft-state input) before))
+            (should (eq (buffer-local-value 'pilish--process chat) proc))
+            (should (pilish--session-transition-active-p chat))))
+      (pilish-test--kill-live-buffers input chat))))
+
+(ert-deftest pilish-test-submit-prompt-refuses-reload-old-process ()
+  "Reload keeps its old process live, but API prompts cannot go to it."
+  (pcase-let ((`(,chat ,input ,old-proc)
+               (pilish-test--make-open-session-command-buffers)))
+    (let ((new-proc (make-pipe-process :name "pilish-api-reload"
+                                       :buffer nil :noquery t))
+          (root (file-name-as-directory (make-temp-file "pilish-api-reload-" t)))
+          switch-callback sent responses)
+      (unwind-protect
+          (progn
+            (with-current-buffer input (insert "Keep this draft through reload"))
+            (with-current-buffer chat
+              (pilish--set-chat-session-identity root)
+              (setq pilish--state
+                    (list :session-file (expand-file-name "session.jsonl" root))))
+            (cl-letf (((symbol-function 'pilish--start-process)
+                       (lambda (_) new-proc))
+                      ((symbol-function 'pilish--rpc-async)
+                       (lambda (proc command callback)
+                         (pcase (plist-get command :type)
+                           ("switch_session" (setq switch-callback callback))
+                           ("prompt"
+                            (push proc sent)
+                            (funcall callback '(:success t :data (:disposition "started"))))
+                           (_ (ert-fail "Unexpected reload RPC")))))
+                      ((symbol-function 'pilish--refresh-transition-state-and-history)
+                       (lambda (_proc buf generation &rest _)
+                         (with-current-buffer buf
+                           (pilish--finish-session-transition generation))))
+                      ((symbol-function 'pilish--refresh-commands-ignoring-errors)
+                       #'ignore))
+              (with-current-buffer chat (pilish-reload))
+              (should switch-callback)
+              (should (process-live-p old-proc))
+              (should (eq (buffer-local-value 'pilish--process chat) old-proc))
+              (should (pilish--session-transition-active-p chat))
+              (let ((before (pilish-test--submission-draft-state input)))
+                (should-error
+                 (pilish-submit-prompt chat "Must not reach the old process"
+                                       (lambda (r) (push r responses))))
+                (should-not sent)
+                (should-not responses)
+                (should (equal (pilish-test--submission-draft-state input) before)))
+              (funcall switch-callback '(:success t :data (:cancelled :false)))
+              (should-not (process-live-p old-proc))
+              (should (eq (buffer-local-value 'pilish--process chat) new-proc))
+              (should-not (pilish--session-transition-active-p chat))
+              (pilish-submit-prompt chat "Safe after reload"
+                                    (lambda (r) (push r responses)))
+              (should (equal sent (list new-proc)))
+              (should (= 1 (length responses)))))
+        (when (process-live-p new-proc) (delete-process new-proc))
+        (pilish-test--kill-live-buffers input chat)
+        (delete-directory root t)))))
+
 (ert-deftest pilish-test-submit-prompt-fake-draft-and-queue ()
   "The subprocess reports acceptance, queue and rejection with the draft intact."
   (let* ((root (file-name-as-directory (make-temp-file "pilish-submit-" t)))
