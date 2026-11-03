@@ -333,6 +333,82 @@ raced a turn that was never submitted."
     (should (pilish-gui-test-chat-contains "Fake reply for: second turn"))
     (should (pilish-gui-test-idle-p))))
 
+(defun pilish-gui-test--double-return-journey (&optional use-evil)
+  "Compose a multiline draft and send with two RETs, using USE-EVIL if non-nil."
+  (let ((pilish-send-on-double-return nil)
+        (pilish-chat-mode-hook pilish-chat-mode-hook))
+    (when use-evil
+      (unless (require 'evil nil t) (ert-skip "Evil not installed"))
+      (require 'pilish-evil))
+    (pilish-gui-test-with-fresh-session
+      (:backend fake :fake-scenario "prompt-lifecycle")
+      (select-window (pilish-gui-test-input-window))
+      (when use-evil
+        (evil-local-mode 1)
+        (evil-insert-state))
+      (let* ((input (current-buffer))
+             (process (plist-get pilish-gui-test--session :process))
+             (stem (if use-evil "double-return-evil" "double-return")))
+        ;; Disabled means the usual newline, also in Evil insert state.
+        (execute-kbd-macro (kbd "p l a i n RET RET"))
+        (should (equal (buffer-string) "plain\n\n"))
+        (should (pilish-gui-test-idle-p))
+        (should-not (pilish-gui-test-chat-contains "plain"))
+        (erase-buffer)
+        (setq pilish-send-on-double-return 0.5)
+        (execute-kbd-macro (kbd "f i r s t SPC l i n e RET s e c o n d SPC l i n e"))
+        (should (equal (buffer-string) "first line\nsecond line"))
+        (pilish-gui-test--large-evidence
+         (concat stem "-draft")
+         (list :draft (buffer-string) :option pilish-send-on-double-return
+               :ret-binding (key-binding (kbd "RET"))
+               :input-library (symbol-file 'pilish-newline-or-send)
+               :window-system window-system :package-user-dir package-user-dir))
+        ;; Keep both RETs in one command loop; execute-kbd-macro starts
+        ;; a fresh last-command history on each invocation.  Observe the
+        ;; first newline without delaying the gesture for a PNG export.
+        (let* ((returns 0)
+               (observe
+                (lambda ()
+                  (when (eq this-command 'pilish-newline-or-send)
+                    (cl-incf returns)
+                    (when (= returns 1)
+                      (should (equal (buffer-string) "first line\nsecond line\n"))
+                      (should (pilish-gui-test-idle-p)))))))
+          (add-hook 'post-command-hook observe)
+          (unwind-protect
+              (execute-kbd-macro (kbd "RET RET"))
+            (remove-hook 'post-command-hook observe))
+          (should (= returns 2)))
+        (should (pilish-gui-test-wait-for-idle))
+        (should (pilish-gui-test-wait-for-chat-settled))
+        (should (pilish-gui-test-chat-contains "Fake reply for: first line"))
+        (should (equal (with-current-buffer input (buffer-string)) ""))
+        (should (equal (with-current-buffer input (ring-ref pilish--input-ring 0))
+                       "first line\nsecond line"))
+        ;; Check the actual peer's accepted prompt, not just its visible echo.
+        (let* ((response (pilish--rpc-sync process '(:type "get_messages") 2))
+               (messages (plist-get (plist-get response :data) :messages))
+               (users (seq-filter (lambda (item) (equal (plist-get item :role) "user"))
+                                  messages)))
+          (should (eq (plist-get response :success) t))
+          (should (= (length users) 1))
+          (should (equal (pilish--extract-history-user-message-text (elt users 0))
+                         "first line\nsecond line")))
+        (pilish-gui-test--large-evidence
+         (concat stem "-sent")
+         (list :draft (with-current-buffer input (buffer-string))
+               :history (with-current-buffer input (ring-elements pilish--input-ring))
+               :idle (pilish-gui-test-idle-p)))))))
+
+(ert-deftest pilish-gui-test-double-return-sends-multiline-draft ()
+  "RET composes by default; opt-in consecutive RETs submit a multiline prompt."
+  (pilish-gui-test--double-return-journey))
+
+(ert-deftest pilish-gui-test-double-return-sends-in-evil-insert-state ()
+  "The same opt-in gesture submits through Evil's insert-state keymap."
+  (pilish-gui-test--double-return-journey t))
+
 (defun pilish-gui-test--settle-input-fit (input-buf)
   "Wait until INPUT-BUF's pending fit has run, then redisplay."
   (should (pilish-test-wait-until

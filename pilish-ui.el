@@ -86,6 +86,8 @@
 (declare-function pilish-history-isearch-backward "pilish-input")
 (declare-function pilish-queue-steering "pilish-input")
 (declare-function pilish-input-mode "pilish-input")
+(declare-function pilish-newline-or-send "pilish-input")
+(declare-function pilish--double-return-filter "pilish-input")
 
 ;; pilish-browse.el (session browser)
 (declare-function pilish-session-browser "pilish-browse")
@@ -1171,6 +1173,10 @@ removing the instructional header that would otherwise appear."
 (defvar pilish-input-mode-map
   (let ((map (make-sparse-keymap)))
     (define-key map (kbd "C-c C-c") #'pilish-send)
+    ;; Nil from the filter preserves the usual binding when disabled.
+    (define-key map (kbd "RET")
+                '(menu-item "" pilish-newline-or-send
+                            :filter pilish--double-return-filter))
     (define-key map (kbd "TAB") #'pilish-complete)
     (define-key map (kbd "C-c C-k") #'pilish-abort)
     (define-key map (kbd "C-c C-p") #'pilish-menu)

@@ -33,6 +33,7 @@
 ;;
 ;; Key entry points:
 ;;   `pilish-send'                  Send prompt (C-c C-c)
+;;   `pilish-newline-or-send'       Newline; quick second RET sends (opt-in)
 ;;   `pilish-attach-image'          Attach one prompt image (menu C-c C-p a i)
 ;;   `pilish-abort'                 Abort current operation (C-c C-k)
 ;;   `pilish-quit'                  Close session
@@ -47,6 +48,55 @@
 
 (require 'pilish-render)
 (require 'ring)
+
+;;;; Sending with a double RET
+
+(defcustom pilish-send-on-double-return nil
+  "Seconds within which a second RET sends the prompt, or nil for never.
+When a positive number, two consecutive RETs at the end of the draft
+send through `pilish-send', removing the first RET's newline.  Only
+whitespace may follow point.  A slower second RET inserts a blank line.
+A prefix argument always inserts newlines and breaks the gesture.
+Pending input, such as unbracketed pasted text, does not arm or send."
+  :type '(choice (const :tag "Never" nil)
+                 (number :tag "Seconds"))
+  :group 'pilish)
+
+(defvar-local pilish--last-return nil
+  "Time, point and character-modification tick after the last inserted RET.")
+
+(defun pilish--double-return-filter (command)
+  "Return COMMAND when double-RET sending is enabled, otherwise nil."
+  (and pilish-send-on-double-return command))
+
+(defun pilish-newline-or-send (&optional arg)
+  "Insert a newline, or send the prompt on a quick second RET.
+See `pilish-send-on-double-return'.  With prefix ARG, always insert
+newlines by passing ARG to `newline'."
+  (interactive "*P")
+  (let ((last pilish--last-return)
+        (now (float-time)))
+    (setq pilish--last-return nil)
+    (if (and pilish-send-on-double-return
+             (not arg)
+             last
+             (eq last-command 'pilish-newline-or-send)
+             (< (- now (nth 0 last)) pilish-send-on-double-return)
+             (= (point) (nth 1 last))
+             (= (buffer-chars-modified-tick) (nth 2 last))
+             (eq (char-before) ?\n)
+             (string-blank-p (buffer-substring-no-properties
+                              (point) (point-max)))
+             (not (input-pending-p)))
+        (progn
+          (delete-char -1)
+          (pilish-send))
+      (newline arg t)
+      (when (and pilish-send-on-double-return
+                 (not arg)
+                 (not (input-pending-p)))
+        (setq pilish--last-return
+              (list now (point) (buffer-chars-modified-tick)))))))
 
 ;;;; Input History (comint/eshell style)
 

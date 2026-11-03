@@ -16,6 +16,144 @@
 (require 'pilish)
 (require 'pilish-test-common)
 
+;;; Double-RET Sending
+
+(defun pilish-test--input-return (&optional prefix)
+  "Dispatch input RET with PREFIX and record its command for the next RET."
+  (let ((this-command (key-binding (kbd "RET")))
+        (current-prefix-arg prefix))
+    (call-interactively this-command)
+    (setq last-command this-command)))
+
+(ert-deftest pilish-test-double-return-disabled-keeps-newline-binding ()
+  "The default RET binding and blank-line composition stay unchanged."
+  (let ((pilish-send-on-double-return nil)
+        (last-command nil))
+    (with-temp-buffer
+      (text-mode)
+      (let ((binding (key-binding (kbd "RET"))))
+        (pilish-input-mode)
+        (should (eq (key-binding (kbd "RET")) binding)))
+      (insert "draft")
+      (pilish-test--input-return)
+      (pilish-test--input-return)
+      (should (equal (buffer-string) "draft\n\n")))))
+
+(ert-deftest pilish-test-double-return-sends-through-normal-prompt-path ()
+  "Two quick RETs send once, without the inserted newline, and record history."
+  (pilish-test-with-rpc-session (_chat input _proc commands)
+    (let ((pilish-send-on-double-return 0.5)
+          (last-command nil)
+          (now 100.0))
+      (cl-letf (((symbol-function 'float-time) (lambda (&optional _) now))
+                ((symbol-function 'input-pending-p) (lambda () nil)))
+        (with-current-buffer input
+          (insert "A multiline\nprompt")
+          (pilish-test--input-return)
+          (should (equal (buffer-string) "A multiline\nprompt\n"))
+          (should-not commands)
+          (setq now 100.1)
+          (pilish-test--input-return)
+          (should (string-empty-p (buffer-string)))
+          (should (equal (ring-ref (pilish--input-ring) 0) "A multiline\nprompt"))
+          (should-not pilish--last-return))
+        (should (= 1 (length commands)))
+        (should (equal (plist-get (car commands) :type) "prompt"))
+        (should (equal (plist-get (car commands) :message) "A multiline\nprompt"))))))
+
+(ert-deftest pilish-test-double-return-guards-keep-composing ()
+  "Slow, interrupted, moved, edited and non-final RETs never submit."
+  (dolist (guard '(slow intervening-command moved edited middle))
+    (ert-info ((format "Double-RET guard: %s" guard))
+      (pilish-test-with-rpc-session (_chat input _proc commands)
+        (let ((pilish-send-on-double-return 0.5)
+              (last-command nil)
+              (now 100.0))
+          (cl-letf (((symbol-function 'float-time) (lambda (&optional _) now))
+                    ((symbol-function 'input-pending-p) (lambda () nil)))
+            (with-current-buffer input
+              (insert "draft")
+              (when (eq guard 'middle)
+                (insert " suffix")
+                (backward-char 7))
+              (pilish-test--input-return)
+              (setq now 100.1)
+              (pcase guard
+                ('slow (setq now 100.5))
+                ('intervening-command (setq last-command 'forward-char))
+                ('moved (backward-char))
+                ('edited (save-excursion (goto-char (point-min)) (delete-char 1) (insert "D"))))
+              (let ((before (buffer-size)))
+                (pilish-test--input-return)
+                (should (= (buffer-size) (1+ before))))
+              (should (string-match-p "[dD]raft" (buffer-string))))
+            (should-not commands)))))))
+
+(ert-deftest pilish-test-double-return-prefix-breaks-gesture ()
+  "A prefixed RET inserts newlines and cannot arm the next RET to submit."
+  (pilish-test-with-rpc-session (_chat input _proc commands)
+    (let ((pilish-send-on-double-return 0.5)
+          (last-command nil))
+      (cl-letf (((symbol-function 'input-pending-p) (lambda () nil)))
+        (with-current-buffer input
+          (insert "draft")
+          (pilish-test--input-return)
+          (pilish-test--input-return 2)
+          (should (equal (buffer-string) "draft\n\n\n"))
+          (should-not pilish--last-return)
+          (pilish-test--input-return)
+          (should (equal (buffer-string) "draft\n\n\n\n")))
+        (should-not commands)))))
+
+(ert-deftest pilish-test-double-return-pending-input-neither-arms-nor-sends ()
+  "An unbracketed paste cannot arm a double-RET or trigger it with pending keys."
+  (pilish-test-with-rpc-session (_chat input _proc commands)
+    (let ((pilish-send-on-double-return 0.5)
+          (last-command nil)
+          pending)
+      (cl-letf (((symbol-function 'input-pending-p) (lambda () pending)))
+        (with-current-buffer input
+          (insert "draft")
+          (pilish-test--input-return)
+          (should pilish--last-return)
+          (setq pending t)
+          (pilish-test--input-return)
+          (should-not pilish--last-return)
+          ;; Even the last RET from buffered input has no armed predecessor.
+          (setq pending nil)
+          (pilish-test--input-return)
+          (should (equal (buffer-string) "draft\n\n\n")))
+        (should-not commands)))))
+
+(ert-deftest pilish-test-double-return-allows-only-whitespace-after-point ()
+  "Trailing whitespace permits a double-RET at the end of the meaningful draft."
+  (pilish-test-with-rpc-session (_chat input _proc commands)
+    (let ((pilish-send-on-double-return 0.5)
+          (last-command nil))
+      (cl-letf (((symbol-function 'input-pending-p) (lambda () nil)))
+        (with-current-buffer input
+          (insert "draft  \n")
+          (goto-char 6)
+          (pilish-test--input-return)
+          (pilish-test--input-return)
+          (should (string-empty-p (buffer-string))))
+        (should (= 1 (length commands)))
+        (should (equal (plist-get (car commands) :message) "draft"))))))
+
+(ert-deftest pilish-test-double-return-respects-send-refusal ()
+  "The ordinary session-switching guard still refuses the double-RET send."
+  (pilish-test-with-rpc-session (chat input _proc commands)
+    (with-current-buffer chat (pilish--begin-session-transition))
+    (let ((pilish-send-on-double-return 0.5)
+          (last-command nil))
+      (cl-letf (((symbol-function 'input-pending-p) (lambda () nil)))
+        (with-current-buffer input
+          (insert "draft")
+          (pilish-test--input-return)
+          (pilish-test--input-return)
+          (should (equal (buffer-string) "draft")))
+        (should-not commands)))))
+
 ;;; Sending Prompts
 
 (ert-deftest pilish-test-send-extracts-text ()
