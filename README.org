@@ -1476,6 +1476,45 @@ essential grammar prompt:
 (setopt pilish-essential-grammar-action 'warn)
 #+end_src
 
+** Session inspection API
+
+Integrations can inspect session buffers without starting Pi or changing
+windows.  =pilish-session-chat-buffer= resolves a chat or linked input
+buffer; =pilish-session-input-buffer= and =pilish-session-process= return
+its existing input and process.  Each accepts a buffer or buffer name,
+defaulting to the current buffer.  Missing, dead, unrelated and read-only
+snapshot buffers return nil.  A stopped chat is still a session; its
+process may have exited, so check =process-live-p= before using it.
+
+The same buffer argument works with =pilish-session-directory=, =-name=
+(the Emacs session suffix), =-title= (Pi's conversation title), =-file=
+(Pi's session file, not a saved Markdown transcript), =-model=,
+=-context-usage=, =-queued-prompts= and =-busy-p=.  These report the latest
+observed state without RPC or disk reads, and return copies of data,
+including nested strings and vectors.  Queue order matches the header:
+backend follow-ups, local follow-ups in FIFO order, then steering.  An
+unreported backend queue is unknown, not necessarily empty.
+
+=pilish-session-exists-p= takes a directory and optional session name
+(nil for the default session), and checks for existing buffers even when
+Pi is stopped.  It does not resolve directory symlinks.
+
+#+begin_src emacs-lisp
+(let ((chat (pilish-session-chat-buffer)))
+  (when chat
+    (list (pilish-session-title chat)
+          (plist-get (pilish-session-model chat) :id)
+          (pilish-session-busy-p chat))))
+#+end_src
+
+=pilish-view-session-file= opens a Pi-v3 JSONL file in an independent,
+read-only observer in another window and selects it.  It never resumes Pi
+or replaces a live session or draft.  Press =g= to reread that observer's
+captured file identity and =q= to close only the observer.  Reads and
+rendering are synchronous, including for remote files.  Invalid files
+signal an error before display.  To resume instead, use
+=pilish-open-session-file=.
+
 ** Activity phase hooks
 
 For custom UI changes tied to activity, add functions to

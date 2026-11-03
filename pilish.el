@@ -122,6 +122,154 @@
 
 (declare-function dired-get-filename "dired" (&optional localp no-error-if-not-filep))
 
+;;;; Session Inspection
+
+(defun pilish-session-chat-buffer (&optional buffer)
+  "Return the session chat linked to BUFFER, or nil outside a session.
+BUFFER is a buffer or buffer name, defaulting to the current buffer.
+Dead, missing, unrelated and saved snapshot buffers return nil.  An input
+buffer resolves to its live chat even when Pi has stopped.  No process is
+started and no window is displayed or selected."
+  (when-let* ((buffer (get-buffer (or buffer (current-buffer))))
+              ((buffer-live-p buffer)))
+    (with-current-buffer buffer
+      (cond
+       ((derived-mode-p 'pilish-chat-mode) buffer)
+       ((and (derived-mode-p 'pilish-input-mode)
+             (buffer-live-p pilish--chat-buffer)
+             (with-current-buffer pilish--chat-buffer
+               (derived-mode-p 'pilish-chat-mode)))
+        pilish--chat-buffer)))))
+
+(defun pilish--copy-session-value (value)
+  "Copy session data VALUE, including nested strings and vectors."
+  (cond
+   ((stringp value) (substring-no-properties value))
+   ((consp value) (cons (pilish--copy-session-value (car value))
+                        (pilish--copy-session-value (cdr value))))
+   ((vectorp value) (apply #'vector (mapcar #'pilish--copy-session-value value)))
+   (t value)))
+
+(defun pilish--session-value (buffer variable &optional key)
+  "Copy VARIABLE's value from BUFFER's chat, or nil without a chat.
+When KEY is non-nil, copy that plist member instead of the whole value."
+  (when-let* ((chat (pilish-session-chat-buffer buffer)))
+    (let ((value (buffer-local-value variable chat)))
+      (pilish--copy-session-value (if key (plist-get value key) value)))))
+
+(defun pilish-session-input-buffer (&optional buffer)
+  "Return the live input buffer owned by BUFFER's session, or nil.
+BUFFER follows `pilish-session-chat-buffer'.  No input is created."
+  (when-let* ((chat (pilish-session-chat-buffer buffer))
+              (input (buffer-local-value 'pilish--input-buffer chat))
+              ((buffer-live-p input)))
+    (with-current-buffer input
+      (and (derived-mode-p 'pilish-input-mode)
+           (eq pilish--chat-buffer chat)
+           input))))
+
+(defun pilish-session-process (&optional buffer)
+  "Return BUFFER's session process, or nil if none was assigned.
+BUFFER follows `pilish-session-chat-buffer'.  The returned process may have
+exited; use `process-live-p' to check it.  This does not start a process."
+  (when-let* ((chat (pilish-session-chat-buffer buffer))
+              (process (buffer-local-value 'pilish--process chat)))
+    (and (processp process) process)))
+
+(defun pilish-session-directory (&optional buffer)
+  "Return a copy of BUFFER's session directory, or nil without a session.
+BUFFER follows `pilish-session-chat-buffer'.  The directory stays tied to
+the session even when its chat visits a Markdown transcript elsewhere."
+  (when-let* ((chat (pilish-session-chat-buffer buffer)))
+    (pilish--copy-session-value (pilish--chat-session-directory chat))))
+
+(defun pilish-session-name (&optional buffer)
+  "Return BUFFER's named-session suffix, or nil for the default session.
+BUFFER follows `pilish-session-chat-buffer'.  This is the Emacs session
+name, not Pi's conversation title; the returned string is a copy."
+  (pilish--session-value buffer 'pilish--canonical-session-name))
+
+(defun pilish-session-title (&optional buffer)
+  "Return a copy of Pi's conversation title for BUFFER, or nil if unnamed.
+BUFFER follows `pilish-session-chat-buffer'."
+  (let ((title (pilish--session-value buffer 'pilish--session-name)))
+    (and (stringp title) (not (string-empty-p title)) title)))
+
+(defun pilish-session-file (&optional buffer)
+  "Return a copy of BUFFER's last reported Pi session pathname, or nil.
+BUFFER follows `pilish-session-chat-buffer'.  This is not the chat's
+visited Markdown transcript file, and no disk or RPC lookup is made."
+  (pilish--session-value buffer 'pilish--state :session-file))
+
+(defun pilish-session-model (&optional buffer)
+  "Return BUFFER's last reported model plist, or nil if unknown.
+BUFFER follows `pilish-session-chat-buffer'.  The result (including nested
+values) is a copy; typical keys include :id, :name and :provider."
+  (pilish--session-value buffer 'pilish--state :model))
+
+(defun pilish-session-context-usage (&optional buffer)
+  "Return BUFFER's last reported context usage plist, or nil if unknown.
+BUFFER follows `pilish-session-chat-buffer'.  The result is a copy, with
+keys such as :percent, :tokens and :contextWindow.  No RPC is sent."
+  (pilish--session-value buffer 'pilish--cached-stats :contextUsage))
+
+(defun pilish-session-queued-prompts (&optional buffer)
+  "Return a copy of BUFFER's known queued prompt texts, or nil if none.
+BUFFER follows `pilish-session-chat-buffer'.  Order matches the header:
+Pi's reported follow-ups, local follow-ups in FIFO order, then reported
+steering.  Unreported Pi queues are not included."
+  (when-let* ((chat (pilish-session-chat-buffer buffer)))
+    (with-current-buffer chat
+      (let ((snapshot (pilish--process-queue-snapshot pilish--process)))
+        (pilish--copy-session-value
+         (append (plist-get snapshot :followUp)
+                 (pilish--followups-in-fifo-order)
+                 (plist-get snapshot :steering)
+                 nil))))))
+
+(defun pilish-session-busy-p (&optional buffer)
+  "Return non-nil when BUFFER's session has active or known queued work.
+BUFFER follows `pilish-session-chat-buffer'.  This includes local pending
+prompts, model/session changes and compaction, not just streamed output.
+Like the header, it reports observed state, not a fresh Pi query."
+  (when-let* ((chat (pilish-session-chat-buffer buffer)))
+    (and (or (pilish--session-busy-p chat)
+             (not (member (buffer-local-value 'pilish--activity-phase chat)
+                          '(nil "idle")))
+             (pilish-session-queued-prompts chat))
+         t)))
+
+(defun pilish-session-exists-p (directory &optional name)
+  "Return non-nil when DIRECTORY's session NAME has chat or input buffers.
+NAME nil means the directory's default session.  Stopped sessions count;
+no process is started.  DIRECTORY is expanded with a trailing slash, not
+resolved through symlinks, matching Pilish's normal session lookup."
+  (let* ((directory (pilish--normalize-directory directory))
+         (input (get-buffer (pilish--buffer-name :input directory name))))
+    (and (or (pilish--find-session directory name)
+             (and input
+                  (with-current-buffer input
+                    (derived-mode-p 'pilish-input-mode))))
+         t)))
+
+;;;###autoload
+(defun pilish-view-session-file (file)
+  "Open Pi v3 session FILE in a new read-only saved observer and return it.
+Like a saved-conversation link, select the observer in another window.
+This never starts or resumes Pi and never changes any live session or
+draft.  Each call creates an independent observer; \`g' rereads its captured
+file identity.  Invalid or unreadable files signal an error before display.
+Reads and rendering are synchronous, including for remote files."
+  (interactive (list (pilish--read-session-file-name)))
+  (let* ((file (pilish--route-preserving-expand-file-name file))
+         (header (pilish-jsonl-read-session-header file))
+         (target (pilish--snapshot-target-for-pi-v3
+                  file (plist-get header :id)
+                  (file-name-directory file) (file-name-nondirectory file))))
+    (unless target
+      (user-error "Not a readable Pi session: %s" file))
+    (pilish-open-subagent-snapshot target)))
+
 ;;;; Main Entry Point
 
 (defcustom pilish-evil-integration t
