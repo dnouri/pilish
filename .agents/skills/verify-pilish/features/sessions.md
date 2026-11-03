@@ -1,17 +1,19 @@
 # Browse and resume sessions
 
-The session and tree browsers support native folding, searching, copying, and scrolling. The session browser can resume a selected saved session and rebuild its history.
+The session and tree browsers support native folding, searching, copying, and scrolling. The session browser can resume a selected saved session and rebuild its history. Reload restarts Pi for the open session and rebuilds the same history.
 
 ## Sub-features
 
 - `session-browser` folds, searches, copies, and scrolls saved-session rows. Opening gathers metadata only. The first valid nonblank search gathers full text asynchronously; later queries reuse it, and refreshes and scope changes keep collecting it until buffer death or mode reset.
 - `tree-browser` applies the same native actions to projected conversation nodes.
 - `session-resume` selects a saved session in the real browser, invokes its switch command, and rebuilds the chat history.
+- `session-reload` restarts Pi for the open session, keeps the unsent draft, and rebuilds the chat history. A Lisp caller's reload callback reports each reload exactly once, including a fresh Pi that exits.
 
 ## How to get to it (user POV)
 
 - Use the margin, `TAB`, `S-TAB`, `/`, `M-w`, and ordinary scrolling in an open session or tree browser.
 - Select a saved session and run `M-x pilish-session-browser-switch` to resume it.
+- Run `M-x pilish-reload` in a session, or call `pilish-reload` with a callback from Lisp.
 
 ## Driving it with Pilish harnesses
 
@@ -22,7 +24,8 @@ Preconditions:
 - **Drive both browsers.** Run `G1_CAPTURE="$RUN_DIR/browser-capture" ./test/run-gui-tests.sh --headless pilish-gui-test-large-browser-fold-and-copy 2>&1 | tee "$RUN_DIR/browsers.log"`. Record `browsers.exit`. Both browser modes preserve canonical folds, copied text, search state, and viewport behavior.
 - **Search saved text for the first time.** Run `./test/run-gui-tests.sh --headless pilish-gui-test-session-browser-first-search-from-disk 2>&1 | tee "$RUN_DIR/first-search.log"`. Record `first-search.exit`. Opening has no search corpus; `/` finds late saved text, a later missing query shows no matches, and clearing then refreshing retains full text.
 - **Resume through the browser.** Run `./bench/run-reload-resume-bench.sh --scenario smoke -c 1 --out-dir "$RUN_DIR/reload-resume" 2>&1 | tee "$RUN_DIR/resume.log"`. Record `resume.exit`. The resume lane selects the target section, calls `pilish-session-browser-switch`, and checks rebuilt history.
-- **Check the proof.** Require zero statuses and nonempty logs. Require `.png` and `.el` files for `browser-pilish-session-browser-mode-folded`, `browser-pilish-session-browser-mode-unfolded`, `browser-pilish-tree-browser-mode-folded`, and `browser-pilish-tree-browser-mode-unfolded` under `$RUN_DIR/browser-capture`. Require at least one nonempty `result.json` under `$RUN_DIR/reload-resume`.
+- **Reload under a draft.** Run `G1_CAPTURE="$RUN_DIR/reload-capture" ./test/run-gui-tests.sh --headless pilish-gui-test-reload-keeps-draft-and-reports-once 2>&1 | tee "$RUN_DIR/reload.log"`. Record `reload.exit`. `M-x pilish-reload` replaces the process and keeps the draft; a Lisp reload reports `nil` once after its state and history refreshes finish; a reload whose fresh Pi exits reports one failure and keeps the working process.
+- **Check the proof.** Require zero statuses and nonempty logs. Require `.png` and `.el` files for `browser-pilish-session-browser-mode-folded`, `browser-pilish-session-browser-mode-unfolded`, `browser-pilish-tree-browser-mode-folded`, and `browser-pilish-tree-browser-mode-unfolded` under `$RUN_DIR/browser-capture`, and for `reload-interactive`, `reload-callback-success` and `reload-callback-failure` under `$RUN_DIR/reload-capture`. Require at least one nonempty `result.json` under `$RUN_DIR/reload-resume`.
 
 ## Gotchas
 
