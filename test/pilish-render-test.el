@@ -3733,8 +3733,7 @@ The caller saves the window configuration; queued paints need a visible chat."
               (should (string-match-p
                        (regexp-quote (if read-svg-p "Image: image/svg+xml" "Image: image/png"))
                        (buffer-string)))
-              (if (and (display-images-p)
-                       (image-type-available-p (if read-svg-p 'svg 'png)))
+              (if (image-type-available-p (if read-svg-p 'svg 'png))
                   (should (eq 'image (car (get-text-property position 'display))))
                 (should-not (get-text-property position 'display))))
             (when read-svg-p
@@ -9170,13 +9169,16 @@ no payload at all."
   "iVBORw0KGgoAAAANSUhEUgAAAAIAAAABCAYAAAD0In+KAAAADklEQVR4nGP4z8DwHwQBEPgD/U6VwW8AAAAASUVORK5CYII="
   "Base64 for a two-by-one PNG used by image preview tests.")
 
-(ert-deftest pilish-test-tool-result-image-has-terminal-placeholder ()
-  "An image result is useful text inside its tool block in a terminal."
+(ert-deftest pilish-test-tool-result-image-keeps-spec-without-graphical-frame ()
+  "A terminal render keeps the label and the image for later GUI frames."
   (with-temp-buffer
     (pilish-chat-mode)
     (let ((block (pilish--display-tool-start
                   "custom_image" '(:label "preview") "image-call")))
-      (cl-letf (((symbol-function 'display-images-p) (lambda (&rest _) nil)))
+      (cl-letf (((symbol-function 'display-images-p) (lambda (&rest _) nil))
+                ((symbol-function 'image-type-available-p) (lambda (_) t))
+                ((symbol-function 'create-image)
+                 (lambda (&rest _) '(image :type png :data "preview"))))
         (pilish--display-tool-end
          "custom_image" '(:label "preview")
          `[(:type "text" :text "generated")
@@ -9190,10 +9192,64 @@ no payload at all."
         (should (<= (overlay-start overlay) position))
         (should (< position (overlay-end overlay)))
         (should (get-text-property position 'pilish-no-fontify))
-        (should-not (get-text-property position 'display))
+        (should (equal '(image :type png :data "preview")
+                       (get-text-property position 'display)))
         (should (string-match-p
                  "Image: image/png, 71 B"
                  (buffer-substring-no-properties position (overlay-end overlay))))))))
+
+(ert-deftest pilish-test-image-preview-limits-prefer-graphical-window ()
+  "A terminal window never supplies pixel dimensions for a preview."
+  (let ((pilish-image-preview-max-width 2000)
+        (terminal (selected-window))
+        (graphical 'graphical-window))
+    (cl-letf (((symbol-function 'get-buffer-window-list)
+               (lambda (&rest _) (list terminal)))
+              ((symbol-function 'frame-selected-window)
+               (lambda (_) graphical))
+              ((symbol-function 'window-frame) #'identity)
+              ((symbol-function 'display-images-p)
+               (lambda (frame) (eq frame graphical)))
+              ((symbol-function 'window-pixel-width)
+               (lambda (window) (should (eq window graphical)) 1000))
+              ((symbol-function 'window-pixel-height)
+               (lambda (window) (should (eq window graphical)) 600)))
+      (should (equal (pilish--image-preview-pixel-limits)
+                     '(:max-width 900 :max-height 300))))))
+
+(ert-deftest pilish-test-image-preview-limits-without-graphical-window ()
+  "Daemon startup sizes previews without reading terminal pixel dimensions."
+  (cl-letf (((symbol-function 'display-images-p) (lambda (&rest _) nil))
+            ((symbol-function 'window-pixel-width)
+             (lambda (&rest _) (ert-fail "Read terminal width")))
+            ((symbol-function 'window-pixel-height)
+             (lambda (&rest _) (ert-fail "Read terminal height"))))
+    (let ((pilish-image-preview-max-width 640))
+      (should (equal (pilish--image-preview-pixel-limits)
+                     '(:max-width 640 :max-height 320))))
+    (let ((pilish-image-preview-max-width nil))
+      (should (equal (pilish--image-preview-pixel-limits)
+                     '(:max-width 900 :max-height 450))))))
+
+(ert-deftest pilish-test-read-svg-keeps-spec-without-graphical-frame ()
+  "A standalone read SVG retains its display spec before a GUI connects."
+  (let ((source "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"2\" height=\"1\"><rect/></svg>"))
+    (cl-letf (((symbol-function 'display-images-p) (lambda (&rest _) nil))
+              ((symbol-function 'image-type-available-p) (lambda (_) t))
+              ((symbol-function 'create-image)
+               (lambda (data type data-p &rest properties)
+                 (should (equal source data))
+                 (should (eq type 'svg))
+                 (should data-p)
+                 (should (equal properties
+                                '(:max-width 900 :max-height 450
+                                  :base-uri "data:" :scale 1)))
+                 '(image :type svg :data "preview"))))
+      (let ((preview (pilish--read-svg-preview
+                      "read" '(:path "unavailable.svg") source nil nil)))
+        (should (equal '(image :type svg :data "preview")
+                       (get-text-property 0 'display preview)))
+        (should (string-match-p (regexp-quote "Image: image/svg+xml") preview))))))
 
 (ert-deftest pilish-test-prompt-image-live-and-history-use-image-preview ()
   "Live and replayed user image blocks use the bounded #221 renderer."

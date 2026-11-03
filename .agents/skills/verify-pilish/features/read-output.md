@@ -13,6 +13,8 @@ The chat renders streamed Markdown and changes thinking display without losing t
 - `output-table-kill` keeps the cursor at the visual end of a wrapped row after `C-k`.
 - `output-block-details` inspects completed reply, thinking, and tool details without changing the session or draft.
 - `output-link-copy` copies a URL destination or a shell-local file path from a chat link with `w`.
+- `output-image-before-gui` displays images prepared before a graphical client connects, without a history reload.
+- `output-terminal-image` opts into Kitty/Ghostty previews, keeps graphical windows unchanged, and restores terminal labels on disabling the mode.
 
 ## How to get to it (user POV)
 
@@ -29,6 +31,8 @@ The chat renders streamed Markdown and changes thinking display without losing t
 - Press `C-h .` for an echo-area peek. Native link and control help keeps priority.
 - Place point on a Markdown link label and press `w` to copy the URL destination, or the shell-local path for a local file link.
 - Press `q` in Help to return to the chat or saved snapshot.
+- Open a chat prepared before a graphical client connected. Its image previews appear without a tool toggle or history reload; terminal frames keep the labels.
+- In a Kitty or Ghostty text-terminal frame, run `M-x pilish-terminal-image-mode`. Read or attach a PNG image, scroll and resize the terminal. Run the command again to restore the text label. A graphical window showing the same chat keeps its image.
 - Native chat links and controls retain their hover help and click actions. Input headers, browsers, and menus keep their existing hover behavior.
 
 ## Driving it with Pilish harnesses
@@ -49,12 +53,18 @@ Preconditions:
 - **Observe duration and restoration.** Run `G1_CAPTURE="$RUN_DIR/duration" ./test/run-gui-tests.sh --headless pilish-gui-test-fake-duration-live-reload-and-resume 2>&1 | tee "$RUN_DIR/duration.log"`. Record `duration.exit`. The fake bash stream advances through real `Elapsed` timers, settles on `Took 2m 5s`, and keeps that recorded value through bottom-control actions, browser resume, and process reload. The final timer stays stopped.
 - **Read run-return receipts.** Run `G1_CAPTURE="$RUN_DIR/return-receipt" ./test/run-gui-tests.sh --headless pilish-gui-test-run-return-receipt-responsive-and-transient 2>&1 | tee "$RUN_DIR/return-receipt.log"`. Record `return-receipt.exit`. The test sends through `C-c C-c`, checks the recorded tool duration and the receipt's own label, aligns the receipt at 104 and 54 columns and in unequal sibling windows, sends a second run, then reloads. The two live receipts remain in order until reload; recorded tool time survives it, but return receipts do not.
 - **Copy link targets.** Run `./test/run-gui-tests.sh --headless pilish-gui-test-copy-link-targets-with-w 2>&1 | tee "$RUN_DIR/link-copy.log"`. Record `link-copy.exit`. Real `w` presses on `https:`, `file:`, and absolute-path link labels push the URL, the `file:` URL, and the absolute pathname into the kill ring.
-- **Check the proof.** Require zero statuses and nonempty logs for all thirteen commands. Require `fake-duration-elapsed-1.png`, `fake-duration-recorded.png`, `fake-duration-resumed.png`, `fake-duration-reloaded.png`, and their matching `.el` files under `$RUN_DIR/duration`. Under `$RUN_DIR/return-receipt`, require `run-return-wide.png`, `run-return-narrow.png`, `run-return-independent-edges.png`, `run-return-second.png`, `run-return-reloaded.png`, and their matching `.el` files. Use the evidence pattern from the skill.
+- **Show previously prepared images.** Run `G1_CAPTURE="$RUN_DIR/images" ./test/run-gui-tests.sh --headless pilish-gui-test-image-render-before-graphical-display 2>&1 | tee "$RUN_DIR/images.log"`. Record `images.exit`. With graphical-window detection temporarily disabled, real PNG and standalone read-SVG results are prepared in hidden buffers. `switch-to-buffer` then shows the same display specs using real decoders, without a tool toggle or history reload. Require `image-before-gui-png.png`, `image-before-gui-svg.png`, and their matching `.el` files under `$RUN_DIR/images`.
+- **Keep graphical previews while opting in.** Run `G1_CAPTURE="$RUN_DIR/terminal-mode" ./test/run-gui-tests.sh --headless pilish-gui-test-terminal-image-mode-preserves-graphical-preview 2>&1 | tee "$RUN_DIR/terminal-mode.log"`. Record `terminal-mode.exit`. Real `M-x pilish-terminal-image-mode` toggles the global mode; the graphical preview keeps the same image spec and gets no terminal overlay. Require `terminal-mode-graphical.png` and its `.el` observation under `$RUN_DIR/terminal-mode`.
+- **Real terminal protocol (manual).** Use a disposable Emacs with the fake backend, not your regular daemon. Open it in Ghostty or Kitty with its real terminal type and 24-bit colour. Unset `COLORTERM` in the client environment to match ordinary SSH. Attach a PNG through `pilish-attach-image`, send an ordinary prompt, and confirm the fake echoes its image. Toggle the mode with `M-x`, scroll down/back and resize the terminal. Record a screenshot of the image, the reported `tty-type`, colour count, window-scoped overlay, composed placeholder grid and unchanged graphical preview if a graphical frame is also open. Toggle the mode off and capture the label. This is required for a terminal-protocol claim: the headless graphical test alone cannot prove it.
+- **Check the proof.** Require zero statuses and nonempty logs for all fourteen commands. Require `fake-duration-elapsed-1.png`, `fake-duration-recorded.png`, `fake-duration-resumed.png`, `fake-duration-reloaded.png`, and their matching `.el` files under `$RUN_DIR/duration`. Under `$RUN_DIR/return-receipt`, require `run-return-wide.png`, `run-return-narrow.png`, `run-return-independent-edges.png`, `run-return-second.png`, `run-return-reloaded.png`, and their matching `.el` files. Use the evidence pattern from the skill.
 
 ## Gotchas
 
+- Terminal images are disabled by default. PNG is sent directly; JPEG, GIF and WebP require ImageMagick. SVG keeps the label. The default `mosh`/`tmux` terminal types do not qualify. Do not change `TERM` to disguise an unsupported path. A failure stays a label and reports in `*Messages*`.
+- Terminal writes and raster conversion are synchronous. The terminal journey proves only the terminal and transport actually used; record Kitty, Wayland, SSH, conversion or multiplexers as unrun when not exercised.
+- The image journey simulates the absence of graphical windows only while preparing previews; it is not a real daemon/client or terminal-protocol test. It checks both real decoders and the retained display specs. Unit tests separately check that terminal windows never supply pixel dimensions.
 - The thinking test invokes the real toggle command directly. Do not describe it as a keystroke test.
-- Most tests in this feature assert text, properties, and window state without PNG evidence. The duration and return-receipt journeys save the required frames listed above.
+- Most tests in this feature assert text, properties, and window state without PNG evidence. The duration, return-receipt and image journeys save the required frames listed above.
 - Cold tables intentionally remain unchanged during the hot-tail resize test.
 - The table `C-k` test uses a real key sequence and cursor coordinates. It does not save PNG evidence.
 - The `details` menu suffix appears only for transcript-origin menus. It does not appear in the input-origin menu.
