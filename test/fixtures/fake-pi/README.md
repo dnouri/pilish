@@ -38,6 +38,12 @@ Optional `handled_input` consumes that exact text for both `prompt` and `steer`
 with `data.disposition: "handled"`, without messages, a run, user persistence, or
 queue changes. The `input-dispositions.json` fixture covers this Pi 1.0 case.
 
+Optional `notifications` emit fire-and-forget extension `notify` requests while
+the reply streams. Each item names `after_chunk` (the number of text chunks
+already sent), `notify_type` (default `info`) and `message`. They expect no
+response and change no session data. The `notify-notices.json` fixture sends a
+warning and an error mid-stream.
+
 A raw prompt during streaming must explicitly carry
 `streamingBehavior: "steer"` to queue text into the same single slot. Missing
 behavior fails; `"followUp"` is unsupported, as is the `follow_up` command.

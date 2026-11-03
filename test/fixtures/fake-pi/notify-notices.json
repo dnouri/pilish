@@ -1,0 +1,15 @@
+{
+  "description": "A streamed reply during which an extension sends a warning and an error notification.",
+  "commands": [],
+  "prompt": {
+    "type": "text_stream",
+    "assistant_text": "The deployment check finished. Every service reports healthy.",
+    "chunk_count": 6,
+    "delay_ms": 120,
+    "echo_user": true,
+    "notifications": [
+      {"after_chunk": 2, "notify_type": "warning", "message": "Quota at 90%: run `pi usage` *today*"},
+      {"after_chunk": 4, "notify_type": "error", "message": "MCP server docs disconnected\n```\nretrying in 30s"}
+    ]
+  }
+}
