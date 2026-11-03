@@ -1151,6 +1151,132 @@ follow-up that is sent as the next prompt once Pi finishes."
                        :queue (pilish--process-queue-snapshot proc)))))))
       (set-frame-size nil width height))))
 
+(defun pilish-gui-test--arrow-state (input-win)
+  "Return the draft, point and point's screen row in INPUT-WIN.
+The row counts from the draft's start, not the window's, so a draft
+taller than the window keeps its numbering when the window scrolls."
+  (with-current-buffer (window-buffer input-win)
+    (list :window-system window-system
+          :input-width (window-body-width input-win)
+          :input-height (window-body-height input-win)
+          :text (buffer-string)
+          :point (window-point input-win)
+          :screen-row (save-excursion
+                        (goto-char (window-point input-win))
+                        (- (vertical-motion
+                            (- (count-screen-lines (point-min) (point-max)
+                                                   t input-win))
+                            input-win)))
+          :screen-rows (count-screen-lines (point-min) (point-max)
+                                           t input-win))))
+
+(ert-deftest pilish-gui-test-input-arrow-history-at-draft-edges ()
+  "Pi-style arrows move through a wrapped draft, then browse sent prompts.
+With `pilish-input-arrow-history', <up> on lower screen rows of one
+wrapped line moves point; on the first row it goes to the start, then
+recalls prompts.  <down> moves forward and returns the draft unchanged.
+After an `M-r' recall <down> walks back to the draft.  An arrow typed
+during `C-r' or `M-r' leaves history alone.  Once a recalled prompt is
+edited the arrows only move point and `M-n' restores the draft."
+  (let ((pilish-input-arrow-history t))
+    (pilish-gui-test-with-fresh-session
+      (:backend fake :fake-scenario "prompt-lifecycle")
+      (pilish-gui-test-send "first prompt")
+      (pilish-gui-test-send "second prompt")
+      (let* ((input-win (pilish-gui-test-input-window))
+             (draft (concat "start "
+                            (mapconcat #'identity
+                                       (make-list (window-body-width input-win)
+                                                  "wrapped")
+                                       " ")))
+             (state (lambda () (pilish-gui-test--arrow-state input-win))))
+        (select-window input-win)
+        (execute-kbd-macro draft)
+        (redisplay t)
+        (should (equal (buffer-string) draft))
+        (should (= (count-lines (point-min) (point-max)) 1))
+        (let ((rows (plist-get (funcall state) :screen-rows)))
+          (should (>= rows 3))
+          (pilish-gui-test--large-evidence "arrow-draft" (funcall state))
+          ;; Rows below the first: <up> is an ordinary line motion.
+          (dotimes (row (1- rows))
+            (execute-kbd-macro [up])
+            (redisplay t)
+            (should (equal (buffer-string) draft))
+            (should (= (plist-get (funcall state) :screen-row)
+                       (- rows row 2))))
+          (should-not (bobp))
+          (pilish-gui-test--large-evidence "arrow-first-row" (funcall state))
+          ;; First row: to the draft's start, then into history.
+          (execute-kbd-macro [up])
+          (should (bobp))
+          (should (equal (buffer-string) draft))
+          (execute-kbd-macro [up])
+          (redisplay t)
+          (should (equal (buffer-string) "second prompt"))
+          (pilish-gui-test--large-evidence "arrow-recalled" (funcall state))
+          (execute-kbd-macro [up])
+          (should (equal (buffer-string) "first prompt"))
+          (execute-kbd-macro [down])
+          (should (equal (buffer-string) "second prompt"))
+          (execute-kbd-macro [down])
+          (redisplay t)
+          (should (equal (buffer-string) draft))
+          (pilish-gui-test--large-evidence "arrow-draft-restored"
+                                           (funcall state))
+          ;; History search shares the position the arrows continue from.
+          (execute-kbd-macro (vconcat (kbd "M-r") "first" (kbd "RET")))
+          (should (equal (buffer-string) "first prompt"))
+          (execute-kbd-macro [down])
+          (should (equal (buffer-string) "second prompt"))
+          (execute-kbd-macro [down])
+          (redisplay t)
+          (should (equal (buffer-string) draft))
+          (should-not pilish--input-ring-index)
+          (pilish-gui-test--large-evidence "arrow-search-restored"
+                                           (funcall state))
+          ;; An arrow typed during a search is looked up before the
+          ;; search ends; it must not browse.  At the draft's start the
+          ;; ordinary <up> signals, which ends the macro.
+          (condition-case nil
+              (execute-kbd-macro (vconcat (kbd "C-r") "start" [up]))
+            (beginning-of-buffer nil))
+          (redisplay t)
+          (should-not isearch-mode)
+          (should (equal (buffer-string) draft))
+          (should-not pilish--input-ring-index)
+          (pilish-gui-test--large-evidence "arrow-isearch-kept"
+                                           (funcall state))
+          ;; Inside `M-r' the arrow runs within the search; the macro's
+          ;; end accepts the match, and the draft stays saved.
+          (let ((search-exit-option nil))
+            (condition-case nil
+                (execute-kbd-macro (vconcat (kbd "M-r") "first" [up]))
+              (beginning-of-buffer nil)))
+          (should-not isearch-mode)
+          (should (equal (buffer-string) "first prompt"))
+          (execute-kbd-macro [down])
+          (should (equal (buffer-string) "second prompt"))
+          (execute-kbd-macro [down])
+          (should (equal (buffer-string) draft))
+          ;; An edited recall ends arrow browsing but keeps the draft.
+          (execute-kbd-macro (kbd "M-<"))
+          (execute-kbd-macro [up])
+          (should (equal (buffer-string) "second prompt"))
+          (execute-kbd-macro (vconcat (kbd "C-e") " edited" (kbd "C-a")))
+          (execute-kbd-macro [down])
+          (should (equal (buffer-string) "second prompt edited"))
+          (should (eobp))
+          (execute-kbd-macro [up])
+          (execute-kbd-macro [up])
+          (redisplay t)
+          (should (equal (buffer-string) "second prompt edited"))
+          (should (bobp))
+          (pilish-gui-test--large-evidence "arrow-edited-moves-only"
+                                           (funcall state))
+          (execute-kbd-macro (kbd "M-n"))
+          (should (equal (buffer-string) draft)))))))
+
 (defun pilish-gui-test--settle-input-fit (input-buf)
   "Wait until INPUT-BUF's pending fit has run, then redisplay."
   (should (pilish-test-wait-until
