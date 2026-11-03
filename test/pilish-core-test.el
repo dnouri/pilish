@@ -1362,6 +1362,61 @@ and starting in DIRECTORY or `/tmp/'."
                             :command)
                  '("pi" "--mode" "rpc" "--no-approve"))))
 
+(ert-deftest pilish-test-start-process-appends-per-process-args ()
+  "Per-process arguments follow every global argument."
+  (let ((pilish-executable '("pi"))
+        (pilish-extra-args '("-e" "/ext.ts"))
+        (pilish-project-trust-policy 'approve)
+        (captured nil)
+        (dummy-proc (start-process "pilish-capture-args" nil "cat")))
+    (unwind-protect
+        (cl-letf (((symbol-function 'make-process)
+                   (lambda (&rest args) (setq captured args) dummy-proc)))
+          (pilish--start-process "/tmp/" '("--model" "m"))
+          (should (equal (plist-get captured :command)
+                         '("pi" "--mode" "rpc" "-e" "/ext.ts" "--approve"
+                           "--model" "m"))))
+      (when-let* ((stderr-buf (plist-get captured :stderr)))
+        (kill-buffer stderr-buf))
+      (delete-process dummy-proc))))
+
+(ert-deftest pilish-test-start-process-environment-reaches-only-that-process ()
+  "Per-process environment overrides reach Pi and leave Emacs unchanged.
+An earlier entry wins over a later one, and a nil value unsets."
+  (let* ((dir (pilish-test--make-temp-directory "pilish-test-env-"))
+         (out (expand-file-name "env.out" dir))
+         (global-environment (copy-sequence process-environment))
+         (process-environment (cons "PILISH_TEST_UNSET=global"
+                                    process-environment))
+         (pilish-executable
+          (list "sh" "-c"
+                (format (concat "printf '%%s|%%s|%%s\\n' \"$PILISH_TEST_A\" "
+                                "\"${PILISH_TEST_UNSET-unset}\" \"$*\" > %s")
+                        (shell-quote-argument out))
+                "pi"))
+         (pilish-extra-args nil)
+         (pilish-project-trust-policy 'default)
+         (proc nil))
+    (unwind-protect
+        (progn
+          (setq proc (pilish--start-process
+                      dir '("--extra")
+                      '(("PILISH_TEST_A" . "first")
+                        ("PILISH_TEST_A" . "second")
+                        ("PILISH_TEST_UNSET"))))
+          (should (pilish-test-wait-for-process-exit proc))
+          (should (equal (with-temp-buffer
+                           (insert-file-contents out)
+                           (buffer-string))
+                         "first|unset|--mode rpc --extra\n"))
+          (should-not (getenv "PILISH_TEST_A"))
+          (should (equal (getenv "PILISH_TEST_UNSET") "global"))
+          (should (equal (cdr process-environment) global-environment)))
+      (when (processp proc)
+        (pilish--cleanup-process-stderr-buffer proc)
+        (delete-process proc))
+      (delete-directory dir t))))
+
 (ert-deftest pilish-test-start-process-captures-stderr-separately ()
   "start-process routes stderr away from the JSON-RPC stdout pipe."
   (let ((launch (pilish-test--capture-process-launch '("pi") nil)))

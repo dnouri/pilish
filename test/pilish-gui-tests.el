@@ -148,6 +148,88 @@
     (should (pilish-gui-test-input-window))
     (should (pilish-gui-test-verify-layout))))
 
+(ert-deftest pilish-gui-test-background-session-start-and-resume ()
+  "Background sessions start and resume without touching the layout.
+Neither start sends a prompt; the resumed session shows the saved
+conversation once it is displayed."
+  (pilish-gui-test-with-fresh-session
+    (:backend fake :fake-scenario "prompt-lifecycle")
+    (pilish-gui-test-send "Remember the background check")
+    (let* ((visible (plist-get pilish-gui-test--session :chat-buffer))
+           (backend (plist-get pilish-gui-test--session :backend))
+           (dir (plist-get pilish-gui-test--session :directory))
+           (file (plist-get (buffer-local-value 'pilish--state visible)
+                            :session-file))
+           (pilish-executable (plist-get backend :executable))
+           (pilish-extra-args (plist-get backend :extra-args))
+           (sent nil)
+           (record (lambda (proc command &rest _)
+                     (unless (eq proc (buffer-local-value
+                                       'pilish--process visible))
+                       (push (plist-get command :type) sent))))
+           (selected (selected-window))
+           (config (current-window-configuration))
+           fresh resumed)
+      (should (file-exists-p file))
+      (advice-add 'pilish--rpc-async :before record)
+      (unwind-protect
+          (progn
+            (setq fresh (pilish-start-session dir "background")
+                  resumed (pilish-start-session nil "resumed"
+                                                :session-file file))
+            (should (pilish-test-wait-until
+                     (lambda ()
+                       (and (plist-get (buffer-local-value 'pilish--state fresh)
+                                       :session-file)
+                            (not (with-current-buffer resumed
+                                   (pilish--session-transition-active-p)))
+                            (with-current-buffer resumed
+                              (string-match-p "Remember the background check"
+                                              (buffer-string)))))
+                     pilish-test-gui-timeout pilish-test-poll-interval))
+            (redisplay t)
+            (should (eq selected (selected-window)))
+            (should (compare-window-configurations
+                     config (current-window-configuration)))
+            (should-not (get-buffer-window fresh t))
+            (should-not (get-buffer-window resumed t))
+            (should (equal (plist-get (buffer-local-value 'pilish--state resumed)
+                                      :session-file)
+                           file))
+            (should-not (with-current-buffer fresh
+                          (string-match-p "Remember the background check"
+                                          (buffer-string))))
+            (should-not (seq-intersection sent '("prompt" "steer" "follow_up")))
+            (should (member "switch_session" sent))
+            (pilish-gui-test--large-evidence
+             "background-layout-unchanged"
+             (list :sent (reverse sent)
+                   :windows (mapcar (lambda (window)
+                                      (buffer-name (window-buffer window)))
+                                    (window-list))
+                   :background (list (buffer-name fresh) (buffer-name resumed))))
+            ;; Displaying the session uses the ordinary command.
+            (delete-other-windows)
+            (let ((default-directory dir))
+              (pilish "resumed"))
+            (should (get-buffer-window resumed))
+            (with-selected-window (get-buffer-window resumed)
+              (goto-char (point-min))
+              (should (search-forward "Remember the background check" nil t))
+              (recenter 2))
+            (redisplay t)
+            (pilish-gui-test--large-evidence
+             "background-resumed-shown"
+             (list :windows (mapcar (lambda (window)
+                                      (buffer-name (window-buffer window)))
+                                    (window-list)))))
+        (advice-remove 'pilish--rpc-async record)
+        (let ((pilish-quit-without-confirmation t))
+          (dolist (chat (list fresh resumed))
+            (when (buffer-live-p chat)
+              (kill-buffer (buffer-local-value 'pilish--input-buffer chat))
+              (kill-buffer chat))))))))
+
 (defun pilish-gui-test--window-header-p (window)
   "Return non-nil when WINDOW displays a header line.
 A window shows a header line exactly when its total height exceeds
