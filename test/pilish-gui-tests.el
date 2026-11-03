@@ -3379,6 +3379,102 @@ Return observations suitable for the graphical evidence file."
       (set-frame-size nil original-width original-height)
       (sit-for 0.1))))
 
+(ert-deftest pilish-gui-test-reload-keeps-draft-and-reports-once ()
+  "Reload replaces Pi under a draft and reports each Lisp reload once."
+  (pilish-gui-test-with-fresh-session
+    (:backend fake :fake-scenario "prompt-lifecycle")
+    (let* ((backend (plist-get pilish-gui-test--session :backend))
+           (pilish-executable (plist-get backend :executable))
+           (pilish-extra-args (plist-get backend :extra-args))
+           (chat (plist-get pilish-gui-test--session :chat-buffer))
+           (input (plist-get pilish-gui-test--session :input-buffer))
+           (first-proc (plist-get pilish-gui-test--session :process))
+           (draft "An unsent draft that reload must keep")
+           (pilish-gui-test--large-trace nil)
+           outcomes failures)
+      (cl-labels
+          ((wait (predicate)
+             (unless (pilish-test-wait-until predicate 10 0.01)
+               (ert-fail (list :wait-failed
+                               :outcomes outcomes :failures failures
+                               :messages (with-current-buffer "*Messages*"
+                                           (buffer-string))))))
+           (current-process ()
+             (buffer-local-value 'pilish--process chat))
+           (settled-p ()
+             (with-current-buffer chat
+               (not (pilish--session-transition-active-p))))
+           (history-p ()
+             (with-current-buffer chat
+               (and (string-match-p "Fake reply for: Remember this turn"
+                                    (buffer-string))
+                    t)))
+           (capture (name)
+             (redisplay t)
+             (pilish-gui-test--large-evidence
+              name
+              (list :outcomes (reverse outcomes)
+                    :failures (reverse failures)
+                    :draft (with-current-buffer input (buffer-string))
+                    :process (format "%S" (current-process))
+                    :process-live (process-live-p (current-process))
+                    :transition-active (not (settled-p))
+                    :chat (with-current-buffer chat
+                            (buffer-substring-no-properties
+                             (point-min) (point-max)))
+                    :window-system window-system
+                    :reload-library (symbol-file 'pilish-reload)
+                    :commands (reverse pilish-gui-test--large-trace)))))
+        (wait #'settled-p)
+        (pilish-gui-test-send "Remember this turn")
+        (should (history-p))
+        (select-window (pilish-gui-test-input-window))
+        (insert draft)
+        ;; The interactive command keeps its behavior.
+        (execute-kbd-macro (kbd "M-x pilish-reload RET"))
+        (wait (lambda () (and (not (eq (current-process) first-proc))
+                              (settled-p) (history-p))))
+        (should-not (process-live-p first-proc))
+        (should (equal (with-current-buffer input (buffer-string)) draft))
+        (capture "reload-interactive")
+        ;; A Lisp caller hears about the reload exactly once.
+        (let ((second-proc (current-process)))
+          (with-current-buffer input
+            (pilish-reload
+             (lambda (outcome)
+               (push (list :outcome outcome
+                           :process-changed
+                           (not (eq (current-process) second-proc))
+                           :history-shown (history-p)
+                           :transition-active (not (settled-p)))
+                     outcomes))))
+          (wait (lambda () (and outcomes (settled-p))))
+          (should (equal outcomes
+                         '((:outcome nil :process-changed t
+                            :history-shown t :transition-active nil))))
+          (should-not (process-live-p second-proc))
+          (should (process-live-p (current-process)))
+          (should (equal (with-current-buffer input (buffer-string)) draft))
+          (capture "reload-callback-success"))
+        ;; A fresh Pi that exits keeps the working session and reports once.
+        (let ((live-proc (current-process))
+              (pilish-executable '("false"))
+              (pilish-extra-args nil))
+          (with-current-buffer input
+            (pilish-reload (lambda (outcome) (push outcome failures))))
+          (wait (lambda () (and failures (settled-p))))
+          (should (= (length failures) 1))
+          ;; Pi may exit before or after the switch request is written.
+          (should (string-match-p "Process exited\\|not running"
+                                  (car failures)))
+          (should (eq (current-process) live-proc))
+          (should (process-live-p live-proc))
+          (should (history-p))
+          (should (equal (with-current-buffer input (buffer-string)) draft))
+          (capture "reload-callback-failure"))
+        (should (= (length outcomes) 1))
+        (should (= (length failures) 1))))))
+
 (ert-deftest pilish-gui-test-live-duration-advances-and-settles ()
   "Real one-second ticks preserve live footers, folds and responsive geometry."
   (let ((original-width (frame-width)) (original-height (frame-height))

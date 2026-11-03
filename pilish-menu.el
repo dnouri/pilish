@@ -489,19 +489,33 @@ stale callbacks from older session switches cannot unlock newer transitions."
               (pilish--finish-session-transition generation))))))))
 
 (defun pilish--refresh-transition-state-and-history
-    (proc chat-buf generation &optional session-file history-callback)
+    (proc chat-buf generation &optional session-file history-callback
+          completion)
   "Refresh state and history for CHAT-BUF through PROC in parallel.
+HISTORY-CALLBACK runs with the message count when the history is shown.
+COMPLETION runs once with the state and history responses after both have
+arrived, in either order and whether or not they still belong to GENERATION.
 The transition remains active until both the state and history RPC callbacks
 for GENERATION have completed or failed.  Synchronous scheduling errors finish
 the transition before being re-signaled so the UI cannot stay wedged."
-  (let ((latch (pilish--make-session-transition-latch
-                chat-buf proc generation 2)))
+  (let* ((latch (pilish--make-session-transition-latch
+                 chat-buf proc generation 2))
+         (responses (list nil nil))
+         (remaining 2)
+         (settle (lambda (index)
+                   (lambda (response)
+                     (unwind-protect
+                         (funcall latch response)
+                       (setf (nth index responses) response)
+                       (when (and completion (= (cl-decf remaining) 0))
+                         (funcall completion
+                                  (nth 0 responses) (nth 1 responses))))))))
     (condition-case err
         (progn
           (pilish--refresh-session-state
-           proc chat-buf session-file generation latch)
+           proc chat-buf session-file generation (funcall settle 0))
           (pilish--load-session-history
-           proc history-callback chat-buf latch))
+           proc history-callback chat-buf (funcall settle 1)))
       (error
        (when (pilish--session-transition-current-p
               chat-buf proc generation)
@@ -515,8 +529,9 @@ the transition before being re-signaled so the UI cannot stay wedged."
 SESSION-FILE seeds the session-name cache when the switching action already
 knows the selected file.  Optional GENERATION ties the refresh to an existing
 session transition; otherwise this function starts and finishes its own guard.
-Optional COMPLETION-CALLBACK runs after a current get_state response is
-handled, even when the response failed."
+Optional COMPLETION-CALLBACK runs with every get_state response: after a
+current response is handled, even when it failed, and without handling a
+response that no longer belongs to the transition."
   (when (buffer-live-p chat-buf)
     (with-current-buffer chat-buf
       (pilish--set-canonical-messages nil)
@@ -528,8 +543,10 @@ handled, even when the response failed."
         (condition-case err
             (pilish--rpc-async proc '(:type "get_state")
               (lambda (response)
-                (when (pilish--session-transition-current-p
-                       chat-buf proc generation)
+                (if (not (pilish--session-transition-current-p
+                          chat-buf proc generation))
+                    (when completion-callback
+                      (funcall completion-callback response))
                   (unwind-protect
                       (when (eq (plist-get response :success) t)
                         (pilish--apply-state-response chat-buf response)
@@ -555,15 +572,60 @@ handled, even when the response failed."
            (signal (car err) (cdr err))))))))
 
 ;;;###autoload
-(defun pilish-reload ()
+(defun pilish-reload (&optional callback)
   "Reload the current session by restarting the pi process.
 Useful for reloading extensions, skills, prompts, and themes after
 editing them, or when the pi process has died or become unresponsive.
 Starts a fresh process with the session's own arguments and environment
 \(see `pilish-start-session'), switches it back to the cached session
 file, then replaces the old process, refreshes state and commands, and
-rebuilds the chat buffer from session history."
+rebuilds the chat buffer from session history.
+
+When called from Lisp with CALLBACK, call CALLBACK exactly once with the
+outcome: nil after the fresh process owns the session, both its state and
+history refreshes succeeded in whatever order Pi answered them, the history
+is shown and the session transition has finished; otherwise a string saying
+why the reload failed, was cancelled, or was superseded by a newer session
+change.  A failed refresh fails the reload even though the fresh process
+has already replaced the old one.  CALLBACK may run before this function
+returns.  With CALLBACK, errors are passed to it instead of being signaled;
+a quit is still signaled after CALLBACK runs.  An error signaled by CALLBACK
+itself is reported as a warning and does not change the reload."
   (interactive)
+  (let* ((settled nil)
+         (settle (lambda (outcome)
+                   (unless settled
+                     (setq settled t)
+                     (when callback
+                       (condition-case err
+                           (funcall callback outcome)
+                         (error
+                          (display-warning
+                           'pilish
+                           (format "Reload callback failed: %s"
+                                   (error-message-string err))
+                           :error))))))))
+    (if (not callback)
+        (pilish--reload-session settle)
+      (condition-case err
+          (pilish--reload-session settle)
+        (error
+         (funcall settle (error-message-string err)))
+        (quit
+         (funcall settle "Reload quit")
+         (signal (car err) (cdr err)))))))
+
+(defun pilish--discard-reload-process (proc)
+  "Stop PROC, a fresh reload process that did not take over the session."
+  (when (processp proc)
+    (pilish--unregister-display-handler proc)
+    (when (process-live-p proc)
+      (delete-process proc))))
+
+(defun pilish--reload-session (settle)
+  "Reload the current session; call SETTLE with nil or a failure reason.
+A synchronous error is signaled after any started process is discarded and
+the session transition is finished; SETTLE is then not called."
   (let* ((chat-buf (pilish--get-chat-buffer))
          (session-file (and chat-buf
                             (buffer-local-value 'pilish--state chat-buf)
@@ -571,9 +633,11 @@ rebuilds the chat buffer from session history."
                                        :session-file))))
     (cond
      ((not chat-buf)
-      (message "Pi: No session to reload"))
+      (message "Pi: No session to reload")
+      (funcall settle "No session to reload"))
      ((not session-file)
-      (message "Pi: No session file available - cannot reload"))
+      (message "Pi: No session file available - cannot reload")
+      (funcall settle "No session file available - cannot reload"))
      (t
       (with-current-buffer chat-buf
         (pilish--cancel-model-change-and-restore-followups))
@@ -589,66 +653,122 @@ rebuilds the chat buffer from session history."
                                session-file dir))
                 (old-proc pilish--process))
             (setq pilish--status 'idle)
-            (let* ((new-proc (pilish--start-session-process dir))
-                   (generation (pilish--begin-session-transition
-                                new-proc)))
-              (when (processp new-proc)
-                (set-process-buffer new-proc chat-buf)
-                (process-put new-proc 'pilish-chat-buffer chat-buf)
-                (pilish--register-display-handler new-proc)
-                (pilish--rpc-async
-                 new-proc
-                 (list :type "switch_session" :sessionPath session-path)
-                 (lambda (response)
-                   (when (pilish--session-transition-current-p
-                          chat-buf new-proc generation)
-                     (let* ((data (plist-get response :data))
-                            (cancelled (plist-get data :cancelled)))
-                       (if (and (eq (plist-get response :success) t)
-                                (pilish--json-false-p cancelled))
-                           (let ((refresh-scheduled nil))
-                             (condition-case err
-                                 (progn
-                                   (when (and (processp old-proc)
-                                              (not (eq old-proc new-proc)))
-                                     (pilish--skip-process-kill-confirmation
-                                      old-proc)
-                                     (pilish--unregister-display-handler
-                                      old-proc)
-                                     (when (process-live-p old-proc)
-                                       (delete-process old-proc)))
-                                   (when (buffer-live-p chat-buf)
-                                     (with-current-buffer chat-buf
-                                       (pilish--set-process new-proc)))
-                                   (pilish--refresh-transition-state-and-history
-                                    new-proc chat-buf generation session-file
-                                    (lambda (_count)
-                                      (message "Pi: Session reloaded")))
-                                   (setq refresh-scheduled t))
-                               (error
-                                (when (pilish--session-transition-current-p
-                                       chat-buf new-proc generation)
-                                  (with-current-buffer chat-buf
-                                    (pilish--finish-session-transition
-                                     generation)))
-                                (message "Pi: Failed to reload - %s"
-                                         (error-message-string err))))
-                             (when refresh-scheduled
-                               (pilish--refresh-commands-ignoring-errors
-                                new-proc chat-buf generation dir)))
-                         (pilish--unregister-display-handler new-proc)
-                         (when (process-live-p new-proc)
-                           (delete-process new-proc))
-                         (if (and cancelled
-                                  (not (pilish--json-false-p cancelled)))
-                             (message "Pi: Reload cancelled")
-                           (message "Pi: Failed to reload - %s"
-                                    (or (plist-get response :error)
-                                        "unknown error")))
-                         (when (buffer-live-p chat-buf)
-                           (with-current-buffer chat-buf
-                             (pilish--finish-session-transition
-                              generation)))))))))))))))))
+            (let ((new-proc (pilish--start-session-process dir)))
+              (unless (processp new-proc)
+                (error "Pi: Failed to reload - pi did not start"))
+              (let ((generation (pilish--begin-session-transition new-proc)))
+                (condition-case err
+                    (progn
+                      (set-process-buffer new-proc chat-buf)
+                      (process-put new-proc 'pilish-chat-buffer chat-buf)
+                      (pilish--register-display-handler new-proc)
+                      (pilish--rpc-async
+                       new-proc
+                       (list :type "switch_session" :sessionPath session-path)
+                       (lambda (response)
+                         (pilish--reload-switched
+                          response chat-buf old-proc new-proc generation
+                          session-file dir settle))))
+                  ((error quit)
+                   (pilish--discard-reload-process new-proc)
+                   (pilish--finish-session-transition generation)
+                   (signal (car err) (cdr err)))))))))))))
+
+(defun pilish--reload-refreshed
+    (chat-buf new-proc generation history-shown state-response
+              history-response settle)
+  "Report a reload whose state and history refreshes have both answered.
+CHAT-BUF, NEW-PROC and GENERATION identify the reload; HISTORY-SHOWN says
+whether the history was rendered.  STATE-RESPONSE and HISTORY-RESPONSE are
+the RPC responses.  Call SETTLE with nil only when the reload still owns
+CHAT-BUF, its transition has finished and both refreshes succeeded."
+  (let ((failure
+         (lambda (response what)
+           (format "Failed to reload - %s"
+                   (or (plist-get response :error)
+                       (format "%s unavailable" what))))))
+    (cond
+     ((not (and (pilish--session-transition-current-p
+                 chat-buf new-proc generation)
+                (not (pilish--session-transition-active-p chat-buf))))
+      (funcall settle "Reload superseded by another session change"))
+     ((not (eq (plist-get state-response :success) t))
+      (let ((reason (funcall failure state-response "state")))
+        (message "Pi: %s" reason)
+        (funcall settle reason)))
+     ((not (eq (plist-get history-response :success) t))
+      (let ((reason (funcall failure history-response "history")))
+        (message "Pi: %s" reason)
+        (funcall settle reason)))
+     ((not history-shown)
+      (funcall settle "Reload superseded before its history was shown"))
+     (t
+      (message "Pi: Session reloaded")
+      (funcall settle nil)))))
+
+(defun pilish--reload-switched
+    (response chat-buf old-proc new-proc generation session-file dir settle)
+  "Continue a reload after NEW-PROC answered switch_session with RESPONSE.
+CHAT-BUF, OLD-PROC, GENERATION, SESSION-FILE and DIR describe the reload
+started by `pilish--reload-session'.  Call SETTLE with nil once the history
+is shown, or with the reason the reload did not complete."
+  (if (not (pilish--session-transition-current-p
+            chat-buf new-proc generation))
+      (progn
+        (unless (and (buffer-live-p chat-buf)
+                     (eq new-proc (buffer-local-value 'pilish--process
+                                                      chat-buf)))
+          (pilish--discard-reload-process new-proc))
+        (funcall settle "Reload superseded by another session change"))
+    (let* ((data (plist-get response :data))
+           (cancelled (plist-get data :cancelled)))
+      (if (and (eq (plist-get response :success) t)
+               (pilish--json-false-p cancelled))
+          (let ((refresh-scheduled nil)
+                (history-shown nil))
+            (condition-case err
+                (progn
+                  (when (and (processp old-proc)
+                             (not (eq old-proc new-proc)))
+                    (pilish--skip-process-kill-confirmation old-proc)
+                    (pilish--unregister-display-handler old-proc)
+                    (when (process-live-p old-proc)
+                      (delete-process old-proc)))
+                  (when (buffer-live-p chat-buf)
+                    (with-current-buffer chat-buf
+                      (pilish--set-process new-proc)))
+                  (pilish--refresh-transition-state-and-history
+                   new-proc chat-buf generation session-file
+                   (lambda (_count) (setq history-shown t))
+                   (lambda (state-response history-response)
+                     (pilish--reload-refreshed
+                      chat-buf new-proc generation history-shown
+                      state-response history-response settle)))
+                  (setq refresh-scheduled t))
+              (error
+               (when (pilish--session-transition-current-p
+                      chat-buf new-proc generation)
+                 (with-current-buffer chat-buf
+                   (pilish--finish-session-transition generation)))
+               (message "Pi: Failed to reload - %s"
+                        (error-message-string err))
+               (funcall settle (format "Failed to reload - %s"
+                                       (error-message-string err)))))
+            (when refresh-scheduled
+              (pilish--refresh-commands-ignoring-errors
+               new-proc chat-buf generation dir)))
+        (pilish--discard-reload-process new-proc)
+        (let ((reason (if (and cancelled
+                               (not (pilish--json-false-p cancelled)))
+                          "Reload cancelled"
+                        (format "Failed to reload - %s"
+                                (or (plist-get response :error)
+                                    "unknown error")))))
+          (message "Pi: %s" reason)
+          (when (buffer-live-p chat-buf)
+            (with-current-buffer chat-buf
+              (pilish--finish-session-transition generation)))
+          (funcall settle reason))))))
 
 (defun pilish--resume-selected-session (proc chat-buf selected-path)
   "Resume SELECTED-PATH using PROC and rebuild CHAT-BUF from its history."
