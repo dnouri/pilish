@@ -2402,8 +2402,8 @@ selected input window, then the tallest input window."
 
 (defun pilish--split-input-below-chat (chat-buf input-buf)
   "Show INPUT-BUF in a new window below the best visible CHAT-BUF window.
-The new window is soft-dedicated so `display-buffer' never targets it.
-Return the new input window, or nil when no chat window can be split."
+The window is made by `pilish-split-input-window'.  Return the new input
+window, or nil when no chat window can be split."
   (when-let* ((chat-win
                (or (and (eq (window-buffer (selected-window)) chat-buf)
                         (pilish--window-can-split-for-input-p
@@ -2412,6 +2412,36 @@ Return the new input window, or nil when no chat window can be split."
                    (cl-find-if #'pilish--window-can-split-for-input-p
                                (pilish--windows-by-height
                                 (get-buffer-window-list chat-buf nil))))))
+    (pilish-split-input-window chat-win input-buf)))
+
+(defvar pilish-split-input-window-function #'pilish--split-input-window-below
+  "Function that shows an input buffer in a new window for a chat window.
+It is called with CHAT-WIN and INPUT-BUF and returns the input window, or
+nil when CHAT-WIN cannot take one.  Every input window Pilish opens for a
+chat, including the session layout and `pilish-open-input', comes from
+here.  The default splits CHAT-WIN and puts the input below it.
+
+Window managers that keep chat and input windows in their own
+arrangement wrap or replace the default with `add-function'.  The
+function may place the window anywhere.  Pilish passes only chat
+windows at least twice `window-min-height' tall.  `fit' sizing (see
+`pilish-input-window-height') applies only to an input window directly
+below its chat window, and when several input windows are visible,
+Pilish prefers the one below the selected chat window.")
+
+(defun pilish-split-input-window (chat-win input-buf)
+  "Show INPUT-BUF in a new window for CHAT-WIN and return that window.
+Call `pilish-split-input-window-function'.  By default the window is
+below CHAT-WIN, its height follows
+`pilish-input-window-height', the window is soft-dedicated so
+`display-buffer' never targets it, and the result is nil when CHAT-WIN is
+too small to split."
+  (funcall pilish-split-input-window-function chat-win input-buf))
+
+(defun pilish--split-input-window-below (chat-win input-buf)
+  "Split CHAT-WIN and show INPUT-BUF below it; return the new window or nil.
+The default `pilish-split-input-window-function'."
+  (when (pilish--window-can-split-for-input-p chat-win)
     (let ((input-win
            (split-window
             chat-win (- (pilish--input-height-for-window chat-win))
