@@ -403,13 +403,21 @@ replaces the previous draft image."
 
 (defun pilish--accept-input-text (text &optional prompt-image)
   "Accept TEXT from input buffer state, consuming optional PROMPT-IMAGE.
-Adds only TEXT to history, resets history navigation, and clears input."
+Adds only TEXT to history, resets history navigation, and clears input.
+With `pilish-jump-to-end-on-submit', also return the chat's windows in
+the selected frame to its end."
   (pilish--history-add text)
   (setq pilish--input-ring-index nil
         pilish--input-saved nil)
   (when prompt-image
     (pilish--clear-prompt-image))
-  (erase-buffer))
+  (erase-buffer)
+  (when-let* ((pilish-jump-to-end-on-submit)
+              (chat-buf (pilish--get-chat-buffer)))
+    (dolist (window (get-buffer-window-list chat-buf nil))
+      (with-selected-window window
+        (goto-char (point-max))
+        (recenter -1)))))
 
 (defun pilish--queue-followup-text (chat-buf text)
   "Accept TEXT and enqueue it as a follow-up in CHAT-BUF."

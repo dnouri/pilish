@@ -277,6 +277,14 @@ so they scroll the linked chat.  If your terminal does not send those
 keys, =C-M-v= and =C-M-S-v= (the classic other-window scrolling
 commands) work for the same reason.
 
+A chat scrolled back to earlier text keeps its position when you send;
+only a chat already at its end follows the reply.  To return the chat
+to its end whenever you submit a prompt, a steering message, or a
+queued follow-up, set =pilish-jump-to-end-on-submit= to =t=.  Input
+keeps focus, and only chat windows in the current frame move.  Typing,
+refused or empty drafts, and automatic delivery of queued follow-ups
+leave the chat alone, and a hidden chat stays hidden.
+
 #+html: <a id="reading-output"></a>
 ** Reading output
 
