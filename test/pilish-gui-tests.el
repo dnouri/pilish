@@ -1115,8 +1115,11 @@ and sending with \\`C-c C-c' returns it to one line."
   "Test scroll position is preserved while fake tool output arrives."
   (pilish-gui-test-with-fresh-session
     (:backend fake :fake-scenario "tool-read")
+    ;; The helper provides three window heights of content.  Scroll one,
+    ;; not a fixed 20 lines that reaches the beginning in a short window.
     (pilish-gui-test-ensure-scrollable)
-    (pilish-gui-test-scroll-up 20)
+    (pilish-gui-test-scroll-up
+     (window-body-height (pilish-gui-test-chat-window)))
     (should-not (pilish-gui-test-at-end-p))
     (let ((line-before (pilish-gui-test-top-line-number)))
       (should (> line-before 1))
