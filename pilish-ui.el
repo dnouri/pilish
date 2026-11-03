@@ -1168,6 +1168,20 @@ removing the instructional header that would otherwise appear."
   (let ((completion-show-help nil))
     (completion-at-point)))
 
+(defconst pilish--input-arrow-up-binding
+  '(menu-item "" pilish-input-history-up
+              :filter pilish--input-arrow-up-filter)
+  "Input <up> binding: Pi-style history only where its filter applies.
+The filter returns nil elsewhere, so <up> falls through to the usual
+command.  See `pilish-input-arrow-history'.")
+
+(defconst pilish--input-arrow-down-binding
+  '(menu-item "" pilish-input-history-down
+              :filter pilish--input-arrow-down-filter)
+  "Input <down> binding: Pi-style history only where its filter applies.
+The filter returns nil elsewhere, so <down> falls through to the usual
+command.  See `pilish-input-arrow-history'.")
+
 (defvar pilish-input-mode-map
   (let ((map (make-sparse-keymap)))
     (define-key map (kbd "C-c C-c") #'pilish-send)
@@ -1179,6 +1193,10 @@ removing the instructional header that would otherwise appear."
     (define-key map (kbd "M-n") #'pilish-next-input)
     (define-key map (kbd "<C-up>") #'pilish-previous-input)
     (define-key map (kbd "<C-down>") #'pilish-next-input)
+    ;; Pi-style arrows on the first/last screen line when
+    ;; `pilish-input-arrow-history' is on; elsewhere the usual bindings.
+    (define-key map [up] pilish--input-arrow-up-binding)
+    (define-key map [down] pilish--input-arrow-down-binding)
     (define-key map (kbd "C-r") #'pilish-history-isearch-backward)
     ;; Message queuing (steering only - follow-up handled by C-c C-c)
     (define-key map (kbd "C-c C-s") #'pilish-queue-steering)

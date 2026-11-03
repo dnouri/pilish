@@ -221,6 +221,15 @@ or failed runs. Receipts remain in the current transcript. They are transient
 display observations, so rebuilding or reloading saved history omits them
 rather than guessing from message timestamps.
 
+=M-p= / =M-n= browse the prompts you sent.  Set
+=pilish-input-arrow-history= to make =↑= / =↓= browse them like Pi's
+editor: =↑= on the first screen line recalls the previous prompt when
+the input is empty, point is at its start, or a recalled prompt is
+unedited, and =↓= on the last screen line moves forward until your draft
+returns.  Wrapped lines count as screen lines, so on other lines,
+including the earlier rows of a long wrapped line, the arrows move point.
+Editing a recalled prompt makes it your draft.
+
 Press =C-c C-p= for the transient menu to find session commands,
 model settings, skills, and custom commands.
 
@@ -689,6 +698,7 @@ The main buffers:
 | =C-c C-p a i=             | menu         | Attach or replace one prompt image          |
 | =C-u C-c C-p a i=         | menu         | Clear the attached prompt image             |
 | =M-p= / =M-n=             | input        | Prompt history (=C-↑= / =C-↓= also work)    |
+| =↑= / =↓=                 | input        | Pi-style prompt history, if enabled         |
 | =C-r=                     | input        | Incremental prompt-history search           |
 | =TAB=                     | input        | Complete paths and =/= commands             |
 | =M-<prior>= / =M-<next>=  | input        | Scroll the linked chat window               |
@@ -1095,6 +1105,10 @@ Input buffer (normal state):
 | =RET= | send               |
 | =q=   | close input window |
 | =?=   | transient menu     |
+
+With =pilish-input-arrow-history=, =↑= / =↓= browse prompt history
+from the draft's first or last screen line in normal and insert state;
+elsewhere they keep Evil's line motions.
 
 Session and tree browser buffers start in motion state as well.  Evil's
 =j= / =k= move line-wise.  Magit's section motions remain on =n= / =p=
