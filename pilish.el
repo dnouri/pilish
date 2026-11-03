@@ -163,11 +163,12 @@ Returns the chat buffer."
           (pilish--register-display-handler pilish--process)
           ;; Initialize state from server
           (let ((buf chat-buf)
-                (proc pilish--process))  ; Capture for closures
+                (proc pilish--process)
+                (generation pilish--session-transition-generation))
             (pilish--rpc-async proc '(:type "get_state")
               (lambda (response)
                 (if (eq (plist-get response :success) t)
-                    (progn
+                    (when (pilish--session-transition-current-p buf proc generation)
                       (pilish--apply-state-response buf response)
                       ;; Check if no model available and warn user
                       (when (buffer-live-p buf)

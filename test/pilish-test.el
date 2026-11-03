@@ -891,6 +891,43 @@ still mock the RPC boundary, so the process is never used for I/O."
       (ignore-errors (delete-file file))
       (ignore-errors (delete-directory root t)))))
 
+(ert-deftest pilish-test-setup-session-ignores-stale-state-after-switch ()
+  "Startup state cannot overwrite a newer session on the same process."
+  (pilish-test-with-rpc-session (chat input proc commands)
+    (let ((name "stale-state-startup"))
+      (with-current-buffer chat
+        (pilish--set-chat-session-identity "/tmp/" name)
+        (setq pilish--process nil))
+      (with-current-buffer input
+        (rename-buffer (pilish--buffer-name :input "/tmp/" name)))
+      (cl-letf (((symbol-function 'pilish--check-dependencies) #'ignore)
+                ((symbol-function 'pilish--start-process) (lambda (_dir) proc))
+                ((symbol-function 'pilish--fetch-commands) #'ignore))
+        (should (eq (pilish--setup-session "/tmp/" name) chat)))
+      (let ((startup-request (car commands)))
+        (should (equal (plist-get startup-request :type) "get_state"))
+        ;; Complete the newer transition's authoritative refresh first.  The
+        ;; startup reply still has a valid RPC id and the same live process.
+        (pilish--refresh-session-state proc chat)
+        (pilish--dispatch-response
+         proc (list :type "response" :command "get_state"
+                    :id (plist-get (car commands) :id) :success t
+                    :data '(:sessionFile "/tmp/switched.jsonl"
+                            :thinkingLevel "high" :isStreaming :false)))
+        (should-not (pilish--session-transition-active-p chat))
+        (pilish--dispatch-response
+         proc (list :type "response" :command "get_state"
+                    :id (plist-get startup-request :id) :success t
+                    :data '(:sessionFile "/tmp/startup-old.jsonl"
+                            :thinkingLevel "low" :isStreaming t)))
+        (with-current-buffer chat
+          (should (equal (plist-get pilish--state :session-file)
+                         "/tmp/switched.jsonl"))
+          (should (equal (plist-get pilish--state :thinking-level) "high"))
+          (should (eq pilish--status 'idle)))
+        (should (= (hash-table-count
+                    (process-get proc 'pilish-pending-requests)) 0))))))
+
 (ert-deftest pilish-test-setup-session-shows-startup-error-from-initial-state-request ()
   "Initial startup failure should be rendered into the chat buffer."
   (let ((root (pilish-test--make-temp-directory
