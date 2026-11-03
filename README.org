@@ -281,7 +281,8 @@ operations, and edit diffs.  Commands stream their output live, and
 long tool output collapses to a preview.  Wide pipe tables wrap to
 fit the window without changing the Markdown text.  Images appear
 inline in graphical Emacs and as type-and-size placeholders in
-terminals.  See =Images= in Advanced for the limits.
+terminals.  Enable =pilish-terminal-image-mode= for inline previews in
+Kitty or Ghostty.  See =Images= in Advanced for the limits.
 
 Click a left-margin caret or press =TAB= in a section to expand or
 collapse tools, completed thinking, startup details, or browser rows.
@@ -1202,8 +1203,49 @@ decoder cost is not bounded by the source-byte cap.  The preview
 settings in Configuration bound what renders.  A chat rendered before
 any graphical client connects keeps its image previews: graphical
 frames show the images and terminal frames show the labels without a
-history reload.  Resizing previews or applying a later extension
+history reload.  Resizing graphical previews or applying a later extension
 replacement may require a toggle or history reload.
+
+*Terminal display* is opt-in:
+
+#+begin_src emacs-lisp
+(pilish-terminal-image-mode 1)
+#+end_src
+
+Kitty and Ghostty text-terminal frames with 24-bit colour can display
+PNG previews through the Kitty graphics protocol's Unicode placeholders.
+JPEG, GIF and WebP need ImageMagick (=magick= or =convert=); only the
+first animation frame is used.  Conversion runs in the background, two
+images at a time, with ImageMagick resource limits, a 10-second timeout
+and a 16 MiB output cap; the preview appears when it finishes.  SVG and
+unsupported formats keep the label, as do unsuccessful conversions.
+Update errors, including failed terminal writes, are reported in
+=*Messages*=.
+Disabling the mode restores the labels without changing the chat text or
+other windows' graphical previews.
+
+Previews in live chats and saved-conversation views fit the terminal
+window, resize and scroll with the text.  Each size of an image is
+stored once per terminal, so differently sized windows and chats do not
+affect each other; a resize stores the image again at the new size.
+Images that no window on a terminal shows any more are deleted from it,
+and disabling the mode deletes all of them.  Newly connected terminals
+receive their own copy.  Only images near a visible window are prepared.
+Protocol writes are synchronous.  Image ids are random 32-bit numbers:
+a terminal's image storage is shared with other programs, so a
+collision with their images is unlikely but possible.  If a terminal
+resets or evicts its image storage, reconnect the terminal client to
+resend its previews.
+
+Capability comes from the frame's =tty-type=, not Emacs's environment:
+=xterm-ghostty=, =xterm-kitty= and their suffixed variants qualify
+(=pilish-terminal-image-types=).  Over plain =ssh=, the remote side must
+report one of those types (its terminfo installed) and the terminal must
+accept the protocol through the connection; this has not been tested.
+Standard =mosh= and
+=tmux= terminal types keep the label: they do not provide this direct
+protocol path.  Do not disguise an unsupported terminal by changing
+its reported type.
 
 ** Sessions, transcripts, and exports
 

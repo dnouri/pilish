@@ -1640,6 +1640,44 @@ logical block and should not start following later streamed output."
 
 ;;;; Content Tests
 
+(ert-deftest pilish-gui-test-terminal-image-mode-preserves-graphical-preview ()
+  "Opting into terminal images leaves graphical previews unchanged."
+  (unless (and (display-images-p) (image-type-available-p 'png))
+    (ert-skip "This display cannot render PNG images"))
+  (let ((buffer (generate-new-buffer " *pilish-gui-terminal-mode*"))
+        (was-enabled pilish-terminal-image-mode))
+    (unwind-protect
+        (save-window-excursion
+          (switch-to-buffer buffer)
+          (pilish-chat-mode)
+          (pilish--display-tool-end
+           "generate" nil
+           (list (list :type "image" :mimeType "image/png"
+                       :data (pilish-test--prompt-image-base64 'png)))
+           nil nil)
+          (let* ((position (text-property-any (point-min) (point-max)
+                                              'pilish-image-preview t))
+                 (spec (get-text-property position 'display)))
+            (execute-kbd-macro (kbd "M-x pilish-terminal-image-mode RET"))
+            (should pilish-terminal-image-mode)
+            (pilish--terminal-image-update)
+            (should-not pilish--terminal-image-overlays)
+            (should (eq spec (get-char-property position 'display (selected-window))))
+            (should (> (car (image-size spec t)) 0))
+            (goto-char (point-min))
+            (redisplay t)
+            (pilish-gui-test--large-evidence
+             "terminal-mode-graphical"
+             (list :enabled pilish-terminal-image-mode
+                   :same-image-spec t :terminal-overlays nil))
+            (execute-kbd-macro (kbd "M-x pilish-terminal-image-mode RET"))
+            (should-not pilish-terminal-image-mode)
+            (should (eq spec (get-text-property position 'display)))))
+      (pilish-terminal-image-mode (if was-enabled 1 -1))
+      (when (buffer-live-p buffer)
+        (with-current-buffer buffer (set-buffer-modified-p nil))
+        (kill-buffer buffer)))))
+
 (ert-deftest pilish-gui-test-tool-result-image-has-real-display-property ()
   "A real PNG result inserts an image display property in graphical Emacs."
   (unless (and (display-images-p) (image-type-available-p 'png))
