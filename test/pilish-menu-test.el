@@ -1641,6 +1641,31 @@ Pi v0.51.3+ renamed SlashCommandSource from \"template\" to \"prompt\"."
                               (not (null (derived-mode-p 'pilish-transcript-mode))))))))
           (transient--emergency-exit))))))
 
+(ert-deftest pilish-test-markup-menu-transcript-only ()
+  "Transcript menus expose the next markup action; input menus do not."
+  (save-window-excursion
+    (dolist (mode '(pilish-chat-mode pilish-snapshot-mode pilish-input-mode))
+      (with-temp-buffer
+        (funcall mode)
+        (unwind-protect
+            (progn
+              (switch-to-buffer (current-buffer))
+              (transient-setup 'pilish-menu)
+              (let ((suffix (pilish-test--suffix-key-bound-p "v")))
+                (if (derived-mode-p 'pilish-transcript-mode)
+                    (progn
+                      (should suffix)
+                      (should-not (oref suffix inactive))
+                      (should (eq (oref suffix command)
+                                  #'md-ts-toggle-hide-markup))
+                      (should (equal (transient-format-description suffix)
+                                     "show Markdown markup"))
+                      (setq-local md-ts-hide-markup nil)
+                      (should (equal (transient-format-description suffix)
+                                     "hide Markdown markup")))
+                  (should (oref suffix inactive)))))
+          (transient--emergency-exit))))))
+
 (ert-deftest pilish-test-transient-opens-session-and-tree-browsers ()
   "The main menu exposes the session and tree browser actions."
   (transient-setup 'pilish-menu)

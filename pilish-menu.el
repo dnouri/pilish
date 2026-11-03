@@ -170,6 +170,12 @@ from either chat or input buffer."
   (concat (pilish--menu-model-description) " • "
           (pilish--menu-thinking-description)))
 
+(defun pilish--menu-markup-description ()
+  "Describe the next Markdown markup action for this transcript."
+  (if md-ts-hide-markup
+      "show Markdown markup"
+    "hide Markdown markup"))
+
 (defun pilish--menu-default-thinking-display-mode ()
   "Return the completed-thinking display mode used for new chat buffers."
   pilish-thinking-display)
@@ -1391,7 +1397,9 @@ Uses commands from pi's `get_commands' RPC."
    ["Completed thinking"
     (pilish-menu-chat-thinking-display)
     (pilish-menu-default-thinking-display)]
-   ["Info"
+   ["View / info"
+    ("v" pilish--menu-markup-description md-ts-toggle-hide-markup
+     :if-derived pilish-transcript-mode)
     ("d" "details" pilish-describe-reply :if-derived pilish-transcript-mode)
     ("i" "stats" pilish-session-stats)
     ("y" "copy last" pilish-copy-last-message)]])

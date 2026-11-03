@@ -1756,6 +1756,40 @@ rear-advance overlay before assistant text continues after the tool block."
                             (overlays-at assistant-pos))))
         (should-not tool-overlay)))))
 
+(ert-deftest pilish-gui-test-markup-toggle-through-menu ()
+  "Real menu keys reveal and re-hide Markdown source."
+  (pilish-gui-test-with-fresh-session
+    (:backend fake :fake-scenario "prompt-lifecycle")
+    (let ((chat (plist-get pilish-gui-test--session :chat-buffer))
+          (raw "A **bold** [link](https://example.org).")
+          (rendered "A bold link."))
+      (with-current-buffer chat
+        (pilish--display-history-messages
+         (vector
+          (list :role "assistant" :timestamp 1784817120000 :provider "saved"
+                :model "m"
+                :content (vector (list :type "text" :text raw)))))
+        (font-lock-ensure))
+      (select-window (pilish-gui-test-chat-window))
+      (let ((visible (pilish--visible-text (point-min) (point-max))))
+        (should (string-match-p (regexp-quote rendered) visible))
+        (should-not (string-match-p (regexp-quote raw) visible)))
+      (execute-kbd-macro (kbd "C-c C-p v"))
+      (font-lock-ensure)
+      (redisplay)
+      (should-not md-ts-hide-markup)
+      (should (string-match-p
+               (regexp-quote raw)
+               (pilish--visible-text (point-min) (point-max))))
+      (execute-kbd-macro (kbd "C-c C-p v"))
+      (font-lock-ensure)
+      (redisplay)
+      (should md-ts-hide-markup)
+      (should (string-match-p (regexp-quote raw) (buffer-string)))
+      (let ((visible (pilish--visible-text (point-min) (point-max))))
+        (should (string-match-p (regexp-quote rendered) visible))
+        (should-not (string-match-p (regexp-quote raw) visible))))))
+
 (ert-deftest pilish-gui-test-copy-link-targets-with-w ()
   "`w' copies URL and local-file link targets from a live chat."
   (pilish-gui-test-with-fresh-session

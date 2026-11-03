@@ -694,6 +694,7 @@ The main buffers:
 | =M-<prior>= / =M-<next>=  | input        | Scroll the linked chat window               |
 | =TAB=                     | chat         | Toggle summary line, thinking, tool, or turn |
 | =RET=                     | chat, snapshot | Open Pi session link or file target       |
+| =C-c C-p v=               | chat menu    | Show or hide Markdown markup                |
 | =C-c C-p d=               | chat menu    | Describe a completed reply, thinking, or tool |
 | =C-h .=                   | chat, snapshot | Show native help or completed-block details |
 | =C-c ]= / =C-c [=         | chat, snapshot | Next or previous Pi session link           |
