@@ -865,6 +865,14 @@ Local commands may mark a session busy before the first event arrives,
 for example normal prompt submission and manual compaction during the
 RPC pre-event window.")
 
+(defvar-local pilish--run-generation 0
+  "Generation of observed agent starts and announced retries.
+Unlike compaction, these events supersede a local prompt preflight window.")
+
+(defvar-local pilish--activity-generation 0
+  "Generation of observed lifecycle events, for stale prompt-state probes.
+Local prompt reservation does not advance this counter.")
+
 (defvar-local pilish--pre-compaction-status nil
   "Status that was active before a compaction event sequence.
 Restores the surrounding run or prompt preflight even when compaction fails
@@ -911,6 +919,12 @@ Handles agent lifecycle, message events, compaction, error/retry events,
 and thinking level changes Pi reports for any cause.
 For agent_settled, return non-nil only when waiting work was released."
   (let ((type (plist-get event :type)))
+    (when (member type '("agent_start" "auto_retry_start"))
+      (cl-incf pilish--run-generation))
+    (when (member type '("agent_start" "agent_end" "agent_settled"
+                         "compaction_start" "compaction_end"
+                         "auto_retry_start" "auto_retry_end"))
+      (cl-incf pilish--activity-generation))
     (pcase type
       ("agent_start"
        (setq pilish--status 'streaming)

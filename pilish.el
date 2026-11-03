@@ -369,15 +369,24 @@ prompt so extension commands can execute immediately, even while busy.
 
 CALLBACK receives the response plist: success means accepted, queued,
 or handled, not finished.  Pi reports its queue through `queue_update';
-this function never uses Pilish's local follow-up queue.  Process exit
-reports failure through CALLBACK.  Invalid arguments, an unavailable
-process, an active session transition (reload, resume, new session or
-fork), or a send failure signal synchronously instead.  Transitions
-refuse submission before any RPC is scheduled.
+this function never queues TEXT in Pilish's local follow-up FIFO.  API
+requests are sent in call order, ahead of unsent local FIFO entries;
+there is no global ordering across Pi's steering/follow-up queues and
+that FIFO.  Process exit reports failure through CALLBACK.  Invalid
+arguments, an unavailable process, an active session transition (reload,
+resume, new session or fork), or a send failure signal synchronously.
+Transitions refuse submission before any RPC is scheduled.
 
 Submission does not edit the input buffer, consume its image, add to
-prompt history, display windows, or move focus.  Normal Pi output and
-extension UI requests are still processed.  The return value is unspecified."
+prompt history, display windows, or move focus.  Reserve prompt-start
+ownership before sending, so a normal user send during preflight takes
+the existing busy path instead of starting a competing direct prompt.
+Overlapping requests retain independent ownership until rejection,
+handling without a run, or a confirming idle-state probe.  Observed runs
+still await agent_settled.  The probe uses the existing 0.5-second fallback;
+acceptance alone is not permission to drain local follow-ups.  Normal Pi
+output and extension UI requests are still processed.  The return value
+is unspecified."
   (unless (and (buffer-live-p chat-buffer)
                (with-current-buffer chat-buffer
                  (derived-mode-p 'pilish-chat-mode)))
@@ -393,10 +402,35 @@ extension UI requests are still processed.  The return value is unspecified."
   (let ((proc (buffer-local-value 'pilish--process chat-buffer)))
     (unless (and (processp proc) (process-live-p proc))
       (error "Pi process is unavailable"))
-    (pilish--rpc-async
-     proc (list :type "prompt" :message text
-                :streamingBehavior (or behavior "followUp"))
-     callback)))
+    (let (responded
+          (wait (with-current-buffer chat-buffer
+                  (pilish--reserve-prompt-start 'programmatic))))
+      (condition-case err
+          (pilish--rpc-async
+           proc (list :type "prompt" :message text
+                      :streamingBehavior (or behavior "followUp"))
+           (lambda (response)
+             (setq responded t)
+             (pilish--settle-programmatic-prompt chat-buffer wait response)
+             (unwind-protect
+                 (funcall callback response)
+               (when (and (buffer-live-p chat-buffer) (process-live-p proc))
+                 (with-current-buffer chat-buffer
+                   (when (eq proc pilish--process)
+                     (pilish--process-followup-queue)))))))
+        ((error quit)
+         (unless responded
+           (pilish--settle-programmatic-prompt chat-buffer wait '(:success :false))
+           (when (and (buffer-live-p chat-buffer) (process-live-p proc))
+             (with-current-buffer chat-buffer
+               (when (eq proc pilish--process)
+                 (condition-case cleanup
+                     (pilish--process-followup-queue)
+                   ((error quit)
+                    (error "%s; follow-up cleanup failed: %s"
+                           (error-message-string err)
+                           (error-message-string cleanup))))))))
+         (signal (car err) (cdr err)))))))
 
 (provide 'pilish)
 ;;; pilish.el ends here
