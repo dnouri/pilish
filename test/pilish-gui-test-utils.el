@@ -414,9 +414,10 @@ is what determines if the window will auto-scroll during streaming."
       (buffer-substring-no-properties (point-min) (point-max)))))
 
 (defun pilish-gui-test-chat-contains (text)
-  "Return t if chat buffer contains TEXT."
+  "Return non-nil if the chat contains literal TEXT, matching case."
   (when-let ((content (pilish-gui-test-chat-content)))
-    (string-match-p (regexp-quote text) content)))
+    (let ((case-fold-search nil))
+      (string-match-p (regexp-quote text) content))))
 
 (defun pilish-gui-test-chat-text-in-tool-block-p (text)
   "Return t if TEXT appears inside a tool block overlay."
