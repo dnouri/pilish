@@ -22,6 +22,15 @@ jobs:
         sudo apt-get update && sudo apt-get install -y emacs
         emacs --version
         git clone https://github.com/riscy/melpazoid.git ~/melpazoid
+        python - <<'PY'
+        from pathlib import Path
+        dockerfile = Path.home() / "melpazoid/docker/Dockerfile"
+        source = dockerfile.read_text()
+        mirror = "https://mirrors.kernel.org/gnu/emacs/"
+        if source.count(mirror) != 1:
+            raise SystemExit("Expected exactly one Emacs mirror URL in melpazoid Dockerfile")
+        dockerfile.write_text(source.replace(mirror, "https://ftp.gnu.org/gnu/emacs/"))
+        PY
     - name: Run
       env:
         LOCAL_REPO: ${{ github.workspace }}
