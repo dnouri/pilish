@@ -4671,11 +4671,11 @@ frame whether to show IMAGE or FALLBACK."
   (let ((case-fold-search t)
         (without-local-links source)
         (local-link-re
-         "\\_<\\(?:[[:alnum:]_.-]+:\\)?href[[:space:]]*=[[:space:]]*\\([\"']\\)#[^\"']*\\1"))
+         "\\(?:\\`\\|[ \t\r\n]\\)\\(?:[[:alnum:]_.-]+:\\)?href[ \t\r\n]*=[ \t\r\n]*\\([\"']\\)#[^\"']*\\1"))
     (setq without-local-links
           (replace-regexp-in-string local-link-re "" without-local-links))
     (not (string-match-p
-          "\\_<\\(?:[[:alnum:]_.-]+:\\)?href[[:space:]]*="
+          "\\(?:\\`\\|[ \t\r\n]\\)\\(?:[[:alnum:]_.-]+:\\)?href[ \t\r\n]*="
           without-local-links))))
 
 (defun pilish--standalone-svg-p (source)
@@ -4684,10 +4684,10 @@ frame whether to show IMAGE or FALLBACK."
     (and (eq 'svg (condition-case nil
                       (image-type-from-data source)
                     (error nil)))
-         (or (string-match-p "</svg[[:space:]]*>[[:space:]]*\\'" source)
-             (string-match-p "<svg\\_>[^>]*?/>[[:space:]]*\\'" source))
+         (or (string-match-p "</svg[ \t\r\n]*>[ \t\r\n]*\\'" source)
+             (string-match-p "<svg\\(?:[ \t\r\n][^>]*\\)?/>[ \t\r\n]*\\'" source))
          (not (string-match-p
-               "\\(?:<[[:space:]]*\\(?:script\\|foreignobject\\|image\\|feimage\\)\\_>\\|url[[:space:]]*(\\|@import\\|<!doctype\\|<!entity\\)"
+               "\\(?:<[ \t\r\n]*\\(?:script\\|foreignobject\\|image\\|feimage\\)[ \t\r\n/>]\\|url[ \t\r\n]*(\\|@import\\|<!doctype\\|<!entity\\)"
                source))
          (pilish--svg-fragment-links-only-p source))))
 
