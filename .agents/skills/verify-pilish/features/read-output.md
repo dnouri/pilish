@@ -1,10 +1,11 @@
 # Read streamed output
 
-The chat renders streamed Markdown and changes thinking display without losing the reader's place. It preserves reading positions, follows the tail on request, and rewraps hot tables after a resize. Completed thinking uses a margin caret and TAB. Long tool output uses bottom continuation controls. Bash and subagent footers, including resumed subagent calls, show live elapsed time, then Pi's recorded duration when available. A settled run adds a transient right-aligned return timestamp and whole-run duration. Completed replies, thinking, and tools expose literal details through explicit Help and echo-area commands. This metadata does not appear on automatic hover; other hover behavior is unchanged.
+The chat renders streamed Markdown, reveals or hides its source markup on demand, and changes thinking display without losing the reader's place. It preserves reading positions, follows the tail on request, and rewraps hot tables after a resize. Completed thinking uses a margin caret and TAB. Long tool output uses bottom continuation controls. Bash and subagent footers, including resumed subagent calls, show live elapsed time, then Pi's recorded duration when available. A settled run adds a transient right-aligned return timestamp and whole-run duration. Completed replies, thinking, and tools expose literal details through explicit Help and echo-area commands. This metadata does not appear on automatic hover; other hover behavior is unchanged.
 
 ## Sub-features
 
 - `output-stream` renders streamed write-tool content without exposing fence markers.
+- `output-markup` reveals emphasis delimiters and link destinations, then hides them again.
 - `output-thinking` changes completed thinking display in two windows and toggles one block with its caret or TAB.
 - `output-duration` advances live bash and subagent timing, including resumed calls, then restores the same recorded duration after reload or resume.
 - `output-return-receipt` records when the current run returned control and its total observed duration, aligns the receipt in unequal windows, retains earlier receipts, and omits them after reload or resume.
@@ -17,6 +18,7 @@ The chat renders streamed Markdown and changes thinking display without losing t
 ## How to get to it (user POV)
 
 - Read write-tool content as it streams into the chat.
+- Press `C-c C-p v` in a live chat to show or hide Markdown source through the menu.
 - Run `M-x pilish-toggle-thinking-display` to change completed thinking display.
 - Press `TAB` inside completed thinking or click its left-margin caret. Press `TAB` or `RET` on a tool footer, or click its left-margin caret.
 - Watch `Elapsed` advance during bash or subagent execution, including resumed calls, and change to `Took …` on completion. Live labels use whole seconds below a minute and minutes or hours above it.
@@ -38,6 +40,7 @@ Preconditions:
 - The Doctor check passed. `RUN_DIR` is a new empty evidence directory.
 
 - **Stream Markdown.** Run `./test/run-gui-tests.sh --headless pilish-gui-test-streaming-no-fences 2>&1 | tee "$RUN_DIR/stream.log"`. Record `stream.exit`. The rendered write-tool content contains no Markdown fence markers.
+- **Toggle Markdown markup.** Run `./test/run-gui-tests.sh --headless pilish-gui-test-markup-toggle-through-menu 2>&1 | tee "$RUN_DIR/markup.log"`. Record `markup.exit`. Real `C-c C-p v` key sequences reveal bold delimiters and a link destination, then restore the hidden-markup display without changing the source text.
 - **Toggle thinking.** Run `./test/run-gui-tests.sh --headless pilish-gui-test-thinking-display-toggle-restores-each-visible-window 2>&1 | tee "$RUN_DIR/thinking.log"`. Record `thinking.exit`. The tail keeps following output while the scrolled-back window preserves its context.
 - **Start thinking with whitespace.** Run `./test/run-gui-tests.sh --headless pilish-gui-test-thinking-initial-whitespace-keeps-point 2>&1 | tee "$RUN_DIR/thinking-initial.log"`. Record `thinking-initial.exit`. Initial whitespace and the first visible text leave point at its original position.
 - **Scroll back.** Run `./test/run-gui-tests.sh --headless pilish-gui-test-scroll-preserved-streaming 2>&1 | tee "$RUN_DIR/scroll.log"`. Record `scroll.exit`. Streaming does not pull the scrolled-back window to the tail.
@@ -49,10 +52,11 @@ Preconditions:
 - **Observe duration and restoration.** Run `G1_CAPTURE="$RUN_DIR/duration" ./test/run-gui-tests.sh --headless pilish-gui-test-fake-duration-live-reload-and-resume 2>&1 | tee "$RUN_DIR/duration.log"`. Record `duration.exit`. The fake bash stream advances through real `Elapsed` timers, settles on `Took 2m 5s`, and keeps that recorded value through bottom-control actions, browser resume, and process reload. The final timer stays stopped.
 - **Read run-return receipts.** Run `G1_CAPTURE="$RUN_DIR/return-receipt" ./test/run-gui-tests.sh --headless pilish-gui-test-run-return-receipt-responsive-and-transient 2>&1 | tee "$RUN_DIR/return-receipt.log"`. Record `return-receipt.exit`. The test sends through `C-c C-c`, checks the recorded tool duration and the receipt's own label, aligns the receipt at 104 and 54 columns and in unequal sibling windows, sends a second run, then reloads. The two live receipts remain in order until reload; recorded tool time survives it, but return receipts do not.
 - **Copy link targets.** Run `./test/run-gui-tests.sh --headless pilish-gui-test-copy-link-targets-with-w 2>&1 | tee "$RUN_DIR/link-copy.log"`. Record `link-copy.exit`. Real `w` presses on `https:`, `file:`, and absolute-path link labels push the URL, the `file:` URL, and the absolute pathname into the kill ring.
-- **Check the proof.** Require zero statuses and nonempty logs for all thirteen commands. Require `fake-duration-elapsed-1.png`, `fake-duration-recorded.png`, `fake-duration-resumed.png`, `fake-duration-reloaded.png`, and their matching `.el` files under `$RUN_DIR/duration`. Under `$RUN_DIR/return-receipt`, require `run-return-wide.png`, `run-return-narrow.png`, `run-return-independent-edges.png`, `run-return-second.png`, `run-return-reloaded.png`, and their matching `.el` files. Use the evidence pattern from the skill.
+- **Check the proof.** Require zero statuses and nonempty logs for all fourteen commands. Require `fake-duration-elapsed-1.png`, `fake-duration-recorded.png`, `fake-duration-resumed.png`, `fake-duration-reloaded.png`, and their matching `.el` files under `$RUN_DIR/duration`. Under `$RUN_DIR/return-receipt`, require `run-return-wide.png`, `run-return-narrow.png`, `run-return-independent-edges.png`, `run-return-second.png`, `run-return-reloaded.png`, and their matching `.el` files. Use the evidence pattern from the skill.
 
 ## Gotchas
 
+- The markup test inserts a deterministic assistant message, then uses the real menu key sequence in both directions. It checks visible-text projections and Markdown properties, not PNG pixels.
 - The thinking test invokes the real toggle command directly. Do not describe it as a keystroke test.
 - Most tests in this feature assert text, properties, and window state without PNG evidence. The duration and return-receipt journeys save the required frames listed above.
 - Cold tables intentionally remain unchanged during the hot-tail resize test.
