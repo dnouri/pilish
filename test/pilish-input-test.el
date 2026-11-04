@@ -6176,6 +6176,135 @@ no spurious faces are applied to plain colon-ending lines."
     (should (eq (key-binding (kbd "TAB")) 'pilish-complete))
     (should (eq (key-binding (kbd "C-c C-s")) 'pilish-queue-steering))))
 
+;;; Returning the Chat to its End on Submit
+
+(defmacro pilish-test--with-scrolled-back-chat (&rest body)
+  "Run BODY in a selected input window below two windows on a long chat.
+Both chat windows, bound as `chat-windows', show the chat's first line.
+`chat' and `input' are the linked buffers; BODY runs in `input'."
+  (declare (indent 0) (debug t))
+  `(let ((chat (generate-new-buffer " *pilish-submit-chat*"))
+         (input (generate-new-buffer " *pilish-submit-input*")))
+     (unwind-protect
+         (progn
+           (delete-other-windows)
+           (switch-to-buffer chat)
+           (with-current-buffer chat
+             (pilish-chat-mode)
+             (let ((inhibit-read-only t))
+               (dotimes (n 200) (insert (format "Earlier line %d\n" n))))
+             (pilish--set-input-buffer input))
+           (with-current-buffer input
+             (pilish-input-mode)
+             (pilish--set-chat-buffer chat))
+           (let* ((input-window (split-window nil -5 'below))
+                  (chat-windows (list (selected-window)
+                                      (split-window nil nil 'right))))
+             (set-window-buffer input-window input)
+             (dolist (window chat-windows)
+               (set-window-start window 1)
+               (set-window-point window 1))
+             (select-window input-window)
+             (cl-letf (((symbol-function 'message) #'ignore))
+               ,@body)))
+       (pilish-test--kill-live-buffers input chat)
+       (delete-other-windows))))
+
+(defun pilish-test--submit-draft (kind)
+  "Submit the current draft as KIND with sending stubbed out.
+KIND is `prompt', `follow-up', `steer' or `compacting-steer'."
+  (with-current-buffer (pilish--get-chat-buffer)
+    (setq pilish--status (pcase kind
+                           ('prompt 'idle)
+                           ('compacting-steer 'compacting)
+                           (_ 'streaming))))
+  (cl-letf (((symbol-function 'pilish--prepare-and-send) #'ignore)
+            ((symbol-function 'pilish--send-steer-message) (lambda (_) t)))
+    (if (memq kind '(steer compacting-steer))
+        (pilish-queue-steering)
+      (pilish-send))))
+
+(ert-deftest pilish-test-submit-returns-chat-windows-to-end ()
+  "Accepted drafts return every chat window in the frame to the end.
+Input keeps focus, and typing alone leaves the chat where it was."
+  (dolist (kind '(prompt follow-up steer compacting-steer))
+    (pilish-test--with-scrolled-back-chat
+      (let ((pilish-jump-to-end-on-submit t))
+        (insert "new prompt")
+        (dolist (window chat-windows)
+          (should (= (window-point window) 1)))
+        (pilish-test--submit-draft kind)
+        (should (string-empty-p (buffer-string)))
+        (should (eq (selected-window) input-window))
+        (dolist (window chat-windows)
+          (should (= (window-point window)
+                     (with-current-buffer chat (point-max))))
+          (should (> (window-start window) 1)))))))
+
+(ert-deftest pilish-test-submit-keeps-chat-position-by-default ()
+  "Without `pilish-jump-to-end-on-submit', a scrolled-back chat stays put."
+  (dolist (kind '(prompt follow-up steer compacting-steer))
+    (pilish-test--with-scrolled-back-chat
+      (insert "new prompt")
+      (pilish-test--submit-draft kind)
+      (should (string-empty-p (buffer-string)))
+      (dolist (window chat-windows)
+        (should (= (window-point window) 1))
+        (should (= (window-start window) 1))))))
+
+(ert-deftest pilish-test-refused-submit-keeps-chat-position ()
+  "Empty and refused drafts neither move the chat nor lose the draft."
+  (dolist (case '((prompt . "")
+                  (follow-up . "/compact")
+                  (idle-steer . "nothing to steer")
+                  (failed-steer . "steer without a process")))
+    (pilish-test--with-scrolled-back-chat
+      (let ((pilish-jump-to-end-on-submit t))
+        (insert (cdr case))
+        (pcase (car case)
+          ('idle-steer (pilish-queue-steering))
+          ('failed-steer
+           (with-current-buffer chat (setq pilish--status 'streaming))
+           (cl-letf (((symbol-function 'pilish--send-steer-message)
+                      (lambda (_) nil)))
+             (pilish-queue-steering)))
+          (kind (pilish-test--submit-draft kind)))
+        (should (equal (buffer-string) (cdr case)))
+        (dolist (window chat-windows)
+          (should (= (window-point window) 1))
+          (should (= (window-start window) 1)))))))
+
+(ert-deftest pilish-test-queued-delivery-keeps-chat-position ()
+  "Automatic delivery of a queued follow-up is not a submission."
+  (pilish-test--with-scrolled-back-chat
+    (let ((pilish-jump-to-end-on-submit t)
+          delivered)
+      (with-current-buffer chat
+        (setq pilish--status 'idle
+              pilish--followup-queue '("queued earlier"))
+        (cl-letf (((symbol-function 'pilish--prepare-and-send)
+                   (lambda (text &rest _) (setq delivered text))))
+          (pilish--process-followup-queue)))
+      (should (equal delivered "queued earlier"))
+      (dolist (window chat-windows)
+        (should (= (window-point window) 1))
+        (should (= (window-start window) 1))))))
+
+(ert-deftest pilish-test-submit-does-not-display-hidden-chat ()
+  "Submitting while the chat is hidden neither shows it nor moves its point."
+  (pilish-test--with-scrolled-back-chat
+    (dolist (window chat-windows)
+      (delete-window window))
+    (with-current-buffer chat (goto-char (point-min)))
+    (let ((pilish-jump-to-end-on-submit t))
+      (insert "queued while hidden")
+      (pilish-test--submit-draft 'follow-up)
+      (should (string-empty-p (buffer-string)))
+      (should-not (get-buffer-window chat t))
+      (should (= (with-current-buffer chat (point)) 1))
+      (with-current-buffer chat
+        (should (equal pilish--followup-queue '("queued while hidden")))))))
+
 ;;; Input-Buffer Chat Navigation
 
 (ert-deftest pilish-test-input-next-message-moves-chat ()

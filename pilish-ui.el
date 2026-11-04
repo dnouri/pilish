@@ -223,6 +223,20 @@ next model call, as with `pilish-queue-steering'.
                  (const :tag "Steer the current run" steer))
   :group 'pilish)
 
+(defcustom pilish-jump-to-end-on-submit nil
+  "Non-nil means submitting a draft returns the chat to its end.
+Applies when the input buffer accepts a prompt, a steering message
+or a queued follow-up.  Each window in the submitting frame that
+shows the chat moves to the end of the conversation, so it follows
+the reply; the input keeps focus.  Typing, refused or empty
+submissions, automatic delivery of queued follow-ups and windows in
+other frames do not move, and a hidden chat is not displayed.
+
+When nil, a chat scrolled back to earlier text keeps its position;
+only windows already at the end follow new output."
+  :type 'boolean
+  :group 'pilish)
+
 (defcustom pilish-activity-phase-functions nil
   "Functions called after a session activity phase is applied.
 Each function is called with five arguments:

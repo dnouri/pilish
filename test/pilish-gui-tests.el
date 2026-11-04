@@ -1252,6 +1252,44 @@ and sending with \\`C-c C-c' returns it to one line."
       (should (= line-before (pilish-gui-test-top-line-number)))
       (should (pilish-gui-test-chat-contains "fake tool output")))))
 
+(ert-deftest pilish-gui-test-submit-returns-chat-to-end ()
+  "With `pilish-jump-to-end-on-submit', \\`C-c C-c' follows the new reply.
+Typing leaves the scrolled-back chat alone; input keeps focus."
+  (let ((pilish-jump-to-end-on-submit t))
+    (pilish-gui-test-with-fresh-session
+      (:backend fake :fake-scenario "scrolling-text")
+      (pilish-gui-test-send "first turn")
+      (pilish-gui-test-ensure-scrollable)
+      (pilish-gui-test-scroll-up 20)
+      (should-not (pilish-gui-test-at-end-p))
+      (let ((line-before (pilish-gui-test-top-line-number))
+            (input-window (pilish-gui-test-input-window)))
+        (should (> line-before 1))
+        (select-window input-window)
+        (execute-kbd-macro "second turn")
+        (redisplay t)
+        (should (= line-before (pilish-gui-test-top-line-number)))
+        (pilish-gui-test--large-evidence
+         "submit-draft-while-reading"
+         (list :top-line (pilish-gui-test-top-line-number)
+               :at-end (pilish-gui-test-at-end-p)))
+        (execute-kbd-macro (kbd "C-c C-c"))
+        (should (eq (selected-window) input-window))
+        (should (pilish-gui-test-window-point-at-end-p))
+        (should (pilish-gui-test-wait-for-idle))
+        (should (pilish-gui-test-wait-for-chat-settled))
+        (redisplay t)
+        (should (pilish-gui-test-chat-contains "Scroll line 24 for second turn"))
+        (should (pilish-gui-test-at-end-p))
+        (should (eq (selected-window) input-window))
+        (should (string-empty-p (with-current-buffer (window-buffer input-window)
+                                  (buffer-string))))
+        (pilish-gui-test--large-evidence
+         "submit-returned-to-end"
+         (list :top-line (pilish-gui-test-top-line-number)
+               :at-end (pilish-gui-test-at-end-p)
+               :input-selected (eq (selected-window) input-window)))))))
+
 (ert-deftest pilish-gui-test-tool-streaming-preserves-point-after-block ()
   "Tool growth and contraction keep point on text after the block."
   (let ((buf (get-buffer-create "*pi-gui-tool-point-stability*")))
