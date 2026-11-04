@@ -9466,6 +9466,141 @@ no payload at all."
                                :base-uri "data:" :scale 1))
                        (cdr created)))))))
 
+(ert-deftest pilish-test-read-svg-banned-tags-never-reach-decoder ()
+  "Bare, self-closing, and attributed banned tags stay text in chat mode."
+  (with-temp-buffer
+    (pilish-chat-mode)
+    (dolist (name '("script" "foreignobject" "image" "feimage"
+                    "ScRiPt" "foreignObject" "ImAgE" "feImage"))
+      (dolist (element (list (format "<%s></%s>" name name)
+                             (format "<%s/>" name)
+                             (format "<%s data-x='1'/>" name)))
+        (let ((source (concat "<svg>" element "</svg>"))
+              (create-count 0)
+              preview)
+          (ert-info ((format "Banned element without href: %s" source))
+            (cl-letf (((symbol-function 'image-type-available-p) (lambda (_) t))
+                      ((symbol-function 'create-image)
+                       (lambda (&rest _)
+                         (cl-incf create-count)
+                         (error "Unexpected SVG decoder call"))))
+              (setq preview (pilish--read-svg-preview
+                             "read" '(:path "missing.svg") source
+                             '(:truncation :null) nil)))
+            (should (= 0 create-count))
+            (should-not preview)))))))
+
+(ert-deftest pilish-test-read-svg-compact-and-fragment-previews ()
+  "Compact roots and quoted local fragments remain eligible for previews."
+  (with-temp-buffer
+    (pilish-chat-mode)
+    (dolist (source '("<svg/>" "<svg />"
+                      "<svg xmlns='http://www.w3.org/2000/svg'/>"
+                      "<svg><rect/></svg> \t\r\n"
+                      "<svg><use href=\"#r\"/></svg>"
+                      "<svg><use xlink:href='#r'/></svg>"
+                      "<svg><use HREF = '#r'/><use href=\"#s\"/></svg>"
+                      "<svg><scripture/><imagex/><feimagex/></svg>"
+                      "<svg><text>hrefx='external' urlx(</text></svg>"))
+      (let ((create-count 0))
+        (ert-info ((format "Eligible SVG: %s" source))
+          (cl-letf (((symbol-function 'image-type-available-p) (lambda (_) t))
+                    ((symbol-function 'create-image)
+                     (lambda (data type data-p &rest _)
+                       (cl-incf create-count)
+                       (should (equal source data))
+                       (should (eq 'svg type))
+                       (should data-p)
+                       '(image :type svg :data "preview"))))
+            (let ((preview (pilish--read-svg-preview
+                            "read" '(:path "missing.svg") source nil nil)))
+              (should (= 1 create-count))
+              (should (equal '(image :type svg :data "preview")
+                             (get-text-property 0 'display preview))))))))))
+
+(ert-deftest pilish-test-read-svg-external-and-mixed-hrefs-stay-text ()
+  "External hrefs are refused alone and beside local links in either order."
+  (with-temp-buffer
+    (pilish-chat-mode)
+    (dolist (href '("\"https://example.invalid/x.svg\"" "'file:///tmp/x.svg'"
+                    "'data:image/svg+xml,x'" "'relative.svg'"
+                    "'//example.invalid/x.svg'" "''" "external.svg" "#r"))
+      (dolist (attribute '("href" "xlink:href"))
+        (let ((external (format "<use %s=%s/>" attribute href))
+              (local "<use href='#r'/>"))
+          (dolist (body (list external (concat local external)
+                             (concat external local)))
+            (let ((source (concat "<svg>" body "</svg>"))
+                  (create-count 0)
+                  preview)
+              (ert-info ((format "Nonfragment or unquoted href: %s" source))
+                (should-not (pilish--svg-fragment-links-only-p source))
+                (cl-letf (((symbol-function 'image-type-available-p) (lambda (_) t))
+                          ((symbol-function 'create-image)
+                           (lambda (&rest _)
+                             (cl-incf create-count)
+                             (error "Unexpected SVG decoder call"))))
+                  (setq preview (pilish--read-svg-preview
+                                 "read" nil source nil nil)))
+                (should (= 0 create-count))
+                (should-not preview)))))))))
+
+(ert-deftest pilish-test-read-svg-keeps-resource-marker-refusals ()
+  "Resource markers and incomplete or near-name roots remain refused."
+  (with-temp-buffer
+    (pilish-chat-mode)
+    (dolist (source '("<svgx/>" "<svg>" "<svg><rect/>"
+                      "<svg><style>url(#r)</style></svg>"
+                      "<svg><style>url ('external')</style></svg>"
+                      "<svg><style>@import 'external';</style></svg>"
+                      "<!DOCTYPE svg><svg/>" "<!ENTITY x 'external'><svg/>"))
+      (ert-info ((format "Refused SVG: %s" source))
+        (should-not (pilish--standalone-svg-p source))))))
+
+(ert-deftest pilish-test-read-svg-screen-ignores-caller-syntax ()
+  "Direct and composed screens use XML separators without changing syntax."
+  (with-temp-buffer
+    (pilish-chat-mode)
+    (let ((caller-table (syntax-table)))
+      (dolist (changes '(nil ((?\s . "_") (?\t . "_") (?\r . "_") (?\n . "_"))
+                            ((?h . ".") (?s . ".") (?f . ".") (?i . "."))
+                            ((?x . " "))
+                            ((?< . ".") (?> . ".") (?/ . "."))))
+        (let ((table (copy-syntax-table caller-table)))
+          (dolist (change changes)
+            (modify-syntax-entry (car change) (cdr change) table))
+          (let ((before (copy-syntax-table table)))
+            (with-syntax-table table
+              (dolist (case '(("href='#r'" t)
+                              ("<use href = \"#r\"/>" t)
+                              ("<use\txlink:href\r=\n'#r'/>" t)
+                              ("<use hrefx='external'/>" t)
+                              ("<use href='external'/>" nil)
+                              ("<use href='external'/><use href='#r'/>" nil)
+                              ("<use href='#r'/><use xlink:href='external'/>" nil)))
+                (ert-info ((format "Direct href screen, syntax %S, source %s"
+                                   changes (car case)))
+                  (should (eq (cadr case)
+                              (not (null (pilish--svg-fragment-links-only-p
+                                          (car case))))))))
+              (dolist (case '(("<svg/>" t)
+                              ("<svg><rect/></svg> \t\r\n" t)
+                              ("<svg><use href='#r'/></svg>" t)
+                              ("<svg><text>hrefx='external' urlx(</text></svg>" t)
+                              ("<svg><script/></svg>" nil)
+                              ("<svg><foreignObject></foreignObject></svg>" nil)
+                              ("<svg><image/></svg>" nil)
+                              ("<svg><feImage/></svg>" nil)
+                              ("<svg><use href='external'/></svg>" nil)
+                              ("<svg><style>url\t(#r)</style></svg>" nil)
+                              ("<svgx/>" nil)))
+                (ert-info ((format "Standalone screen, syntax %S, source %s"
+                                   changes (car case)))
+                  (should (eq (cadr case)
+                              (not (null (pilish--standalone-svg-p (car case)))))))))
+            (should (equal before table))))
+        (should (eq caller-table (syntax-table)))))))
+
 (ert-deftest pilish-test-read-svg-refuses-truncated-result ()
   "A non-null truncation record keeps complete-looking SVG as text."
   (with-temp-buffer
