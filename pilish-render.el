@@ -4515,27 +4515,32 @@ path/error metadata for `pilish-visit-file'."
     ("image/svg+xml" 'svg)))
 
 (defun pilish--image-preview-window ()
-  "Return the window whose frame and dimensions govern image previews."
-  (or (pilish--chat-display-window)
-      (selected-window)))
-
-(defun pilish--image-display-capable-p ()
-  "Return non-nil when the image preview window is graphical."
-  (display-images-p
-   (window-frame (pilish--image-preview-window))))
+  "Return a graphical window to size image previews, or nil.
+Prefer a window showing the chat, then the selected window, then a
+window on any graphical frame.  Terminal dimensions are character
+cells, not pixels."
+  (seq-find (lambda (window) (display-images-p (window-frame window)))
+            (append (get-buffer-window-list (current-buffer) nil 'visible)
+                    (list (selected-window))
+                    (mapcar #'frame-selected-window (frame-list)))))
 
 (defun pilish--image-preview-pixel-limits ()
-  "Return window-relative image preview size properties."
-  (let* ((window (pilish--image-preview-window))
-         (window-width
-          (max 1 (truncate (* 0.9 (window-pixel-width window)))))
-         (configured-width
-          (if (natnump pilish-image-preview-max-width)
-              (max 1 pilish-image-preview-max-width)
-            window-width)))
-    (list :max-width (min window-width configured-width)
-          :max-height
-          (max 1 (truncate (* 0.5 (window-pixel-height window)))))))
+  "Return image preview size properties for the current chat.
+Without a graphical window, use the configured width and half that
+height, rather than interpreting terminal cells as pixel dimensions."
+  (let ((window (pilish--image-preview-window))
+        (configured-width
+         (when (natnump pilish-image-preview-max-width)
+           (max 1 pilish-image-preview-max-width))))
+    (if window
+        (let ((window-width
+               (max 1 (truncate (* 0.9 (window-pixel-width window))))))
+          (list :max-width (min window-width
+                                (or configured-width window-width))
+                :max-height
+                (max 1 (truncate (* 0.5 (window-pixel-height window))))))
+      (let ((width (or configured-width 900)))
+        (list :max-width width :max-height (max 1 (/ width 2)))))))
 
 (defconst pilish--image-previews-per-content-limit 8
   "Maximum image blocks rendered from one message or tool result.")
@@ -4552,7 +4557,9 @@ path/error metadata for `pilish-visit-file'."
    (pilish--render-safe-string value fallback)))
 
 (defun pilish--image-preview-string (fallback &optional image)
-  "Return FALLBACK marked as an image preview, displaying IMAGE when non-nil."
+  "Return FALLBACK marked as an image preview, displaying IMAGE when non-nil.
+Keep the spec even without a graphical frame: redisplay decides per
+frame whether to show IMAGE or FALLBACK."
   (apply #'propertize fallback
          (append
           (list 'face 'pilish-tool-header
@@ -4619,9 +4626,6 @@ path/error metadata for `pilish-visit-file'."
               (pilish--image-preview-string
                (pilish--image-preview-label
                 mime-type (format "%s, invalid data" size))))
-             ((not (pilish--image-display-capable-p))
-              (pilish--image-preview-string
-               (pilish--image-preview-label mime-type size)))
              ((not (image-type-available-p type))
               (pilish--image-preview-string
                (pilish--image-preview-label
@@ -4667,11 +4671,11 @@ path/error metadata for `pilish-visit-file'."
   (let ((case-fold-search t)
         (without-local-links source)
         (local-link-re
-         "\\_<\\(?:[[:alnum:]_.-]+:\\)?href[[:space:]]*=[[:space:]]*\\([\"']\\)#[^\"']*\\1"))
+         "\\(?:\\`\\|[ \t\r\n]\\)\\(?:[[:alnum:]_.-]+:\\)?href[ \t\r\n]*=[ \t\r\n]*\\([\"']\\)#[^\"']*\\1"))
     (setq without-local-links
           (replace-regexp-in-string local-link-re "" without-local-links))
     (not (string-match-p
-          "\\_<\\(?:[[:alnum:]_.-]+:\\)?href[[:space:]]*="
+          "\\(?:\\`\\|[ \t\r\n]\\)\\(?:[[:alnum:]_.-]+:\\)?href[ \t\r\n]*="
           without-local-links))))
 
 (defun pilish--standalone-svg-p (source)
@@ -4680,10 +4684,10 @@ path/error metadata for `pilish-visit-file'."
     (and (eq 'svg (condition-case nil
                       (image-type-from-data source)
                     (error nil)))
-         (or (string-match-p "</svg[[:space:]]*>[[:space:]]*\\'" source)
-             (string-match-p "<svg\\_>[^>]*?/>[[:space:]]*\\'" source))
+         (or (string-match-p "</svg[ \t\r\n]*>[ \t\r\n]*\\'" source)
+             (string-match-p "<svg\\(?:[ \t\r\n][^>]*\\)?/>[ \t\r\n]*\\'" source))
          (not (string-match-p
-               "\\(?:<[[:space:]]*\\(?:script\\|foreignobject\\|image\\|feimage\\)\\_>\\|url[[:space:]]*(\\|@import\\|<!doctype\\|<!entity\\)"
+               "\\(?:<[ \t\r\n]*\\(?:script\\|foreignobject\\|image\\|feimage\\)[ \t\r\n/>]\\|url[ \t\r\n]*(\\|@import\\|<!doctype\\|<!entity\\)"
                source))
          (pilish--svg-fragment-links-only-p source))))
 
@@ -4711,8 +4715,6 @@ TOOL-NAME, ARGS, DETAILS, and IS-ERROR describe the completed result."
         (pilish--image-preview-string
          (pilish--image-preview-label
           "image/svg+xml" (pilish--image-too-large-description limit))))
-       ((not (pilish--image-display-capable-p))
-        (pilish--image-preview-string fallback))
        ((not (image-type-available-p 'svg))
         (pilish--image-preview-string
          (pilish--image-preview-label

@@ -1730,6 +1730,63 @@ logical block and should not start following later streamed output."
             (should (> (cdr size) 0))))
       (kill-buffer buffer))))
 
+(ert-deftest pilish-gui-test-image-render-before-graphical-display ()
+  "Images prepared without a graphical window display without history reload."
+  (unless (and (display-images-p)
+               (image-type-available-p 'png)
+               (image-type-available-p 'svg))
+    (ert-skip "This Emacs display cannot render PNG and SVG images"))
+  (save-window-excursion
+    (dolist (type '(png svg))
+      (let ((buffer (generate-new-buffer " *pilish-gui-hidden-image*"))
+            (source "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"600\" height=\"200\"><rect width=\"600\" height=\"200\" fill=\"#369\"/></svg>")
+            display position)
+        (unwind-protect
+            (progn
+              (with-current-buffer buffer
+                (pilish-chat-mode)
+                ;; Emulate rendering before any graphical client connects.
+                ;; Use real image decoders, not a fabricated display spec.
+                (cl-letf (((symbol-function 'display-images-p)
+                           (lambda (&rest _) nil)))
+                  (if (eq type 'png)
+                      (pilish--display-tool-end
+                       "generate" nil
+                       (list (list :type "image" :mimeType "image/png"
+                                   :data (pilish-test--prompt-image-base64 'png)))
+                       nil nil)
+                    (pilish--display-tool-end
+                     "read" '(:path "/missing/returned.svg")
+                     (list (list :type "text" :text source)) nil nil)))
+                (setq position (text-property-any (point-min) (point-max)
+                                                  'pilish-image-preview t)
+                      display (and position (get-text-property position 'display)))
+                (should (eq 'image (car-safe display))))
+              ;; This is the only action needed to show the prepared image:
+              ;; no tool toggle, new result or history rebuild.
+              (switch-to-buffer buffer)
+              (delete-other-windows)
+              (goto-char (point-min))
+              (font-lock-ensure)
+              (redisplay t)
+              (should (eq display (get-text-property position 'display)))
+              (let ((size (image-size display t)))
+                (should (> (car size) 0))
+                (should (> (cdr size) 0))
+                (when (eq type 'svg)
+                  (should (= (car size) 600))
+                  (should (= (cdr size) 200)))
+                (pilish-gui-test--large-evidence
+                 (format "image-before-gui-%s" type)
+                 (list :action 'switch-to-buffer :type type
+                       :rendered-without-graphical-window t
+                       :same-display-spec t :pixel-size size
+                       :package-user-dir package-user-dir :window-system window-system
+                       :render-library (symbol-file 'pilish--render-content-image-preview)))))
+          (when (buffer-live-p buffer)
+            (with-current-buffer buffer (set-buffer-modified-p nil))
+            (kill-buffer buffer)))))))
+
 (ert-deftest pilish-gui-test-startup-logo-renders-real-image ()
   "The startup heading renders the real SVG logo on image-capable displays.
 The 1.5em image glyph makes the heading row taller than a text row and

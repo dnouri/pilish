@@ -3733,8 +3733,7 @@ The caller saves the window configuration; queued paints need a visible chat."
               (should (string-match-p
                        (regexp-quote (if read-svg-p "Image: image/svg+xml" "Image: image/png"))
                        (buffer-string)))
-              (if (and (display-images-p)
-                       (image-type-available-p (if read-svg-p 'svg 'png)))
+              (if (image-type-available-p (if read-svg-p 'svg 'png))
                   (should (eq 'image (car (get-text-property position 'display))))
                 (should-not (get-text-property position 'display))))
             (when read-svg-p
@@ -9170,13 +9169,16 @@ no payload at all."
   "iVBORw0KGgoAAAANSUhEUgAAAAIAAAABCAYAAAD0In+KAAAADklEQVR4nGP4z8DwHwQBEPgD/U6VwW8AAAAASUVORK5CYII="
   "Base64 for a two-by-one PNG used by image preview tests.")
 
-(ert-deftest pilish-test-tool-result-image-has-terminal-placeholder ()
-  "An image result is useful text inside its tool block in a terminal."
+(ert-deftest pilish-test-tool-result-image-keeps-spec-without-graphical-frame ()
+  "A terminal render keeps the label and the image for later GUI frames."
   (with-temp-buffer
     (pilish-chat-mode)
     (let ((block (pilish--display-tool-start
                   "custom_image" '(:label "preview") "image-call")))
-      (cl-letf (((symbol-function 'display-images-p) (lambda (&rest _) nil)))
+      (cl-letf (((symbol-function 'display-images-p) (lambda (&rest _) nil))
+                ((symbol-function 'image-type-available-p) (lambda (_) t))
+                ((symbol-function 'create-image)
+                 (lambda (&rest _) '(image :type png :data "preview"))))
         (pilish--display-tool-end
          "custom_image" '(:label "preview")
          `[(:type "text" :text "generated")
@@ -9190,10 +9192,64 @@ no payload at all."
         (should (<= (overlay-start overlay) position))
         (should (< position (overlay-end overlay)))
         (should (get-text-property position 'pilish-no-fontify))
-        (should-not (get-text-property position 'display))
+        (should (equal '(image :type png :data "preview")
+                       (get-text-property position 'display)))
         (should (string-match-p
                  "Image: image/png, 71 B"
                  (buffer-substring-no-properties position (overlay-end overlay))))))))
+
+(ert-deftest pilish-test-image-preview-limits-prefer-graphical-window ()
+  "A terminal window never supplies pixel dimensions for a preview."
+  (let ((pilish-image-preview-max-width 2000)
+        (terminal (selected-window))
+        (graphical 'graphical-window))
+    (cl-letf (((symbol-function 'get-buffer-window-list)
+               (lambda (&rest _) (list terminal)))
+              ((symbol-function 'frame-selected-window)
+               (lambda (_) graphical))
+              ((symbol-function 'window-frame) #'identity)
+              ((symbol-function 'display-images-p)
+               (lambda (frame) (eq frame graphical)))
+              ((symbol-function 'window-pixel-width)
+               (lambda (window) (should (eq window graphical)) 1000))
+              ((symbol-function 'window-pixel-height)
+               (lambda (window) (should (eq window graphical)) 600)))
+      (should (equal (pilish--image-preview-pixel-limits)
+                     '(:max-width 900 :max-height 300))))))
+
+(ert-deftest pilish-test-image-preview-limits-without-graphical-window ()
+  "Daemon startup sizes previews without reading terminal pixel dimensions."
+  (cl-letf (((symbol-function 'display-images-p) (lambda (&rest _) nil))
+            ((symbol-function 'window-pixel-width)
+             (lambda (&rest _) (ert-fail "Read terminal width")))
+            ((symbol-function 'window-pixel-height)
+             (lambda (&rest _) (ert-fail "Read terminal height"))))
+    (let ((pilish-image-preview-max-width 640))
+      (should (equal (pilish--image-preview-pixel-limits)
+                     '(:max-width 640 :max-height 320))))
+    (let ((pilish-image-preview-max-width nil))
+      (should (equal (pilish--image-preview-pixel-limits)
+                     '(:max-width 900 :max-height 450))))))
+
+(ert-deftest pilish-test-read-svg-keeps-spec-without-graphical-frame ()
+  "A standalone read SVG retains its display spec before a GUI connects."
+  (let ((source "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"2\" height=\"1\"><rect/></svg>"))
+    (cl-letf (((symbol-function 'display-images-p) (lambda (&rest _) nil))
+              ((symbol-function 'image-type-available-p) (lambda (_) t))
+              ((symbol-function 'create-image)
+               (lambda (data type data-p &rest properties)
+                 (should (equal source data))
+                 (should (eq type 'svg))
+                 (should data-p)
+                 (should (equal properties
+                                '(:max-width 900 :max-height 450
+                                  :base-uri "data:" :scale 1)))
+                 '(image :type svg :data "preview"))))
+      (let ((preview (pilish--read-svg-preview
+                      "read" '(:path "unavailable.svg") source nil nil)))
+        (should (equal '(image :type svg :data "preview")
+                       (get-text-property 0 'display preview)))
+        (should (string-match-p (regexp-quote "Image: image/svg+xml") preview))))))
 
 (ert-deftest pilish-test-prompt-image-live-and-history-use-image-preview ()
   "Live and replayed user image blocks use the bounded #221 renderer."
@@ -9409,6 +9465,141 @@ no payload at all."
         (should (equal '(svg t (:max-width 900 :max-height 300
                                :base-uri "data:" :scale 1))
                        (cdr created)))))))
+
+(ert-deftest pilish-test-read-svg-banned-tags-never-reach-decoder ()
+  "Bare, self-closing, and attributed banned tags stay text in chat mode."
+  (with-temp-buffer
+    (pilish-chat-mode)
+    (dolist (name '("script" "foreignobject" "image" "feimage"
+                    "ScRiPt" "foreignObject" "ImAgE" "feImage"))
+      (dolist (element (list (format "<%s></%s>" name name)
+                             (format "<%s/>" name)
+                             (format "<%s data-x='1'/>" name)))
+        (let ((source (concat "<svg>" element "</svg>"))
+              (create-count 0)
+              preview)
+          (ert-info ((format "Banned element without href: %s" source))
+            (cl-letf (((symbol-function 'image-type-available-p) (lambda (_) t))
+                      ((symbol-function 'create-image)
+                       (lambda (&rest _)
+                         (cl-incf create-count)
+                         (error "Unexpected SVG decoder call"))))
+              (setq preview (pilish--read-svg-preview
+                             "read" '(:path "missing.svg") source
+                             '(:truncation :null) nil)))
+            (should (= 0 create-count))
+            (should-not preview)))))))
+
+(ert-deftest pilish-test-read-svg-compact-and-fragment-previews ()
+  "Compact roots and quoted local fragments remain eligible for previews."
+  (with-temp-buffer
+    (pilish-chat-mode)
+    (dolist (source '("<svg/>" "<svg />"
+                      "<svg xmlns='http://www.w3.org/2000/svg'/>"
+                      "<svg><rect/></svg> \t\r\n"
+                      "<svg><use href=\"#r\"/></svg>"
+                      "<svg><use xlink:href='#r'/></svg>"
+                      "<svg><use HREF = '#r'/><use href=\"#s\"/></svg>"
+                      "<svg><scripture/><imagex/><feimagex/></svg>"
+                      "<svg><text>hrefx='external' urlx(</text></svg>"))
+      (let ((create-count 0))
+        (ert-info ((format "Eligible SVG: %s" source))
+          (cl-letf (((symbol-function 'image-type-available-p) (lambda (_) t))
+                    ((symbol-function 'create-image)
+                     (lambda (data type data-p &rest _)
+                       (cl-incf create-count)
+                       (should (equal source data))
+                       (should (eq 'svg type))
+                       (should data-p)
+                       '(image :type svg :data "preview"))))
+            (let ((preview (pilish--read-svg-preview
+                            "read" '(:path "missing.svg") source nil nil)))
+              (should (= 1 create-count))
+              (should (equal '(image :type svg :data "preview")
+                             (get-text-property 0 'display preview))))))))))
+
+(ert-deftest pilish-test-read-svg-external-and-mixed-hrefs-stay-text ()
+  "External hrefs are refused alone and beside local links in either order."
+  (with-temp-buffer
+    (pilish-chat-mode)
+    (dolist (href '("\"https://example.invalid/x.svg\"" "'file:///tmp/x.svg'"
+                    "'data:image/svg+xml,x'" "'relative.svg'"
+                    "'//example.invalid/x.svg'" "''" "external.svg" "#r"))
+      (dolist (attribute '("href" "xlink:href"))
+        (let ((external (format "<use %s=%s/>" attribute href))
+              (local "<use href='#r'/>"))
+          (dolist (body (list external (concat local external)
+                             (concat external local)))
+            (let ((source (concat "<svg>" body "</svg>"))
+                  (create-count 0)
+                  preview)
+              (ert-info ((format "Nonfragment or unquoted href: %s" source))
+                (should-not (pilish--svg-fragment-links-only-p source))
+                (cl-letf (((symbol-function 'image-type-available-p) (lambda (_) t))
+                          ((symbol-function 'create-image)
+                           (lambda (&rest _)
+                             (cl-incf create-count)
+                             (error "Unexpected SVG decoder call"))))
+                  (setq preview (pilish--read-svg-preview
+                                 "read" nil source nil nil)))
+                (should (= 0 create-count))
+                (should-not preview)))))))))
+
+(ert-deftest pilish-test-read-svg-keeps-resource-marker-refusals ()
+  "Resource markers and incomplete or near-name roots remain refused."
+  (with-temp-buffer
+    (pilish-chat-mode)
+    (dolist (source '("<svgx/>" "<svg>" "<svg><rect/>"
+                      "<svg><style>url(#r)</style></svg>"
+                      "<svg><style>url ('external')</style></svg>"
+                      "<svg><style>@import 'external';</style></svg>"
+                      "<!DOCTYPE svg><svg/>" "<!ENTITY x 'external'><svg/>"))
+      (ert-info ((format "Refused SVG: %s" source))
+        (should-not (pilish--standalone-svg-p source))))))
+
+(ert-deftest pilish-test-read-svg-screen-ignores-caller-syntax ()
+  "Direct and composed screens use XML separators without changing syntax."
+  (with-temp-buffer
+    (pilish-chat-mode)
+    (let ((caller-table (syntax-table)))
+      (dolist (changes '(nil ((?\s . "_") (?\t . "_") (?\r . "_") (?\n . "_"))
+                            ((?h . ".") (?s . ".") (?f . ".") (?i . "."))
+                            ((?x . " "))
+                            ((?< . ".") (?> . ".") (?/ . "."))))
+        (let ((table (copy-syntax-table caller-table)))
+          (dolist (change changes)
+            (modify-syntax-entry (car change) (cdr change) table))
+          (let ((before (copy-syntax-table table)))
+            (with-syntax-table table
+              (dolist (case '(("href='#r'" t)
+                              ("<use href = \"#r\"/>" t)
+                              ("<use\txlink:href\r=\n'#r'/>" t)
+                              ("<use hrefx='external'/>" t)
+                              ("<use href='external'/>" nil)
+                              ("<use href='external'/><use href='#r'/>" nil)
+                              ("<use href='#r'/><use xlink:href='external'/>" nil)))
+                (ert-info ((format "Direct href screen, syntax %S, source %s"
+                                   changes (car case)))
+                  (should (eq (cadr case)
+                              (not (null (pilish--svg-fragment-links-only-p
+                                          (car case))))))))
+              (dolist (case '(("<svg/>" t)
+                              ("<svg><rect/></svg> \t\r\n" t)
+                              ("<svg><use href='#r'/></svg>" t)
+                              ("<svg><text>hrefx='external' urlx(</text></svg>" t)
+                              ("<svg><script/></svg>" nil)
+                              ("<svg><foreignObject></foreignObject></svg>" nil)
+                              ("<svg><image/></svg>" nil)
+                              ("<svg><feImage/></svg>" nil)
+                              ("<svg><use href='external'/></svg>" nil)
+                              ("<svg><style>url\t(#r)</style></svg>" nil)
+                              ("<svgx/>" nil)))
+                (ert-info ((format "Standalone screen, syntax %S, source %s"
+                                   changes (car case)))
+                  (should (eq (cadr case)
+                              (not (null (pilish--standalone-svg-p (car case)))))))))
+            (should (equal before table))))
+        (should (eq caller-table (syntax-table)))))))
 
 (ert-deftest pilish-test-read-svg-refuses-truncated-result ()
   "A non-null truncation record keeps complete-looking SVG as text."
