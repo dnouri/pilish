@@ -1646,7 +1646,11 @@ which asks upfront before any buffers are touched."
           (delete-process proc))))
     (when (and pilish--input-buffer (buffer-live-p pilish--input-buffer))
       (let ((input-buf pilish--input-buffer))
-        (pilish--set-input-buffer nil) ; break cycle before kill
+        ;; Unlink both ways first.  Otherwise the input's own cleanup kills
+        ;; this buffer again from inside its `kill-buffer-hook', and the rest
+        ;; of this buffer's hook then runs in whatever buffer is current.
+        (pilish--set-input-buffer nil)
+        (with-current-buffer input-buf (pilish--set-chat-buffer nil))
         (kill-buffer input-buf)))
     (pilish--cleanup-visible-string-buffer)))
 
@@ -1661,7 +1665,9 @@ which asks upfront before any buffers are touched."
     (when (and pilish--chat-buffer (buffer-live-p pilish--chat-buffer))
       (let* ((chat-buf pilish--chat-buffer)
              (proc (buffer-local-value 'pilish--process chat-buf)))
-        (pilish--set-chat-buffer nil) ; break cycle before kill
+        ;; Unlink both ways first; see `pilish--cleanup-on-kill'.
+        (pilish--set-chat-buffer nil)
+        (with-current-buffer chat-buf (pilish--set-input-buffer nil))
         (when (and proc (process-live-p proc))
           (pilish--skip-process-kill-confirmation proc)
           (set-process-query-on-exit-flag proc nil))

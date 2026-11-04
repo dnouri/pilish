@@ -1817,6 +1817,73 @@ rear-advance overlay before assistant text continues after the tool block."
           (execute-kbd-macro "w")
           (should (equal (car kill-ring) (cdr case))))))))
 
+;;;; Session Teardown Tests
+
+(defun pilish-gui-test--tool-block-fingerprint (chat)
+  "Return CHAT's hot and cold tool block positions."
+  (with-current-buffer chat
+    (list :hot (sort (mapcar #'overlay-start
+                             (seq-filter
+                              (lambda (ov) (overlay-get ov 'pilish-tool-block))
+                              (overlays-in (point-min) (point-max))))
+                     #'<)
+          :cold (let (starts (pos (point-min)))
+                  (while (setq pos (text-property-not-all
+                                    pos (point-max) 'pilish-cold-tool-block nil))
+                    (push pos starts)
+                    (setq pos (or (next-single-property-change
+                                   pos 'pilish-cold-tool-block)
+                                  (point-max))))
+                  (nreverse starts)))))
+
+(ert-deftest pilish-gui-test-killing-session-keeps-other-chat-tool-blocks ()
+  "`C-x k' on one session's chat leaves another session's tool blocks intact.
+With `hidden' input display each session shows only its chat, so the
+other session's chat is the most recent buffer when one is killed."
+  (let ((pilish-input-window-display 'hidden))
+    (pilish-gui-test-with-fresh-session
+      (:backend fake :fake-scenario "tool-read")
+      (pilish-gui-test-send "read the fake file")
+      (let* ((chat-c (plist-get pilish-gui-test--session :chat-buffer))
+             (before (pilish-gui-test--tool-block-fingerprint chat-c))
+             (backend (pilish-gui-test--backend-spec 'fake "prompt-lifecycle"))
+             (pilish-executable (plist-get backend :executable))
+             (pilish-extra-args (plist-get backend :extra-args))
+             (default-directory "/tmp/")
+             (pilish-quit-without-confirmation t)
+             (others nil))
+        (should (or (plist-get before :hot) (plist-get before :cold)))
+        (pilish-gui-test--large-evidence
+         "kill-before" (list :chat (buffer-name chat-c) :tool-blocks before))
+        (unwind-protect
+            (progn
+              ;; Open two more sessions; each shows its own chat and input.
+              (dolist (name '("kill-b" "kill-a"))
+                (pilish name)
+                (let ((chat (get-buffer
+                             (format "*pilish-chat:/tmp/<%s>*" name))))
+                  (should (pilish-test-wait-until
+                           (lambda ()
+                             (and chat (process-live-p
+                                        (buffer-local-value 'pilish--process chat))))
+                           pilish-test-gui-timeout pilish-test-poll-interval))
+                  (push chat others)))
+              (let ((chat-a (car others)))
+                (should (get-buffer-window chat-a))
+                (select-window (get-buffer-window chat-a))
+                (execute-kbd-macro (kbd "C-x k RET"))
+                (should-not (buffer-live-p chat-a)))
+              (should (equal (pilish-gui-test--tool-block-fingerprint chat-c)
+                             before))
+              (switch-to-buffer chat-c)
+              (redisplay t)
+              (pilish-gui-test--large-evidence
+               "kill-after"
+               (list :chat (buffer-name chat-c)
+                     :tool-blocks (pilish-gui-test--tool-block-fingerprint
+                                   chat-c))))
+          (apply #'pilish-test--kill-live-buffers others))))))
+
 ;;;; Extension Command Tests
 
 (ert-deftest pilish-gui-test-extension-command-returns-to-idle ()
