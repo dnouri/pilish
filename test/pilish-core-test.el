@@ -1268,6 +1268,18 @@ Display is handled by the display handler, not by state updates."
     (should (equal (plist-get pilish--state :last-error)
                    "TypeError: undefined is not a function"))))
 
+(ert-deftest pilish-test-event-thinking-level-changed-updates-state ()
+  "thinking_level_changed stores Pi's level, also when Pilish did not ask."
+  (let ((pilish--status 'idle)
+        (pilish--state nil))
+    (pilish--update-state-from-event
+     '(:type "thinking_level_changed" :level "high"))
+    (should (equal (plist-get pilish--state :thinking-level) "high"))
+    (pilish--update-state-from-event
+     '(:type "thinking_level_changed" :level "off"))
+    (should (equal (plist-get pilish--state :thinking-level) "off"))
+    (should (eq pilish--status 'idle))))
+
 (ert-deftest pilish-test-event-agent-start-clears-error-state ()
   "agent_start event clears error and retry state."
   (let ((pilish--status 'idle)

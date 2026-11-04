@@ -136,6 +136,10 @@ Required now:
 - `tool_execution_update`
 - `tool_execution_end`
 - `extension_ui_request`
+- `session_info_changed` and `thinking_level_changed`, only from an
+  extension-like command that renames the session or changes the thinking
+  level (the `set_session_name`, `set_model` and `set_thinking_level`
+  commands do not emit them)
 
 The fake does not need `turn_start`, `turn_end`, retry, compaction, or other
 higher-level events until a test genuinely needs them.
@@ -447,6 +451,10 @@ acknowledges `abort` without releasing the editor waiter. Only a matching
 stdin still tears down the fake worker. Other dialog methods keep their existing
 timeout and abort behavior. Pilish Stop must send editor cancellation itself;
 `abort` alone does not prove that an editor caller resumed.
+
+`/test-session-metadata` renames the session to `Named by extension` and sets
+the thinking level to `high`, emitting `session_info_changed` then
+`thinking_level_changed` before `handled` acceptance.
 
 Likewise, `/test-message` emits its custom message before `handled` acceptance,
 while `/test-noop` emits no messages, lifecycle events, or session entries.

@@ -2800,6 +2800,25 @@ This ensures history loads correctly when callback runs in arbitrary context."
             (should (string-match-p "│" header))))
       (kill-buffer chat-buf))))
 
+(ert-deftest pilish-test-session-events-update-header-line ()
+  "Pi's session name and thinking level events repaint the header line."
+  (with-temp-buffer
+    (pilish-chat-mode)
+    (setq pilish--state (list :model '(:name "test-model") :thinking-level "off")
+          pilish--session-name nil)
+    (pilish--handle-display-event
+     '(:type "session_info_changed" :name "Named by extension"))
+    (pilish--handle-display-event
+     '(:type "thinking_level_changed" :level "high"))
+    (let ((header (pilish--header-line-string)))
+      (should (string-match-p "Named by extension" header))
+      (should (string-match-p "high" header)))
+    ;; An absent name means Pi cleared it.
+    (pilish--handle-display-event '(:type "session_info_changed"))
+    (should-not pilish--session-name)
+    (should-not (string-match-p "Named by extension"
+                                (pilish--header-line-string)))))
+
 (ert-deftest pilish-test-header-line-truncates-long-session-name ()
   "pilish--header-line-string truncates long session names."
   (let ((chat-buf (get-buffer-create "*pi-test-header-truncate*")))

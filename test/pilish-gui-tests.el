@@ -1900,6 +1900,31 @@ other session's chat is the most recent buffer when one is killed."
     (pilish-gui-test-send "/test-message")
     (should (pilish-gui-test-chat-contains "Test message from extension"))))
 
+(ert-deftest pilish-gui-test-extension-session-metadata-updates-header ()
+  "An extension's rename and thinking change show in the live header line."
+  (pilish-gui-test-with-fresh-session
+    (:backend fake :fake-scenario "extension-session-metadata")
+    (let* ((chat-win (pilish-gui-test-chat-window))
+           (header (lambda ()
+                     (with-selected-window chat-win
+                       (format-mode-line header-line-format)))))
+      (redisplay t)
+      (should-not (string-match-p "Named by extension" (funcall header)))
+      (should-not (string-match-p "high" (funcall header)))
+      (pilish-gui-test--large-evidence
+       "session-metadata-before" (list :chat-header (funcall header)))
+      (pilish-gui-test-send "/test-session-metadata" t)
+      (should (pilish-test-wait-until
+               (lambda ()
+                 (redisplay t)
+                 (let ((text (funcall header)))
+                   (and (string-match-p "Named by extension" text)
+                        (string-match-p "high" text))))
+               pilish-test-gui-timeout pilish-test-poll-interval))
+      (should (pilish-gui-test-wait-for-idle 2))
+      (pilish-gui-test--large-evidence
+       "session-metadata-after" (list :chat-header (funcall header))))))
+
 (ert-deftest pilish-gui-test-extension-confirm-response-displayed ()
   "Fake extension confirm response triggers the displayed follow-up message."
   (pilish-gui-test-with-fresh-session

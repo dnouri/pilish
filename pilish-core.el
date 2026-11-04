@@ -857,7 +857,8 @@ JSON null values, and other non-strings become nil."
 
 (defun pilish--update-state-from-event (event)
   "Update status and state based on EVENT.
-Handles agent lifecycle, message events, compaction, and error/retry events.
+Handles agent lifecycle, message events, compaction, error/retry events,
+and thinking level changes Pi reports for any cause.
 For agent_settled, return non-nil only when waiting work was released."
   (let ((type (plist-get event :type)))
     (pcase type
@@ -913,7 +914,14 @@ For agent_settled, return non-nil only when waiting work was released."
        (unless (eq (plist-get event :success) t)
          (plist-put pilish--state :last-error (plist-get event :finalError))))
       ("extension_error"
-       (plist-put pilish--state :last-error (plist-get event :error))))))
+       (plist-put pilish--state :last-error (plist-get event :error)))
+      ("thinking_level_changed"
+       ;; Also reports changes Pilish did not request: a model switch clamping
+       ;; the level, or an extension calling `pi.setThinkingLevel'.
+       (when (stringp (plist-get event :level))
+         (setq pilish--state
+               (plist-put pilish--state :thinking-level
+                          (plist-get event :level))))))))
 
 (defun pilish--ensure-active-tools ()
   "Ensure :active-tools hash table exists in state."
