@@ -209,7 +209,11 @@ follow-up and sends it when the current turn finishes.  Press
 steering message.  Pi delivers it after the current tool call and
 interrupts the remaining queued tools.  During compaction or while a
 run is settling, =C-c C-s= queues a local follow-up instead, sent
-when Pi is ready for another prompt.  Press =C-c C-k=
+when Pi is ready for another prompt.  To make =C-c C-c= steer while
+Pi is busy, like Enter in Pi's terminal UI, set
+=pilish-send-while-busy= to =steer=.  =M-RET=
+(=M-x pilish-queue-followup=), like Alt+Enter in Pi, always queues a
+follow-up while Pi is busy and sends at once when it is idle.  Press =C-c C-k=
 (=M-x pilish-abort=) to abort the current response or compaction.
 
 When Pi returns control, a quiet right-aligned receipt such as =Returned
@@ -683,6 +687,7 @@ The main buffers:
 |---------------------------+--------------+---------------------------------------------|
 | =C-c C-c=                 | input        | Send prompt, or queue follow-up if busy     |
 | =C-c C-s=                 | input        | Send steering message while Pi is busy      |
+| =M-RET=                   | input        | Send prompt, or queue follow-up if busy     |
 | =C-c C-k=                 | input, chat  | Abort current response or compaction        |
 | =C-c C-p=                 | input, chat  | Open the transient menu                     |
 | =C-c C-r=                 | input, chat  | Browse sessions                             |
@@ -1016,6 +1021,10 @@ extension status, and image details all follow it.
 Less common tuning knobs:
 
 #+begin_src emacs-lisp
+;; C-c C-c steers while Pi is busy, like Enter in Pi's terminal UI;
+;; M-RET still queues a follow-up:
+;; (setopt pilish-send-while-busy 'steer)
+
 ;; New input buffers use plain text instead of Markdown highlighting:
 ;; (setopt pilish-input-markdown-highlighting nil)
 

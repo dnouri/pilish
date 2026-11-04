@@ -85,6 +85,7 @@
 (declare-function pilish-next-input "pilish-input")
 (declare-function pilish-history-isearch-backward "pilish-input")
 (declare-function pilish-queue-steering "pilish-input")
+(declare-function pilish-queue-followup "pilish-input")
 (declare-function pilish-input-mode "pilish-input")
 
 ;; pilish-browse.el (session browser)
@@ -209,6 +210,17 @@ when needed."
   :type '(choice (const :tag "Always visible" always)
                  (const :tag "On demand (hide after send)" on-demand)
                  (const :tag "Hidden at launch (chat only; open on demand)" hidden))
+  :group 'pilish)
+
+(defcustom pilish-send-while-busy 'follow-up
+  "What `pilish-send' does with the input while Pi is working.
+`follow-up' (the default) queues it and sends it as the next prompt
+once Pi finishes.  `steer' sends it as steering, like Enter in Pi's
+terminal UI: Pi reads it after the current tool calls and before its
+next model call, as with `pilish-queue-steering'.
+`pilish-queue-steering' and `pilish-queue-followup' ignore this option."
+  :type '(choice (const :tag "Queue as follow-up" follow-up)
+                 (const :tag "Steer the current run" steer))
   :group 'pilish)
 
 (defcustom pilish-activity-phase-functions nil
@@ -1180,8 +1192,9 @@ removing the instructional header that would otherwise appear."
     (define-key map (kbd "<C-up>") #'pilish-previous-input)
     (define-key map (kbd "<C-down>") #'pilish-next-input)
     (define-key map (kbd "C-r") #'pilish-history-isearch-backward)
-    ;; Message queuing (steering only - follow-up handled by C-c C-c)
+    ;; Explicit steering and follow-up; C-c C-c follows `pilish-send-while-busy'.
     (define-key map (kbd "C-c C-s") #'pilish-queue-steering)
+    (define-key map (kbd "M-RET") #'pilish-queue-followup)
     map)
   "Keymap for `pilish-input-mode'.")
 
