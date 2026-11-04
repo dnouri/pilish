@@ -24,7 +24,7 @@
 
 (defun pilish-gui-test--table-display-strings (beg end)
   "Return ordered table overlay display strings between BEG and END."
-  (when-let ((buf (plist-get pilish-gui-test--session :chat-buffer)))
+  (when-let* ((buf (plist-get pilish-gui-test--session :chat-buffer)))
     (with-current-buffer buf
       (mapcar (lambda (ov) (overlay-get ov 'display))
               (sort (seq-filter
@@ -1115,8 +1115,11 @@ and sending with \\`C-c C-c' returns it to one line."
   "Test scroll position is preserved while fake tool output arrives."
   (pilish-gui-test-with-fresh-session
     (:backend fake :fake-scenario "tool-read")
+    ;; The helper provides three window heights of content.  Scroll one,
+    ;; not a fixed 20 lines that reaches the beginning in a short window.
     (pilish-gui-test-ensure-scrollable)
-    (pilish-gui-test-scroll-up 20)
+    (pilish-gui-test-scroll-up
+     (window-body-height (pilish-gui-test-chat-window)))
     (should-not (pilish-gui-test-at-end-p))
     (let ((line-before (pilish-gui-test-top-line-number)))
       (should (> line-before 1))
@@ -2822,7 +2825,7 @@ Return observations suitable for the graphical evidence file."
                      bytes (with-temp-buffer (insert-file-contents-literally file) (buffer-string)))
                (should (string-match-p "\"durationMs\":[[:space:]]*125000" bytes))
                ;; Keep the saved JSONL as evidence outside the disposable fake root.
-               (when-let ((directory (getenv "G1_CAPTURE")))
+               (when-let* ((directory (getenv "G1_CAPTURE")))
                  (copy-file file (expand-file-name "duration-session.jsonl" directory) t))
                (select-window (get-buffer-window chat))
                (pilish-gui-test--large-command (kbd "C-c C-n") 'pilish-new-session)
@@ -3805,7 +3808,7 @@ keep their recovery keys on screen too."
 
 (defun pilish-gui-test--large-evidence (name value)
   "Save test-owned VALUE under NAME when graphical evidence is requested."
-  (when-let ((directory (getenv "G1_CAPTURE")))
+  (when-let* ((directory (getenv "G1_CAPTURE")))
     (make-directory directory t)
     (with-temp-file (expand-file-name (concat name ".el") directory)
       (prin1 value (current-buffer)))
@@ -3946,7 +3949,7 @@ FAILURE permits an expected user error, whose native post hook may not run."
           (let ((q p))
             (while (< q end)
               (dolist (property '(line-prefix wrap-prefix))
-                (when-let ((prefix (get-text-property q property)))
+                (when-let* ((prefix (get-text-property q property)))
                   (when (stringp prefix)
                     (should-not (text-property-not-all 0 (length prefix) 'pilish-disclosure-hit nil prefix)))))
               (setq q (next-property-change q nil end)))))
