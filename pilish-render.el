@@ -2064,11 +2064,17 @@ Updates buffer-local state and renders display updates."
      (setq pilish--session-name
            (pilish--normalize-string-or-null (plist-get event :name)))
      (force-mode-line-update t))
-    (_ (run-hook-wrapped
-        'pilish-unhandled-event-functions
-        (lambda (function)
-          (pilish--call-process-hook function event)
-          nil))))))
+    (_ (let ((chat-buf (current-buffer))
+             (process pilish--process))
+         (run-hook-wrapped
+          'pilish-unhandled-event-functions
+          (lambda (function)
+            (if (and (buffer-live-p chat-buf)
+                     (eq process (buffer-local-value 'pilish--process chat-buf)))
+                (with-current-buffer chat-buf
+                  (pilish--call-process-hook function event)
+                  nil)
+              t))))))))
 
 
 ;;;; Tool Output
