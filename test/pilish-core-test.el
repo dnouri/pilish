@@ -1864,6 +1864,44 @@ redisplay cycle instead of triggering N separate redraws."
       (should (eq observed-buffer chat))
       (should (eq observed-state 'streaming)))))
 
+(ert-deftest pilish-test-process-hooks-unhandled-events-stop-when-chat-killed ()
+  (let ((chat (generate-new-buffer " *pilish-hook-chat*"))
+        (proc (start-process "pilish-hook-owner-killed" nil "cat"))
+        (pilish-quit-without-confirmation t)
+        later-called)
+    (unwind-protect
+        (progn
+          (with-current-buffer chat
+            (pilish-chat-mode)
+            (setq pilish--process proc))
+          (process-put proc 'pilish-chat-buffer chat)
+          (pilish--register-display-handler proc)
+          (let ((pilish-unhandled-event-functions
+                 (list (lambda (_event)
+                         (kill-buffer (current-buffer))
+                         nil)
+                       (lambda (_event) (setq later-called t)))))
+            (pilish--process-filter proc "{\"type\":\"custom_event\"}\n"))
+          (should-not (buffer-live-p chat))
+          (should-not later-called))
+      (when (buffer-live-p chat) (kill-buffer chat))
+      (when (process-live-p proc) (delete-process proc)))))
+
+(ert-deftest pilish-test-process-hooks-unhandled-events-stop-when-process-replaced ()
+  (pilish-test-with-rpc-session (chat _input proc _commands)
+    (let ((replacement (start-process "pilish-hook-replacement" nil "cat"))
+          later-called)
+      (unwind-protect
+          (let ((pilish-unhandled-event-functions
+                 (list (lambda (_event)
+                         (pilish--set-process replacement)
+                         nil)
+                       (lambda (_event) (setq later-called t)))))
+            (pilish-test--stdout proc '(:type "custom_event"))
+            (should (eq (buffer-local-value 'pilish--process chat) replacement))
+            (should-not later-called))
+        (when (process-live-p replacement) (delete-process replacement))))))
+
 (ert-deftest pilish-test-process-hooks-consumption-skips-display-state ()
   "A consumer owns skipped lifecycle effects and bypasses the fallback hook."
   (pilish-test-with-rpc-session (chat _input proc _commands)
