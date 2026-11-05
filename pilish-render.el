@@ -1753,6 +1753,16 @@ which asks upfront before any buffers are touched."
     ;; Reset so next assistant message shows its header
     (setq pilish--assistant-header-shown nil)))
 
+(defvar pilish-unhandled-event-functions nil
+  "Functions called with EVENT when its type has no display case.
+Runs only for the chat's current process, in its chat buffer, after the
+ordinary protocol-state update and stream flush.  Known display cases do
+not run this hook, even when those cases intentionally do nothing.  A type
+may stop reaching this hook when Pilish gains a display case for it.
+Return values are ignored; errors and quits are reported without preventing
+later functions.  Treat EVENT as read-only.
+Events consumed by `pilish-process-event-functions' never reach this hook.")
+
 (defun pilish--handle-display-event (event)
   "Handle EVENT for display purposes.
 Updates buffer-local state and renders display updates."
@@ -2053,7 +2063,18 @@ Updates buffer-local state and renders display updates."
      ;; `pi.setSessionName'.  An absent name means it was cleared.
      (setq pilish--session-name
            (pilish--normalize-string-or-null (plist-get event :name)))
-     (force-mode-line-update t)))))
+     (force-mode-line-update t))
+    (_ (let ((chat-buf (current-buffer))
+             (process pilish--process))
+         (run-hook-wrapped
+          'pilish-unhandled-event-functions
+          (lambda (function)
+            (if (and (buffer-live-p chat-buf)
+                     (eq process (buffer-local-value 'pilish--process chat-buf)))
+                (with-current-buffer chat-buf
+                  (pilish--call-process-hook function event)
+                  nil)
+              t))))))))
 
 
 ;;;; Tool Output
