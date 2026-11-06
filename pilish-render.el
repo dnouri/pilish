@@ -45,6 +45,7 @@
 (require 'pilish-ui)
 (require 'pilish-conversations)
 (require 'pilish-table)
+(require 'pilish-answer)
 (require 'cl-lib)
 (require 'ansi-color)
 (require 'image)
@@ -303,6 +304,8 @@ TRACK-REGION is non-nil, return a marker pair bounding the inserted turn."
   (let* ((chat-buffer (pilish--get-render-buffer))
          (start (with-current-buffer chat-buffer (point-max)))
          (previews (pilish--content-image-previews content)))
+    (with-current-buffer chat-buffer
+      (pilish--answer-turn-start))
     (pilish--append-to-chat
      (concat "\n" (pilish--make-separator "You" timestamp) "\n"
              (or text "") "\n"
@@ -355,6 +358,7 @@ full content vector, so an authoritative image transformation cannot be lost."
   "Display separator for new agent turn.
 Only shows the Assistant header once per prompt, even during retries.
 Note: status is set to `streaming' by the event handler."
+  (pilish--answer-turn-start)
   ;; Only show header if not already shown for this prompt.
   (unless pilish--assistant-header-shown
     (pilish--append-to-chat
@@ -1816,9 +1820,10 @@ Updates buffer-local state and renders display updates."
                  (equal (plist-get event :type) "agent_settled"))
         ;; Consume the clock before fallible presentation.  The receipt belongs
         ;; before idle hooks and follow-ups, either of which may start new work.
-        (let ((run-started-at pilish--run-started-at))
+        (let ((run-started-at pilish--run-started-at)
+              (aborted pilish--aborted))
           (pilish--reset-run-clock)
-          (when pilish--aborted
+          (when aborted
             (pilish--clear-followup-queue))
           (pilish--set-aborted nil)
           (when run-started-at
@@ -1827,6 +1832,9 @@ Updates buffer-local state and renders display updates."
               (error
                (message "Pi: Could not display return receipt: %s"
                         (error-message-string err)))))
+          ;; Land only when Pi returns control, after the receipt.  One run
+          ;; can span several low-level agent_end events.
+          (pilish--answer-turn-end aborted)
           (pilish--set-activity-phase "idle")
           (pilish--process-followup-queue)))
       (when (memq delta-kind '(text thinking))

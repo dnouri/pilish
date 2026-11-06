@@ -402,6 +402,19 @@ See =File and command actions= in Advanced for the exact rules and
 Use =n= and =p= to jump between user messages in the chat, and =f= to
 fork from the turn at point.
 
+With =pilish-jump-to-answer= non-nil, a turn that ends normally moves
+chat windows following the output to the start of the final assistant
+message, the answer after the last tool call, so a long answer is read
+from its beginning.  This happens when Pi returns control, after the
+return receipt.  Windows where you scrolled elsewhere stay, and an
+answer already visible together with the end of the buffer, receipt
+included, moves nothing.  Stopped turns, and turns followed at once by a queued
+follow-up, do not jump.  A window that is not shown when the turn ends,
+such as one in another tab, lands when it is shown again.  When the
+next turn starts, a landed window whose point you left in place follows
+the output again.  =M-x pilish-toggle-jump-to-answer= toggles the
+setting for the current session only.
+
 The chat header's summary line shows the Pi and Pilish versions plus
 skill and prompt-template counts.  Expand it to see context files,
 skills, prompt templates, and registered extension commands.
@@ -981,6 +994,9 @@ Here are some common non-default preferences:
 
 ;; Or fit the draft in every session, up to 30% of the window pair:
 ;; (setopt pilish-input-window-height 'fit)
+
+;; When Pi returns control, show its final answer from the start:
+(setopt pilish-jump-to-answer t)
 
 ;; Copy source Markdown from the chat buffer instead of only visible text:
 (setopt pilish-copy-raw-markdown t)
