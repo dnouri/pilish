@@ -2420,8 +2420,6 @@ Capture text/image ordering, completed thinking and both cold projections."
                       (footer)
                       (execute-kbd-macro (kbd "RET"))
                       (should (string-match-p "Line 20" (buffer-string)))
-                      ;; Thinking's three non-blank lines conceal two, not the
-                      ;; blank lines between them.
                       (goto-char (point-min))
                       (re-search-forward "^> Thinking: Plan the work… (2 more lines)$")
                       (beginning-of-line)
