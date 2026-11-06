@@ -1278,7 +1278,8 @@ execution cannot retain a temporary record on this setup's evaluator stack."
   "A streamed native link keeps priority over reply details across folding."
   (with-temp-buffer
     (pilish-chat-mode)
-    (let ((message (pilish-test--hover-message
+    (let ((pilish-thinking-fold-min-lines 1)
+          (message (pilish-test--hover-message
                     [(:type "text" :text "Earlier [anchor][target].\n")
                      (:type "thinking" :thinking "[target]: https://example.org/live")
                      (:type "text" :text "End of reply.")])))
@@ -4408,6 +4409,7 @@ Models may send \\n\\n before thinking content too."
 (ert-deftest pilish-test-hidden-thinking-falls-back-when-first-line-is-too-long ()
   "Collapsed thinking falls back to the generic hidden label for long first lines."
   (let ((pilish-thinking-display 'hidden)
+        (pilish-thinking-fold-min-lines 1)
         (long-line (make-string 72 ?x)))
     (with-temp-buffer
       (pilish-chat-mode)
@@ -4422,7 +4424,8 @@ Models may send \\n\\n before thinking content too."
 
 (ert-deftest pilish-test-hidden-thinking-falls-back-when-first-line-is-too-short ()
   "Collapsed thinking falls back when the first line is shorter than 3 chars."
-  (let ((pilish-thinking-display 'hidden))
+  (let ((pilish-thinking-display 'hidden)
+        (pilish-thinking-fold-min-lines 1))
     (with-temp-buffer
       (pilish-chat-mode)
       (pilish--display-agent-start)
@@ -4450,15 +4453,17 @@ Models may send \\n\\n before thinking content too."
         (should-not (string-match-p "Thinking: Crafting response style" text))))))
 
 (ert-deftest pilish-test-thinking-caret-and-tab-toggle-without-footer-controls ()
-  "Thinking keeps its caret and TAB toggle without footer buttons or rows."
+  "Thinking keeps its caret and TAB toggle without footer buttons or rows.
+Stubs count non-blank lines only."
   (dolist (case `(("\n\nConsider this\n\n\n\nCheck that\n\n" t
-                   "> Thinking: Consider this… (2 more lines)")
+                   "> Thinking: Consider this… (1 more line)")
                   ("\n\nConsider this\n\n\n\nCheck that\n\n" nil
-                   "> Thinking (3 lines)")
+                   "> Thinking (2 lines)")
                   ("One thought" t "> Thinking (1 line)")
                   (,(make-string 300 ?x) t "> Thinking (1 line)")))
     (pcase-let ((`(,raw ,preview ,stub) case))
-      (let ((pilish-thinking-hidden-preview preview))
+      (let ((pilish-thinking-hidden-preview preview)
+            (pilish-thinking-fold-min-lines 1))
         (with-temp-buffer
           (pilish-chat-mode)
           (setq pilish--thinking-display 'hidden)
@@ -4503,7 +4508,8 @@ Models may send \\n\\n before thinking content too."
 
 (ert-deftest pilish-test-live-visible-thinking-end-stamps-toggle-metadata ()
   "Completed live thinking in visible mode stays locally toggleable."
-  (let ((pilish-thinking-display 'visible))
+  (let ((pilish-thinking-display 'visible)
+        (pilish-thinking-fold-min-lines 1))
     (with-temp-buffer
       (pilish-chat-mode)
       (pilish--display-agent-start)
@@ -4526,7 +4532,8 @@ Models may send \\n\\n before thinking content too."
 
 (ert-deftest pilish-test-hidden-thinking-collapse-keeps-blank-line-separators ()
   "Collapsing completed thinking should keep stable blank-line separation."
-  (let ((pilish-thinking-display 'hidden))
+  (let ((pilish-thinking-display 'hidden)
+        (pilish-thinking-fold-min-lines 1))
     (with-temp-buffer
       (pilish-chat-mode)
       (pilish--display-agent-start)
@@ -4555,7 +4562,8 @@ Models may send \\n\\n before thinking content too."
 
 (ert-deftest pilish-test-toggle-thinking-display-during-streaming-defers-rebuild ()
   "Streaming toggles keep live thinking visible and apply on completion."
-  (let ((pilish-thinking-display 'visible))
+  (let ((pilish-thinking-display 'visible)
+        (pilish-thinking-fold-min-lines 1))
     (with-temp-buffer
       (pilish-chat-mode)
       (setq pilish--status 'streaming)
@@ -4769,7 +4777,8 @@ Models may send \\n\\n before thinking content too."
 (ert-deftest pilish-test-thinking-completion-keeps-lossless-raw-in-both-modes ()
   "Visible and hidden completion receive every raw byte, even discarded gaps."
   (dolist (display '(visible hidden))
-    (let ((pilish-thinking-display display))
+    (let ((pilish-thinking-display display)
+          (pilish-thinking-fold-min-lines 1))
       (with-temp-buffer
         (pilish-chat-mode)
         (pilish--handle-display-event '(:type "agent_start"))
@@ -4797,7 +4806,7 @@ Models may send \\n\\n before thinking content too."
             (should (equal (buffer-substring-no-properties start (plist-get metadata :end))
                            (if (eq display 'visible)
                                ">   é> \t\n> \n> 終\r"
-                             "> Thinking (3 lines)"))))
+                             "> Thinking (2 lines)"))))
           (should-not pilish--thinking-raw)
           (should-not pilish--thinking-stream)
           (should-not pilish--thinking-marker)
@@ -5314,7 +5323,8 @@ When PARTIAL-TEXT is supplied it must precede the outcome, never be erased."
 
 (ert-deftest pilish-test-history-hides-completed-thinking-when-display-hidden ()
   "Session replay collapses completed thinking when the buffer display is hidden."
-  (let ((pilish-thinking-display 'hidden))
+  (let ((pilish-thinking-display 'hidden)
+        (pilish-thinking-fold-min-lines 1))
     (with-temp-buffer
       (pilish-chat-mode)
       (pilish--display-history-messages
@@ -6785,7 +6795,8 @@ and DISPLAY controls how completed thinking is rendered."
 
 (ert-deftest pilish-test-tab-expands-completed-thinking-stub ()
   "TAB on a hidden completed-thinking stub expands that block."
-  (let ((pilish-thinking-display 'hidden))
+  (let ((pilish-thinking-display 'hidden)
+        (pilish-thinking-fold-min-lines 1))
     (with-temp-buffer
       (pilish-chat-mode)
       (pilish--display-session-history
@@ -6807,7 +6818,8 @@ and DISPLAY controls how completed thinking is rendered."
 
 (ert-deftest pilish-test-tab-collapses-expanded-completed-thinking-block ()
   "TAB inside an expanded completed-thinking block collapses it again."
-  (let ((pilish-thinking-display 'hidden))
+  (let ((pilish-thinking-display 'hidden)
+        (pilish-thinking-fold-min-lines 1))
     (with-temp-buffer
       (pilish-chat-mode)
       (pilish--display-session-history
@@ -6833,7 +6845,8 @@ and DISPLAY controls how completed thinking is rendered."
 
 (ert-deftest pilish-test-thinking-toggle-wins-before-tool-or-outline ()
   "TAB inside completed thinking toggles thinking without touching tools or outline."
-  (let ((pilish-thinking-display 'hidden))
+  (let ((pilish-thinking-display 'hidden)
+        (pilish-thinking-fold-min-lines 1))
     (with-temp-buffer
       (pilish-chat-mode)
       (pilish--display-session-history
@@ -6857,7 +6870,8 @@ and DISPLAY controls how completed thinking is rendered."
 
 (ert-deftest pilish-test-rerender-clears-temporary-thinking-expansion ()
   "A canonical-history rebuild resets manual thinking expansion."
-  (let ((pilish-thinking-display 'hidden))
+  (let ((pilish-thinking-display 'hidden)
+        (pilish-thinking-fold-min-lines 1))
     (with-temp-buffer
       (pilish-chat-mode)
       (pilish--display-session-history
@@ -6881,6 +6895,7 @@ and DISPLAY controls how completed thinking is rendered."
 (ert-deftest pilish-test-thinking-toggle-preserves-window-start-before-block ()
   "Thinking toggles keep a window anchored when it was scrolled before the block."
   (let ((pilish-thinking-display 'hidden)
+        (pilish-thinking-fold-min-lines 1)
         (buf (generate-new-buffer " *pi-thinking-toggle-scroll*")))
     (unwind-protect
         (progn
@@ -6901,6 +6916,121 @@ and DISPLAY controls how completed thinking is rendered."
                 (should (= (window-start win) start-before))))))
       (when (buffer-live-p buf)
         (kill-buffer buf)))))
+
+(defconst pilish-test--short-thinking-summaries
+  '(("**Reading first 80 lines**" . "> **Reading first 80 lines**")
+    ("**Checking includes**\n\nComparing both headers."
+     . "> **Checking includes**\n> \n> Comparing both headers."))
+  "Thinking below the default fold threshold, with its rendered quote.")
+
+(defun pilish-test--assert-short-thinking-unfoldable (quote)
+  "Assert the only completed thinking block is visible QUOTE without a fold.
+TAB and whole-chat hiding leave it unchanged; TAB falls through to the outline."
+  (let* ((start (text-property-not-all (point-min) (point-max)
+                                       'pilish-thinking-block nil))
+         (block (pilish--thinking-block-metadata-at-pos start))
+         (end (plist-get block :end))
+         (before (buffer-string))
+         outline-called)
+    (should (equal (buffer-substring-no-properties start end) quote))
+    (should (eq (plist-get block :display) 'visible))
+    (should-not (text-property-not-all start end 'pilish-disclosure-hit nil))
+    (should-not (string-match-p "> Thinking" before))
+    (goto-char start)
+    (cl-letf (((symbol-function 'outline-cycle)
+               (lambda (&rest _) (setq outline-called t))))
+      (should-not (pilish--toggle-thinking-block-at-point))
+      (pilish-toggle-tool-section))
+    (should outline-called)
+    (should (equal-including-properties before (buffer-string)))
+    (should-not (pilish--apply-thinking-display-to-completed-blocks 'hidden))
+    (should (equal-including-properties before (buffer-string)))))
+
+(ert-deftest pilish-test-short-live-thinking-stays-visible-without-fold ()
+  "Short completed live thinking has no fold control, even when hidden."
+  (dolist (display '(visible hidden))
+    (pcase-dolist (`(,thinking . ,quote) pilish-test--short-thinking-summaries)
+      (let ((pilish-thinking-display display))
+        (with-temp-buffer
+          (pilish-chat-mode)
+          (pilish--display-agent-start)
+          (pilish--display-thinking-start)
+          (pilish--display-thinking-delta thinking)
+          (pilish--display-thinking-end "")
+          (pilish-test--assert-short-thinking-unfoldable quote))))))
+
+(ert-deftest pilish-test-short-history-thinking-stays-visible-without-fold ()
+  "Replayed short thinking has no fold control, even when hidden."
+  (dolist (display '(visible hidden))
+    (pcase-dolist (`(,thinking . ,quote) pilish-test--short-thinking-summaries)
+      (let ((pilish-thinking-display display))
+        (with-temp-buffer
+          (pilish-chat-mode)
+          (pilish--display-session-history
+           (vector (list :role "assistant"
+                         :content (vector (list :type "thinking" :thinking thinking)
+                                          (list :type "text" :text "Answer."))
+                         :timestamp 1704067200000))
+           (current-buffer))
+          (pilish-test--assert-short-thinking-unfoldable quote))))))
+
+(ert-deftest pilish-test-thinking-at-fold-threshold-still-folds ()
+  "Thinking with the minimum number of non-blank lines collapses and toggles."
+  (let ((pilish-thinking-display 'hidden)
+        (thinking "**First step**\n\n**Second step**\n\n**Third step**"))
+    (with-temp-buffer
+      (pilish-chat-mode)
+      (pilish--display-agent-start)
+      (pilish--display-thinking-start)
+      (pilish--display-thinking-delta thinking)
+      (pilish--display-thinking-end "")
+      (let* ((stub "> Thinking: **First step**… (2 more lines)")
+             (start (text-property-not-all (point-min) (point-max)
+                                           'pilish-thinking-block nil))
+             (block (pilish--thinking-block-metadata-at-pos start)))
+        (should (equal (buffer-substring-no-properties start (plist-get block :end))
+                       stub))
+        (should (eq (plist-get block :display) 'hidden))
+        (should (get-text-property start 'pilish-disclosure-hit))
+        (goto-char start)
+        (pilish-toggle-tool-section)
+        (should (string-match-p "^> \\*\\*Third step\\*\\*$" (buffer-string)))
+        (should-not (string-match-p (regexp-quote stub) (buffer-string)))))))
+
+(ert-deftest pilish-test-long-single-paragraph-thinking-still-folds ()
+  "One long paragraph counts its width, so it folds while a short line does not."
+  (let ((pilish-thinking-display 'hidden))
+    (pcase-dolist (`(,thinking . ,foldable)
+                   `((,(make-string 10000 ?x) . t)
+                     (,(make-string 161 ?x) . t)
+                     (,(make-string 160 ?x) . nil)))
+      (with-temp-buffer
+        (pilish-chat-mode)
+        (pilish--display-agent-start)
+        (pilish--display-thinking-start)
+        (pilish--display-thinking-delta thinking)
+        (pilish--display-thinking-end "")
+        (let* ((start (text-property-not-all (point-min) (point-max)
+                                             'pilish-thinking-block nil))
+               (block (pilish--thinking-block-metadata-at-pos start)))
+          (should (eq (plist-get block :display) (if foldable 'hidden 'visible)))
+          (should (eq (and (get-text-property start 'pilish-disclosure-hit) t)
+                      foldable))
+          (when foldable
+            (should (equal (buffer-substring-no-properties
+                            start (plist-get block :end))
+                           "> Thinking (1 line)"))
+            (goto-char start)
+            (pilish-toggle-tool-section)
+            (should (string-search thinking (buffer-string)))))))))
+
+(ert-deftest pilish-test-thinking-details-count-non-blank-lines ()
+  "Thinking details and hidden stubs count non-blank lines only."
+  (should (equal (pilish--format-thinking-details nil "**A**\n\n**B**")
+                 "Thinking · 2 lines"))
+  (let ((pilish-thinking-hidden-preview nil))
+    (should (equal (pilish--thinking-hidden-stub "One\n\nTwo\n\nThree")
+                   "> Thinking (3 lines)"))))
 
 (ert-deftest pilish-test-hidden-thinking-end-keeps-tail-window-filled ()
   "Collapsing long live thinking keeps a tail-following window filled."
@@ -25563,7 +25693,8 @@ events where the header text hasn't changed."
   "Equal-text completion gains a caret without changing the streamed quote."
   (with-temp-buffer
     (pilish-chat-mode)
-    (let ((inhibit-read-only t))
+    (let ((inhibit-read-only t)
+          (pilish-thinking-fold-min-lines 1))
       (insert "> first\n> \n> last")
       (setq pilish--thinking-start-marker (copy-marker (point-min))
             pilish--thinking-marker (copy-marker (point-max) t))

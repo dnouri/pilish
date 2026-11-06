@@ -524,6 +524,29 @@ at most one empty paragraph separator while preserving indentation."
   "Return COUNT formatted as a singular or plural hidden-line label."
   (format "%d more line%s" count (if (= count 1) "" "s")))
 
+(defun pilish--thinking-content-line-count (normalized)
+  "Return the number of non-blank lines in NORMALIZED thinking."
+  (length (split-string normalized "\n" t "[ \t]*")))
+
+(defconst pilish--thinking-fold-line-width 80
+  "Columns that count as one line when deciding whether thinking folds.")
+
+(defun pilish--thinking-fold-line-count (normalized)
+  "Return the fold size of NORMALIZED thinking in nominal lines.
+Each non-blank line counts once per started
+`pilish--thinking-fold-line-width' columns, so a long paragraph counts
+as the rows it needs rather than as one line."
+  (let ((count 0))
+    (dolist (line (split-string normalized "\n" t "[ \t]*") count)
+      (setq count (+ count (max 1 (ceiling (string-width line)
+                                           (float pilish--thinking-fold-line-width))))))))
+
+(defun pilish--thinking-foldable-p (normalized)
+  "Return non-nil when completed NORMALIZED thinking can be collapsed.
+See `pilish-thinking-fold-min-lines'."
+  (>= (pilish--thinking-fold-line-count normalized)
+      pilish-thinking-fold-min-lines))
+
 (defun pilish--thinking-first-content-line (normalized)
   "Return the first non-empty trimmed line from NORMALIZED, or nil."
   (catch 'first
@@ -534,7 +557,7 @@ at most one empty paragraph separator while preserving indentation."
 
 (defun pilish--thinking-hidden-stub (normalized)
   "Return the collapsed completed-thinking stub for NORMALIZED."
-  (let* ((line-count (length (split-string normalized "\n" nil)))
+  (let* ((line-count (pilish--thinking-content-line-count normalized))
          (first-line (pilish--thinking-first-content-line normalized))
          (previewable (and pilish-thinking-hidden-preview
                            (> line-count 1)
@@ -572,7 +595,9 @@ OBJECT is a rendered string, or nil for the current buffer."
        rear-nonsticky t) object)
     (pilish--set-details start end details object)
     (pilish--put-disclosure start end (eq display 'visible)
-                           #'pilish--toggle-thinking-block-at-point object)))
+                           (and (pilish--thinking-foldable-p normalized)
+                                #'pilish--toggle-thinking-block-at-point)
+                           object)))
 
 (defun pilish--owned-span-probe-pos (pos property)
   "Return POS or its preceding character inside an owned PROPERTY span."
@@ -4257,7 +4282,7 @@ renders with the normal absent-path placeholder."
     (substring-no-properties
      (concat (pilish--details-title "Thinking" message)
              " · " (pilish--thinking-line-count-label
-                      (length (split-string normalized "\n" nil)))
+                      (pilish--thinking-content-line-count normalized))
              (unless (string-empty-p provenance) (concat "\n" provenance))))))
 
 (defun pilish--format-tool-duration-seconds (seconds &optional tenths)
@@ -6552,7 +6577,8 @@ coordinates from before the rewrites."
   (let (replacements)
     (save-excursion
       (dolist (block (nreverse (pilish--completed-thinking-blocks)))
-        (unless (eq (plist-get block :display) display)
+        (unless (or (eq (plist-get block :display) display)
+                    (not (pilish--thinking-foldable-p (plist-get block :normalized))))
           (when-let* ((rendered
                        (pilish--completed-thinking-rendered-from-normalized
                         (plist-get block :normalized)
@@ -6573,6 +6599,7 @@ Returns non-nil when point was inside a completed thinking block and the block
 was toggled successfully."
   (when-let* ((block (pilish--thinking-block-metadata-at-pos (point)))
               (normalized (plist-get block :normalized))
+              ((pilish--thinking-foldable-p normalized))
               (order (plist-get block :order))
               (display (plist-get block :display))
               (rendered (pilish--completed-thinking-rendered-from-normalized
@@ -10270,7 +10297,9 @@ BLOCK-ORDER identifies the logical completed-thinking block across rerenders.
 DETAILS is the owning message's literal report when known.
 Returns nil when NORMALIZED has no visible completed-thinking content."
   (unless (string-empty-p normalized)
-    (let ((display (or display (pilish--thinking-display-mode))))
+    (let ((display (if (pilish--thinking-foldable-p normalized)
+                       (or display (pilish--thinking-display-mode))
+                     'visible)))
       (pilish--propertize-completed-thinking
        (pcase display
          ('hidden (pilish--thinking-hidden-stub normalized))

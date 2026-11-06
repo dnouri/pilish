@@ -388,18 +388,31 @@ Allowed values are:
 - `hidden'   Collapse completed thinking to a short stub line.
 
 Live streaming thinking is always shown while the assistant is still working.
-Per-block TAB toggles are temporary local overrides and are cleared by buffer
-rebuilds, reloads, or whole-chat display-mode changes."
+Completed thinking shorter than `pilish-thinking-fold-min-lines' is always
+visible.  Per-block TAB toggles are temporary local overrides and are cleared
+by buffer rebuilds, reloads, or whole-chat display-mode changes."
   :type '(choice (const :tag "Visible" visible)
                  (const :tag "Hidden" hidden))
+  :group 'pilish)
+
+(defcustom pilish-thinking-fold-min-lines 3
+  "Minimum number of non-blank lines for completed thinking to fold.
+A line longer than 80 columns counts once per started 80 columns, so a
+long paragraph still folds.  Shorter completed thinking, such as the
+one-heading reasoning summaries some providers send, always stays
+expanded: it has no disclosure caret, `TAB' does not collapse it, and
+`hidden' display leaves it visible, because a stub would hide most of it
+while saving at most a few rows.  Set this to 1 to make all completed
+thinking foldable."
+  :type 'natnum
   :group 'pilish)
 
 (defcustom pilish-thinking-hidden-preview t
   "Whether hidden completed thinking should preview its first line.
 When non-nil, collapsed completed thinking shows the first non-empty trimmed
-line when the normalized thinking spans more than one line, is at least
-3 characters long, and shorter than 72 characters. Otherwise the hidden block
-falls back to a generic line-count label."
+line when the thinking has more than one non-blank line and that line is at
+least 3 characters long and shorter than 72 characters.  Otherwise the hidden
+block falls back to a generic line-count label."
   :type 'boolean
   :group 'pilish)
 
