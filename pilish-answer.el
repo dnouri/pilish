@@ -37,9 +37,7 @@
 ;; a window configuration.
 ;;
 ;; A landed window whose point the reader left in place follows the
-;; output again when the next turn starts.  `pilish--answer-windows'
-;; records each landing so that a window revived later at a landing
-;; position is still recognized as unmoved.
+;; output again when the next turn starts.
 
 ;;; Code:
 
@@ -77,8 +75,6 @@ The setting becomes buffer-local in the session's chat buffer."
       (user-error "Not in a Pilish session"))
     (with-current-buffer chat
       (setq-local pilish-jump-to-answer (not pilish-jump-to-answer))
-      ;; Landed windows keep their records, so they still follow the
-      ;; next turn; only a pending landing for hidden windows is dropped.
       (unless pilish-jump-to-answer
         (pilish--answer-forget-target))
       (message "Pilish: jump to answer %s"

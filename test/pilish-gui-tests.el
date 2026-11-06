@@ -1498,31 +1498,41 @@ buffer end so the next streamed turn still follows automatically."
 The answer follows a tool call and lands after its return receipt.
 An unmoved landed window follows the next run and lands on that run's
 answer.  Toggling the session off with its command leaves the next
-turn's window at the end."
+turn's window at the end.  The journey runs with and without
+`pilish-jump-to-end-on-submit'."
   (let ((pilish-jump-to-answer t))
-    (pilish-gui-test-with-fresh-session
-      (:backend fake :fake-scenario "tool-long-answer")
-      (dolist (turn '("first" "second"))
-        (pilish-gui-test-send (format "%s turn" turn))
-        (let ((window (pilish-gui-test-chat-window))
-              (start (pilish-gui-test--last-answer-start)))
-          (with-current-buffer (window-buffer window)
-            (should (text-property-any start (point-max) 'pilish-run-receipt t)))
-          (pilish-gui-test--large-evidence
-           (format "jump-to-answer-%s" turn)
-           (list :answer-start start
-                 :window-start (window-start window)
-                 :window-point (window-point window)
-                 :point-max (with-current-buffer (window-buffer window)
-                              (point-max))))
-          (should (= (window-start window) start))
-          (should (= (window-point window) start))
-          (should (pos-visible-in-window-p start window))))
-      (with-current-buffer (plist-get pilish-gui-test--session :input-buffer)
-        (call-interactively #'pilish-toggle-jump-to-answer))
-      (pilish-gui-test-send "third turn")
-      (should (pilish-gui-test-window-point-at-end-p))
-      (should (pilish-gui-test-at-end-p)))))
+    (dolist (pilish-jump-to-end-on-submit '(nil t))
+      (pilish-gui-test-with-fresh-session
+        (:backend fake :fake-scenario "tool-long-answer")
+        (let ((suffix (if pilish-jump-to-end-on-submit
+                          "-with-submit-jump"
+                        "")))
+          (dolist (turn '("first" "second"))
+            (pilish-gui-test-send (format "%s turn" turn))
+            (let ((window (pilish-gui-test-chat-window))
+                  (start (pilish-gui-test--last-answer-start)))
+              (with-current-buffer (window-buffer window)
+                (should (text-property-any start (point-max)
+                                           'pilish-run-receipt t))
+                (should (equal (assq window pilish--answer-windows)
+                               (cons window pilish--answer-target)))
+                (should (= (cdr (assq window pilish--answer-windows)) start)))
+              (pilish-gui-test--large-evidence
+               (format "jump-to-answer%s-%s" suffix turn)
+               (list :answer-start start
+                     :submit-jump pilish-jump-to-end-on-submit
+                     :window-start (window-start window)
+                     :window-point (window-point window)
+                     :point-max (with-current-buffer (window-buffer window)
+                                  (point-max))))
+              (should (= (window-start window) start))
+              (should (= (window-point window) start))
+              (should (pos-visible-in-window-p start window))))
+        (with-current-buffer (plist-get pilish-gui-test--session :input-buffer)
+          (call-interactively #'pilish-toggle-jump-to-answer))
+        (pilish-gui-test-send "third turn")
+        (should (pilish-gui-test-window-point-at-end-p))
+        (should (pilish-gui-test-at-end-p)))))))
 
 (ert-deftest pilish-gui-test-thinking-initial-whitespace-keeps-point ()
   (let ((buf (get-buffer-create "*pi-gui-thinking-initial-point*")))
