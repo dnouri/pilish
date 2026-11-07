@@ -5583,9 +5583,13 @@ reads it through the session link instead of the current buffer."
   (with-temp-buffer
     (pilish-chat-mode)
     (setq pilish--state '(:model (:name "claude-sonnet-4")))
-    (let ((header (pilish--header-line-string)))
-      ;; Should have local-map property
-      (should (get-text-property 0 'local-map header))
+    (let* ((header (pilish--header-line-string))
+           (map (get-text-property 0 'local-map header)))
+      (should map)
+      (dolist (area '(header-line mode-line))
+        (dolist (button '(mouse-1 mouse-2))
+          (should (eq (lookup-key map (vector area button))
+                      #'pilish-select-model))))
       ;; Should have mouse-face for highlight
       (should (get-text-property 0 'mouse-face header)))))
 
@@ -5603,10 +5607,10 @@ reads it through the session link instead of the current buffer."
       (should map)
       ;; Should have mouse-face for highlight
       (should (get-text-property pos 'mouse-face header))
-      (should (eq (lookup-key map [header-line mouse-1])
-                  #'pilish-cycle-thinking))
-      (should (eq (lookup-key map [header-line mouse-2])
-                  #'pilish-cycle-thinking)))))
+      (dolist (area '(header-line mode-line))
+        (dolist (button '(mouse-1 mouse-2))
+          (should (eq (lookup-key map (vector area button))
+                      #'pilish-cycle-thinking)))))))
 
 (ert-deftest pilish-test-header-format-context-returns-nil-when-no-window ()
   "Context format returns nil when context window is 0."
