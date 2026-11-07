@@ -1027,6 +1027,21 @@ Choose one of three input window display styles:
 ;; (setopt pilish-input-window-display 'hidden)
 #+end_src
 
+Every input window Pilish opens for a chat window comes from
+=pilish-split-input-window=, which calls
+=pilish-split-input-window-function=.  The default puts the input below
+the chat.  Window managers that arrange chat and input windows
+themselves can wrap or replace it; =fit= sizing applies only to an input
+window directly below its chat:
+
+#+begin_src emacs-lisp
+(add-function :around pilish-split-input-window-function
+              (lambda (split chat-window input-buffer)
+                (when-let* ((window (funcall split chat-window input-buffer)))
+                  (set-window-parameter window 'my-pilish-input t)
+                  window)))
+#+end_src
+
 The session header line sits at the top of the chat window by
 default.  Put it back above the input window, as in earlier Pilish
 versions, or remove it entirely — including the inactivity warning,
