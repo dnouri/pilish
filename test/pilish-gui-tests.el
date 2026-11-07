@@ -2972,6 +2972,17 @@ Return observations suitable for the graphical evidence file."
                                    (match-beginning 0))))
                    (should (eq (get-text-property warning-at 'face) 'pilish-retry-notice))
                    (should (eq (get-text-property error-at 'face) 'pilish-error-notice))))
+               ;; Raw saves retain the local copy even though Pi history does not.
+               (let ((save-file (make-temp-file "pilish-notices-" nil ".md")))
+                 (unwind-protect
+                     (progn
+                       (with-current-buffer chat
+                         (write-region nil nil save-file nil 'silent))
+                       (with-temp-buffer
+                         (insert-file-contents save-file)
+                         (should (string-search warning (buffer-string)))
+                         (should (string-search error-text (buffer-string)))))
+                   (delete-file save-file)))
                ;; Pi's history has no notices, so a reloaded chat omits them.
                (select-window (get-buffer-window chat))
                (execute-kbd-macro (kbd "M-x pilish-reload RET"))

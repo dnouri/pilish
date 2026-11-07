@@ -1327,8 +1327,9 @@ them.  To keep extension warnings and errors in the chat as well, set
 =pilish-notify-in-chat= to =t=.  Their text appears literally, without
 Markdown formatting.  One that arrives while Pi streams a reply or
 compacts appears after that output, before the run's return receipt.
-Pi does not save notifications, so reloading or resuming the session
-omits them.
+The notices are local buffer text, so visible copies and raw Markdown
+saves include them.  Pi does not save notifications, so reloading or
+resuming the session omits them.  Backend HTML export omits them too.
 
 A multiline editor prompt opens a separate prefilled buffer without
 changing your prompt draft or its major mode.  Press =C-c C-c= to submit
