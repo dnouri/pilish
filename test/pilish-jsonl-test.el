@@ -1510,6 +1510,16 @@ wrap the result in --…-- under ROOT (default: sessions-root)."
                    "/a:b/c" "/r/sessions"))
                  "/r/sessions/--a-b-c--")))
 
+(ert-deftest pilish-test-jsonl-session-directory ()
+  "PI_CODING_AGENT_SESSION_DIR replaces the munged default for local cwds."
+  (let ((process-environment '("PI_CODING_AGENT_SESSION_DIR=/tmp/flat/")))
+    (should (equal (pilish-jsonl-session-directory "/a/b") "/tmp/flat"))
+    (should (equal (pilish-jsonl-session-directory "/ssh:h:/a/b" "/ssh:h:/r")
+                   (pilish-jsonl-session-dir-for-cwd "/ssh:h:/a/b" "/ssh:h:/r"))))
+  (let ((process-environment '("PI_CODING_AGENT_SESSION_DIR=")))
+    (should (equal (pilish-jsonl-session-directory "/a/b" "/r")
+                   "/r/--a-b--"))))
+
 (ert-deftest pilish-test-jsonl-sessions-root ()
   "sessions-root expands the agent dir, always with a trailing slash.
 The default is ~/.pi/agent/sessions (mirroring pi's getAgentDir);
