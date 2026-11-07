@@ -361,6 +361,16 @@ For example:
                                             :value-type sexp)))
   :group 'pilish)
 
+(defcustom pilish-notify-in-chat nil
+  "Whether extension warnings and errors also stay in the chat.
+Extension `notify' requests always show in the echo area.  When non-nil,
+warning and error notifications are also appended to the chat as literal
+notices.  A notice that arrives while Pi streams or compacts waits until
+that output ends.  Notices are not part of Pi's saved history, so a chat
+rebuilt from it omits them."
+  :type 'boolean
+  :group 'pilish)
+
 (defcustom pilish-quit-without-confirmation nil
   "Whether quitting skips confirmation for a live process.
 When non-nil, closing a session never asks whether a running pi process
@@ -2023,6 +2033,9 @@ canonical history, so rebuilding now would erase that visible turn."
 (defvar-local pilish--extension-status nil
   "Alist of extension status messages for header-line display.
 Keys are extension identifiers (strings), values are status text.")
+
+(defvar-local pilish--held-chat-notices nil
+  "Chat notices waiting for streaming or compaction to end, newest first.")
 
 (defvar-local pilish--working-message nil
   "Transient extension working message for header-line display.")

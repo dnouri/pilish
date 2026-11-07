@@ -1209,6 +1209,8 @@ Extension cancellation is not a local stop; core events own status transitions."
        (plist-get result :summary)
        (pilish--ms-to-time (plist-get result :timestamp))))
      (t (pilish--display-compaction-failure (plist-get event :errorMessage))))
+    ;; Held notices belong before any follow-up released below.
+    (pilish--flush-chat-notices)
     (pilish--set-activity-phase
      (if (memq pilish--status '(sending streaming)) "thinking" "idle"))
     (when (and (eq pilish--status 'idle) (not (pilish--session-busy-p)))
@@ -1337,16 +1339,56 @@ Include optional STDERR in a text fence and optional DETAIL before it."
                          'face 'pilish-error-notice)
              "\n"))))
 
+(defun pilish--flush-chat-notices ()
+  "Append held chat notices unless streaming or compaction owns the chat end.
+Live output is written through markers that follow the end of the buffer,
+so a notice appended during a run would land inside that output."
+  (when (and pilish--held-chat-notices
+             (not (memq pilish--status '(streaming compacting))))
+    (let ((notices (reverse pilish--held-chat-notices)))
+      (setq pilish--held-chat-notices nil)
+      (dolist (notice notices)
+        (pilish--append-to-chat notice)))))
+
+(defun pilish--add-chat-notice (text face)
+  "Append TEXT in FACE to the chat once no live output owns its end.
+Hidden fence lines keep TEXT literal: its Markdown cannot style it or
+open a block that swallows later output.  The `pilish-chat-notice'
+property holds FACE on the text and `guard' on the fence lines, for
+`pilish--restore-tool-properties'."
+  (let ((fence (pilish--markdown-fence-delimiter text)))
+    (push (concat "\n"
+                  (propertize (concat fence "\n")
+                              'display "" 'pilish-chat-notice 'guard)
+                  (propertize text 'face face 'pilish-chat-notice face)
+                  (propertize (concat "\n" fence)
+                              'display "" 'pilish-chat-notice 'guard)
+                  "\n")
+          pilish--held-chat-notices))
+  (pilish--flush-chat-notices))
+
 (defun pilish--extension-ui-notify (event)
-  "Handle notify method from EVENT."
-  (let ((msg (plist-get event :message))
-        (notify-type (plist-get event :notifyType)))
-    (message "Pi: %s%s"
-             (pcase notify-type
-               ("warning" "⚠ ")
-               ("error" "✗ ")
-               (_ ""))
-             msg)))
+  "Handle notify method from EVENT.
+When `pilish-notify-in-chat' is non-nil, warnings and errors also stay
+in the chat."
+  (let* ((msg (plist-get event :message))
+         (notify-type (plist-get event :notifyType))
+         (prefix (pcase notify-type
+                   ("warning" "⚠ ")
+                   ("error" "✗ ")
+                   (_ ""))))
+    (message "Pi: %s%s" prefix msg)
+    (when (and pilish-notify-in-chat
+               (not (string-empty-p prefix)))
+      (pilish--add-chat-notice
+       (concat prefix
+               (string-trim-right
+                (pilish--escape-control-chars-for-display
+                 (ansi-color-filter-apply (pilish--render-safe-string msg))
+                 t)))
+       (if (equal notify-type "error")
+           'pilish-error-notice
+         'pilish-retry-notice)))))
 
 (defun pilish--complete-extension-ui-dialog (event proc read-response)
   "Attempt one response to supported-dialog EVENT on PROC.
@@ -1748,6 +1790,7 @@ which asks upfront before any buffers are touched."
           ;; so it must land before the exit banner rather than after it.
           (progn
             (pilish--flush-stream-deltas)
+            (pilish--flush-chat-notices)
             (unless (process-get process 'pilish-exit-error-rendered)
               (pilish--display-process-exit-error
                error-msg
@@ -2107,7 +2150,9 @@ Updates buffer-local state and renders display updates."
                 (with-current-buffer chat-buf
                   (pilish--call-process-hook function event)
                   nil)
-              t))))))))
+              t))))))
+    ;; Streaming or compaction may have released the end of the chat.
+    (pilish--flush-chat-notices)))
 
 
 ;;;; Tool Output
@@ -10208,9 +10253,10 @@ Display-only table decoration is applied after the content is stable."
 (defun pilish--restore-tool-properties (beg end)
   "Restore literal metadata after tree-sitter fontification in BEG..END.
 Strip Markdown hiding, faces and link buttons from literal argument text,
-saved assistant outcomes, child summaries and full-output paths, including
-cold text without overlays.
-Preserve image previews, footer alignment and the duration/outcome faces.
+saved assistant outcomes, chat notices, child summaries and full-output
+paths, including cold text without overlays.
+Preserve image previews, footer alignment and the duration, outcome and
+notice faces.
 Restore `font-lock-face' values for all
 overlapping tool headers, live or finalized."
   (let ((inhibit-read-only t)
@@ -10227,16 +10273,20 @@ overlapping tool headers, live or finalized."
                          (next-single-property-change pos 'pilish-tool-output-footer nil end)
                          (next-single-property-change pos 'pilish-tool-footer-align-width nil end)
                          (next-single-property-change pos 'pilish-tool-footer-break-width nil end)
-                         (next-single-property-change pos 'pilish-tool-duration nil end)))
+                         (next-single-property-change pos 'pilish-tool-duration nil end)
+                         (next-single-property-change pos 'pilish-chat-notice nil end)))
              (outcome (get-text-property pos 'pilish-assistant-outcome))
+             (notice (get-text-property pos 'pilish-chat-notice))
              (argument-p (get-text-property pos 'pilish-argument-literal)))
-        (when (or outcome argument-p (get-text-property pos 'pilish-nested-summary)
+        (when (or outcome notice argument-p (get-text-property pos 'pilish-nested-summary)
                   (get-text-property pos 'pilish-conversation-tree)
                   (eq (get-text-property pos 'pilish-tool-section) 'full-output))
           (when (fboundp 'md-ts--remove-link-button-properties)
             (md-ts--remove-link-button-properties pos limit))
           (remove-text-properties pos limit '(invisible nil display nil face nil))
           (when outcome (put-text-property pos limit 'face 'pilish-error-notice))
+          (cond ((eq notice 'guard) (put-text-property pos limit 'display ""))
+                (notice (put-text-property pos limit 'face notice)))
           (when (or (get-text-property pos 'pilish-argument-guard)
                     (get-text-property pos 'pilish-tool-diagnostic-guard)
                     (get-text-property pos 'pilish-conversation-guard))

@@ -8118,6 +8118,133 @@ since we don't display them locally. Let pi's message_start handle it."
         (should-not responses)
         (should-not commands)))))
 
+(defun pilish-test--notify (type text)
+  "Deliver an extension notify of TYPE with TEXT to the current chat."
+  (pilish--handle-display-event
+   (list :type "extension_ui_request" :id "notify"
+         :method "notify" :message text :notifyType type)))
+
+(ert-deftest pilish-test-notify-in-chat-keeps-warnings-and-errors ()
+  "With `pilish-notify-in-chat', warnings and errors also stay in the chat."
+  (let ((pilish-notify-in-chat t)
+        echoed)
+    (cl-letf (((symbol-function 'message)
+               (lambda (fmt &rest args) (push (apply #'format fmt args) echoed))))
+      (with-temp-buffer
+        (pilish-chat-mode)
+        (pilish--append-to-chat "Earlier output\n")
+        (pilish-test--notify "info" "Just so you know")
+        (pilish-test--notify "warning" "Disk almost full")
+        (pilish-test--notify "error" "\e[31mServer down\e[0m\n")
+        (should (equal (reverse echoed)
+                       '("Pi: Just so you know" "Pi: ⚠ Disk almost full"
+                         "Pi: ✗ \e[31mServer down\e[0m\n")))
+        (should-not (string-search "Just so you know" (buffer-string)))
+        (let ((warning (pilish-test--hover-pos "⚠ Disk almost full"))
+              (error (pilish-test--hover-pos "✗ Server down")))
+          (should (< warning error))
+          (should (eq (get-text-property warning 'face) 'pilish-retry-notice))
+          (should (eq (get-text-property error 'face) 'pilish-error-notice))
+          ;; The error's line ends right after its trimmed, escape-free text.
+          (should (string-search "✗ Server down\n" (buffer-substring-no-properties
+                                                   error (point-max)))))))))
+
+(ert-deftest pilish-test-notify-in-chat-waits-for-the-run-to-end ()
+  "A notice never lands inside streamed output and precedes the run receipt."
+  (let ((pilish-notify-in-chat t)
+        (now 100.0))
+    (cl-letf (((symbol-function 'current-time)
+               (lambda () (seconds-to-time now))))
+      (with-temp-buffer
+        (pilish-chat-mode)
+        (pilish--handle-display-event '(:type "agent_start"))
+        (pilish--handle-display-event
+         '(:type "message_start" :message (:role "assistant")))
+        (pilish-test--send-text-delta "First half ")
+        (pilish-test--notify "warning" "Quota low")
+        (should-not (string-search "Quota low" (buffer-string)))
+        (pilish-test--send-text-delta "second half.")
+        (pilish--handle-display-event
+         '(:type "message_end"
+           :message (:role "assistant"
+                     :content [(:type "text" :text "First half second half.")])))
+        (should-not (string-search "Quota low" (buffer-string)))
+        (setq now 105)
+        (pilish--handle-display-event '(:type "agent_end" :messages []))
+        (pilish--handle-display-event '(:type "agent_settled"))
+        (let ((reply (pilish-test--hover-pos "First half second half."))
+              (notice (pilish-test--hover-pos "⚠ Quota low"))
+              (receipt (pilish-test--hover-pos "Returned ")))
+          (should (< reply notice receipt))
+          (should (= 1 (pilish-test--count-matches "Quota low" (buffer-string)))))))))
+
+(ert-deftest pilish-test-notify-in-chat-waits-for-compaction ()
+  "A notice raised during compaction follows its result, before follow-ups."
+  (let ((pilish-notify-in-chat t)
+        followup-saw-notice)
+    (with-temp-buffer
+      (pilish-chat-mode)
+      (pilish--handle-display-event '(:type "compaction_start" :reason "manual"))
+      (pilish-test--notify "error" "Hook failed")
+      (should-not (string-search "Hook failed" (buffer-string)))
+      (cl-letf (((symbol-function 'pilish--process-followup-queue)
+                 (lambda ()
+                   (setq followup-saw-notice
+                         (if (string-search "Hook failed" (buffer-string))
+                             'yes
+                           'no)))))
+        (pilish--handle-display-event
+         '(:type "compaction_end" :reason "manual" :aborted :false
+           :result (:tokensBefore 1000 :summary "Short summary"))))
+      ;; A released follow-up would start new output after the notice.
+      (should (eq followup-saw-notice 'yes))
+      (should (< (pilish-test--hover-pos "Short summary")
+                 (pilish-test--hover-pos "✗ Hook failed"))))))
+
+(ert-deftest pilish-test-notify-in-chat-survives-process-exit ()
+  "A notice held for a run appears before the exit report when Pi dies."
+  (let ((pilish-notify-in-chat t))
+    (pilish-test-with-rpc-session (chat _input proc _commands)
+      (with-current-buffer chat
+        (pilish--handle-display-event '(:type "agent_start"))
+        (pilish-test--notify "error" "Held across exit")
+        (should-not (string-search "Held across exit" (buffer-string)))
+        (pilish--mark-process-exited proc '(:error "Gone" :exitCode 1))
+        (should (< (pilish-test--hover-pos "✗ Held across exit")
+                   (pilish-test--hover-pos "pi process exited")))))))
+
+(ert-deftest pilish-test-notify-in-chat-stays-literal ()
+  "Markdown in a notice is shown literally and cannot capture later output."
+  (let ((pilish-notify-in-chat t))
+    (with-temp-buffer
+      (pilish-chat-mode)
+      (pilish-test--notify "warning" "Run `make` *now*\n```\nunclosed")
+      (pilish--append-to-chat "\nAfter **bold** text\n")
+      (font-lock-ensure)
+      (let ((code (pilish-test--hover-pos "`make`"))
+            (fence (pilish-test--hover-pos "```\nunclosed"))
+            (bold (pilish-test--hover-pos "bold")))
+        (should (eq (get-text-property code 'face) 'pilish-retry-notice))
+        (should-not (invisible-p code))
+        (should-not (invisible-p (pilish-test--hover-pos "*now*")))
+        (should (eq (get-text-property fence 'face) 'pilish-retry-notice))
+        ;; Hidden guard fences close the notice, so later Markdown still renders.
+        (should (invisible-p (1- bold)))
+        (should-not (eq (get-text-property bold 'face) 'pilish-retry-notice))))))
+
+(ert-deftest pilish-test-session-reset-drops-held-chat-notices ()
+  "A notice held in one session never appears in the next one."
+  (let ((pilish-notify-in-chat t))
+    (with-temp-buffer
+      (pilish-chat-mode)
+      (pilish--handle-display-event '(:type "agent_start"))
+      (pilish-test--notify "error" "stale")
+      (pilish--reset-session-state)
+      ;; The next session starts idle, which would release held notices.
+      (setq pilish--status 'idle)
+      (pilish--flush-chat-notices)
+      (should-not (string-search "stale" (buffer-string))))))
+
 (ert-deftest pilish-test-extension-ui-confirm-yes ()
   "extension_ui_request confirm method uses yes-or-no-p and sends response."
   (let ((response-sent nil))
