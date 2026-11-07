@@ -1820,7 +1820,8 @@ which asks upfront before any buffers are touched."
   (when (and (stringp content)
              (not (string-empty-p content)))
     (let ((start (point-max)))
-      (pilish--append-to-chat (concat "\n" content "\n"))
+      (pilish--append-to-chat
+       (concat "\n" (propertize (concat content "\n") 'pilish-custom-message t)))
       (pilish--decorate-tables-unless-deferred start (point-max)))
     ;; Reset so next assistant message shows its header
     (setq pilish--assistant-header-shown nil)))
@@ -2156,6 +2157,14 @@ Updates buffer-local state and renders display updates."
 
 
 ;;;; Tool Output
+
+(defvar pilish-tool-block-finalize-functions nil
+  "Functions called with a tool block overlay after its face is final.
+They run in the chat buffer after a live block finishes, fails, or is
+forced to finish, and while saved history is rendered.  The overlay
+`face' is then `pilish-tool-block-success', `pilish-tool-block-error' or
+`pilish-tool-block'.  A callback does not mean that a tool just executed.
+Display add-ons that decorate tool blocks by their face refresh them here.")
 
 (defun pilish--truncate-to-visual-lines (content max-lines width)
   "Truncate CONTENT to fit within MAX-LINES visual lines at WIDTH.
@@ -4916,6 +4925,7 @@ until an authoritative tool execution/history event supplies it."
     (overlay-put ov 'face face)
     (pilish--tool-refresh-prefixes block)
     (pilish--tool-block-refresh-overlay block)
+    (run-hook-with-args 'pilish-tool-block-finalize-functions ov)
     (pilish--tool-block-unregister block)
     (when (eq pilish--pending-tool-overlay ov)
       (setq pilish--pending-tool-overlay nil)))
@@ -6472,7 +6482,7 @@ if none exists, render the result at point without a live overlay."
                                        (pilish--tool-block-history-p block))
           (pilish--redraw-compound-tool block)
           (pilish--tool-overlay-finalize
-           (if is-error 'pilish-tool-block-error 'pilish-tool-block) block))
+           (if is-error 'pilish-tool-block-error 'pilish-tool-block-success) block))
       (let ((presentation (pilish--tool-result-presentation
                            tool-name args content details is-error nil catalog)))
         (if block
@@ -6491,7 +6501,7 @@ if none exists, render the result at point without a live overlay."
                    (pilish--tool-block-refresh-overlay block)
                    ;; Error content and the overlay face suffice; no error badge.
                    (pilish--tool-overlay-finalize
-                    (if is-error 'pilish-tool-block-error 'pilish-tool-block) block)
+                    (if is-error 'pilish-tool-block-error 'pilish-tool-block-success) block)
                    (when (eobp) (insert "\n"))))))
           (pilish--with-scroll-preservation
             (save-excursion
@@ -7362,7 +7372,7 @@ Return :cold-body and transient absolute :deleted-spans for view mapping."
                        pilish-tool-output-footer
                        pilish-tool-footer-align-width pilish-tool-footer-break-width
                        pilish-argument-guard pilish-argument-value pilish-argument-literal
-                       line-prefix wrap-prefix))
+                       pilish-literal-text line-prefix wrap-prefix))
       (let ((position 0))
         (while (< position (length body))
           (let ((next (next-single-property-change position property body (length body)))
@@ -7389,7 +7399,8 @@ Return :cold-body and transient absolute :deleted-spans for view mapping."
                                                 font-lock-face pilish-tool-duration) cold))
           (setq position next))))
     (dolist (property '(pilish-argument-guard pilish-tool-diagnostic-guard
-                        pilish-conversation-guard pilish-argument-literal))
+                        pilish-conversation-guard pilish-argument-literal
+                        pilish-literal-text))
       (let ((position 0))
         (while (< position (length body))
           (let ((next (next-single-property-change position property body (length body))))
@@ -10253,8 +10264,8 @@ Display-only table decoration is applied after the content is stable."
 (defun pilish--restore-tool-properties (beg end)
   "Restore literal metadata after tree-sitter fontification in BEG..END.
 Strip Markdown hiding, faces and link buttons from literal argument text,
-saved assistant outcomes, chat notices, child summaries and full-output
-paths, including cold text without overlays.
+text marked `pilish-literal-text', saved assistant outcomes, chat notices,
+child summaries and full-output paths, including cold text without overlays.
 Preserve image previews, footer alignment and the duration, outcome and
 notice faces.
 Restore `font-lock-face' values for all
@@ -10274,10 +10285,12 @@ overlapping tool headers, live or finalized."
                          (next-single-property-change pos 'pilish-tool-footer-align-width nil end)
                          (next-single-property-change pos 'pilish-tool-footer-break-width nil end)
                          (next-single-property-change pos 'pilish-tool-duration nil end)
-                         (next-single-property-change pos 'pilish-chat-notice nil end)))
+                         (next-single-property-change pos 'pilish-chat-notice nil end)
+                         (next-single-property-change pos 'pilish-literal-text nil end)))
              (outcome (get-text-property pos 'pilish-assistant-outcome))
              (notice (get-text-property pos 'pilish-chat-notice))
-             (argument-p (get-text-property pos 'pilish-argument-literal)))
+             (argument-p (or (get-text-property pos 'pilish-argument-literal)
+                             (get-text-property pos 'pilish-literal-text))))
         (when (or outcome notice argument-p (get-text-property pos 'pilish-nested-summary)
                   (get-text-property pos 'pilish-conversation-tree)
                   (eq (get-text-property pos 'pilish-tool-section) 'full-output))

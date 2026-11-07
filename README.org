@@ -1636,6 +1636,31 @@ incoming plists as read-only and report handler errors and quits without
 blocking later handlers or ordinary cleanup.  They do not authorize
 attachment to another process or provide renderer rollback or
 process-start/reload replacement.
+** Display add-ons
+
+Packages that restyle chat buffers, for example with overlays added
+from =jit-lock-functions=, can rely on this structure instead of
+parsing the transcript:
+
+- Turn and summary headings (=You=, =Assistant=, =Compaction=,
+  =Branch Summary=, and the startup =Pilish= heading) carry the
+  =pilish-heading= text property on both setext lines.  Its value is the
+  label.
+- Completed thinking carries =pilish-thinking-block=.  Visible custom
+  messages from extensions carry =pilish-custom-message=.
+- Live tool blocks are overlays with =pilish-tool-block=,
+  =pilish-tool-name= and =pilish-header-end= (a marker at the start of
+  the output).  Their =face= is =pilish-tool-block= while running and
+  =pilish-tool-block-success= or =pilish-tool-block-error= when done.
+  The success face inherits the running face.  Completed blocks outside
+  the recent turns become plain text with =pilish-cold-tool-block=.
+- =pilish-tool-block-finalize-functions= runs with a block's overlay
+  after its final face is set, for example to refontify it.  These
+  callbacks run for live tool completion and saved-history rendering;
+  a callback does not mean that a tool has just executed.
+- Text a package inserts with the =pilish-literal-text= property keeps
+  its characters and its own =font-lock-face=: Markdown fontification
+  does not hide its markup or turn it into links.
 
 ** Installation details
 

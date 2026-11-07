@@ -468,6 +468,12 @@ still operate on the raw table source."
 Subtle blue-tinted background derived from the current theme."
   :group 'pilish)
 
+(defface pilish-tool-block-success
+  '((t :inherit pilish-tool-block))
+  "Face for tool blocks after successful completion.
+By default they look like running tool blocks."
+  :group 'pilish)
+
 (defface pilish-tool-block-error
   '((t :extend t))
   "Face for tool blocks after failed completion.
@@ -2730,7 +2736,9 @@ Returns a markdown setext heading: label line followed by === underline.
 Fontification is handled by `md-ts-mode'.
 
 Using setext headings enables outline/imenu navigation and keeps our
-turn markers as H1 while LLM ATX headings are leveled down to H2+."
+turn markers as H1 while LLM ATX headings are leveled down to H2+.
+Both lines carry the `pilish-heading' text property, whose value is
+LABEL, so display add-ons can find headings without parsing text."
   (let* ((timestamp-str (when timestamp
                           (pilish--format-message-timestamp timestamp)))
          (header-line (if timestamp-str
@@ -2739,7 +2747,7 @@ turn markers as H1 while LLM ATX headings are leveled down to H2+."
          ;; Underline must be at least 3 chars, and at least as long as header
          (underline-len (max 3 (length header-line)))
          (underline (make-string underline-len ?=)))
-    (concat header-line "\n" underline "\n")))
+    (propertize (concat header-line "\n" underline "\n") 'pilish-heading label)))
 
 ;;;; Formatting Utilities
 
