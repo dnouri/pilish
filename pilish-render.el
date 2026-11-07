@@ -2159,11 +2159,12 @@ Updates buffer-local state and renders display updates."
 ;;;; Tool Output
 
 (defvar pilish-tool-block-finalize-functions nil
-  "Functions called with a live tool block overlay once its face is final.
-They run in the chat buffer when the block finishes, fails, or is forced
-to finish, after its overlay `face' became `pilish-tool-block-success',
-`pilish-tool-block-error' or `pilish-tool-block'.  Display add-ons that
-decorate tool blocks by their face refresh them here.")
+  "Functions called with a tool block overlay after its face is final.
+They run in the chat buffer after a live block finishes, fails, or is
+forced to finish, and while saved history is rendered.  The overlay
+`face' is then `pilish-tool-block-success', `pilish-tool-block-error' or
+`pilish-tool-block'.  A callback does not mean that a tool just executed.
+Display add-ons that decorate tool blocks by their face refresh them here.")
 
 (defun pilish--truncate-to-visual-lines (content max-lines width)
   "Truncate CONTENT to fit within MAX-LINES visual lines at WIDTH.
@@ -7371,7 +7372,7 @@ Return :cold-body and transient absolute :deleted-spans for view mapping."
                        pilish-tool-output-footer
                        pilish-tool-footer-align-width pilish-tool-footer-break-width
                        pilish-argument-guard pilish-argument-value pilish-argument-literal
-                       line-prefix wrap-prefix))
+                       pilish-literal-text line-prefix wrap-prefix))
       (let ((position 0))
         (while (< position (length body))
           (let ((next (next-single-property-change position property body (length body)))
@@ -7398,7 +7399,8 @@ Return :cold-body and transient absolute :deleted-spans for view mapping."
                                                 font-lock-face pilish-tool-duration) cold))
           (setq position next))))
     (dolist (property '(pilish-argument-guard pilish-tool-diagnostic-guard
-                        pilish-conversation-guard pilish-argument-literal))
+                        pilish-conversation-guard pilish-argument-literal
+                        pilish-literal-text))
       (let ((position 0))
         (while (< position (length body))
           (let ((next (next-single-property-change position property body (length body))))

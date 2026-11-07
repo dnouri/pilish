@@ -6230,6 +6230,83 @@ links or replace its `font-lock-face'; neighbouring Markdown still renders."
     (should (text-property-not-all (match-beginning 0) (match-end 0)
                                    'invisible nil))))
 
+(ert-deftest pilish-test-literal-text-survives-tool-cooling ()
+  "Cooling keeps add-on literal text and faces, not arbitrary controls."
+  (with-temp-buffer
+    (pilish-chat-mode)
+    (let ((pilish-tool-block-finalize-functions
+           (list (lambda (overlay)
+                   (save-excursion
+                     (goto-char (overlay-get overlay 'pilish-header-end))
+                     (let ((inhibit-read-only t))
+                       (insert
+                        (propertize "Note **one** of [a](b)\n\n"
+                                    'pilish-literal-text t
+                                    'font-lock-face 'pilish-tool-command)))))))
+          (block (pilish--display-tool-start
+                  "bash" '(:command "true") "literal-cooling")))
+      (pilish--display-tool-end
+       "bash" '(:command "true")
+       (list (list :type "text" :text "fine")) nil nil block)
+      (pilish--append-to-chat
+       "\nNormal **rendered** [outside](https://example.org).\n")
+      (let ((overlay (pilish--tool-block-overlay block)))
+        (font-lock-ensure (point-min) (point-max))
+        (pilish--restore-tool-properties (point-min) (point-max))
+        (goto-char (point-min))
+        (search-forward "Note **one** of [a](b)")
+        (let ((start (match-beginning 0))
+              (end (match-end 0))
+              (inhibit-read-only t))
+          (should-not (text-property-not-all start end 'pilish-literal-text t))
+          (should-not (text-property-not-all start end 'face
+                                             'pilish-tool-command))
+          ;; Cooling must reject these rather than giving them a cold life.
+          (add-text-properties
+           start (1+ start)
+           (list 'display "UNOWNED"
+                 'keymap (make-sparse-keymap)
+                 'help-echo "UNOWNED"
+                 'button 'unowned))
+          (pilish--cool-completed-tool-blocks (list overlay))
+          (goto-char (point-min))
+          (search-forward "Note **one** of [a](b)")
+          (setq start (match-beginning 0)
+                end (match-end 0))
+          (dolist (property '(display keymap help-echo button))
+            (should-not (text-property-not-all start end property nil)))
+          (should (get-text-property start 'pilish-cold-tool-block))
+          (should-not (text-property-not-all start end 'pilish-literal-text t))
+          (should-not (text-property-not-all start end 'font-lock-face
+                                             'pilish-tool-command))
+          (font-lock-flush (point-min) (point-max))
+          (font-lock-ensure (point-min) (point-max))
+          (pilish--restore-tool-properties (point-min) (point-max))
+          (goto-char (point-min))
+          (search-forward "Note **one** of [a](b)")
+          (setq start (match-beginning 0)
+                end (match-end 0))
+          (should (equal (buffer-substring-no-properties start end)
+                         "Note **one** of [a](b)"))
+          (dolist (property '(invisible display button))
+            (should-not (text-property-not-all start end property nil)))
+          (should-not (text-property-not-all start end 'font-lock-face
+                                             'pilish-tool-command))
+          (should-not (text-property-not-all start end 'face
+                                             'pilish-tool-command))
+          (goto-char start)
+          (while (< (point) end)
+            (should-not (button-at (point)))
+            (forward-char 1))))
+      ;; The add-on promise does not disable neighboring Markdown.
+      (goto-char (point-min))
+      (search-forward "**rendered**")
+      (should (text-property-not-all (match-beginning 0) (match-end 0)
+                                     'invisible nil))
+      (goto-char (point-min))
+      (search-forward "outside")
+      (should (button-at (match-beginning 0))))))
+
 (ert-deftest pilish-test-session-history-rebuild-keeps-single-logo-decoration ()
   "A full history rebuild decorates the startup heading exactly once.
 Reloads and resumes reuse `pilish--format-startup-header', so the logo

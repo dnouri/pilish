@@ -5971,7 +5971,7 @@ The success face inherits the running face, so it looks the same by default."
                    'pilish-tool-block))))
 
 (ert-deftest pilish-test-tool-block-finalize-functions-see-final-face ()
-  "`pilish-tool-block-finalize-functions' get each block with its final face."
+  "Finalize hooks see final faces for live and saved-history blocks."
   (with-temp-buffer
     (pilish-chat-mode)
     (let* ((seen nil)
@@ -5987,9 +5987,16 @@ The success face inherits the running face, so it looks the same by default."
       (pilish--display-tool-start "bash" '(:command "false") "bad")
       (pilish--display-tool-end "bash" '(:command "false")
                                 '((:type "text" :text "broken")) nil t)
+      (pilish--display-history-messages
+       [(:role "assistant"
+         :content [(:type "toolCall" :id "saved" :name "read"
+                    :arguments (:path "saved.txt"))])
+        (:role "toolResult" :toolCallId "saved" :toolName "read"
+         :content [(:type "text" :text "saved output")] :isError :json-false)])
       (should (equal (reverse seen)
                      (list (list (current-buffer) "bash" 'pilish-tool-block-success)
-                           (list (current-buffer) "bash" 'pilish-tool-block-error)))))))
+                           (list (current-buffer) "bash" 'pilish-tool-block-error)
+                           (list (current-buffer) "read" 'pilish-tool-block-success)))))))
 
 (ert-deftest pilish-test-tool-end-error-face ()
   "tool_execution_end sets error face on failure."
