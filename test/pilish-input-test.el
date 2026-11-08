@@ -5613,7 +5613,6 @@ reads it through the session link instead of the current buffer."
                       #'pilish--cycle-thinking-at-event)))))))
 
 (ert-deftest pilish-test-header-click-targets-event-window ()
-  "Status clicks target B and restore A; keyboard commands stay on A."
   (let ((a (generate-new-buffer " *status-A*"))
         (b (generate-new-buffer " *status-B*"))
         (input (generate-new-buffer " *status-B-input*"))
@@ -5669,7 +5668,6 @@ reads it through the session link instead of the current buffer."
         (kill-buffer buffer)))))
 
 (ert-deftest pilish-test-header-click-does-not-fall-back-to-selected-session ()
-  "Unrelated or dead event windows never route to the selected session."
   (save-window-excursion
     (delete-other-windows)
     (let* ((wa (selected-window))
