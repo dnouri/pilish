@@ -402,6 +402,19 @@ See =File and command actions= in Advanced for the exact rules and
 Use =n= and =p= to jump between user messages in the chat, and =f= to
 fork from the turn at point.
 
+With =pilish-jump-to-answer= non-nil, a turn that ends normally moves
+chat windows following the output to the start of the final assistant
+message, the answer after the last tool call, so a long answer is read
+from its beginning.  This happens when Pi returns control, after the
+return receipt.  Windows where you scrolled elsewhere stay, and an
+answer already visible together with the end of the buffer, receipt
+included, moves nothing.  Stopped turns, and turns followed at once by a queued
+follow-up, do not jump.  A window that is not shown when the turn ends,
+such as one in another tab, lands when it is shown again.  When the
+next turn starts, a landed window whose point you left in place follows
+the output again.  =M-x pilish-toggle-jump-to-answer= toggles the
+setting for the current session only.
+
 The chat header's summary line shows the Pi and Pilish versions plus
 skill and prompt-template counts.  Expand it to see context files,
 skills, prompt templates, and registered extension commands.
@@ -982,6 +995,9 @@ Here are some common non-default preferences:
 ;; Or fit the draft in every session, up to 30% of the window pair:
 ;; (setopt pilish-input-window-height 'fit)
 
+;; When Pi returns control, show its final answer from the start:
+(setopt pilish-jump-to-answer t)
+
 ;; Copy source Markdown from the chat buffer instead of only visible text:
 (setopt pilish-copy-raw-markdown t)
 
@@ -1061,6 +1077,9 @@ Less common tuning knobs:
 
 ;; Hidden thinking uses generic line-count stubs instead of first-line previews:
 ;; (setopt pilish-thinking-hidden-preview nil)
+
+;; Let completed thinking of any length fold (default: 3 non-blank lines):
+;; (setopt pilish-thinking-fold-min-lines 1)
 
 ;; New browser buffers can start elsewhere; existing browsers keep
 ;; their toggled state (see the Sessions and context section):
@@ -1178,7 +1197,12 @@ that default persist across restarts, set
 =M-x customize-option=.
 
 Press =TAB= inside completed thinking or click its margin caret to
-expand or collapse it.  Live thinking cannot be collapsed.
+expand or collapse it.  Live thinking cannot be collapsed.  Completed
+thinking with fewer than =pilish-thinking-fold-min-lines= non-blank
+lines (default 3), such as a one-heading reasoning summary, always
+stays expanded and has no caret: a stub would hide most of it while
+saving at most a few rows.  Lines longer than 80 columns count once per
+80 columns, so one long paragraph still folds.
 
 ** Markdown tables
 
@@ -1297,6 +1321,15 @@ extensions.  Extension commands show up in slash completion and the
 transient menu, extension tools run normally, and extensions can use
 notifications, confirm/select/input prompts, multiline editor prompts,
 prefill the input buffer, and show status text.
+
+Notifications show in the echo area, where the next message replaces
+them.  To keep extension warnings and errors in the chat as well, set
+=pilish-notify-in-chat= to =t=.  Their text appears literally, without
+Markdown formatting.  One that arrives while Pi streams a reply or
+compacts appears after that output, before the run's return receipt.
+The notices are local buffer text, so visible copies and raw Markdown
+saves include them.  Pi does not save notifications, so reloading or
+resuming the session omits them.  Backend HTML export omits them too.
 
 A multiline editor prompt opens a separate prefilled buffer without
 changing your prompt draft or its major mode.  Press =C-c C-c= to submit
@@ -1572,6 +1605,62 @@ Track busy sessions for your own mode-line or tab display:
 (add-hook 'pilish-activity-phase-functions
           #'my-pi-track-busy-sessions)
 #+end_src
+
+** Process event and exit hooks
+
+Dependent packages can observe RPC traffic without advising the process
+filter.  =pilish-process-event-functions= receives =(PROCESS EVENT)= for
+non-response events, after core queue bookkeeping but before the display
+handler.  Return nil to observe; non-nil consumes the event and stops
+later handlers.  Consuming a lifecycle event also skips the display
+handler's session-state updates, so the consumer must own those effects.
+The filter's current buffer need not be the chat.  Removing the process
+from Emacs's process table (for example with =delete-process=) stops later
+handlers and the rest of that filter batch.  An OS exit alone does not
+discard final stdout, including an exit during event handling.
+
+=pilish-unhandled-event-functions= receives =EVENT= in the chat buffer
+only for the chat's current process and types with no display case, after
+the ordinary state update and stream flush.  Types stop reaching it when
+Pilish gains a display case for them.  Its return values are ignored.
+This can handle a new producer event without replacing Pilish's known
+event handling.
+
+=pilish-process-exit-functions= receives =(PROCESS RESPONSE)= after editor
+cleanup and pending RPC callbacks/tables, before the frontend exit handler
+and stderr release.  =RESPONSE= is the same error plist given to pending
+callbacks, including =:processExit=, =:exitCode= and optional =:stderr=.
+Return values are ignored.  Editor cleanup and pending callbacks report
+errors and quits so later cleanup can proceed.  All three hooks treat
+incoming plists as read-only and report handler errors and quits without
+blocking later handlers or ordinary cleanup.  They do not authorize
+attachment to another process or provide renderer rollback or
+process-start/reload replacement.
+** Display add-ons
+
+Packages that restyle chat buffers, for example with overlays added
+from =jit-lock-functions=, can rely on this structure instead of
+parsing the transcript:
+
+- Turn and summary headings (=You=, =Assistant=, =Compaction=,
+  =Branch Summary=, and the startup =Pilish= heading) carry the
+  =pilish-heading= text property on both setext lines.  Its value is the
+  label.
+- Completed thinking carries =pilish-thinking-block=.  Visible custom
+  messages from extensions carry =pilish-custom-message=.
+- Live tool blocks are overlays with =pilish-tool-block=,
+  =pilish-tool-name= and =pilish-header-end= (a marker at the start of
+  the output).  Their =face= is =pilish-tool-block= while running and
+  =pilish-tool-block-success= or =pilish-tool-block-error= when done.
+  The success face inherits the running face.  Completed blocks outside
+  the recent turns become plain text with =pilish-cold-tool-block=.
+- =pilish-tool-block-finalize-functions= runs with a block's overlay
+  after its final face is set, for example to refontify it.  These
+  callbacks run for live tool completion and saved-history rendering;
+  a callback does not mean that a tool has just executed.
+- Text a package inserts with the =pilish-literal-text= property keeps
+  its characters and its own =font-lock-face=: Markdown fontification
+  does not hide its markup or turn it into links.
 
 ** Installation details
 

@@ -104,6 +104,7 @@ class TextStreamPrompt:
     echo_user: bool = True
     steer_assistant_text: str | None = None
     handled_input: str | None = None
+    notifications: tuple[JsonDict, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -271,6 +272,14 @@ def load_scenario(path: Path, name: str) -> Scenario:
             echo_user=bool(prompt_data.get("echo_user", True)),
             steer_assistant_text=prompt_data.get("steer_assistant_text"),
             handled_input=prompt_data.get("handled_input"),
+            notifications=tuple(
+                {
+                    "after_chunk": int(item["after_chunk"]),
+                    "notifyType": item.get("notify_type", "info"),
+                    "message": item["message"],
+                }
+                for item in prompt_data.get("notifications", [])
+            ),
         )
     elif prompt_type == "extension_dialog":
         prompt = ExtensionDialogPrompt(
@@ -797,6 +806,17 @@ class FakePiHarness:
                 }
             )
             emitted_chunks.append(chunk)
+            for notification in behavior.notifications:
+                if notification["after_chunk"] == len(emitted_chunks):
+                    self._write_json(
+                        {
+                            "type": "extension_ui_request",
+                            "id": f"notify-{uuid.uuid4().hex[:8]}",
+                            "method": "notify",
+                            "message": notification["message"],
+                            "notifyType": notification["notifyType"],
+                        }
+                    )
             if not self._sleep_ms(behavior.delay_ms, abortable=True):
                 return False, self._build_aborted_assistant_message(
                     "".join(emitted_chunks)

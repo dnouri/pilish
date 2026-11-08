@@ -2027,6 +2027,33 @@ SPEC is (SESSION SCENARIO &rest EXTRA-ARGS)."
         (pilish-fake-pi-test--assert-assistant-roundtrip
          proc (list tool-assistant-message final-message))))))
 
+(ert-deftest pilish-fake-pi-test-text-stream-notifications-arrive-mid-stream ()
+  "Scenario notifications are fire-and-forget requests between text deltas."
+  (pilish-fake-pi-test-with-process (proc "notify-notices")
+    (should (eq t (plist-get (pilish-fake-pi-test--rpc
+                             proc '(:type "prompt" :message "check"))
+                            :success)))
+    (let* ((events (pilish-fake-pi-test--collect-until
+                    proc (lambda (event)
+                           (equal (plist-get event :type) "agent_settled"))))
+           (types (pilish-fake-pi-test--event-types events))
+           (notifies (pilish-fake-pi-test--events-of-type
+                      events "extension_ui_request")))
+      (should (equal (mapcar (lambda (event) (plist-get event :notifyType)) notifies)
+                     '("warning" "error")))
+      (dolist (notify notifies)
+        (should (equal (plist-get notify :method) "notify"))
+        (should (stringp (plist-get notify :id))))
+      ;; Each request follows its configured number of text deltas.
+      (let ((deltas 0) seen)
+        (dolist (event events)
+          (pcase (plist-get event :type)
+            ("message_update" (setq deltas (1+ deltas)))
+            ("extension_ui_request" (push deltas seen))))
+        (should (equal (nreverse seen) '(2 4))))
+      (should (< (cl-position "extension_ui_request" types :test #'equal :from-end t)
+                 (cl-position "message_end" types :test #'equal :from-end t))))))
+
 (ert-deftest pilish-fake-pi-test-tool-duration-wire-and-saved-roundtrip ()
   "Recorded timing is optional, top-level, and survives the subprocess store."
   (dolist (scenario '("tool-duration" "tool-read"))

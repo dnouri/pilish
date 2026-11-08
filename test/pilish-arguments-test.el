@@ -1637,7 +1637,7 @@ established file actions keep authority over real path references only."
       (let ((prefix (get-text-property (point) 'line-prefix))
             (value-face (get-text-property (point) 'font-lock-face)))
         (should (eq (get-text-property 0 'face prefix)
-                    (if is-error 'pilish-tool-block-error 'pilish-tool-block)))
+                    (if is-error 'pilish-tool-block-error 'pilish-tool-block-success)))
         (pilish--cool-completed-tool-blocks (pilish-arguments-test--all-tool-overlays))
         (pilish-arguments-test--goto-text "SECOND")
         (let ((cold-prefix (get-text-property (point) 'line-prefix)))

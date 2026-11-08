@@ -1278,7 +1278,8 @@ execution cannot retain a temporary record on this setup's evaluator stack."
   "A streamed native link keeps priority over reply details across folding."
   (with-temp-buffer
     (pilish-chat-mode)
-    (let ((message (pilish-test--hover-message
+    (let ((pilish-thinking-fold-min-lines 1)
+          (message (pilish-test--hover-message
                     [(:type "text" :text "Earlier [anchor][target].\n")
                      (:type "thinking" :thinking "[target]: https://example.org/live")
                      (:type "text" :text "End of reply.")])))
@@ -4408,6 +4409,7 @@ Models may send \\n\\n before thinking content too."
 (ert-deftest pilish-test-hidden-thinking-falls-back-when-first-line-is-too-long ()
   "Collapsed thinking falls back to the generic hidden label for long first lines."
   (let ((pilish-thinking-display 'hidden)
+        (pilish-thinking-fold-min-lines 1)
         (long-line (make-string 72 ?x)))
     (with-temp-buffer
       (pilish-chat-mode)
@@ -4422,7 +4424,8 @@ Models may send \\n\\n before thinking content too."
 
 (ert-deftest pilish-test-hidden-thinking-falls-back-when-first-line-is-too-short ()
   "Collapsed thinking falls back when the first line is shorter than 3 chars."
-  (let ((pilish-thinking-display 'hidden))
+  (let ((pilish-thinking-display 'hidden)
+        (pilish-thinking-fold-min-lines 1))
     (with-temp-buffer
       (pilish-chat-mode)
       (pilish--display-agent-start)
@@ -4450,15 +4453,17 @@ Models may send \\n\\n before thinking content too."
         (should-not (string-match-p "Thinking: Crafting response style" text))))))
 
 (ert-deftest pilish-test-thinking-caret-and-tab-toggle-without-footer-controls ()
-  "Thinking keeps its caret and TAB toggle without footer buttons or rows."
+  "Thinking keeps its caret and TAB toggle without footer buttons or rows.
+Stubs count non-blank lines only."
   (dolist (case `(("\n\nConsider this\n\n\n\nCheck that\n\n" t
-                   "> Thinking: Consider this… (2 more lines)")
+                   "> Thinking: Consider this… (1 more line)")
                   ("\n\nConsider this\n\n\n\nCheck that\n\n" nil
-                   "> Thinking (3 lines)")
+                   "> Thinking (2 lines)")
                   ("One thought" t "> Thinking (1 line)")
                   (,(make-string 300 ?x) t "> Thinking (1 line)")))
     (pcase-let ((`(,raw ,preview ,stub) case))
-      (let ((pilish-thinking-hidden-preview preview))
+      (let ((pilish-thinking-hidden-preview preview)
+            (pilish-thinking-fold-min-lines 1))
         (with-temp-buffer
           (pilish-chat-mode)
           (setq pilish--thinking-display 'hidden)
@@ -4503,7 +4508,8 @@ Models may send \\n\\n before thinking content too."
 
 (ert-deftest pilish-test-live-visible-thinking-end-stamps-toggle-metadata ()
   "Completed live thinking in visible mode stays locally toggleable."
-  (let ((pilish-thinking-display 'visible))
+  (let ((pilish-thinking-display 'visible)
+        (pilish-thinking-fold-min-lines 1))
     (with-temp-buffer
       (pilish-chat-mode)
       (pilish--display-agent-start)
@@ -4526,7 +4532,8 @@ Models may send \\n\\n before thinking content too."
 
 (ert-deftest pilish-test-hidden-thinking-collapse-keeps-blank-line-separators ()
   "Collapsing completed thinking should keep stable blank-line separation."
-  (let ((pilish-thinking-display 'hidden))
+  (let ((pilish-thinking-display 'hidden)
+        (pilish-thinking-fold-min-lines 1))
     (with-temp-buffer
       (pilish-chat-mode)
       (pilish--display-agent-start)
@@ -4555,7 +4562,8 @@ Models may send \\n\\n before thinking content too."
 
 (ert-deftest pilish-test-toggle-thinking-display-during-streaming-defers-rebuild ()
   "Streaming toggles keep live thinking visible and apply on completion."
-  (let ((pilish-thinking-display 'visible))
+  (let ((pilish-thinking-display 'visible)
+        (pilish-thinking-fold-min-lines 1))
     (with-temp-buffer
       (pilish-chat-mode)
       (setq pilish--status 'streaming)
@@ -4769,7 +4777,8 @@ Models may send \\n\\n before thinking content too."
 (ert-deftest pilish-test-thinking-completion-keeps-lossless-raw-in-both-modes ()
   "Visible and hidden completion receive every raw byte, even discarded gaps."
   (dolist (display '(visible hidden))
-    (let ((pilish-thinking-display display))
+    (let ((pilish-thinking-display display)
+          (pilish-thinking-fold-min-lines 1))
       (with-temp-buffer
         (pilish-chat-mode)
         (pilish--handle-display-event '(:type "agent_start"))
@@ -4797,7 +4806,7 @@ Models may send \\n\\n before thinking content too."
             (should (equal (buffer-substring-no-properties start (plist-get metadata :end))
                            (if (eq display 'visible)
                                ">   é> \t\n> \n> 終\r"
-                             "> Thinking (3 lines)"))))
+                             "> Thinking (2 lines)"))))
           (should-not pilish--thinking-raw)
           (should-not pilish--thinking-stream)
           (should-not pilish--thinking-marker)
@@ -5314,7 +5323,8 @@ When PARTIAL-TEXT is supplied it must precede the outcome, never be erased."
 
 (ert-deftest pilish-test-history-hides-completed-thinking-when-display-hidden ()
   "Session replay collapses completed thinking when the buffer display is hidden."
-  (let ((pilish-thinking-display 'hidden))
+  (let ((pilish-thinking-display 'hidden)
+        (pilish-thinking-fold-min-lines 1))
     (with-temp-buffer
       (pilish-chat-mode)
       (pilish--display-history-messages
@@ -6152,6 +6162,151 @@ When PARTIAL-TEXT is supplied it must precede the outcome, never be erased."
       (should (< first-pos custom-pos))
       (should (< custom-pos second-pos)))))
 
+(ert-deftest pilish-test-history-marks-headings-and-custom-messages ()
+  "Rendered history carries semantic properties display add-ons can follow.
+Heading lines carry `pilish-heading' with their label; the text of a custom
+message carries `pilish-custom-message', but its separating newline does not."
+  (with-temp-buffer
+    (pilish-chat-mode)
+    (pilish--display-session-history
+     [(:role "user" :content [(:type "text" :text "Question?")]
+       :timestamp 1704067200000)
+      (:role "assistant" :content [(:type "text" :text "Answer.")]
+       :timestamp 1704067201000)
+      (:role "custom" :display t :content "Extension note"
+       :timestamp 1704067201500)
+      (:role "compactionSummary" :summary "Summary text" :tokensBefore 1000
+       :timestamp 1704067202000)]
+     (current-buffer))
+    (let (headings)
+      (save-excursion
+        (goto-char (point-min))
+        (let (match)
+          (while (setq match (text-property-search-forward 'pilish-heading nil nil))
+            (let ((label (prop-match-value match))
+                  (text (buffer-substring-no-properties
+                         (prop-match-beginning match) (prop-match-end match))))
+              (should (string-prefix-p label text))
+              (should (string-match-p "\n=\\{3,\\}\n\\'" text))
+              (push label headings)))))
+      ;; The startup banner heading comes first.
+      (should (equal (nreverse headings)
+                     '("Pilish" "You" "Assistant" "Compaction"))))
+    (goto-char (point-min))
+    (search-forward "Extension note")
+    (should (get-text-property (match-beginning 0) 'pilish-custom-message))
+    (should (get-text-property (1- (match-end 0)) 'pilish-custom-message))
+    (should-not (get-text-property (1- (match-beginning 0)) 'pilish-custom-message))
+    (goto-char (point-min))
+    (search-forward "Answer.")
+    (should-not (get-text-property (match-beginning 0) 'pilish-custom-message))
+    (should-not (get-text-property (match-beginning 0) 'pilish-heading))))
+
+(ert-deftest pilish-test-literal-text-survives-markdown-fontification ()
+  "Text marked `pilish-literal-text' keeps its characters and own faces.
+Markdown fontification of the chat must not hide its markup, turn it into
+links or replace its `font-lock-face'; neighbouring Markdown still renders."
+  (with-temp-buffer
+    (pilish-chat-mode)
+    (let ((inhibit-read-only t))
+      (insert "Assistant **bold**\n\n")
+      (insert (propertize "Pick **one** of [a](b) or __two__\n"
+                          'pilish-literal-text t
+                          'font-lock-face 'pilish-tool-command)))
+    (font-lock-ensure (point-min) (point-max))
+    (pilish--restore-tool-properties (point-min) (point-max))
+    (goto-char (point-min))
+    (search-forward "Pick")
+    (let ((start (match-beginning 0))
+          (end (line-end-position)))
+      (should (equal (buffer-substring-no-properties start end)
+                     "Pick **one** of [a](b) or __two__"))
+      (should-not (text-property-not-all start end 'invisible nil))
+      (should-not (text-property-not-all start end 'display nil))
+      (should-not (text-property-not-all start end 'face 'pilish-tool-command))
+      (should (get-text-property start 'rear-nonsticky)))
+    (goto-char (point-min))
+    (search-forward "**bold**")
+    (should (text-property-not-all (match-beginning 0) (match-end 0)
+                                   'invisible nil))))
+
+(ert-deftest pilish-test-literal-text-survives-tool-cooling ()
+  "Cooling keeps add-on literal text and faces, not arbitrary controls."
+  (with-temp-buffer
+    (pilish-chat-mode)
+    (let ((pilish-tool-block-finalize-functions
+           (list (lambda (overlay)
+                   (save-excursion
+                     (goto-char (overlay-get overlay 'pilish-header-end))
+                     (let ((inhibit-read-only t))
+                       (insert
+                        (propertize "Note **one** of [a](b)\n\n"
+                                    'pilish-literal-text t
+                                    'font-lock-face 'pilish-tool-command)))))))
+          (block (pilish--display-tool-start
+                  "bash" '(:command "true") "literal-cooling")))
+      (pilish--display-tool-end
+       "bash" '(:command "true")
+       (list (list :type "text" :text "fine")) nil nil block)
+      (pilish--append-to-chat
+       "\nNormal **rendered** [outside](https://example.org).\n")
+      (let ((overlay (pilish--tool-block-overlay block)))
+        (font-lock-ensure (point-min) (point-max))
+        (pilish--restore-tool-properties (point-min) (point-max))
+        (goto-char (point-min))
+        (search-forward "Note **one** of [a](b)")
+        (let ((start (match-beginning 0))
+              (end (match-end 0))
+              (inhibit-read-only t))
+          (should-not (text-property-not-all start end 'pilish-literal-text t))
+          (should-not (text-property-not-all start end 'face
+                                             'pilish-tool-command))
+          ;; Cooling must reject these rather than giving them a cold life.
+          (add-text-properties
+           start (1+ start)
+           (list 'display "UNOWNED"
+                 'keymap (make-sparse-keymap)
+                 'help-echo "UNOWNED"
+                 'button 'unowned))
+          (pilish--cool-completed-tool-blocks (list overlay))
+          (goto-char (point-min))
+          (search-forward "Note **one** of [a](b)")
+          (setq start (match-beginning 0)
+                end (match-end 0))
+          (dolist (property '(display keymap help-echo button))
+            (should-not (text-property-not-all start end property nil)))
+          (should (get-text-property start 'pilish-cold-tool-block))
+          (should-not (text-property-not-all start end 'pilish-literal-text t))
+          (should-not (text-property-not-all start end 'font-lock-face
+                                             'pilish-tool-command))
+          (font-lock-flush (point-min) (point-max))
+          (font-lock-ensure (point-min) (point-max))
+          (pilish--restore-tool-properties (point-min) (point-max))
+          (goto-char (point-min))
+          (search-forward "Note **one** of [a](b)")
+          (setq start (match-beginning 0)
+                end (match-end 0))
+          (should (equal (buffer-substring-no-properties start end)
+                         "Note **one** of [a](b)"))
+          (dolist (property '(invisible display button))
+            (should-not (text-property-not-all start end property nil)))
+          (should-not (text-property-not-all start end 'font-lock-face
+                                             'pilish-tool-command))
+          (should-not (text-property-not-all start end 'face
+                                             'pilish-tool-command))
+          (goto-char start)
+          (while (< (point) end)
+            (should-not (button-at (point)))
+            (forward-char 1))))
+      ;; The add-on promise does not disable neighboring Markdown.
+      (goto-char (point-min))
+      (search-forward "**rendered**")
+      (should (text-property-not-all (match-beginning 0) (match-end 0)
+                                     'invisible nil))
+      (goto-char (point-min))
+      (search-forward "outside")
+      (should (button-at (match-beginning 0))))))
+
 (ert-deftest pilish-test-session-history-rebuild-keeps-single-logo-decoration ()
   "A full history rebuild decorates the startup heading exactly once.
 Reloads and resumes reuse `pilish--format-startup-header', so the logo
@@ -6785,7 +6940,8 @@ and DISPLAY controls how completed thinking is rendered."
 
 (ert-deftest pilish-test-tab-expands-completed-thinking-stub ()
   "TAB on a hidden completed-thinking stub expands that block."
-  (let ((pilish-thinking-display 'hidden))
+  (let ((pilish-thinking-display 'hidden)
+        (pilish-thinking-fold-min-lines 1))
     (with-temp-buffer
       (pilish-chat-mode)
       (pilish--display-session-history
@@ -6807,7 +6963,8 @@ and DISPLAY controls how completed thinking is rendered."
 
 (ert-deftest pilish-test-tab-collapses-expanded-completed-thinking-block ()
   "TAB inside an expanded completed-thinking block collapses it again."
-  (let ((pilish-thinking-display 'hidden))
+  (let ((pilish-thinking-display 'hidden)
+        (pilish-thinking-fold-min-lines 1))
     (with-temp-buffer
       (pilish-chat-mode)
       (pilish--display-session-history
@@ -6833,7 +6990,8 @@ and DISPLAY controls how completed thinking is rendered."
 
 (ert-deftest pilish-test-thinking-toggle-wins-before-tool-or-outline ()
   "TAB inside completed thinking toggles thinking without touching tools or outline."
-  (let ((pilish-thinking-display 'hidden))
+  (let ((pilish-thinking-display 'hidden)
+        (pilish-thinking-fold-min-lines 1))
     (with-temp-buffer
       (pilish-chat-mode)
       (pilish--display-session-history
@@ -6857,7 +7015,8 @@ and DISPLAY controls how completed thinking is rendered."
 
 (ert-deftest pilish-test-rerender-clears-temporary-thinking-expansion ()
   "A canonical-history rebuild resets manual thinking expansion."
-  (let ((pilish-thinking-display 'hidden))
+  (let ((pilish-thinking-display 'hidden)
+        (pilish-thinking-fold-min-lines 1))
     (with-temp-buffer
       (pilish-chat-mode)
       (pilish--display-session-history
@@ -6881,6 +7040,7 @@ and DISPLAY controls how completed thinking is rendered."
 (ert-deftest pilish-test-thinking-toggle-preserves-window-start-before-block ()
   "Thinking toggles keep a window anchored when it was scrolled before the block."
   (let ((pilish-thinking-display 'hidden)
+        (pilish-thinking-fold-min-lines 1)
         (buf (generate-new-buffer " *pi-thinking-toggle-scroll*")))
     (unwind-protect
         (progn
@@ -6901,6 +7061,121 @@ and DISPLAY controls how completed thinking is rendered."
                 (should (= (window-start win) start-before))))))
       (when (buffer-live-p buf)
         (kill-buffer buf)))))
+
+(defconst pilish-test--short-thinking-summaries
+  '(("**Reading first 80 lines**" . "> **Reading first 80 lines**")
+    ("**Checking includes**\n\nComparing both headers."
+     . "> **Checking includes**\n> \n> Comparing both headers."))
+  "Thinking below the default fold threshold, with its rendered quote.")
+
+(defun pilish-test--assert-short-thinking-unfoldable (quote)
+  "Assert the only completed thinking block is visible QUOTE without a fold.
+TAB and whole-chat hiding leave it unchanged; TAB falls through to the outline."
+  (let* ((start (text-property-not-all (point-min) (point-max)
+                                       'pilish-thinking-block nil))
+         (block (pilish--thinking-block-metadata-at-pos start))
+         (end (plist-get block :end))
+         (before (buffer-string))
+         outline-called)
+    (should (equal (buffer-substring-no-properties start end) quote))
+    (should (eq (plist-get block :display) 'visible))
+    (should-not (text-property-not-all start end 'pilish-disclosure-hit nil))
+    (should-not (string-match-p "> Thinking" before))
+    (goto-char start)
+    (cl-letf (((symbol-function 'outline-cycle)
+               (lambda (&rest _) (setq outline-called t))))
+      (should-not (pilish--toggle-thinking-block-at-point))
+      (pilish-toggle-tool-section))
+    (should outline-called)
+    (should (equal-including-properties before (buffer-string)))
+    (should-not (pilish--apply-thinking-display-to-completed-blocks 'hidden))
+    (should (equal-including-properties before (buffer-string)))))
+
+(ert-deftest pilish-test-short-live-thinking-stays-visible-without-fold ()
+  "Short completed live thinking has no fold control, even when hidden."
+  (dolist (display '(visible hidden))
+    (pcase-dolist (`(,thinking . ,quote) pilish-test--short-thinking-summaries)
+      (let ((pilish-thinking-display display))
+        (with-temp-buffer
+          (pilish-chat-mode)
+          (pilish--display-agent-start)
+          (pilish--display-thinking-start)
+          (pilish--display-thinking-delta thinking)
+          (pilish--display-thinking-end "")
+          (pilish-test--assert-short-thinking-unfoldable quote))))))
+
+(ert-deftest pilish-test-short-history-thinking-stays-visible-without-fold ()
+  "Replayed short thinking has no fold control, even when hidden."
+  (dolist (display '(visible hidden))
+    (pcase-dolist (`(,thinking . ,quote) pilish-test--short-thinking-summaries)
+      (let ((pilish-thinking-display display))
+        (with-temp-buffer
+          (pilish-chat-mode)
+          (pilish--display-session-history
+           (vector (list :role "assistant"
+                         :content (vector (list :type "thinking" :thinking thinking)
+                                          (list :type "text" :text "Answer."))
+                         :timestamp 1704067200000))
+           (current-buffer))
+          (pilish-test--assert-short-thinking-unfoldable quote))))))
+
+(ert-deftest pilish-test-thinking-at-fold-threshold-still-folds ()
+  "Thinking with the minimum number of non-blank lines collapses and toggles."
+  (let ((pilish-thinking-display 'hidden)
+        (thinking "**First step**\n\n**Second step**\n\n**Third step**"))
+    (with-temp-buffer
+      (pilish-chat-mode)
+      (pilish--display-agent-start)
+      (pilish--display-thinking-start)
+      (pilish--display-thinking-delta thinking)
+      (pilish--display-thinking-end "")
+      (let* ((stub "> Thinking: **First step**… (2 more lines)")
+             (start (text-property-not-all (point-min) (point-max)
+                                           'pilish-thinking-block nil))
+             (block (pilish--thinking-block-metadata-at-pos start)))
+        (should (equal (buffer-substring-no-properties start (plist-get block :end))
+                       stub))
+        (should (eq (plist-get block :display) 'hidden))
+        (should (get-text-property start 'pilish-disclosure-hit))
+        (goto-char start)
+        (pilish-toggle-tool-section)
+        (should (string-match-p "^> \\*\\*Third step\\*\\*$" (buffer-string)))
+        (should-not (string-match-p (regexp-quote stub) (buffer-string)))))))
+
+(ert-deftest pilish-test-long-single-paragraph-thinking-still-folds ()
+  "One long paragraph counts its width, so it folds while a short line does not."
+  (let ((pilish-thinking-display 'hidden))
+    (pcase-dolist (`(,thinking . ,foldable)
+                   `((,(make-string 10000 ?x) . t)
+                     (,(make-string 161 ?x) . t)
+                     (,(make-string 160 ?x) . nil)))
+      (with-temp-buffer
+        (pilish-chat-mode)
+        (pilish--display-agent-start)
+        (pilish--display-thinking-start)
+        (pilish--display-thinking-delta thinking)
+        (pilish--display-thinking-end "")
+        (let* ((start (text-property-not-all (point-min) (point-max)
+                                             'pilish-thinking-block nil))
+               (block (pilish--thinking-block-metadata-at-pos start)))
+          (should (eq (plist-get block :display) (if foldable 'hidden 'visible)))
+          (should (eq (and (get-text-property start 'pilish-disclosure-hit) t)
+                      foldable))
+          (when foldable
+            (should (equal (buffer-substring-no-properties
+                            start (plist-get block :end))
+                           "> Thinking (1 line)"))
+            (goto-char start)
+            (pilish-toggle-tool-section)
+            (should (string-search thinking (buffer-string)))))))))
+
+(ert-deftest pilish-test-thinking-details-count-non-blank-lines ()
+  "Thinking details and hidden stubs count non-blank lines only."
+  (should (equal (pilish--format-thinking-details nil "**A**\n\n**B**")
+                 "Thinking · 2 lines"))
+  (let ((pilish-thinking-hidden-preview nil))
+    (should (equal (pilish--thinking-hidden-stub "One\n\nTwo\n\nThree")
+                   "> Thinking (3 lines)"))))
 
 (ert-deftest pilish-test-hidden-thinking-end-keeps-tail-window-filled ()
   "Collapsing long live thinking keeps a tail-following window filled."
@@ -7987,6 +8262,133 @@ since we don't display them locally. Let pi's message_start handle it."
             (should (equal (buffer-string) before))))
         (should-not responses)
         (should-not commands)))))
+
+(defun pilish-test--notify (type text)
+  "Deliver an extension notify of TYPE with TEXT to the current chat."
+  (pilish--handle-display-event
+   (list :type "extension_ui_request" :id "notify"
+         :method "notify" :message text :notifyType type)))
+
+(ert-deftest pilish-test-notify-in-chat-keeps-warnings-and-errors ()
+  "With `pilish-notify-in-chat', warnings and errors also stay in the chat."
+  (let ((pilish-notify-in-chat t)
+        echoed)
+    (cl-letf (((symbol-function 'message)
+               (lambda (fmt &rest args) (push (apply #'format fmt args) echoed))))
+      (with-temp-buffer
+        (pilish-chat-mode)
+        (pilish--append-to-chat "Earlier output\n")
+        (pilish-test--notify "info" "Just so you know")
+        (pilish-test--notify "warning" "Disk almost full")
+        (pilish-test--notify "error" "\e[31mServer down\e[0m\n")
+        (should (equal (reverse echoed)
+                       '("Pi: Just so you know" "Pi: ⚠ Disk almost full"
+                         "Pi: ✗ \e[31mServer down\e[0m\n")))
+        (should-not (string-search "Just so you know" (buffer-string)))
+        (let ((warning (pilish-test--hover-pos "⚠ Disk almost full"))
+              (error (pilish-test--hover-pos "✗ Server down")))
+          (should (< warning error))
+          (should (eq (get-text-property warning 'face) 'pilish-retry-notice))
+          (should (eq (get-text-property error 'face) 'pilish-error-notice))
+          ;; The error's line ends right after its trimmed, escape-free text.
+          (should (string-search "✗ Server down\n" (buffer-substring-no-properties
+                                                   error (point-max)))))))))
+
+(ert-deftest pilish-test-notify-in-chat-waits-for-the-run-to-end ()
+  "A notice never lands inside streamed output and precedes the run receipt."
+  (let ((pilish-notify-in-chat t)
+        (now 100.0))
+    (cl-letf (((symbol-function 'current-time)
+               (lambda () (seconds-to-time now))))
+      (with-temp-buffer
+        (pilish-chat-mode)
+        (pilish--handle-display-event '(:type "agent_start"))
+        (pilish--handle-display-event
+         '(:type "message_start" :message (:role "assistant")))
+        (pilish-test--send-text-delta "First half ")
+        (pilish-test--notify "warning" "Quota low")
+        (should-not (string-search "Quota low" (buffer-string)))
+        (pilish-test--send-text-delta "second half.")
+        (pilish--handle-display-event
+         '(:type "message_end"
+           :message (:role "assistant"
+                     :content [(:type "text" :text "First half second half.")])))
+        (should-not (string-search "Quota low" (buffer-string)))
+        (setq now 105)
+        (pilish--handle-display-event '(:type "agent_end" :messages []))
+        (pilish--handle-display-event '(:type "agent_settled"))
+        (let ((reply (pilish-test--hover-pos "First half second half."))
+              (notice (pilish-test--hover-pos "⚠ Quota low"))
+              (receipt (pilish-test--hover-pos "Returned ")))
+          (should (< reply notice receipt))
+          (should (= 1 (pilish-test--count-matches "Quota low" (buffer-string)))))))))
+
+(ert-deftest pilish-test-notify-in-chat-waits-for-compaction ()
+  "A notice raised during compaction follows its result, before follow-ups."
+  (let ((pilish-notify-in-chat t)
+        followup-saw-notice)
+    (with-temp-buffer
+      (pilish-chat-mode)
+      (pilish--handle-display-event '(:type "compaction_start" :reason "manual"))
+      (pilish-test--notify "error" "Hook failed")
+      (should-not (string-search "Hook failed" (buffer-string)))
+      (cl-letf (((symbol-function 'pilish--process-followup-queue)
+                 (lambda ()
+                   (setq followup-saw-notice
+                         (if (string-search "Hook failed" (buffer-string))
+                             'yes
+                           'no)))))
+        (pilish--handle-display-event
+         '(:type "compaction_end" :reason "manual" :aborted :false
+           :result (:tokensBefore 1000 :summary "Short summary"))))
+      ;; A released follow-up would start new output after the notice.
+      (should (eq followup-saw-notice 'yes))
+      (should (< (pilish-test--hover-pos "Short summary")
+                 (pilish-test--hover-pos "✗ Hook failed"))))))
+
+(ert-deftest pilish-test-notify-in-chat-survives-process-exit ()
+  "A notice held for a run appears before the exit report when Pi dies."
+  (let ((pilish-notify-in-chat t))
+    (pilish-test-with-rpc-session (chat _input proc _commands)
+      (with-current-buffer chat
+        (pilish--handle-display-event '(:type "agent_start"))
+        (pilish-test--notify "error" "Held across exit")
+        (should-not (string-search "Held across exit" (buffer-string)))
+        (pilish--mark-process-exited proc '(:error "Gone" :exitCode 1))
+        (should (< (pilish-test--hover-pos "✗ Held across exit")
+                   (pilish-test--hover-pos "pi process exited")))))))
+
+(ert-deftest pilish-test-notify-in-chat-stays-literal ()
+  "Markdown in a notice is shown literally and cannot capture later output."
+  (let ((pilish-notify-in-chat t))
+    (with-temp-buffer
+      (pilish-chat-mode)
+      (pilish-test--notify "warning" "Run `make` *now*\n```\nunclosed")
+      (pilish--append-to-chat "\nAfter **bold** text\n")
+      (font-lock-ensure)
+      (let ((code (pilish-test--hover-pos "`make`"))
+            (fence (pilish-test--hover-pos "```\nunclosed"))
+            (bold (pilish-test--hover-pos "bold")))
+        (should (eq (get-text-property code 'face) 'pilish-retry-notice))
+        (should-not (invisible-p code))
+        (should-not (invisible-p (pilish-test--hover-pos "*now*")))
+        (should (eq (get-text-property fence 'face) 'pilish-retry-notice))
+        ;; Hidden guard fences close the notice, so later Markdown still renders.
+        (should (invisible-p (1- bold)))
+        (should-not (eq (get-text-property bold 'face) 'pilish-retry-notice))))))
+
+(ert-deftest pilish-test-session-reset-drops-held-chat-notices ()
+  "A notice held in one session never appears in the next one."
+  (let ((pilish-notify-in-chat t))
+    (with-temp-buffer
+      (pilish-chat-mode)
+      (pilish--handle-display-event '(:type "agent_start"))
+      (pilish-test--notify "error" "stale")
+      (pilish--reset-session-state)
+      ;; The next session starts idle, which would release held notices.
+      (setq pilish--status 'idle)
+      (pilish--flush-chat-notices)
+      (should-not (string-search "stale" (buffer-string))))))
 
 (ert-deftest pilish-test-extension-ui-confirm-yes ()
   "extension_ui_request confirm method uses yes-or-no-p and sends response."
@@ -21186,7 +21588,7 @@ Regression test: single lines should respect byte limit even with no newlines."
     ;; Should have output, success face, no [error]
     (should (string-match-p "success output" (buffer-string)))
     (let ((ov (car (overlays-at (point-min)))))
-      (should (eq (overlay-get ov 'face) 'pilish-tool-block)))
+      (should (eq (overlay-get ov 'face) 'pilish-tool-block-success)))
     (should-not (string-match-p "\\[error\\]" (buffer-string)))))
 
 (ert-deftest pilish-test-tool-output-survives-message-render ()
@@ -23434,7 +23836,7 @@ Multiple deltas should replace the preview instead of appending forever."
       (should (= 0 (hash-table-count pilish--live-tool-blocks)))
       (should-not pilish--pending-tool-overlay)
       (should (= 1 (length (pilish-test--all-tool-overlays))))
-      (should (eq 'pilish-tool-block
+      (should (eq 'pilish-tool-block-success
                   (overlay-get preview 'face)))
       (should (equal '("final content")
                      (pilish-test--tool-content-lines-from-stream
@@ -25563,7 +25965,8 @@ events where the header text hasn't changed."
   "Equal-text completion gains a caret without changing the streamed quote."
   (with-temp-buffer
     (pilish-chat-mode)
-    (let ((inhibit-read-only t))
+    (let ((inhibit-read-only t)
+          (pilish-thinking-fold-min-lines 1))
       (insert "> first\n> \n> last")
       (setq pilish--thinking-start-marker (copy-marker (point-min))
             pilish--thinking-marker (copy-marker (point-max) t))

@@ -370,6 +370,7 @@ Call this when starting a new session to ensure no stale state persists."
         pilish--assistant-header-shown nil
         pilish--local-user-message nil
         pilish--extension-status nil
+        pilish--held-chat-notices nil
         pilish--working-message nil
         pilish--pre-compaction-status nil
         pilish--in-code-block nil

@@ -427,7 +427,8 @@ Required request methods for current test coverage:
 - `select`
 - `editor`
 - fire-and-forget methods the frontend already handles, especially
-  `notify`, `setStatus`, and `set_editor_text`
+  `notify`, `setStatus`, and `set_editor_text`; a `text_stream` scenario can
+  emit `notify` mid-stream (see the fixture README)
 
 Required response shape:
 

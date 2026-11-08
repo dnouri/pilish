@@ -331,7 +331,7 @@ line between the live windows."
               (pilish--display-history-messages
                [(:role "assistant" :timestamp 1784817120000 :provider "saved"
                  :model "literal\\[find-file]%"
-                 :content [(:type "thinking" :thinking "GUI private first\nGUI private second")
+                 :content [(:type "thinking" :thinking "GUI private first\nGUI private second\nGUI private third")
                            (:type "toolCall" :id "gui-details" :name "bash"
                             :arguments (:command "printf '\\[find-file]' %"))])
                 (:role "toolResult" :toolCallId "gui-details" :timestamp 1784817120000
@@ -341,7 +341,7 @@ line between the live windows."
               (backward-char)
               (let ((expected (pilish--details-at-point)))
                 (should (string-prefix-p "Thinking · " expected))
-                (should (string-match-p "2 lines" expected))
+                (should (string-match-p "3 lines" expected))
                 (setq help (pilish-gui-test--inspect-block-with-keys "C-c C-p d" expected))
                 (execute-kbd-macro (kbd "TAB"))
                 (should (eq (plist-get (pilish--thinking-block-metadata-at-pos (point)) :display) 'hidden))
@@ -1485,6 +1485,55 @@ buffer end so the next streamed turn still follows automatically."
     (should (pilish-gui-test-at-end-p))
     (should (pilish-gui-test-chat-contains "Scroll line 24 for second turn"))))
 
+(defun pilish-gui-test--last-answer-start ()
+  "Return the start of the newest fake answer's first line in the chat."
+  (with-current-buffer (plist-get pilish-gui-test--session :chat-buffer)
+    (save-excursion
+      (goto-char (point-max))
+      (re-search-backward "^Answer line 01$")
+      (line-beginning-position))))
+
+(ert-deftest pilish-gui-test-jump-to-answer-lands-on-final-answer ()
+  "A finished turn shows its long final answer from the first line.
+The answer follows a tool call and lands after its return receipt.
+An unmoved landed window follows the next run and lands on that run's
+answer.  Toggling the session off with its command leaves the next
+turn's window at the end.  The journey runs with and without
+`pilish-jump-to-end-on-submit'."
+  (let ((pilish-jump-to-answer t))
+    (dolist (pilish-jump-to-end-on-submit '(nil t))
+      (pilish-gui-test-with-fresh-session
+        (:backend fake :fake-scenario "tool-long-answer")
+        (let ((suffix (if pilish-jump-to-end-on-submit
+                          "-with-submit-jump"
+                        "")))
+          (dolist (turn '("first" "second"))
+            (pilish-gui-test-send (format "%s turn" turn))
+            (let ((window (pilish-gui-test-chat-window))
+                  (start (pilish-gui-test--last-answer-start)))
+              (with-current-buffer (window-buffer window)
+                (should (text-property-any start (point-max)
+                                           'pilish-run-receipt t))
+                (should (equal (assq window pilish--answer-windows)
+                               (cons window pilish--answer-target)))
+                (should (= (cdr (assq window pilish--answer-windows)) start)))
+              (pilish-gui-test--large-evidence
+               (format "jump-to-answer%s-%s" suffix turn)
+               (list :answer-start start
+                     :submit-jump pilish-jump-to-end-on-submit
+                     :window-start (window-start window)
+                     :window-point (window-point window)
+                     :point-max (with-current-buffer (window-buffer window)
+                                  (point-max))))
+              (should (= (window-start window) start))
+              (should (= (window-point window) start))
+              (should (pos-visible-in-window-p start window))))
+        (with-current-buffer (plist-get pilish-gui-test--session :input-buffer)
+          (call-interactively #'pilish-toggle-jump-to-answer))
+        (pilish-gui-test-send "third turn")
+        (should (pilish-gui-test-window-point-at-end-p))
+        (should (pilish-gui-test-at-end-p)))))))
+
 (ert-deftest pilish-gui-test-thinking-initial-whitespace-keeps-point ()
   (let ((buf (get-buffer-create "*pi-gui-thinking-initial-point*")))
     (unwind-protect
@@ -2361,7 +2410,7 @@ Capture text/image ordering, completed thinking and both cold projections."
                   (switch-to-buffer buf)
                   (pilish-chat-mode)
                   (setq pilish--thinking-display 'hidden)
-                  (pilish--render-history-thinking "\nPlan the work\n\n\nCheck the result\n\n")
+                  (pilish--render-history-thinking "\nPlan the work\n\n\nRead the file\n\nCheck the result\n\n")
                   (let* ((block (pilish--display-tool-start "read" '(:path "/tmp/test.txt") "root"))
                          (overlay (pilish--tool-block-overlay block))
                          (window (selected-window)))
@@ -2420,8 +2469,6 @@ Capture text/image ordering, completed thinking and both cold projections."
                       (footer)
                       (execute-kbd-macro (kbd "RET"))
                       (should (string-match-p "Line 20" (buffer-string)))
-                      ;; Thinking's normalized three source lines conceal two, not
-                      ;; the extra input blank lines.
                       (goto-char (point-min))
                       (re-search-forward "^> Thinking: Plan the work… (2 more lines)$")
                       (beginning-of-line)
@@ -2454,6 +2501,60 @@ Capture text/image ordering, completed thinking and both cold projections."
                 (kill-buffer buf)))))
       (set-frame-size nil width height)
       (sit-for 0.1))))
+
+(ert-deftest pilish-gui-test-short-thinking-stays-visible-without-caret ()
+  "Hidden display collapses long thinking but leaves a short summary readable.
+The summary has no margin caret, and TAB on it reaches the turn outline."
+  (require 'pilish-arguments-test)
+  (let ((buf (generate-new-buffer " *pilish-gui-short-thinking*")))
+    (unwind-protect
+        (save-window-excursion
+          (delete-other-windows)
+          (switch-to-buffer buf)
+          (pilish-chat-mode)
+          (pilish--set-chat-thinking-display 'hidden)
+          (pilish--display-history-messages
+           [(:role "user" :content "Review the build" :timestamp 1784817120000)
+            (:role "assistant" :timestamp 1784817120000
+             :content [(:type "thinking" :thinking "**Reading first 80 lines**")
+                       (:type "text" :text "The header is fine.")
+                       (:type "thinking"
+                        :thinking "Compare the flags.\n\nCheck the linker.\n\nRead the log.")
+                       (:type "text" :text "The linker flags differ.")])])
+          (font-lock-ensure)
+          (let ((window (selected-window))
+                (outline-called nil))
+            (cl-labels ((capture (state)
+                          (pilish-gui-test--large-evidence
+                           (format "short-thinking-%s" state)
+                           (list :state state
+                                 :visible (pilish-arguments-test--visible-text)
+                                 :window-system window-system))))
+              (goto-char (point-min))
+              (search-forward "> **Reading first 80 lines**")
+              (beginning-of-line)
+              (should-not (get-text-property (point) 'pilish-disclosure-hit))
+              (should-not (pilish-gui-test--tool-margin-position window (point)))
+              (re-search-forward "^> Thinking: Compare the flags\\.… (2 more lines)$")
+              (beginning-of-line)
+              (should (pilish-gui-test--tool-margin-position window (point)))
+              (capture "hidden")
+              (goto-char (point-min))
+              (search-forward "Reading first 80 lines")
+              (let ((before (buffer-string)))
+                (cl-letf (((symbol-function 'outline-cycle)
+                           (lambda (&rest _) (setq outline-called t))))
+                  (execute-kbd-macro (kbd "TAB")))
+                (should outline-called)
+                (should (equal before (buffer-string))))
+              (pilish-toggle-thinking-display)
+              (should (string-match-p "^> Read the log\\.$" (buffer-string)))
+              (should (string-match-p "^> \\*\\*Reading first 80 lines\\*\\*$"
+                                      (buffer-string)))
+              (capture "visible"))))
+      (when (buffer-live-p buf)
+        (with-current-buffer buf (set-buffer-modified-p nil))
+        (kill-buffer buf)))))
 
 (defun pilish-gui-test--duration-geometry (window block &optional stacked)
   "Assert BLOCK's actual footer coordinates in WINDOW, expecting STACKED rows.
@@ -2782,6 +2883,118 @@ Return observations suitable for the graphical evidence file."
                                                 'pilish-run-receipt t))
                  (should-not pilish--run-started-at))
                (capture "run-return-reloaded")))))
+      (set-frame-size nil original-width original-height)
+      (sit-for 0.1))))
+
+(ert-deftest pilish-gui-test-notify-in-chat-follows-streamed-reply ()
+  "Mid-stream warnings and errors wait for the reply, stay literal, and are transient."
+  (let ((original-width (frame-width)) (original-height (frame-height))
+        (pilish-notify-in-chat t)
+        (pilish-gui-test--large-trace nil))
+    (unwind-protect
+        (progn
+          (set-frame-size nil 104 45)
+          (pilish-gui-test-with-fresh-session
+           (:backend fake :fake-scenario "notify-notices")
+           (let* ((backend (plist-get pilish-gui-test--session :backend))
+                  (pilish-executable (plist-get backend :executable))
+                  (pilish-extra-args (plist-get backend :extra-args))
+                  (chat (plist-get pilish-gui-test--session :chat-buffer))
+                  (proc (plist-get pilish-gui-test--session :process))
+                  (reply "The deployment check finished. Every service reports healthy.")
+                  (warning "⚠ Quota at 90%: run `pi usage` *today*")
+                  (error-text "✗ MCP server docs disconnected\n```\nretrying in 30s"))
+             (cl-labels
+                 ((wait (predicate)
+                    (unless (pilish-test-wait-until predicate 10 0.01)
+                      (ert-fail (list :wait-failed
+                                      :messages (with-current-buffer "*Messages*"
+                                                  (buffer-string))))))
+                  (echoed-p (text)
+                    (with-current-buffer "*Messages*"
+                      (string-search text (buffer-string))))
+                  (capture (name)
+                    (with-current-buffer chat
+                      (font-lock-ensure)
+                      (redisplay t)
+                      (pilish-gui-test--large-evidence
+                       name
+                       (list :backend "fake/notify-notices"
+                             :status pilish--status
+                             :held (length pilish--held-chat-notices)
+                             :raw (buffer-substring-no-properties (point-min) (point-max))
+                             :visible (pilish--visible-text (point-min) (point-max))
+                             :package-user-dir package-user-dir
+                             :window-system window-system
+                             :render-library (symbol-file 'pilish--add-chat-notice)
+                             :commands (reverse pilish-gui-test--large-trace))))))
+               (wait (lambda () (with-current-buffer chat
+                                  (not (pilish--session-transition-active-p)))))
+               (select-window (pilish-gui-test-input-window))
+               (insert "Check the deployment")
+               (pilish-gui-test--large-command (kbd "C-c C-c") 'pilish-send)
+               ;; The warning is echoed at once but held while the reply streams.
+               (wait (lambda () (echoed-p "Pi: ⚠ Quota at 90%")))
+               (with-current-buffer chat
+                 (should (eq pilish--status 'streaming))
+                 (should-not (string-search "Quota at 90%" (buffer-string))))
+               (capture "notify-held")
+               (wait (lambda ()
+                       (with-current-buffer chat
+                         (and (eq pilish--status 'idle)
+                              (not pilish--run-started-at)
+                              (string-search "Returned " (buffer-string))))))
+               (should (echoed-p "Pi: ✗ MCP server docs disconnected"))
+               (let ((window (get-buffer-window chat)))
+                 (select-window window)
+                 (goto-char (point-max))
+                 (set-window-point window (point-max))
+                 (recenter -1))
+               (capture "notify-settled")
+               (with-current-buffer chat
+                 (font-lock-ensure)
+                 (let* ((visible (pilish--visible-text (point-min) (point-max)))
+                        (reply-pos (string-search reply visible))
+                        (warning-pos (string-search warning visible))
+                        (error-pos (string-search error-text visible))
+                        (receipt-pos (string-search "Returned " visible)))
+                   ;; Literal notices between the complete reply and its receipt.
+                   (should (and reply-pos warning-pos error-pos receipt-pos))
+                   (should (< reply-pos warning-pos error-pos receipt-pos))
+                   (should (= 1 (pilish-test--count-matches "Quota at 90%" visible))))
+                 (let ((warning-at (save-excursion
+                                     (goto-char (point-min))
+                                     (search-forward "`pi usage`")
+                                     (match-beginning 0)))
+                       (error-at (save-excursion
+                                   (goto-char (point-min))
+                                   (search-forward "retrying in 30s")
+                                   (match-beginning 0))))
+                   (should (eq (get-text-property warning-at 'face) 'pilish-retry-notice))
+                   (should (eq (get-text-property error-at 'face) 'pilish-error-notice))))
+               ;; Raw saves retain the local copy even though Pi history does not.
+               (let ((save-file (make-temp-file "pilish-notices-" nil ".md")))
+                 (unwind-protect
+                     (progn
+                       (with-current-buffer chat
+                         (write-region nil nil save-file nil 'silent))
+                       (with-temp-buffer
+                         (insert-file-contents save-file)
+                         (should (string-search warning (buffer-string)))
+                         (should (string-search error-text (buffer-string)))))
+                   (delete-file save-file)))
+               ;; Pi's history has no notices, so a reloaded chat omits them.
+               (select-window (get-buffer-window chat))
+               (execute-kbd-macro (kbd "M-x pilish-reload RET"))
+               (wait (lambda ()
+                       (with-current-buffer chat
+                         (and (not (eq pilish--process proc))
+                              (not (pilish--session-transition-active-p))
+                              (string-search reply (buffer-string))))))
+               (with-current-buffer chat
+                 (should-not (string-search "Quota at 90%" (buffer-string)))
+                 (should-not (string-search "MCP server docs" (buffer-string))))
+               (capture "notify-reloaded")))))
       (set-frame-size nil original-width original-height)
       (sit-for 0.1))))
 

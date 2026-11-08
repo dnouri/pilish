@@ -45,6 +45,7 @@
 (require 'pilish-ui)
 (require 'pilish-conversations)
 (require 'pilish-table)
+(require 'pilish-answer)
 (require 'cl-lib)
 (require 'ansi-color)
 (require 'image)
@@ -303,6 +304,8 @@ TRACK-REGION is non-nil, return a marker pair bounding the inserted turn."
   (let* ((chat-buffer (pilish--get-render-buffer))
          (start (with-current-buffer chat-buffer (point-max)))
          (previews (pilish--content-image-previews content)))
+    (with-current-buffer chat-buffer
+      (pilish--answer-turn-start))
     (pilish--append-to-chat
      (concat "\n" (pilish--make-separator "You" timestamp) "\n"
              (or text "") "\n"
@@ -355,6 +358,7 @@ full content vector, so an authoritative image transformation cannot be lost."
   "Display separator for new agent turn.
 Only shows the Assistant header once per prompt, even during retries.
 Note: status is set to `streaming' by the event handler."
+  (pilish--answer-turn-start)
   ;; Only show header if not already shown for this prompt.
   (unless pilish--assistant-header-shown
     (pilish--append-to-chat
@@ -524,6 +528,29 @@ at most one empty paragraph separator while preserving indentation."
   "Return COUNT formatted as a singular or plural hidden-line label."
   (format "%d more line%s" count (if (= count 1) "" "s")))
 
+(defun pilish--thinking-content-line-count (normalized)
+  "Return the number of non-blank lines in NORMALIZED thinking."
+  (length (split-string normalized "\n" t "[ \t]*")))
+
+(defconst pilish--thinking-fold-line-width 80
+  "Columns that count as one line when deciding whether thinking folds.")
+
+(defun pilish--thinking-fold-line-count (normalized)
+  "Return the fold size of NORMALIZED thinking in nominal lines.
+Each non-blank line counts once per started
+`pilish--thinking-fold-line-width' columns, so a long paragraph counts
+as the rows it needs rather than as one line."
+  (let ((count 0))
+    (dolist (line (split-string normalized "\n" t "[ \t]*") count)
+      (setq count (+ count (max 1 (ceiling (string-width line)
+                                           (float pilish--thinking-fold-line-width))))))))
+
+(defun pilish--thinking-foldable-p (normalized)
+  "Return non-nil when completed NORMALIZED thinking can be collapsed.
+See `pilish-thinking-fold-min-lines'."
+  (>= (pilish--thinking-fold-line-count normalized)
+      pilish-thinking-fold-min-lines))
+
 (defun pilish--thinking-first-content-line (normalized)
   "Return the first non-empty trimmed line from NORMALIZED, or nil."
   (catch 'first
@@ -534,7 +561,7 @@ at most one empty paragraph separator while preserving indentation."
 
 (defun pilish--thinking-hidden-stub (normalized)
   "Return the collapsed completed-thinking stub for NORMALIZED."
-  (let* ((line-count (length (split-string normalized "\n" nil)))
+  (let* ((line-count (pilish--thinking-content-line-count normalized))
          (first-line (pilish--thinking-first-content-line normalized))
          (previewable (and pilish-thinking-hidden-preview
                            (> line-count 1)
@@ -572,7 +599,9 @@ OBJECT is a rendered string, or nil for the current buffer."
        rear-nonsticky t) object)
     (pilish--set-details start end details object)
     (pilish--put-disclosure start end (eq display 'visible)
-                           #'pilish--toggle-thinking-block-at-point object)))
+                           (and (pilish--thinking-foldable-p normalized)
+                                #'pilish--toggle-thinking-block-at-point)
+                           object)))
 
 (defun pilish--owned-span-probe-pos (pos property)
   "Return POS or its preceding character inside an owned PROPERTY span."
@@ -1180,6 +1209,8 @@ Extension cancellation is not a local stop; core events own status transitions."
        (plist-get result :summary)
        (pilish--ms-to-time (plist-get result :timestamp))))
      (t (pilish--display-compaction-failure (plist-get event :errorMessage))))
+    ;; Held notices belong before any follow-up released below.
+    (pilish--flush-chat-notices)
     (pilish--set-activity-phase
      (if (memq pilish--status '(sending streaming)) "thinking" "idle"))
     (when (and (eq pilish--status 'idle) (not (pilish--session-busy-p)))
@@ -1308,16 +1339,56 @@ Include optional STDERR in a text fence and optional DETAIL before it."
                          'face 'pilish-error-notice)
              "\n"))))
 
+(defun pilish--flush-chat-notices ()
+  "Append held chat notices unless streaming or compaction owns the chat end.
+Live output is written through markers that follow the end of the buffer,
+so a notice appended during a run would land inside that output."
+  (when (and pilish--held-chat-notices
+             (not (memq pilish--status '(streaming compacting))))
+    (let ((notices (reverse pilish--held-chat-notices)))
+      (setq pilish--held-chat-notices nil)
+      (dolist (notice notices)
+        (pilish--append-to-chat notice)))))
+
+(defun pilish--add-chat-notice (text face)
+  "Append TEXT in FACE to the chat once no live output owns its end.
+Hidden fence lines keep TEXT literal: its Markdown cannot style it or
+open a block that swallows later output.  The `pilish-chat-notice'
+property holds FACE on the text and `guard' on the fence lines, for
+`pilish--restore-tool-properties'."
+  (let ((fence (pilish--markdown-fence-delimiter text)))
+    (push (concat "\n"
+                  (propertize (concat fence "\n")
+                              'display "" 'pilish-chat-notice 'guard)
+                  (propertize text 'face face 'pilish-chat-notice face)
+                  (propertize (concat "\n" fence)
+                              'display "" 'pilish-chat-notice 'guard)
+                  "\n")
+          pilish--held-chat-notices))
+  (pilish--flush-chat-notices))
+
 (defun pilish--extension-ui-notify (event)
-  "Handle notify method from EVENT."
-  (let ((msg (plist-get event :message))
-        (notify-type (plist-get event :notifyType)))
-    (message "Pi: %s%s"
-             (pcase notify-type
-               ("warning" "⚠ ")
-               ("error" "✗ ")
-               (_ ""))
-             msg)))
+  "Handle notify method from EVENT.
+When `pilish-notify-in-chat' is non-nil, warnings and errors also stay
+in the chat."
+  (let* ((msg (plist-get event :message))
+         (notify-type (plist-get event :notifyType))
+         (prefix (pcase notify-type
+                   ("warning" "⚠ ")
+                   ("error" "✗ ")
+                   (_ ""))))
+    (message "Pi: %s%s" prefix msg)
+    (when (and pilish-notify-in-chat
+               (not (string-empty-p prefix)))
+      (pilish--add-chat-notice
+       (concat prefix
+               (string-trim-right
+                (pilish--escape-control-chars-for-display
+                 (ansi-color-filter-apply (pilish--render-safe-string msg))
+                 t)))
+       (if (equal notify-type "error")
+           'pilish-error-notice
+         'pilish-retry-notice)))))
 
 (defun pilish--complete-extension-ui-dialog (event proc read-response)
   "Attempt one response to supported-dialog EVENT on PROC.
@@ -1719,6 +1790,7 @@ which asks upfront before any buffers are touched."
           ;; so it must land before the exit banner rather than after it.
           (progn
             (pilish--flush-stream-deltas)
+            (pilish--flush-chat-notices)
             (unless (process-get process 'pilish-exit-error-rendered)
               (pilish--display-process-exit-error
                error-msg
@@ -1748,10 +1820,21 @@ which asks upfront before any buffers are touched."
   (when (and (stringp content)
              (not (string-empty-p content)))
     (let ((start (point-max)))
-      (pilish--append-to-chat (concat "\n" content "\n"))
+      (pilish--append-to-chat
+       (concat "\n" (propertize (concat content "\n") 'pilish-custom-message t)))
       (pilish--decorate-tables-unless-deferred start (point-max)))
     ;; Reset so next assistant message shows its header
     (setq pilish--assistant-header-shown nil)))
+
+(defvar pilish-unhandled-event-functions nil
+  "Functions called with EVENT when its type has no display case.
+Runs only for the chat's current process, in its chat buffer, after the
+ordinary protocol-state update and stream flush.  Known display cases do
+not run this hook, even when those cases intentionally do nothing.  A type
+may stop reaching this hook when Pilish gains a display case for it.
+Return values are ignored; errors and quits are reported without preventing
+later functions.  Treat EVENT as read-only.
+Events consumed by `pilish-process-event-functions' never reach this hook.")
 
 (defun pilish--handle-display-event (event)
   "Handle EVENT for display purposes.
@@ -1781,9 +1864,10 @@ Updates buffer-local state and renders display updates."
                  (equal (plist-get event :type) "agent_settled"))
         ;; Consume the clock before fallible presentation.  The receipt belongs
         ;; before idle hooks and follow-ups, either of which may start new work.
-        (let ((run-started-at pilish--run-started-at))
+        (let ((run-started-at pilish--run-started-at)
+              (aborted pilish--aborted))
           (pilish--reset-run-clock)
-          (when pilish--aborted
+          (when aborted
             (pilish--clear-followup-queue))
           (pilish--set-aborted nil)
           (when run-started-at
@@ -1792,6 +1876,9 @@ Updates buffer-local state and renders display updates."
               (error
                (message "Pi: Could not display return receipt: %s"
                         (error-message-string err)))))
+          ;; Land only when Pi returns control, after the receipt.  One run
+          ;; can span several low-level agent_end events.
+          (pilish--answer-turn-end aborted)
           (pilish--set-activity-phase "idle")
           (pilish--process-followup-queue)))
       (when (memq delta-kind '(text thinking))
@@ -2053,10 +2140,31 @@ Updates buffer-local state and renders display updates."
      ;; `pi.setSessionName'.  An absent name means it was cleared.
      (setq pilish--session-name
            (pilish--normalize-string-or-null (plist-get event :name)))
-     (force-mode-line-update t)))))
+     (force-mode-line-update t))
+    (_ (let ((chat-buf (current-buffer))
+             (process pilish--process))
+         (run-hook-wrapped
+          'pilish-unhandled-event-functions
+          (lambda (function)
+            (if (and (buffer-live-p chat-buf)
+                     (eq process (buffer-local-value 'pilish--process chat-buf)))
+                (with-current-buffer chat-buf
+                  (pilish--call-process-hook function event)
+                  nil)
+              t))))))
+    ;; Streaming or compaction may have released the end of the chat.
+    (pilish--flush-chat-notices)))
 
 
 ;;;; Tool Output
+
+(defvar pilish-tool-block-finalize-functions nil
+  "Functions called with a tool block overlay after its face is final.
+They run in the chat buffer after a live block finishes, fails, or is
+forced to finish, and while saved history is rendered.  The overlay
+`face' is then `pilish-tool-block-success', `pilish-tool-block-error' or
+`pilish-tool-block'.  A callback does not mean that a tool just executed.
+Display add-ons that decorate tool blocks by their face refresh them here.")
 
 (defun pilish--truncate-to-visual-lines (content max-lines width)
   "Truncate CONTENT to fit within MAX-LINES visual lines at WIDTH.
@@ -4236,7 +4344,7 @@ renders with the normal absent-path placeholder."
     (substring-no-properties
      (concat (pilish--details-title "Thinking" message)
              " · " (pilish--thinking-line-count-label
-                      (length (split-string normalized "\n" nil)))
+                      (pilish--thinking-content-line-count normalized))
              (unless (string-empty-p provenance) (concat "\n" provenance))))))
 
 (defun pilish--format-tool-duration-seconds (seconds &optional tenths)
@@ -4817,6 +4925,7 @@ until an authoritative tool execution/history event supplies it."
     (overlay-put ov 'face face)
     (pilish--tool-refresh-prefixes block)
     (pilish--tool-block-refresh-overlay block)
+    (run-hook-with-args 'pilish-tool-block-finalize-functions ov)
     (pilish--tool-block-unregister block)
     (when (eq pilish--pending-tool-overlay ov)
       (setq pilish--pending-tool-overlay nil)))
@@ -6373,7 +6482,7 @@ if none exists, render the result at point without a live overlay."
                                        (pilish--tool-block-history-p block))
           (pilish--redraw-compound-tool block)
           (pilish--tool-overlay-finalize
-           (if is-error 'pilish-tool-block-error 'pilish-tool-block) block))
+           (if is-error 'pilish-tool-block-error 'pilish-tool-block-success) block))
       (let ((presentation (pilish--tool-result-presentation
                            tool-name args content details is-error nil catalog)))
         (if block
@@ -6392,7 +6501,7 @@ if none exists, render the result at point without a live overlay."
                    (pilish--tool-block-refresh-overlay block)
                    ;; Error content and the overlay face suffice; no error badge.
                    (pilish--tool-overlay-finalize
-                    (if is-error 'pilish-tool-block-error 'pilish-tool-block) block)
+                    (if is-error 'pilish-tool-block-error 'pilish-tool-block-success) block)
                    (when (eobp) (insert "\n"))))))
           (pilish--with-scroll-preservation
             (save-excursion
@@ -6531,7 +6640,8 @@ coordinates from before the rewrites."
   (let (replacements)
     (save-excursion
       (dolist (block (nreverse (pilish--completed-thinking-blocks)))
-        (unless (eq (plist-get block :display) display)
+        (unless (or (eq (plist-get block :display) display)
+                    (not (pilish--thinking-foldable-p (plist-get block :normalized))))
           (when-let* ((rendered
                        (pilish--completed-thinking-rendered-from-normalized
                         (plist-get block :normalized)
@@ -6552,6 +6662,7 @@ Returns non-nil when point was inside a completed thinking block and the block
 was toggled successfully."
   (when-let* ((block (pilish--thinking-block-metadata-at-pos (point)))
               (normalized (plist-get block :normalized))
+              ((pilish--thinking-foldable-p normalized))
               (order (plist-get block :order))
               (display (plist-get block :display))
               (rendered (pilish--completed-thinking-rendered-from-normalized
@@ -7261,7 +7372,7 @@ Return :cold-body and transient absolute :deleted-spans for view mapping."
                        pilish-tool-output-footer
                        pilish-tool-footer-align-width pilish-tool-footer-break-width
                        pilish-argument-guard pilish-argument-value pilish-argument-literal
-                       line-prefix wrap-prefix))
+                       pilish-literal-text line-prefix wrap-prefix))
       (let ((position 0))
         (while (< position (length body))
           (let ((next (next-single-property-change position property body (length body)))
@@ -7288,7 +7399,8 @@ Return :cold-body and transient absolute :deleted-spans for view mapping."
                                                 font-lock-face pilish-tool-duration) cold))
           (setq position next))))
     (dolist (property '(pilish-argument-guard pilish-tool-diagnostic-guard
-                        pilish-conversation-guard pilish-argument-literal))
+                        pilish-conversation-guard pilish-argument-literal
+                        pilish-literal-text))
       (let ((position 0))
         (while (< position (length body))
           (let ((next (next-single-property-change position property body (length body))))
@@ -10152,9 +10264,10 @@ Display-only table decoration is applied after the content is stable."
 (defun pilish--restore-tool-properties (beg end)
   "Restore literal metadata after tree-sitter fontification in BEG..END.
 Strip Markdown hiding, faces and link buttons from literal argument text,
-saved assistant outcomes, child summaries and full-output paths, including
-cold text without overlays.
-Preserve image previews, footer alignment and the duration/outcome faces.
+text marked `pilish-literal-text', saved assistant outcomes, chat notices,
+child summaries and full-output paths, including cold text without overlays.
+Preserve image previews, footer alignment and the duration, outcome and
+notice faces.
 Restore `font-lock-face' values for all
 overlapping tool headers, live or finalized."
   (let ((inhibit-read-only t)
@@ -10171,16 +10284,22 @@ overlapping tool headers, live or finalized."
                          (next-single-property-change pos 'pilish-tool-output-footer nil end)
                          (next-single-property-change pos 'pilish-tool-footer-align-width nil end)
                          (next-single-property-change pos 'pilish-tool-footer-break-width nil end)
-                         (next-single-property-change pos 'pilish-tool-duration nil end)))
+                         (next-single-property-change pos 'pilish-tool-duration nil end)
+                         (next-single-property-change pos 'pilish-chat-notice nil end)
+                         (next-single-property-change pos 'pilish-literal-text nil end)))
              (outcome (get-text-property pos 'pilish-assistant-outcome))
-             (argument-p (get-text-property pos 'pilish-argument-literal)))
-        (when (or outcome argument-p (get-text-property pos 'pilish-nested-summary)
+             (notice (get-text-property pos 'pilish-chat-notice))
+             (argument-p (or (get-text-property pos 'pilish-argument-literal)
+                             (get-text-property pos 'pilish-literal-text))))
+        (when (or outcome notice argument-p (get-text-property pos 'pilish-nested-summary)
                   (get-text-property pos 'pilish-conversation-tree)
                   (eq (get-text-property pos 'pilish-tool-section) 'full-output))
           (when (fboundp 'md-ts--remove-link-button-properties)
             (md-ts--remove-link-button-properties pos limit))
           (remove-text-properties pos limit '(invisible nil display nil face nil))
           (when outcome (put-text-property pos limit 'face 'pilish-error-notice))
+          (cond ((eq notice 'guard) (put-text-property pos limit 'display ""))
+                (notice (put-text-property pos limit 'face notice)))
           (when (or (get-text-property pos 'pilish-argument-guard)
                     (get-text-property pos 'pilish-tool-diagnostic-guard)
                     (get-text-property pos 'pilish-conversation-guard))
@@ -10249,7 +10368,9 @@ BLOCK-ORDER identifies the logical completed-thinking block across rerenders.
 DETAILS is the owning message's literal report when known.
 Returns nil when NORMALIZED has no visible completed-thinking content."
   (unless (string-empty-p normalized)
-    (let ((display (or display (pilish--thinking-display-mode))))
+    (let ((display (if (pilish--thinking-foldable-p normalized)
+                       (or display (pilish--thinking-display-mode))
+                     'visible)))
       (pilish--propertize-completed-thinking
        (pcase display
          ('hidden (pilish--thinking-hidden-stub normalized))

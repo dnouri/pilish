@@ -361,6 +361,16 @@ For example:
                                             :value-type sexp)))
   :group 'pilish)
 
+(defcustom pilish-notify-in-chat nil
+  "Whether extension warnings and errors also stay in the chat.
+Extension `notify' requests always show in the echo area.  When non-nil,
+warning and error notifications are also appended to the chat as literal
+notices.  A notice that arrives while Pi streams or compacts waits until
+that output ends.  Notices are not part of Pi's saved history, so a chat
+rebuilt from it omits them."
+  :type 'boolean
+  :group 'pilish)
+
 (defcustom pilish-quit-without-confirmation nil
   "Whether quitting skips confirmation for a live process.
 When non-nil, closing a session never asks whether a running pi process
@@ -388,18 +398,31 @@ Allowed values are:
 - `hidden'   Collapse completed thinking to a short stub line.
 
 Live streaming thinking is always shown while the assistant is still working.
-Per-block TAB toggles are temporary local overrides and are cleared by buffer
-rebuilds, reloads, or whole-chat display-mode changes."
+Completed thinking shorter than `pilish-thinking-fold-min-lines' is always
+visible.  Per-block TAB toggles are temporary local overrides and are cleared
+by buffer rebuilds, reloads, or whole-chat display-mode changes."
   :type '(choice (const :tag "Visible" visible)
                  (const :tag "Hidden" hidden))
+  :group 'pilish)
+
+(defcustom pilish-thinking-fold-min-lines 3
+  "Minimum number of non-blank lines for completed thinking to fold.
+A line longer than 80 columns counts once per started 80 columns, so a
+long paragraph still folds.  Shorter completed thinking, such as the
+one-heading reasoning summaries some providers send, always stays
+expanded: it has no disclosure caret, `TAB' does not collapse it, and
+`hidden' display leaves it visible, because a stub would hide most of it
+while saving at most a few rows.  Set this to 1 to make all completed
+thinking foldable."
+  :type 'natnum
   :group 'pilish)
 
 (defcustom pilish-thinking-hidden-preview t
   "Whether hidden completed thinking should preview its first line.
 When non-nil, collapsed completed thinking shows the first non-empty trimmed
-line when the normalized thinking spans more than one line, is at least
-3 characters long, and shorter than 72 characters. Otherwise the hidden block
-falls back to a generic line-count label."
+line when the thinking has more than one non-blank line and that line is at
+least 3 characters long and shorter than 72 characters.  Otherwise the hidden
+block falls back to a generic line-count label."
   :type 'boolean
   :group 'pilish)
 
@@ -443,6 +466,12 @@ still operate on the raw table source."
   '((t :extend t))
   "Face for tool blocks.
 Subtle blue-tinted background derived from the current theme."
+  :group 'pilish)
+
+(defface pilish-tool-block-success
+  '((t :inherit pilish-tool-block))
+  "Face for tool blocks after successful completion.
+By default they look like running tool blocks."
   :group 'pilish)
 
 (defface pilish-tool-block-error
@@ -2011,6 +2040,9 @@ canonical history, so rebuilding now would erase that visible turn."
   "Alist of extension status messages for header-line display.
 Keys are extension identifiers (strings), values are status text.")
 
+(defvar-local pilish--held-chat-notices nil
+  "Chat notices waiting for streaming or compaction to end, newest first.")
+
 (defvar-local pilish--working-message nil
   "Transient extension working message for header-line display.")
 
@@ -2704,7 +2736,9 @@ Returns a markdown setext heading: label line followed by === underline.
 Fontification is handled by `md-ts-mode'.
 
 Using setext headings enables outline/imenu navigation and keeps our
-turn markers as H1 while LLM ATX headings are leveled down to H2+."
+turn markers as H1 while LLM ATX headings are leveled down to H2+.
+Both lines carry the `pilish-heading' text property, whose value is
+LABEL, so display add-ons can find headings without parsing text."
   (let* ((timestamp-str (when timestamp
                           (pilish--format-message-timestamp timestamp)))
          (header-line (if timestamp-str
@@ -2713,7 +2747,7 @@ turn markers as H1 while LLM ATX headings are leveled down to H2+."
          ;; Underline must be at least 3 chars, and at least as long as header
          (underline-len (max 3 (length header-line)))
          (underline (make-string underline-len ?=)))
-    (concat header-line "\n" underline "\n")))
+    (propertize (concat header-line "\n" underline "\n") 'pilish-heading label)))
 
 ;;;; Formatting Utilities
 
