@@ -5377,6 +5377,7 @@ restore-defaults flow from generation-lifetime bookkeeping changes."
                 (pilish--chat-buffer nil)
                 (process-environment (copy-sequence process-environment)))
             (setenv "PI_CODING_AGENT_DIR" agent-root)
+            (setenv "PI_CODING_AGENT_SESSION_DIR" nil)
             (should
              (equal
               (pilish--browse-current-session-directory)
@@ -5393,6 +5394,8 @@ threads forks through :parentSessionPath, reads names from
 session_info, and skips non-session JSONL files, .subagents sidecars,
 and non-munged directories.  scope=current scans one directory."
   (let* ((root (pilish-test--make-temp-directory "pi-scan-root"))
+         (process-environment
+          (cons "PI_CODING_AGENT_SESSION_DIR=" process-environment))
          (sessions (expand-file-name "sessions" root))
          (dir-a (expand-file-name "--home-fake-a--" sessions))
          (dir-b (expand-file-name "--home-fake-b--" sessions))
@@ -5567,6 +5570,60 @@ and non-munged directories.  scope=current scans one directory."
                                  #'string<)
                            (list path-a path-b)))))))))
 
+(ert-deftest pilish-test-browse-env-session-directory-without-chat ()
+  "Local env storage is flat in both scopes, without a linked chat."
+  (let* ((sandbox (pilish-test--make-temp-directory "pi-env-scan-"))
+         (agent (expand-file-name "agent" sandbox))
+         (munged (expand-file-name "sessions/--home-fake-a--" agent))
+         (custom (expand-file-name "custom-sessions" sandbox))
+         (project-a (expand-file-name "project-a" sandbox))
+         (project-b (expand-file-name "project-b" sandbox))
+         (path-a (expand-file-name "a.jsonl" custom))
+         (path-b (expand-file-name "b.jsonl" custom))
+         (decoy (expand-file-name "decoy.jsonl" munged))
+         calls)
+    (unwind-protect
+        (progn
+          (make-directory custom t)
+          (make-directory munged t)
+          (make-directory project-a)
+          (make-directory project-b)
+          (pilish-test--write-session-file path-a "Project A" project-a)
+          (pilish-test--write-session-file path-b "Project B" project-b)
+          (pilish-test--write-session-file decoy "Default decoy" project-a)
+          (with-temp-buffer
+            (pilish-session-browser-mode)
+            (let ((default-directory (file-name-as-directory project-a))
+                  (project-find-functions nil)
+                  (pilish--chat-buffer nil)
+                  (process-environment
+                   (cons (concat "PI_CODING_AGENT_SESSION_DIR=" custom "/")
+                         (cons (concat "PI_CODING_AGENT_DIR=" agent)
+                               process-environment))))
+              (cl-letf (((symbol-function 'pilish--session-list-directory)
+                         (lambda (&optional _chat-buf) nil))
+                        ((symbol-function 'run-at-time)
+                         (lambda (_secs _repeat fn &rest args) (apply fn args))))
+                (should (equal (pilish--browse-current-session-directory)
+                               custom))
+                (should (equal (pilish--browse-session-directories 'all)
+                               (list custom)))
+                (dolist (scope '(current all))
+                  (setq calls nil)
+                  (pilish--browse-load-sessions
+                   scope (lambda (items error) (push (list items error) calls)))
+                  (should (= (length calls) 1))
+                  (pcase-let ((`(,items ,error) (car calls)))
+                    (should-not error)
+                    (should (equal (sort (mapcar (lambda (item)
+                                                  (plist-get item :path))
+                                                items)
+                                         #'string<)
+                                   (if (eq scope 'current)
+                                       (list path-a)
+                                     (list path-a path-b))))))))))
+      (delete-directory sandbox t))))
+
 (ert-deftest pilish-test-flat-session-dir-with-munged-name ()
   "A custom --archives-- directory is flat, regardless of its basename."
   (let* ((sandbox (pilish-test--make-temp-directory "pi-flat-munged-"))
@@ -5735,6 +5792,8 @@ The resumable reader is slowed so the scan spans several slices.
 Synchronous timers deliver exactly one final callback with every item, and a superseded fetch's callback is dropped
 by the fetch token."
   (let* ((root (pilish-test--make-temp-directory "pi-chunk-root"))
+         (process-environment
+          (cons "PI_CODING_AGENT_SESSION_DIR=" process-environment))
          (sessions (expand-file-name "sessions" root))
          (dir (expand-file-name "--home-fake-a--" sessions))
          (step-session-info (symbol-function 'pilish-jsonl-step-session-info))
@@ -6103,6 +6162,8 @@ slow scan raises `quit' — not `error' — inside the slice loop; the
 seam must still call back exactly once so the loading state clears
 and the browser names the interruption."
   (let* ((root (pilish-test--make-temp-directory "pi-scan-quit"))
+         (process-environment
+          (cons "PI_CODING_AGENT_SESSION_DIR=" process-environment))
          (sessions (expand-file-name "sessions" root))
          (dir (expand-file-name "--home-fake-a--" sessions))
          (path (expand-file-name "session.jsonl" dir))
@@ -6150,6 +6211,7 @@ and the browser names the interruption."
          (process-environment (copy-sequence process-environment))
          browser)
     (setenv "PI_CODING_AGENT_DIR" root)
+    (setenv "PI_CODING_AGENT_SESSION_DIR" nil)
     (let* ((dir (pilish-jsonl-session-dir-for-cwd root))
            (path (expand-file-name "session.jsonl" dir)))
       (make-directory dir t)
@@ -6842,7 +6904,9 @@ and Threaded keeps its fork-family hierarchy."
   "The session browser fetch proceeds without a live pi process.
 Phase 2 reads sessions from disk, so the Phase 0 no-process guard is
 gone for the session browser (the tree browser keeps it until Phase 3)."
-  (let ((root (pilish-test--make-temp-directory "pi-noproc-root")))
+  (let ((root (pilish-test--make-temp-directory "pi-noproc-root"))
+        (process-environment
+         (cons "PI_CODING_AGENT_SESSION_DIR=" process-environment)))
     (with-temp-buffer
       (pilish-session-browser-mode)
       (let ((default-directory root)

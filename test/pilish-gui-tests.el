@@ -4681,6 +4681,7 @@ FAILURE permits an expected user error, whose native post hook may not run."
          (pilish-gui-test--large-trace nil)
          browser)
     (setenv "PI_CODING_AGENT_DIR" root)
+    (setenv "PI_CODING_AGENT_SESSION_DIR" nil)
     (let* ((dir (pilish-jsonl-session-dir-for-cwd root))
            (path (expand-file-name "session.jsonl" dir)))
       (make-directory dir t)
@@ -4730,6 +4731,87 @@ FAILURE permits an expected user error, whose native post hook may not run."
               (should (plist-member (car pilish--session-browser-items) :searchText))
               (should (string-match-p "Ordinary opening" (buffer-string)))))
         (when (buffer-live-p browser) (kill-buffer browser))))))
+
+(ert-deftest pilish-gui-test-session-browser-env-directory-without-chat ()
+  "Open local env storage, then toggle All without starting a process."
+  (let* ((sandbox (pilish-test--make-temp-directory "pi-gui-env-"))
+         (agent (expand-file-name "agent" sandbox))
+         (custom (expand-file-name "custom-sessions" sandbox))
+         (project-a (expand-file-name "project-a" sandbox))
+         (project-b (expand-file-name "project-b" sandbox))
+         (path-a (expand-file-name "a.jsonl" custom))
+         (path-b (expand-file-name "b.jsonl" custom))
+         (process-environment (copy-sequence process-environment))
+         (pilish-session-browser-default-scope 'current)
+         (pilish-session-browser-default-named-only nil)
+         (pilish-gui-test--large-trace nil)
+         (processes (process-list))
+         browser)
+    (unwind-protect
+        (progn
+          (make-directory project-a)
+          (make-directory project-b)
+          (setenv "PI_CODING_AGENT_DIR" agent)
+          (setenv "PI_CODING_AGENT_SESSION_DIR" (concat custom "/"))
+          (let ((decoy (expand-file-name
+                        "decoy.jsonl"
+                        (pilish-jsonl-session-dir-for-cwd project-a))))
+            (dolist (fixture (list (list path-a project-a "Env project A")
+                                   (list path-b project-b "Env project B")
+                                   (list decoy project-a "Default tree decoy")))
+              (pcase-let ((`(,path ,cwd ,title) fixture))
+                (make-directory (file-name-directory path) t)
+                (with-temp-file path
+                  (insert (json-encode
+                           (list :type "session" :version 3 :id title
+                                 :cwd cwd :timestamp "2026-01-01T00:00:00Z"))
+                          "\n"
+                          (json-encode
+                           (list :type "message" :id "first"
+                                 :message (list :role "user" :content title)))
+                          "\n")))))
+          (save-window-excursion
+            (with-temp-buffer
+              (switch-to-buffer (current-buffer))
+              (setq default-directory (file-name-as-directory project-a))
+              (let ((project-find-functions nil))
+                (cl-letf (((symbol-function 'make-process)
+                           (lambda (&rest _) (ert-fail "Browser started a process"))))
+                  (should-not (pilish--get-chat-buffer))
+                  (execute-kbd-macro (kbd "M-x pilish-session-browser RET"))
+                  (should (derived-mode-p 'pilish-session-browser-mode))
+                  (push '("M-x pilish-session-browser RET") pilish-gui-test--large-trace)
+                  (setq browser (current-buffer))
+                  (dolist (scope '(current all))
+                    (when (eq scope 'all)
+                      (pilish-gui-test--large-command
+                       (kbd "t") 'pilish-session-browser-toggle-scope))
+                    (should (pilish-test-wait-until
+                             (lambda () (not pilish--session-browser-loading))))
+                    (should-not pilish--session-browser-error)
+                    (should-not (pilish--get-chat-buffer))
+                    (should-not (get-buffer-process browser))
+                    (should (equal processes (process-list)))
+                    (should (eq scope pilish--session-browser-scope))
+                    (let ((paths (sort (mapcar (lambda (item) (plist-get item :path))
+                                               pilish--session-browser-items)
+                                       #'string<)))
+                      (should (equal paths (if (eq scope 'current)
+                                              (list path-a)
+                                            (list path-a path-b))))
+                      (should (string-match-p "Env project A" (buffer-string)))
+                      (should (eq (and (string-match-p "Env project B" (buffer-string)) t)
+                                  (eq scope 'all)))
+                      (should-not (string-match-p "Default tree decoy" (buffer-string)))
+                      (pilish-gui-test--large-evidence
+                       (format "env-browser-%s" scope)
+                       (list :scope scope :paths paths :directory custom
+                             :chat (pilish--get-chat-buffer)
+                             :processes-unchanged (equal processes (process-list))
+                             :text (buffer-string)
+                             :commands (reverse pilish-gui-test--large-trace))))))))))
+      (when (buffer-live-p browser) (kill-buffer browser))
+      (delete-directory sandbox t))))
 
 (ert-deftest pilish-gui-test-large-browser-fold-and-copy ()
   "Both broad browsers preserve canonical folds, hidden data and live margin hits."
