@@ -170,6 +170,12 @@ from either chat or input buffer."
   (concat (pilish--menu-model-description) " • "
           (pilish--menu-thinking-description)))
 
+(defun pilish--menu-markup-description ()
+  "Describe the next Markdown markup action for this transcript."
+  (if md-ts-hide-markup
+      "show Markdown markup"
+    "hide Markdown markup"))
+
 (defun pilish--menu-default-thinking-display-mode ()
   "Return the completed-thinking display mode used for new chat buffers."
   pilish-thinking-display)
@@ -364,6 +370,7 @@ Call this when starting a new session to ensure no stale state persists."
         pilish--assistant-header-shown nil
         pilish--local-user-message nil
         pilish--extension-status nil
+        pilish--held-chat-notices nil
         pilish--working-message nil
         pilish--pre-compaction-status nil
         pilish--in-code-block nil
@@ -886,19 +893,26 @@ than offering levels the current model may not support."
 (defun pilish--refresh-thinking-level-state (proc chat-buf)
   "Refresh CHAT-BUF state from PROC after a thinking-level change.
 Uses `get_state' so the UI reflects the server's actual level,
-including any model-specific clamping."
-  (pilish--rpc-async
-   proc '(:type "get_state")
-   (lambda (response)
-     (if (eq (plist-get response :success) t)
-         (let* ((data (plist-get response :data))
-                (level (or (plist-get data :thinkingLevel) "off")))
-           (pilish--apply-state-response chat-buf response)
-           (message "Pi: Thinking level: %s" level))
-       (message "Pi: Thinking level updated, but failed to refresh state%s"
-                (if-let* ((error-text (plist-get response :error)))
-                    (format ": %s" error-text)
-                  ""))))))
+including any model-specific clamping.  A session transition owns its own
+state refresh: do not schedule this background refresh during one, or apply
+its response after a newer transition or process replacement."
+  (when (and (buffer-live-p chat-buf)
+             (not (pilish--session-transition-active-p chat-buf)))
+    (let ((generation (buffer-local-value
+                       'pilish--session-transition-generation chat-buf)))
+      (pilish--rpc-async
+       proc '(:type "get_state")
+       (lambda (response)
+         (when (pilish--session-transition-current-p chat-buf proc generation)
+           (if (eq (plist-get response :success) t)
+               (let* ((data (plist-get response :data))
+                      (level (or (plist-get data :thinkingLevel) "off")))
+                 (pilish--apply-state-response chat-buf response)
+                 (message "Pi: Thinking level: %s" level))
+             (message "Pi: Thinking level updated, but failed to refresh state%s"
+                      (if-let* ((error-text (plist-get response :error)))
+                          (format ": %s" error-text)
+                        "")))))))))
 
 (defun pilish-select-thinking ()
   "Select a thinking level from the minibuffer."
@@ -1383,6 +1397,7 @@ Uses commands from pi's `get_commands' RPC."
    ["Actions"
     ("RET" "send" pilish-send)
     ("s" "steer" pilish-queue-steering)
+    ("u" "follow-up" pilish-queue-followup)
     ("a" "attach" pilish-attach-menu)
     ("k" "abort" pilish-abort)]]
   [["Model"
@@ -1391,7 +1406,9 @@ Uses commands from pi's `get_commands' RPC."
    ["Completed thinking"
     (pilish-menu-chat-thinking-display)
     (pilish-menu-default-thinking-display)]
-   ["Info"
+   ["View / info"
+    ("v" pilish--menu-markup-description md-ts-toggle-hide-markup
+     :if-derived pilish-transcript-mode)
     ("d" "details" pilish-describe-reply :if-derived pilish-transcript-mode)
     ("i" "stats" pilish-session-stats)
     ("y" "copy last" pilish-copy-last-message)]])

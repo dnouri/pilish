@@ -562,6 +562,37 @@ Returns nil on timeout."
 
 ;;;; Process Management
 
+(defvar pilish-process-event-functions nil
+  "Functions called with (PROCESS EVENT) before its display handler.
+This hook sees non-response JSON events, including unknown types, after
+core queue bookkeeping.  Return nil to observe and continue, or non-nil
+to consume the event and skip later functions and the display handler.
+Consumption also skips the display handler's session-state updates;
+consumers of lifecycle events must own those effects themselves.
+Functions run in the filter's current buffer, not necessarily the chat.
+Treat EVENT as read-only.  Errors and quits are reported and treated like nil.
+Removing PROCESS from Emacs's process table during delivery stops later
+handlers and batch records.  An OS exit alone does not discard final output.")
+
+(defvar pilish-process-exit-functions nil
+  "Functions called with (PROCESS RESPONSE) during process exit cleanup.
+Editor cleanup and pending RPC callbacks/table cleanup run first, with
+errors and quits reported so later cleanup can proceed.  The process's
+frontend exit handler and stderr release run afterwards.
+RESPONSE is the same error response plist given to pending callbacks,
+including :processExit, :exitCode and optional :stderr.  Treat it as
+read-only.  Return values are ignored.  Errors and quits are reported without
+preventing subsequent hooks or the remaining cleanup.  The current buffer
+is not necessarily the chat; inspect PROCESS for process-specific state.")
+
+(defun pilish--call-process-hook (function &rest args)
+  "Call hook FUNCTION with ARGS, reporting errors and returning nil on failure."
+  (condition-case err
+      (apply function args)
+    ((error quit)
+     (message "pilish: process handler failed: %s" (error-message-string err))
+     nil)))
+
 (defun pilish--process-filter (proc output)
   "Handle OUTPUT from pi PROC.
 Accumulates output and dispatches complete JSON lines.
@@ -573,17 +604,22 @@ may also reset this wall-clock observation baseline."
   (let* ((inhibit-redisplay t)
          (partial (process-get proc 'pilish-partial-output-chunks))
          (result (pilish--accumulate-line-chunks partial output))
-         (lines (car result)))
+         (lines (car result))
+         (registered (eq proc (get-process (process-name proc)))))
     (process-put proc 'pilish-partial-output-chunks (cdr result))
-    (dolist (line lines)
-      (if (equal line pilish--remote-ready-marker)
-          (pilish--mark-process-ready proc)
-        (when-let* ((json (pilish--parse-json-line line)))
-          (condition-case err
-              (pilish--dispatch-response proc json)
-            (error
-             (message "pilish: error dispatching process response: %s"
-                      (error-message-string err)))))))))
+    ;; OS exit can precede final stdout or happen during dispatch.  Stop for
+    ;; removal from Emacs's process table, not merely a non-live status.
+    (while (and lines (or (not registered)
+                         (eq proc (get-process (process-name proc)))))
+      (let ((line (pop lines)))
+        (if (equal line pilish--remote-ready-marker)
+            (pilish--mark-process-ready proc)
+          (when-let* ((json (pilish--parse-json-line line)))
+            (condition-case err
+                (pilish--dispatch-response proc json)
+              (error
+               (message "pilish: error dispatching process response: %s"
+                        (error-message-string err))))))))))
 
 (defun pilish--process-sentinel (proc event)
   "Handle process state change EVENT for PROC."
@@ -647,9 +683,18 @@ Calls only the handler registered for this specific process."
   ;; Observe before display registration or adoption, including reload candidates.
   (when (equal (plist-get event :type) "queue_update")
     (process-put proc 'pilish-queue-snapshot event))
-  ;; Call only this process's handler
-  (when-let* ((handler (process-get proc 'pilish-display-handler)))
-    (funcall handler event)))
+  (let ((registered (eq proc (get-process (process-name proc)))))
+    (unless (run-hook-wrapped
+             'pilish-process-event-functions
+             (lambda (function)
+               (or (pilish--call-process-hook function proc event)
+                   (and registered
+                        (not (eq proc (get-process (process-name proc))))))))
+      ;; A hook may disconnect the process without consuming the event.
+      (when (or (not registered)
+                (eq proc (get-process (process-name proc))))
+        (when-let* ((handler (process-get proc 'pilish-display-handler)))
+          (funcall handler event))))))
 
 (defconst pilish--process-stderr-max-chars 4000
   "Maximum number of stderr characters to keep in process exit excerpts.")
@@ -711,14 +756,19 @@ containing EVENT, then clears this process's pending request tables."
     (unwind-protect
         (unwind-protect
             (progn
-              (pilish--close-process-editors proc)
+              (pilish--call-process-hook #'pilish--close-process-editors proc)
               (when pending
                 (maphash (lambda (_id callback)
-                           (funcall callback error-response))
+                           (pilish--call-process-hook callback error-response))
                          pending)
                 (clrhash pending))
               (when pending-types
                 (clrhash pending-types)))
+          (run-hook-wrapped
+           'pilish-process-exit-functions
+           (lambda (function)
+             (pilish--call-process-hook function proc error-response)
+             nil))
           (when-let* ((handler (process-get proc 'pilish-exit-handler)))
             (funcall handler error-response)))
       (pilish--cleanup-process-stderr-buffer proc))))
@@ -857,7 +907,8 @@ JSON null values, and other non-strings become nil."
 
 (defun pilish--update-state-from-event (event)
   "Update status and state based on EVENT.
-Handles agent lifecycle, message events, compaction, and error/retry events.
+Handles agent lifecycle, message events, compaction, error/retry events,
+and thinking level changes Pi reports for any cause.
 For agent_settled, return non-nil only when waiting work was released."
   (let ((type (plist-get event :type)))
     (pcase type
@@ -913,7 +964,14 @@ For agent_settled, return non-nil only when waiting work was released."
        (unless (eq (plist-get event :success) t)
          (plist-put pilish--state :last-error (plist-get event :finalError))))
       ("extension_error"
-       (plist-put pilish--state :last-error (plist-get event :error))))))
+       (plist-put pilish--state :last-error (plist-get event :error)))
+      ("thinking_level_changed"
+       ;; Also reports changes Pilish did not request: a model switch clamping
+       ;; the level, or an extension calling `pi.setThinkingLevel'.
+       (when (stringp (plist-get event :level))
+         (setq pilish--state
+               (plist-put pilish--state :thinking-level
+                          (plist-get event :level))))))))
 
 (defun pilish--ensure-active-tools ()
   "Ensure :active-tools hash table exists in state."

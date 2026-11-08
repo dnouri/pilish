@@ -10,7 +10,7 @@
 ;; Assisted-by: pi:claude-opus-4.6
 ;; URL: https://github.com/dnouri/pilish
 ;; Keywords: ai llm ai-pair-programming tools
-;; Version: 3.4.2
+;; Version: 3.4.4
 ;; Package-Requires: ((emacs "29.1") (transient "0.9.0") (magit-section "4.0.0") (md-ts-mode "0.5.0") (markdown-table-wrap "0.2.0"))
 
 ;; SPDX-License-Identifier: GPL-3.0-or-later
@@ -57,8 +57,10 @@
 ;;
 ;; Key Bindings:
 ;;   Input buffer:
-;;     C-c C-c        Send prompt (queues text as follow-up if busy)
+;;     C-c C-c        Send prompt (queues text as follow-up if busy;
+;;                    steers instead with `pilish-send-while-busy')
 ;;     C-c C-s        Queue steering (interrupts after current tool; busy only)
+;;     M-RET          Send prompt, or always queue as follow-up if busy
 ;;     C-c C-k        Abort current operation
 ;;     C-c C-p        Open menu
 ;;     C-c C-r        Browse sessions
@@ -100,8 +102,10 @@
 ;;   - Prompt image: Attach one content-sniffed raster image to a direct,
 ;;     idle, non-slash prompt; the session header shows its name and size.
 ;;   - Message queuing: Submit text messages while agent is working:
-;;       C-c C-c  queues follow-up (delivered after agent completes)
+;;       C-c C-c  queues follow-up (delivered after agent completes),
+;;                or steers when `pilish-send-while-busy' is `steer'
 ;;       C-c C-s  queues steering (interrupts after current tool)
+;;       M-RET    queues follow-up whatever that option says
 ;;     Image-bearing drafts refuse these busy paths and remain intact.
 ;;
 ;; Press C-c C-p for the full transient menu with model selection,
@@ -163,11 +167,12 @@ Returns the chat buffer."
           (pilish--register-display-handler pilish--process)
           ;; Initialize state from server
           (let ((buf chat-buf)
-                (proc pilish--process))  ; Capture for closures
+                (proc pilish--process)
+                (generation pilish--session-transition-generation))
             (pilish--rpc-async proc '(:type "get_state")
               (lambda (response)
                 (if (eq (plist-get response :success) t)
-                    (progn
+                    (when (pilish--session-transition-current-p buf proc generation)
                       (pilish--apply-state-response buf response)
                       ;; Check if no model available and warn user
                       (when (buffer-live-p buf)

@@ -1268,6 +1268,18 @@ Display is handled by the display handler, not by state updates."
     (should (equal (plist-get pilish--state :last-error)
                    "TypeError: undefined is not a function"))))
 
+(ert-deftest pilish-test-event-thinking-level-changed-updates-state ()
+  "thinking_level_changed stores Pi's level, also when Pilish did not ask."
+  (let ((pilish--status 'idle)
+        (pilish--state nil))
+    (pilish--update-state-from-event
+     '(:type "thinking_level_changed" :level "high"))
+    (should (equal (plist-get pilish--state :thinking-level) "high"))
+    (pilish--update-state-from-event
+     '(:type "thinking_level_changed" :level "off"))
+    (should (equal (plist-get pilish--state :thinking-level) "off"))
+    (should (eq pilish--status 'idle))))
+
 (ert-deftest pilish-test-event-agent-start-clears-error-state ()
   "agent_start event clears error and retry state."
   (let ((pilish--status 'idle)
@@ -1683,6 +1695,294 @@ redisplay cycle instead of triggering N separate redraws."
                          "nul-session"))
           (should-not (plist-get pilish--state :session-file)))
       (delete-process fake-proc))))
+
+;;;; Public process hooks
+
+(ert-deftest pilish-test-process-hooks-observe-and-consume-after-queue-bookkeeping ()
+  "Observers run in order; consuming a queue event preserves its snapshot."
+  (let ((proc (start-process "pilish-hooks" nil "cat"))
+        seen observed-process queue-observed)
+    (unwind-protect
+        (let ((pilish-process-event-functions
+               (list (lambda (process event)
+                       (setq observed-process process)
+                       (push (plist-get event :type) seen)
+                       nil)
+                     (lambda (process event)
+                       (when (equal (plist-get event :type) "queue_update")
+                         (setq queue-observed
+                               (eq event (pilish--process-queue-snapshot process)))
+                         'consumed))
+                     (lambda (_process _event) (push 'last seen) nil))))
+          (process-put proc 'pilish-display-handler
+                       (lambda (event) (push (plist-get event :type) seen)))
+          (pilish--process-filter
+           proc (concat "{\"type\":\"agent_start\"}\n"
+                        "{\"type\":\"queue_update\",\"steering\":[]}\n"))
+          (should (equal (nreverse seen)
+                         '("agent_start" last "agent_start" "queue_update")))
+          (should (eq observed-process proc))
+          (should queue-observed))
+      (delete-process proc))))
+
+(ert-deftest pilish-test-process-hooks-do-not-consume-responses ()
+  "Even a consuming event hook cannot intercept correlated RPC responses."
+  (let ((proc (start-process "pilish-hook-response" nil "cat"))
+        response hook-called)
+    (unwind-protect
+        (let ((pilish-process-event-functions
+               (list (lambda (&rest _) (setq hook-called t)))))
+          (puthash "req" (lambda (value) (setq response value))
+                   (pilish--get-pending-requests proc))
+          (pilish--process-filter proc "{\"type\":\"response\",\"id\":\"req\",\"success\":true}\n")
+          (should (eq (plist-get response :success) t))
+          (should-not hook-called))
+      (delete-process proc))))
+
+(ert-deftest pilish-test-process-hooks-failure-preserves-default-and-later-records ()
+  "A failing observer falls through; failed display loses only its own record."
+  (let ((proc (start-process "pilish-hook-error" nil "cat"))
+        seen reports)
+    (unwind-protect
+        (let ((pilish-process-event-functions
+               (list (lambda (_process _event) (error "observer failed"))
+                     (lambda (_process event)
+                       (push (plist-get event :type) seen) nil))))
+          (process-put proc 'pilish-display-handler
+                       (lambda (event)
+                         (if (equal (plist-get event :type) "first")
+                             (error "display failed")
+                           (push 'display seen))))
+          (cl-letf (((symbol-function 'message)
+                     (lambda (format-string &rest args)
+                       (push (apply #'format format-string args) reports))))
+            (pilish--process-filter proc "{\"type\":\"first\"}\n{\"type\":\"second\"}\n"))
+          (should (equal (nreverse seen) '("first" "second" display)))
+          (should (= (length reports) 3)))
+      (delete-process proc))))
+
+(ert-deftest pilish-test-process-hooks-deletion-stops-current-and-rest-of-batch ()
+  "Deleting the transport without consuming stops observers and later records."
+  (let ((proc (start-process "pilish-hook-delete" nil "cat"))
+        seen)
+    (unwind-protect
+        (let ((pilish-process-event-functions
+               (list (lambda (process event)
+                       (push (plist-get event :type) seen)
+                       (delete-process process)
+                       nil)
+                     (lambda (&rest _) (push 'unexpected-observer seen)))))
+          (process-put proc 'pilish-display-handler
+                       (lambda (_event) (push 'unexpected-display seen)))
+          (pilish--process-filter
+           proc "{\"type\":\"disconnect\"}\n{\"type\":\"agent_start\"}\n")
+          (should (equal seen '("disconnect"))))
+      (when (process-live-p proc) (delete-process proc)))))
+
+(ert-deftest pilish-test-process-hooks-final-output-after-os-exit ()
+  "Emacs may deliver final stdout after a subprocess has already exited."
+  (let ((proc (start-process "pilish-hook-final" nil "sh" "-c" "exit 3"))
+        observed displayed response)
+    (unwind-protect
+        (let ((pilish-process-event-functions
+               (list (lambda (_process event)
+                       (push (plist-get event :type) observed) nil))))
+          (should (pilish-test-wait-until
+                   (lambda () (not (process-live-p proc)))
+                   pilish-test-short-wait pilish-test-poll-interval proc))
+          (should (eq (process-status proc) 'exit))
+          (process-put proc 'pilish-display-handler
+                       (lambda (event) (push (plist-get event :type) displayed)))
+          (puthash "req" (lambda (value) (setq response value))
+                   (pilish--get-pending-requests proc))
+          (pilish--process-filter
+           proc (concat "{\"type\":\"agent_end\"}\n"
+                        "{\"type\":\"response\",\"id\":\"req\",\"success\":true}\n"
+                        "{\"type\":\"agent_settled\"}\n"))
+          (should (equal (reverse observed) '("agent_end" "agent_settled")))
+          (should (equal displayed observed))
+          (should (eq (plist-get response :success) t)))
+      (when (process-live-p proc) (delete-process proc)))))
+
+(ert-deftest pilish-test-process-hooks-os-exit-during-batch-preserves-records ()
+  "A non-live status during dispatch is not deletion from the process table."
+  (let ((proc (start-process "pilish-hook-mid-exit" nil "cat"))
+        (live-p (symbol-function 'process-live-p))
+        exited seen)
+    (unwind-protect
+        (let ((pilish-process-event-functions
+               (list (lambda (_process _event) (setq exited t) nil)
+                     (lambda (_process event)
+                       (push (cons 'observer (plist-get event :type)) seen)
+                       nil))))
+          (process-put proc 'pilish-display-handler
+                       (lambda (event)
+                         (push (cons 'display (plist-get event :type)) seen)))
+          ;; Model SIGCHLD changing status without delete-process.  Keep the
+          ;; real process-table identity, and avoid a timing-based race test.
+          (cl-letf (((symbol-function 'process-live-p)
+                     (lambda (process)
+                       (and (not (and (eq process proc) exited))
+                            (funcall live-p process)))))
+            (pilish--process-filter
+             proc "{\"type\":\"first\"}\n{\"type\":\"second\"}\n"))
+          (should (equal (nreverse seen)
+                         '((observer . "first") (display . "first")
+                           (observer . "second") (display . "second")))))
+      (delete-process proc))))
+
+(ert-deftest pilish-test-process-hooks-quit-is-isolated ()
+  "A quitting observer cannot interrupt other observers or ordinary display."
+  (let ((proc (start-process "pilish-hook-quit" nil "cat"))
+        seen)
+    (unwind-protect
+        (let ((pilish-process-event-functions
+               (list (lambda (&rest _) (signal 'quit nil))
+                     (lambda (&rest _) (push 'observer seen) nil))))
+          (process-put proc 'pilish-display-handler
+                       (lambda (_event) (push 'display seen)))
+          (pilish--process-filter proc "{\"type\":\"custom_event\"}\n")
+          (should (equal (nreverse seen) '(observer display))))
+      (delete-process proc))))
+
+(ert-deftest pilish-test-process-hooks-unhandled-events-run-in-chat ()
+  "Unknown types reach all fallback observers; recognized types do not."
+  (pilish-test-with-rpc-session (chat _input proc _commands)
+    (let* (seen observed-buffer observed-state
+           (pilish-unhandled-event-functions
+            (list (lambda (_event) (error "fallback failed"))
+                  (lambda (event)
+                    (setq observed-buffer (current-buffer)
+                          observed-state pilish--status)
+                    (push (plist-get event :type) seen)
+                    t)
+                  (lambda (_event) (push 'last seen)))))
+      (pilish-test--stdout proc '(:type "agent_start"))
+      (should-not seen)
+      (pilish-test--stdout proc '(:type "custom_event"))
+      (should (equal (nreverse seen) '("custom_event" last)))
+      (should (eq observed-buffer chat))
+      (should (eq observed-state 'streaming)))))
+
+(ert-deftest pilish-test-process-hooks-unhandled-events-stop-when-chat-killed ()
+  (let ((chat (generate-new-buffer " *pilish-hook-chat*"))
+        (proc (start-process "pilish-hook-owner-killed" nil "cat"))
+        (pilish-quit-without-confirmation t)
+        later-called)
+    (unwind-protect
+        (progn
+          (with-current-buffer chat
+            (pilish-chat-mode)
+            (setq pilish--process proc))
+          (process-put proc 'pilish-chat-buffer chat)
+          (pilish--register-display-handler proc)
+          (let ((pilish-unhandled-event-functions
+                 (list (lambda (_event)
+                         (kill-buffer (current-buffer))
+                         nil)
+                       (lambda (_event) (setq later-called t)))))
+            (pilish--process-filter proc "{\"type\":\"custom_event\"}\n"))
+          (should-not (buffer-live-p chat))
+          (should-not later-called))
+      (when (buffer-live-p chat) (kill-buffer chat))
+      (when (process-live-p proc) (delete-process proc)))))
+
+(ert-deftest pilish-test-process-hooks-unhandled-events-stop-when-process-replaced ()
+  (pilish-test-with-rpc-session (chat _input proc _commands)
+    (let ((replacement (start-process "pilish-hook-replacement" nil "cat"))
+          later-called)
+      (unwind-protect
+          (let ((pilish-unhandled-event-functions
+                 (list (lambda (_event)
+                         (pilish--set-process replacement)
+                         nil)
+                       (lambda (_event) (setq later-called t)))))
+            (pilish-test--stdout proc '(:type "custom_event"))
+            (should (eq (buffer-local-value 'pilish--process chat) replacement))
+            (should-not later-called))
+        (when (process-live-p replacement) (delete-process replacement))))))
+
+(ert-deftest pilish-test-process-hooks-consumption-skips-display-state ()
+  "A consumer owns skipped lifecycle effects and bypasses the fallback hook."
+  (pilish-test-with-rpc-session (chat _input proc _commands)
+    (let* (fallback-called
+           (pilish-process-event-functions (list (lambda (&rest _) t)))
+           (pilish-unhandled-event-functions
+            (list (lambda (_event) (setq fallback-called t)))))
+      (pilish-test--stdout proc '(:type "agent_start") '(:type "custom_event"))
+      (should (eq (buffer-local-value 'pilish--status chat) 'idle))
+      (should-not fallback-called))))
+
+(ert-deftest pilish-test-process-exit-hooks-order-and-error-cleanup ()
+  "Failing exit hooks cannot suppress callbacks, editors, frontend or stderr."
+  (let ((proc (start-process "pilish-hook-exit" nil "cat"))
+        (editor (generate-new-buffer " *pilish-hook-editor*"))
+        (stderr (generate-new-buffer " *pilish-hook-stderr*"))
+        seen received hook-observation hook-response frontend-had-stderr)
+    (unwind-protect
+        (let* ((pending (pilish--get-pending-requests proc))
+               (types (pilish--get-pending-command-types proc))
+               (pilish-process-exit-functions
+                (list (lambda (process response)
+                        (setq hook-observation
+                              (list (eq process proc)
+                                    (buffer-live-p editor)
+                                    (hash-table-count pending)
+                                    (hash-table-count types)
+                                    (buffer-live-p stderr)
+                                    (eq response received)))
+                        (push 'failed-hook seen)
+                        (error "exit observer failed"))
+                      (lambda (_process response)
+                        (push 'next-hook seen)
+                        (setq hook-response response)
+                        t)
+                      (lambda (&rest _) (push 'last-hook seen)))))
+          (with-current-buffer stderr (insert "diagnostic"))
+          (process-put proc 'pilish-stderr-buf stderr)
+          (process-put proc 'pilish-editor-buffers (list editor))
+          (puthash "req" (lambda (response)
+                           (setq received response)
+                           (push 'callback seen)) pending)
+          (puthash "req" "get_state" types)
+          (process-put proc 'pilish-exit-handler
+                       (lambda (_response)
+                         (setq frontend-had-stderr (buffer-live-p stderr))
+                         (push 'frontend seen)))
+          (pilish--handle-process-exit proc "finished\n")
+          (should (equal (nreverse seen)
+                         '(callback failed-hook next-hook last-hook frontend)))
+          (should (equal hook-observation '(t nil 0 0 t t)))
+          (should (eq (plist-get hook-response :processExit) t))
+          (should (equal (plist-get hook-response :stderr) "diagnostic"))
+          (should frontend-had-stderr)
+          (should-not (process-get proc 'pilish-stderr-buf))
+          (should-not (buffer-live-p stderr)))
+      (when (process-live-p proc) (delete-process proc))
+      (when (buffer-live-p editor) (kill-buffer editor))
+      (when (buffer-live-p stderr) (kill-buffer stderr)))))
+
+(ert-deftest pilish-test-process-exit-hooks-survive-callback-error-and-hook-quit ()
+  "Failed callbacks and quitting hooks still settle tables and frontend state."
+  (let ((proc (start-process "pilish-hook-exit-quit" nil "cat"))
+        seen)
+    (unwind-protect
+        (let* ((pending (pilish--get-pending-requests proc))
+               (types (pilish--get-pending-command-types proc))
+               (pilish-process-exit-functions
+                (list (lambda (&rest _) (signal 'quit nil))
+                      (lambda (&rest _) (push 'hook seen)))))
+          (puthash "bad" (lambda (_response) (error "failed callback")) pending)
+          (puthash "good" (lambda (_response) (push 'callback seen)) pending)
+          (puthash "bad" "get_state" types)
+          (puthash "good" "get_messages" types)
+          (process-put proc 'pilish-exit-handler
+                       (lambda (_response) (push 'frontend seen)))
+          (pilish--handle-process-exit proc "finished\n")
+          (should (equal (nreverse seen) '(callback hook frontend)))
+          (should (= (hash-table-count pending) 0))
+          (should (= (hash-table-count types) 0)))
+      (delete-process proc))))
 
 (provide 'pilish-core-test)
 ;;; pilish-core-test.el ends here

@@ -57,5 +57,15 @@
     (should (= 1 (length tests)))
     (should (eq name (ert-test-name (car tests))))))
 
+(ert-deftest pilish-gui-test-utils-test-chat-contains-matches-literal-case ()
+  "Literal output assertions ignore ambient case-folding and regexp syntax."
+  (with-temp-buffer
+    (insert "Fake reply for: HELLO [ok].")
+    (let ((pilish-gui-test--session (list :chat-buffer (current-buffer))))
+      (dolist (case-fold-search '(t nil))
+        (should (pilish-gui-test-chat-contains "Fake reply for: HELLO [ok]."))
+        (should-not (pilish-gui-test-chat-contains "fake REPLY for: hello [ok]."))
+        (should-not (pilish-gui-test-chat-contains "HELLO .ok.."))))))
+
 (provide 'pilish-gui-test-utils-test)
 ;;; pilish-gui-test-utils-test.el ends here

@@ -38,6 +38,12 @@ Optional `handled_input` consumes that exact text for both `prompt` and `steer`
 with `data.disposition: "handled"`, without messages, a run, user persistence, or
 queue changes. The `input-dispositions.json` fixture covers this Pi 1.0 case.
 
+Optional `notifications` emit fire-and-forget extension `notify` requests while
+the reply streams. Each item names `after_chunk` (the number of text chunks
+already sent), `notify_type` (default `info`) and `message`. They expect no
+response and change no session data. The `notify-notices.json` fixture sends a
+warning and an error mid-stream.
+
 A raw prompt during streaming must explicitly carry
 `streamingBehavior: "steer"` to queue text into the same single slot. Missing
 behavior fails; `"followUp"` is unsupported, as is the `follow_up` command.
@@ -85,6 +91,12 @@ without an agent run. Its custom-message output precedes the one
 user entry. `/test-noop` acknowledges as handled without emitting messages,
 lifecycle events, or session entries. These fixtures replay extension-like
 wire behavior; they do not execute extensions.
+
+Optional `session_name` and `thinking_level` model an extension calling
+`pi.setSessionName` and `pi.setThinkingLevel` in that order. Each appends its
+session entry and emits `session_info_changed` or `thinking_level_changed`
+before the acknowledgment; an unchanged thinking level emits nothing, as in
+Pi. `/test-session-metadata` (`extension-session-metadata.json`) uses both.
 
 Example:
 

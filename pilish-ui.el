@@ -85,6 +85,7 @@
 (declare-function pilish-next-input "pilish-input")
 (declare-function pilish-history-isearch-backward "pilish-input")
 (declare-function pilish-queue-steering "pilish-input")
+(declare-function pilish-queue-followup "pilish-input")
 (declare-function pilish-input-mode "pilish-input")
 
 ;; pilish-browse.el (session browser)
@@ -211,6 +212,31 @@ when needed."
                  (const :tag "Hidden at launch (chat only; open on demand)" hidden))
   :group 'pilish)
 
+(defcustom pilish-send-while-busy 'follow-up
+  "What `pilish-send' does with the input while Pi is working.
+`follow-up' (the default) queues it and sends it as the next prompt
+once Pi finishes.  `steer' sends it as steering, like Enter in Pi's
+terminal UI: Pi reads it after the current tool calls and before its
+next model call, as with `pilish-queue-steering'.
+`pilish-queue-steering' and `pilish-queue-followup' ignore this option."
+  :type '(choice (const :tag "Queue as follow-up" follow-up)
+                 (const :tag "Steer the current run" steer))
+  :group 'pilish)
+
+(defcustom pilish-jump-to-end-on-submit nil
+  "Non-nil means submitting a draft returns the chat to its end.
+Applies when the input buffer accepts a prompt, a steering message
+or a queued follow-up.  Each window in the submitting frame that
+shows the chat moves to the end of the conversation, so it follows
+the reply; the input keeps focus.  Typing, refused or empty
+submissions, automatic delivery of queued follow-ups and windows in
+other frames do not move, and a hidden chat is not displayed.
+
+When nil, a chat scrolled back to earlier text keeps its position;
+only windows already at the end follow new output."
+  :type 'boolean
+  :group 'pilish)
+
 (defcustom pilish-activity-phase-functions nil
   "Functions called after a session activity phase is applied.
 Each function is called with five arguments:
@@ -263,7 +289,7 @@ Prevents huge single-line outputs from blowing up the chat buffer."
 
 (defcustom pilish-image-preview-max-width 900
   "Maximum pixel width for inline image previews.
-Previews are also constrained to the visible chat window."
+Previews are also constrained to a graphical window when available."
   :type 'natnum
   :group 'pilish)
 
@@ -335,6 +361,16 @@ For example:
                                             :value-type sexp)))
   :group 'pilish)
 
+(defcustom pilish-notify-in-chat nil
+  "Whether extension warnings and errors also stay in the chat.
+Extension `notify' requests always show in the echo area.  When non-nil,
+warning and error notifications are also appended to the chat as literal
+notices.  A notice that arrives while Pi streams or compacts waits until
+that output ends.  Notices are not part of Pi's saved history, so a chat
+rebuilt from it omits them."
+  :type 'boolean
+  :group 'pilish)
+
 (defcustom pilish-quit-without-confirmation nil
   "Whether quitting skips confirmation for a live process.
 When non-nil, closing a session never asks whether a running pi process
@@ -362,18 +398,31 @@ Allowed values are:
 - `hidden'   Collapse completed thinking to a short stub line.
 
 Live streaming thinking is always shown while the assistant is still working.
-Per-block TAB toggles are temporary local overrides and are cleared by buffer
-rebuilds, reloads, or whole-chat display-mode changes."
+Completed thinking shorter than `pilish-thinking-fold-min-lines' is always
+visible.  Per-block TAB toggles are temporary local overrides and are cleared
+by buffer rebuilds, reloads, or whole-chat display-mode changes."
   :type '(choice (const :tag "Visible" visible)
                  (const :tag "Hidden" hidden))
+  :group 'pilish)
+
+(defcustom pilish-thinking-fold-min-lines 3
+  "Minimum number of non-blank lines for completed thinking to fold.
+A line longer than 80 columns counts once per started 80 columns, so a
+long paragraph still folds.  Shorter completed thinking, such as the
+one-heading reasoning summaries some providers send, always stays
+expanded: it has no disclosure caret, `TAB' does not collapse it, and
+`hidden' display leaves it visible, because a stub would hide most of it
+while saving at most a few rows.  Set this to 1 to make all completed
+thinking foldable."
+  :type 'natnum
   :group 'pilish)
 
 (defcustom pilish-thinking-hidden-preview t
   "Whether hidden completed thinking should preview its first line.
 When non-nil, collapsed completed thinking shows the first non-empty trimmed
-line when the normalized thinking spans more than one line, is at least
-3 characters long, and shorter than 72 characters. Otherwise the hidden block
-falls back to a generic line-count label."
+line when the thinking has more than one non-blank line and that line is at
+least 3 characters long and shorter than 72 characters.  Otherwise the hidden
+block falls back to a generic line-count label."
   :type 'boolean
   :group 'pilish)
 
@@ -417,6 +466,12 @@ still operate on the raw table source."
   '((t :extend t))
   "Face for tool blocks.
 Subtle blue-tinted background derived from the current theme."
+  :group 'pilish)
+
+(defface pilish-tool-block-success
+  '((t :inherit pilish-tool-block))
+  "Face for tool blocks after successful completion.
+By default they look like running tool blocks."
   :group 'pilish)
 
 (defface pilish-tool-block-error
@@ -1180,8 +1235,9 @@ removing the instructional header that would otherwise appear."
     (define-key map (kbd "<C-up>") #'pilish-previous-input)
     (define-key map (kbd "<C-down>") #'pilish-next-input)
     (define-key map (kbd "C-r") #'pilish-history-isearch-backward)
-    ;; Message queuing (steering only - follow-up handled by C-c C-c)
+    ;; Explicit steering and follow-up; C-c C-c follows `pilish-send-while-busy'.
     (define-key map (kbd "C-c C-s") #'pilish-queue-steering)
+    (define-key map (kbd "M-RET") #'pilish-queue-followup)
     map)
   "Keymap for `pilish-input-mode'.")
 
@@ -1984,6 +2040,9 @@ canonical history, so rebuilding now would erase that visible turn."
   "Alist of extension status messages for header-line display.
 Keys are extension identifiers (strings), values are status text.")
 
+(defvar-local pilish--held-chat-notices nil
+  "Chat notices waiting for streaming or compaction to end, newest first.")
+
 (defvar-local pilish--working-message nil
   "Transient extension working message for header-line display.")
 
@@ -2707,7 +2766,9 @@ Returns a markdown setext heading: label line followed by === underline.
 Fontification is handled by `md-ts-mode'.
 
 Using setext headings enables outline/imenu navigation and keeps our
-turn markers as H1 while LLM ATX headings are leveled down to H2+."
+turn markers as H1 while LLM ATX headings are leveled down to H2+.
+Both lines carry the `pilish-heading' text property, whose value is
+LABEL, so display add-ons can find headings without parsing text."
   (let* ((timestamp-str (when timestamp
                           (pilish--format-message-timestamp timestamp)))
          (header-line (if timestamp-str
@@ -2716,7 +2777,7 @@ turn markers as H1 while LLM ATX headings are leveled down to H2+."
          ;; Underline must be at least 3 chars, and at least as long as header
          (underline-len (max 3 (length header-line)))
          (underline (make-string underline-len ?=)))
-    (concat header-line "\n" underline "\n")))
+    (propertize (concat header-line "\n" underline "\n") 'pilish-heading label)))
 
 ;;;; Formatting Utilities
 
@@ -2887,7 +2948,7 @@ warnings for missing dependencies."
 
 ;;;; Startup Header
 
-(defconst pilish-version "3.4.2"
+(defconst pilish-version "3.4.4"
   "Version of Pilish.")
 
 (defconst pilish--version-probe-delay 0.1
