@@ -162,7 +162,7 @@ cat >> "$RUNNER_FILE" << EOF
               (pilish-gui-test--log "  Options: %S"
                                 (plist-get pilish-gui-test--session :options))
               ;; Process status
-              (when-let ((proc (plist-get pilish-gui-test--session :process)))
+              (when-let* ((proc (plist-get pilish-gui-test--session :process)))
                 (pilish-gui-test--log "  --- Process status ---")
                 (pilish-gui-test--log "  Status: %s, Exit: %s"
                                   (process-status proc) (process-exit-status proc))
@@ -170,7 +170,7 @@ cat >> "$RUNNER_FILE" << EOF
                                   (or (process-get proc 'pilish-gui-test-event-count) 0)
                                   (process-get proc 'pilish-gui-test-last-event)))
               ;; Chat buffer content
-              (when-let ((chat-buf (plist-get pilish-gui-test--session :chat-buffer)))
+              (when-let* ((chat-buf (plist-get pilish-gui-test--session :chat-buffer)))
                 (when (buffer-live-p chat-buf)
                   (pilish-gui-test--log "  --- Chat buffer content ---")
                   (pilish-gui-test--log "%s" (with-current-buffer chat-buf (buffer-string)))

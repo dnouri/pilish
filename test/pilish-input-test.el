@@ -1258,6 +1258,59 @@ When user aborts, they want to stop everything - including queued messages."
         (when (process-live-p fake-proc)
           (delete-process fake-proc))))))
 
+(defun pilish-test--linked-session-buffers (dir)
+  "Return linked (CHAT . INPUT) buffers for DIR without a process."
+  (let ((chat (generate-new-buffer (format "*pilish-chat:%s*" dir)))
+        (input (generate-new-buffer (format "*pilish-input:%s*" dir))))
+    (with-current-buffer chat (pilish-chat-mode))
+    (with-current-buffer input (pilish-input-mode))
+    (with-current-buffer chat (pilish--set-input-buffer input))
+    (with-current-buffer input (pilish--set-chat-buffer chat))
+    (cons chat input)))
+
+(ert-deftest pilish-test-killing-session-runs-each-kill-hook-once ()
+  "Killing either half runs each buffer's kill hook once, in that buffer."
+  (dolist (killed '(chat input))
+    (ert-info ((format "killing the %s buffer" killed))
+      (let* ((pair (pilish-test--linked-session-buffers "/tmp/kill-once/"))
+             (runs nil))
+        (unwind-protect
+            (progn
+              (dolist (buf (list (car pair) (cdr pair)))
+                (with-current-buffer buf
+                  (add-hook 'kill-buffer-hook
+                            (lambda () (push (cons buf (current-buffer)) runs))
+                            90 t)))
+              (kill-buffer (if (eq killed 'chat) (car pair) (cdr pair)))
+              (should-not (buffer-live-p (car pair)))
+              (should-not (buffer-live-p (cdr pair)))
+              (should (= (length runs) 2))
+              (dolist (run runs)
+                (should (eq (car run) (cdr run)))))
+          (pilish-test--kill-live-buffers (car pair) (cdr pair)))))))
+
+(ert-deftest pilish-test-killing-session-keeps-other-chat-render-state ()
+  "Killing one session's chat leaves another chat's tool overlays alone."
+  (let ((a (pilish-test--linked-session-buffers "/tmp/kill-a/"))
+        (b (pilish-test--linked-session-buffers "/tmp/kill-b/"))
+        (c (pilish-test--linked-session-buffers "/tmp/kill-c/")))
+    (unwind-protect
+        (save-window-excursion
+          (with-current-buffer (car c)
+            (let ((inhibit-read-only t))
+              (insert "tool output\n"))
+            (overlay-put (make-overlay 1 12) 'pilish-tool-block t))
+          ;; Shown C, then B, then A in one window; A's chat is killed.
+          (switch-to-buffer (car c))
+          (switch-to-buffer (car b))
+          (switch-to-buffer (car a))
+          (kill-buffer (car a))
+          (with-current-buffer (car c)
+            (should (seq-find (lambda (ov) (overlay-get ov 'pilish-tool-block))
+                              (overlays-in (point-min) (point-max))))))
+      (pilish-test--kill-live-buffers (car a) (cdr a) (car b) (cdr b)
+                                      (car c) (cdr c)))))
+
 ;;; Message Queuing
 
 (ert-deftest pilish-test-disposition-steer-feedback ()
@@ -1668,6 +1721,105 @@ When user aborts, they want to stop everything - including queued messages."
             (should (string-empty-p (buffer-string)))))
       (kill-buffer chat-buf)
       (kill-buffer input-buf))))
+
+;; Sending while busy: `pilish-send-while-busy'
+
+(defun pilish-test--send-while-busy (status command text)
+  "Run COMMAND with TEXT in an input buffer whose session has STATUS.
+Return (RPC-COMMAND FOLLOWUP-QUEUE INPUT-LEFT HIDDEN), with RPC mocked."
+  (let ((chat-buf (get-buffer-create "*pilish-test-busy-send*"))
+        (input-buf (get-buffer-create "*pilish-test-busy-send-input*"))
+        (sent nil)
+        (hidden nil))
+    (unwind-protect
+        (progn
+          (with-current-buffer chat-buf
+            (pilish-chat-mode)
+            (setq pilish--status status
+                  pilish--input-buffer input-buf
+                  pilish--followup-queue nil))
+          (with-current-buffer input-buf
+            (pilish-input-mode)
+            (setq pilish--chat-buffer chat-buf)
+            (insert text)
+            (cl-letf (((symbol-function 'pilish--get-process) (lambda () 'mock-proc))
+                      ((symbol-function 'process-live-p) (lambda (_) t))
+                      ((symbol-function 'pilish--rpc-async)
+                       (lambda (_proc cmd _cb) (setq sent cmd)))
+                      ((symbol-function 'pilish--maybe-hide-input-window)
+                       (lambda () (setq hidden t)))
+                      ((symbol-function 'message) #'ignore))
+              (funcall command))
+            (list sent
+                  (buffer-local-value 'pilish--followup-queue chat-buf)
+                  (buffer-string)
+                  hidden)))
+      (kill-buffer chat-buf)
+      (kill-buffer input-buf))))
+
+(ert-deftest pilish-test-send-while-busy-defaults-to-follow-up ()
+  "By default, sending while Pi streams queues a local follow-up."
+  (should (eq (default-value 'pilish-send-while-busy) 'follow-up))
+  (pcase-let ((`(,sent ,queue ,input ,hidden)
+               (pilish-test--send-while-busy 'streaming #'pilish-send "Then do Y")))
+    (should-not sent)
+    (should (equal queue '("Then do Y")))
+    (should (string-empty-p input))
+    (should hidden)))
+
+(ert-deftest pilish-test-send-while-busy-steer ()
+  "With `pilish-send-while-busy' set to `steer', sending steers the run."
+  (let ((pilish-send-while-busy 'steer))
+    (pcase-let ((`(,sent ,queue ,input ,hidden)
+                 (pilish-test--send-while-busy
+                  'streaming #'pilish-send "Use the other API")))
+      (should (equal sent '(:type "steer" :message "Use the other API")))
+      (should-not queue)
+      (should (string-empty-p input))
+      (should hidden))
+    ;; Pi cannot take steering while compacting: the text waits as a
+    ;; follow-up, as with `pilish-queue-steering'.
+    (pcase-let ((`(,sent ,queue ,input ,_hidden)
+                 (pilish-test--send-while-busy 'compacting #'pilish-send "Later")))
+      (should-not sent)
+      (should (equal queue '("Later")))
+      (should (string-empty-p input)))
+    ;; An idle Pi gets an ordinary prompt.
+    (pcase-let ((`(,sent ,_queue ,_input ,_hidden)
+                 (cl-letf (((symbol-function 'pilish--prepare-and-send)
+                            (lambda (text &rest _)
+                              (pilish--rpc-async
+                               'mock-proc (list :type "prompt" :message text)
+                               #'ignore))))
+                   (pilish-test--send-while-busy 'idle #'pilish-send "Start"))))
+      (should (equal sent '(:type "prompt" :message "Start"))))))
+
+(ert-deftest pilish-test-send-while-busy-steer-keeps-draft-when-refused ()
+  "A steering send that Pi cannot receive keeps the draft and the window."
+  (let ((pilish-send-while-busy 'steer))
+    (pcase-let ((`(,sent ,queue ,input ,hidden)
+                 (cl-letf (((symbol-function 'pilish--send-steer-message)
+                            (lambda (_text) nil)))
+                   (pilish-test--send-while-busy
+                    'streaming #'pilish-send "Use the other API"))))
+      (should-not sent)
+      (should-not queue)
+      (should (equal input "Use the other API"))
+      (should-not hidden))))
+
+(ert-deftest pilish-test-queue-followup-ignores-steer-option ()
+  "\\`M-RET' queues a follow-up even when sending steers."
+  (should (eq (keymap-lookup pilish-input-mode-map "M-RET")
+              #'pilish-queue-followup))
+  (should-not (get 'pilish-queue-followup 'byte-obsolete-info))
+  (let ((pilish-send-while-busy 'steer))
+    (pcase-let ((`(,sent ,queue ,input ,hidden)
+                 (pilish-test--send-while-busy
+                  'streaming #'pilish-queue-followup "Then do Y")))
+      (should-not sent)
+      (should (equal queue '("Then do Y")))
+      (should (string-empty-p input))
+      (should hidden))))
 
 (ert-deftest pilish-test-queue-steering-when-idle-refuses ()
   "Queue steering refuses when agent is idle (nothing to interrupt)."
@@ -2747,6 +2899,25 @@ This ensures history loads correctly when callback runs in arbitrary context."
             (should (string-match-p "│" header))))
       (kill-buffer chat-buf))))
 
+(ert-deftest pilish-test-session-events-update-header-line ()
+  "Pi's session name and thinking level events repaint the header line."
+  (with-temp-buffer
+    (pilish-chat-mode)
+    (setq pilish--state (list :model '(:name "test-model") :thinking-level "off")
+          pilish--session-name nil)
+    (pilish--handle-display-event
+     '(:type "session_info_changed" :name "Named by extension"))
+    (pilish--handle-display-event
+     '(:type "thinking_level_changed" :level "high"))
+    (let ((header (pilish--header-line-string)))
+      (should (string-match-p "Named by extension" header))
+      (should (string-match-p "high" header)))
+    ;; An absent name means Pi cleared it.
+    (pilish--handle-display-event '(:type "session_info_changed"))
+    (should-not pilish--session-name)
+    (should-not (string-match-p "Named by extension"
+                                (pilish--header-line-string)))))
+
 (ert-deftest pilish-test-header-line-truncates-long-session-name ()
   "pilish--header-line-string truncates long session names."
   (let ((chat-buf (get-buffer-create "*pi-test-header-truncate*")))
@@ -3023,27 +3194,9 @@ Regression test for #27: history was shared across all sessions."
       (kill-buffer buf1)
       (kill-buffer buf2))))
 
-(ert-deftest pilish-test-seed-history-default-leaves-navigation-alone ()
-  "Session seeding is opt-in and does not disturb local navigation."
-  (let ((pilish-input-history-from-session nil))
-    (with-temp-buffer
-      (pilish-input-mode)
-      (pilish--history-add "local command")
-      (insert "unfinished draft")
-      (pilish-previous-input)
-      (let ((ring pilish--input-ring))
-        (pilish--seed-input-history
-         (current-buffer) [(:role "user" :content "saved prompt")])
-        (should (eq ring pilish--input-ring))
-        (should (= pilish--input-ring-index 0))
-        (should (equal pilish--input-saved "unfinished draft"))
-        (pilish-next-input)
-        (should (equal (buffer-string) "unfinished draft"))))))
-
 (ert-deftest pilish-test-seed-history-merges-visible-prompts-idempotently ()
   "Only visible user text is merged, with local entries kept older."
-  (let ((pilish-input-history-from-session t)
-        (messages [(:role "user" :content "first prompt")
+  (let ((messages [(:role "user" :content "first prompt")
                    (:role "assistant" :content "not input")
                    (:role "toolResult" :content "not input either")
                    (:role "custom" :content "extension output" :display t)
@@ -3074,8 +3227,7 @@ Regression test for #27: history was shared across all sessions."
 
 (ert-deftest pilish-test-seed-history-keeps-ring-bound-and-input-point ()
   "Seeding respects the history capacity without editing the draft."
-  (let ((pilish-input-history-from-session t)
-        (pilish--input-ring-size 2))
+  (let ((pilish--input-ring-size 2))
     (with-temp-buffer
       (pilish-input-mode)
       (insert "draft text")
@@ -3089,45 +3241,31 @@ Regression test for #27: history was shared across all sessions."
         (should (= (buffer-chars-modified-tick) tick))
         (should (= (point) 3))))))
 
-(ert-deftest pilish-test-seed-history-display-loads-the-linked-input-only ()
-  "A successful history display seeds its input, not an unrelated buffer."
-  (let ((pilish-input-history-from-session t)
-        (input (generate-new-buffer " *pilish-seed-input*")))
+(ert-deftest pilish-test-seed-history-display-and-rerender-leave-navigation-alone ()
+  "Display-only replay and rerender leave linked input navigation untouched."
+  (let ((input (generate-new-buffer " *pilish-seed-input*")))
     (unwind-protect
         (with-temp-buffer
           (pilish-chat-mode)
           (setq pilish--input-buffer input)
           (with-current-buffer input
             (pilish-input-mode)
-            (insert "draft"))
-          (pilish--display-session-history
-           [(:role "user" :content "resumed prompt")] (current-buffer))
-          (should (string-match-p "resumed prompt" (buffer-string)))
-          (with-current-buffer input
-            (pilish-previous-input)
-            (should (equal (buffer-string) "resumed prompt"))
-            (pilish-next-input)
-            (should (equal (buffer-string) "draft"))))
-      (pilish-test--kill-live-buffers input))))
-
-(ert-deftest pilish-test-seed-history-failed-replay-does-not-change-input ()
-  "Failed history display must not put unshown prompts into input history."
-  (let ((pilish-input-history-from-session t)
-        (input (generate-new-buffer " *pilish-seed-failed-input*")))
-    (unwind-protect
-        (with-temp-buffer
-          (pilish-chat-mode)
-          (setq pilish--input-buffer input)
-          (with-current-buffer input
-            (pilish-input-mode)
-            (pilish--history-add "local prompt"))
-          (cl-letf (((symbol-function 'pilish--replay-history)
-                     (lambda (&rest _) (error "replay failed"))))
-            (should-error
-             (pilish--display-session-history
-              [(:role "user" :content "unshown prompt")] (current-buffer))))
-          (with-current-buffer input
-            (should (equal (ring-elements pilish--input-ring) '("local prompt")))))
+            (pilish--history-add "local prompt")
+            (insert "unfinished draft")
+            (pilish-previous-input))
+          (let ((ring (buffer-local-value 'pilish--input-ring input)))
+            (pilish--display-session-history
+             [(:role "user" :content "displayed prompt")] (current-buffer))
+            (pilish--rerender-canonical-history)
+            (should (string-match-p "displayed prompt" (buffer-string)))
+            (with-current-buffer input
+              (should (eq ring pilish--input-ring))
+              (should (equal (ring-elements ring) '("local prompt")))
+              (should (= pilish--input-ring-index 0))
+              (should (equal pilish--input-saved "unfinished draft"))
+              (should (equal (buffer-string) "local prompt"))
+              (pilish-next-input)
+              (should (equal (buffer-string) "unfinished draft")))))
       (pilish-test--kill-live-buffers input))))
 
 ;;; History Isearch (C-r incremental search)
@@ -5890,20 +6028,49 @@ This occurs after compaction before the next assistant message."
     ;; Should NOT have drawer syntax
     (should-not (string-match-p ":BASH:" (buffer-string)))))
 
-(ert-deftest pilish-test-tool-end-keeps-overlay-face ()
-  "tool_execution_end keeps base face on success."
+(ert-deftest pilish-test-tool-end-success-face ()
+  "tool_execution_end switches from the running to the success face.
+The success face inherits the running face, so it looks the same by default."
   (with-temp-buffer
     (pilish-chat-mode)
     (pilish--display-tool-start "bash" '(:command "ls"))
-    ;; Initially base face
     (let ((ov (car (overlays-at (point-min)))))
       (should (eq (overlay-get ov 'face) 'pilish-tool-block)))
-    ;; After success — face stays the same
     (pilish--display-tool-end "bash" '(:command "ls")
                           '((:type "text" :text "file.txt"))
                           nil nil)
     (let ((ov (car (overlays-at (point-min)))))
-      (should (eq (overlay-get ov 'face) 'pilish-tool-block)))))
+      (should (eq (overlay-get ov 'face) 'pilish-tool-block-success)))
+    (should (equal (face-attribute 'pilish-tool-block-success :inherit)
+                   'pilish-tool-block))))
+
+(ert-deftest pilish-test-tool-block-finalize-functions-see-final-face ()
+  "Finalize hooks see final faces for live and saved-history blocks."
+  (with-temp-buffer
+    (pilish-chat-mode)
+    (let* ((seen nil)
+           (pilish-tool-block-finalize-functions
+            (list (lambda (overlay)
+                    (push (list (current-buffer)
+                                (overlay-get overlay 'pilish-tool-name)
+                                (overlay-get overlay 'face))
+                          seen)))))
+      (pilish--display-tool-start "bash" '(:command "true") "ok")
+      (pilish--display-tool-end "bash" '(:command "true")
+                                '((:type "text" :text "fine")) nil nil)
+      (pilish--display-tool-start "bash" '(:command "false") "bad")
+      (pilish--display-tool-end "bash" '(:command "false")
+                                '((:type "text" :text "broken")) nil t)
+      (pilish--display-history-messages
+       [(:role "assistant"
+         :content [(:type "toolCall" :id "saved" :name "read"
+                    :arguments (:path "saved.txt"))])
+        (:role "toolResult" :toolCallId "saved" :toolName "read"
+         :content [(:type "text" :text "saved output")] :isError :json-false)])
+      (should (equal (reverse seen)
+                     (list (list (current-buffer) "bash" 'pilish-tool-block-success)
+                           (list (current-buffer) "bash" 'pilish-tool-block-error)
+                           (list (current-buffer) "read" 'pilish-tool-block-success)))))))
 
 (ert-deftest pilish-test-tool-end-error-face ()
   "tool_execution_end sets error face on failure."
@@ -6111,6 +6278,135 @@ no spurious faces are applied to plain colon-ending lines."
     (should (eq (key-binding (kbd "M-n")) 'pilish-next-input))
     (should (eq (key-binding (kbd "TAB")) 'pilish-complete))
     (should (eq (key-binding (kbd "C-c C-s")) 'pilish-queue-steering))))
+
+;;; Returning the Chat to its End on Submit
+
+(defmacro pilish-test--with-scrolled-back-chat (&rest body)
+  "Run BODY in a selected input window below two windows on a long chat.
+Both chat windows, bound as `chat-windows', show the chat's first line.
+`chat' and `input' are the linked buffers; BODY runs in `input'."
+  (declare (indent 0) (debug t))
+  `(let ((chat (generate-new-buffer " *pilish-submit-chat*"))
+         (input (generate-new-buffer " *pilish-submit-input*")))
+     (unwind-protect
+         (progn
+           (delete-other-windows)
+           (switch-to-buffer chat)
+           (with-current-buffer chat
+             (pilish-chat-mode)
+             (let ((inhibit-read-only t))
+               (dotimes (n 200) (insert (format "Earlier line %d\n" n))))
+             (pilish--set-input-buffer input))
+           (with-current-buffer input
+             (pilish-input-mode)
+             (pilish--set-chat-buffer chat))
+           (let* ((input-window (split-window nil -5 'below))
+                  (chat-windows (list (selected-window)
+                                      (split-window nil nil 'right))))
+             (set-window-buffer input-window input)
+             (dolist (window chat-windows)
+               (set-window-start window 1)
+               (set-window-point window 1))
+             (select-window input-window)
+             (cl-letf (((symbol-function 'message) #'ignore))
+               ,@body)))
+       (pilish-test--kill-live-buffers input chat)
+       (delete-other-windows))))
+
+(defun pilish-test--submit-draft (kind)
+  "Submit the current draft as KIND with sending stubbed out.
+KIND is `prompt', `follow-up', `steer' or `compacting-steer'."
+  (with-current-buffer (pilish--get-chat-buffer)
+    (setq pilish--status (pcase kind
+                           ('prompt 'idle)
+                           ('compacting-steer 'compacting)
+                           (_ 'streaming))))
+  (cl-letf (((symbol-function 'pilish--prepare-and-send) #'ignore)
+            ((symbol-function 'pilish--send-steer-message) (lambda (_) t)))
+    (if (memq kind '(steer compacting-steer))
+        (pilish-queue-steering)
+      (pilish-send))))
+
+(ert-deftest pilish-test-submit-returns-chat-windows-to-end ()
+  "Accepted drafts return every chat window in the frame to the end.
+Input keeps focus, and typing alone leaves the chat where it was."
+  (dolist (kind '(prompt follow-up steer compacting-steer))
+    (pilish-test--with-scrolled-back-chat
+      (let ((pilish-jump-to-end-on-submit t))
+        (insert "new prompt")
+        (dolist (window chat-windows)
+          (should (= (window-point window) 1)))
+        (pilish-test--submit-draft kind)
+        (should (string-empty-p (buffer-string)))
+        (should (eq (selected-window) input-window))
+        (dolist (window chat-windows)
+          (should (= (window-point window)
+                     (with-current-buffer chat (point-max))))
+          (should (> (window-start window) 1)))))))
+
+(ert-deftest pilish-test-submit-keeps-chat-position-by-default ()
+  "Without `pilish-jump-to-end-on-submit', a scrolled-back chat stays put."
+  (dolist (kind '(prompt follow-up steer compacting-steer))
+    (pilish-test--with-scrolled-back-chat
+      (insert "new prompt")
+      (pilish-test--submit-draft kind)
+      (should (string-empty-p (buffer-string)))
+      (dolist (window chat-windows)
+        (should (= (window-point window) 1))
+        (should (= (window-start window) 1))))))
+
+(ert-deftest pilish-test-refused-submit-keeps-chat-position ()
+  "Empty and refused drafts neither move the chat nor lose the draft."
+  (dolist (case '((prompt . "")
+                  (follow-up . "/compact")
+                  (idle-steer . "nothing to steer")
+                  (failed-steer . "steer without a process")))
+    (pilish-test--with-scrolled-back-chat
+      (let ((pilish-jump-to-end-on-submit t))
+        (insert (cdr case))
+        (pcase (car case)
+          ('idle-steer (pilish-queue-steering))
+          ('failed-steer
+           (with-current-buffer chat (setq pilish--status 'streaming))
+           (cl-letf (((symbol-function 'pilish--send-steer-message)
+                      (lambda (_) nil)))
+             (pilish-queue-steering)))
+          (kind (pilish-test--submit-draft kind)))
+        (should (equal (buffer-string) (cdr case)))
+        (dolist (window chat-windows)
+          (should (= (window-point window) 1))
+          (should (= (window-start window) 1)))))))
+
+(ert-deftest pilish-test-queued-delivery-keeps-chat-position ()
+  "Automatic delivery of a queued follow-up is not a submission."
+  (pilish-test--with-scrolled-back-chat
+    (let ((pilish-jump-to-end-on-submit t)
+          delivered)
+      (with-current-buffer chat
+        (setq pilish--status 'idle
+              pilish--followup-queue '("queued earlier"))
+        (cl-letf (((symbol-function 'pilish--prepare-and-send)
+                   (lambda (text &rest _) (setq delivered text))))
+          (pilish--process-followup-queue)))
+      (should (equal delivered "queued earlier"))
+      (dolist (window chat-windows)
+        (should (= (window-point window) 1))
+        (should (= (window-start window) 1))))))
+
+(ert-deftest pilish-test-submit-does-not-display-hidden-chat ()
+  "Submitting while the chat is hidden neither shows it nor moves its point."
+  (pilish-test--with-scrolled-back-chat
+    (dolist (window chat-windows)
+      (delete-window window))
+    (with-current-buffer chat (goto-char (point-min)))
+    (let ((pilish-jump-to-end-on-submit t))
+      (insert "queued while hidden")
+      (pilish-test--submit-draft 'follow-up)
+      (should (string-empty-p (buffer-string)))
+      (should-not (get-buffer-window chat t))
+      (should (= (with-current-buffer chat (point)) 1))
+      (with-current-buffer chat
+        (should (equal pilish--followup-queue '("queued while hidden")))))))
 
 ;;; Input-Buffer Chat Navigation
 
