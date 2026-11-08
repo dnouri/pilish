@@ -122,6 +122,31 @@ Restores saved input when moving past newest entry."
       (setq pilish--input-ring-index new-index)
       (insert (ring-ref (pilish--input-ring) new-index)))))
 
+(defun pilish--seed-input-history (input-buffer messages)
+  "Merge shown session MESSAGES into INPUT-BUFFER's history.
+MESSAGES is a vector of message plists, oldest first.  Only visible user
+text becomes a history entry, newest first, and local entries absent from
+MESSAGES stay older.  Repeated loads keep the same history rather than
+appending duplicate copies."
+  (when (and (buffer-live-p input-buffer)
+             (vectorp messages))
+    (let (prompts)
+      (seq-doseq (message messages)
+        (when (equal (plist-get message :role) "user")
+          (when-let* ((text (pilish--extract-history-user-message-text message))
+                      ((not (string-blank-p text))))
+            (push text prompts))))
+      (setq prompts (nreverse prompts))
+      (with-current-buffer input-buffer
+        (let ((older (seq-remove
+                      (lambda (entry) (member entry prompts))
+                      (reverse (ring-elements (pilish--input-ring))))))
+          (setq pilish--input-ring (make-ring pilish--input-ring-size)
+                pilish--input-ring-index nil
+                pilish--input-saved nil)
+          (dolist (entry (append older prompts))
+            (pilish--history-add entry)))))))
+
 ;;;; History Isearch
 
 (defun pilish-history-isearch-backward ()
