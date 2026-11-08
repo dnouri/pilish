@@ -3335,21 +3335,37 @@ header line under `pilish-header-line-location'."
         (with-current-buffer buf
           (force-mode-line-update))))))
 
+(defun pilish--select-model-at-event (event)
+  "Select the model in the live window named by mouse EVENT."
+  (interactive "e")
+  (let ((window (posn-window (event-start event))))
+    (when (window-live-p window)
+      (with-selected-window window
+        (pilish-select-model)))))
+
+(defun pilish--cycle-thinking-at-event (event)
+  "Cycle thinking in the live window named by mouse EVENT."
+  (interactive "e")
+  (let ((window (posn-window (event-start event))))
+    (when (window-live-p window)
+      (with-selected-window window
+        (pilish-cycle-thinking)))))
+
 (defvar pilish--header-model-map
   (let ((map (make-sparse-keymap)))
-    (define-key map [header-line mouse-1] #'pilish-select-model)
-    (define-key map [header-line mouse-2] #'pilish-select-model)
-    (define-key map [mode-line mouse-1] #'pilish-select-model)
-    (define-key map [mode-line mouse-2] #'pilish-select-model)
+    (define-key map [header-line mouse-1] #'pilish--select-model-at-event)
+    (define-key map [header-line mouse-2] #'pilish--select-model-at-event)
+    (define-key map [mode-line mouse-1] #'pilish--select-model-at-event)
+    (define-key map [mode-line mouse-2] #'pilish--select-model-at-event)
     map)
   "Keymap for clicking the model name in the header or mode line.")
 
 (defvar pilish--header-thinking-map
   (let ((map (make-sparse-keymap)))
-    (define-key map [header-line mouse-1] #'pilish-cycle-thinking)
-    (define-key map [header-line mouse-2] #'pilish-cycle-thinking)
-    (define-key map [mode-line mouse-1] #'pilish-cycle-thinking)
-    (define-key map [mode-line mouse-2] #'pilish-cycle-thinking)
+    (define-key map [header-line mouse-1] #'pilish--cycle-thinking-at-event)
+    (define-key map [header-line mouse-2] #'pilish--cycle-thinking-at-event)
+    (define-key map [mode-line mouse-1] #'pilish--cycle-thinking-at-event)
+    (define-key map [mode-line mouse-2] #'pilish--cycle-thinking-at-event)
     map)
   "Keymap for clicking the thinking level in the header or mode line.")
 
