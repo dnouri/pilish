@@ -42,6 +42,7 @@
 ;;   `pilish-input-next-message'    Navigate next chat message
 ;;   `pilish-history-isearch-backward'  History search (C-r)
 ;;   `pilish-queue-steering'        Steering message (C-c C-s)
+;;   `pilish-queue-followup'        Follow-up message (M-RET)
 
 ;;; Code:
 
@@ -402,13 +403,21 @@ replaces the previous draft image."
 
 (defun pilish--accept-input-text (text &optional prompt-image)
   "Accept TEXT from input buffer state, consuming optional PROMPT-IMAGE.
-Adds only TEXT to history, resets history navigation, and clears input."
+Adds only TEXT to history, resets history navigation, and clears input.
+With `pilish-jump-to-end-on-submit', also return the chat's windows in
+the selected frame to its end."
   (pilish--history-add text)
   (setq pilish--input-ring-index nil
         pilish--input-saved nil)
   (when prompt-image
     (pilish--clear-prompt-image))
-  (erase-buffer))
+  (erase-buffer)
+  (when-let* ((pilish-jump-to-end-on-submit)
+              (chat-buf (pilish--get-chat-buffer)))
+    (dolist (window (get-buffer-window-list chat-buf nil))
+      (with-selected-window window
+        (goto-char (point-max))
+        (recenter -1)))))
 
 (defun pilish--queue-followup-text (chat-buf text)
   "Accept TEXT and enqueue it as a follow-up in CHAT-BUF."
@@ -419,7 +428,8 @@ Adds only TEXT to history, resets history navigation, and clears input."
 (defun pilish-send ()
   "Send the current input buffer contents to pi.
 Clears the input buffer after sending.  Does nothing if buffer is empty.
-If pi is busy (sending, streaming, or compacting), queues a local follow-up.
+If pi is busy (sending, streaming, or compacting), queues a local follow-up,
+or steers the run when `pilish-send-while-busy' is `steer'.
 An attached image is accepted only with a direct, ordinary, idle prompt.
 All built-in slash commands are handled locally; other slash commands are
 sent to pi."
@@ -450,6 +460,10 @@ sent to pi."
      ((and busy (pilish--builtin-command-text-p text))
       (message "Pi: Cannot queue /%s while Pi is busy"
                (pilish--builtin-command-name text)))
+     ((and busy (eq pilish-send-while-busy 'steer))
+      (pilish-queue-steering)
+      (when (= (buffer-size) 0)
+        (pilish--maybe-hide-input-window)))
      (busy
       (pilish--queue-followup-text chat-buf text)
       (pilish--maybe-hide-input-window)
@@ -742,12 +756,12 @@ command reservation finish.  Steering refuses a draft image."
                          status))))))))))
 
 (defun pilish-queue-followup ()
-  "Queue current input as a follow-up message.
-Obsolete: Use `pilish-send' (C-c C-c) instead, which now
-automatically queues as follow-up when the agent is busy."
+  "Send the current input, queuing it as a follow-up while Pi is working.
+The follow-up is sent as the next prompt once Pi finishes, whatever
+`pilish-send-while-busy' says.  An idle Pi gets the input at once."
   (interactive)
-  (pilish-send))
-(make-obsolete 'pilish-queue-followup 'pilish-send "1.3.0")
+  (let ((pilish-send-while-busy 'follow-up))
+    (pilish-send)))
 
 (provide 'pilish-input)
 ;;; pilish-input.el ends here

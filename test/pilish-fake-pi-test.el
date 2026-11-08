@@ -30,7 +30,7 @@
                  (concat (or (process-get proc 'fake-pi-raw-output) "") output))
     (process-put proc 'fake-pi-partial (cdr result))
     (dolist (line lines)
-      (if-let ((json (pilish--parse-json-line line)))
+      (if-let* ((json (pilish--parse-json-line line)))
           (push json new-objects)
         (push line new-invalid)))
     (process-put proc 'fake-pi-objects (nconc objects (nreverse new-objects)))
@@ -1560,6 +1560,66 @@ SPEC is (SESSION SCENARIO &rest EXTRA-ARGS)."
     (let ((response (pilish-fake-pi-test--rpc proc '(:type "get_entries"))))
       (should (equal (plist-get (plist-get response :data) :entries) [])))))
 
+(ert-deftest pilish-fake-pi-test-extension-session-metadata-events ()
+  "An extension rename and thinking change emit Pi's change events."
+  (pilish-fake-pi-test-with-process (proc "extension-session-metadata")
+    (pilish-fake-pi-test--send
+     proc '(:id "metadata" :type "prompt" :message "/test-session-metadata"))
+    (let* ((events (pilish-fake-pi-test--collect-until
+                    proc (lambda (obj)
+                           (and (equal (plist-get obj :type) "response")
+                                (equal (plist-get obj :id) "metadata")))))
+           (response (car (last events))))
+      (should (equal (pilish-fake-pi-test--event-types events)
+                     '("session_info_changed" "thinking_level_changed" "response")))
+      (should (equal (plist-get (nth 0 events) :name) "Named by extension"))
+      (should (equal (plist-get (nth 1 events) :level) "high"))
+      (should (equal (plist-get (plist-get response :data) :disposition)
+                     "handled")))
+    (let ((state (plist-get (pilish-fake-pi-test--rpc proc '(:type "get_state"))
+                            :data)))
+      (should (equal (plist-get state :sessionName) "Named by extension"))
+      (should (equal (plist-get state :thinkingLevel) "high")))
+    ;; Pi reports only an actual thinking change.
+    (pilish-fake-pi-test--send
+     proc '(:id "again" :type "prompt" :message "/test-session-metadata"))
+    (should (equal (pilish-fake-pi-test--event-types
+                    (pilish-fake-pi-test--collect-until
+                     proc (lambda (obj)
+                            (and (equal (plist-get obj :type) "response")
+                                 (equal (plist-get obj :id) "again")))))
+                   '("session_info_changed" "response")))))
+
+(ert-deftest pilish-fake-pi-test-session-follows-extension-metadata-events ()
+  "A session's header follows a rename and thinking change it did not request."
+  (pilish-fake-pi-test-with-session (session "extension-session-metadata")
+    (let ((chat-buf (plist-get session :chat-buffer))
+          (input-buf (plist-get session :input-buffer))
+          (proc (plist-get session :process)))
+      (pilish-fake-pi-test--wait-or-fail
+       proc (lambda ()
+              (with-current-buffer chat-buf
+                (and (plist-get pilish--state :session-id)
+                     (not (pilish--session-transition-active-p)))))
+       "initial session state")
+      (with-current-buffer chat-buf
+        (should (equal (plist-get pilish--state :thinking-level) "off"))
+        (should-not pilish--session-name))
+      (with-current-buffer input-buf
+        (erase-buffer)
+        (insert "/test-session-metadata")
+        (pilish-send))
+      (pilish-fake-pi-test--wait-or-fail
+       proc (lambda ()
+              (with-current-buffer chat-buf
+                (and (equal pilish--session-name "Named by extension")
+                     (equal (plist-get pilish--state :thinking-level) "high"))))
+       "session name and thinking level from Pi's events")
+      (with-current-buffer chat-buf
+        (let ((header (pilish--header-line-string)))
+          (should (string-match-p "Named by extension" header))
+          (should (string-match-p "high" header)))))))
+
 (ert-deftest pilish-fake-pi-test-input-dispositions ()
   "Handled input bypasses a run; busy raw prompts need explicit steering."
   (pilish-fake-pi-test-with-process
@@ -1966,6 +2026,33 @@ SPEC is (SESSION SCENARIO &rest EXTRA-ARGS)."
         (should (equal (plist-get agent-end :willRetry) :false))
         (pilish-fake-pi-test--assert-assistant-roundtrip
          proc (list tool-assistant-message final-message))))))
+
+(ert-deftest pilish-fake-pi-test-text-stream-notifications-arrive-mid-stream ()
+  "Scenario notifications are fire-and-forget requests between text deltas."
+  (pilish-fake-pi-test-with-process (proc "notify-notices")
+    (should (eq t (plist-get (pilish-fake-pi-test--rpc
+                             proc '(:type "prompt" :message "check"))
+                            :success)))
+    (let* ((events (pilish-fake-pi-test--collect-until
+                    proc (lambda (event)
+                           (equal (plist-get event :type) "agent_settled"))))
+           (types (pilish-fake-pi-test--event-types events))
+           (notifies (pilish-fake-pi-test--events-of-type
+                      events "extension_ui_request")))
+      (should (equal (mapcar (lambda (event) (plist-get event :notifyType)) notifies)
+                     '("warning" "error")))
+      (dolist (notify notifies)
+        (should (equal (plist-get notify :method) "notify"))
+        (should (stringp (plist-get notify :id))))
+      ;; Each request follows its configured number of text deltas.
+      (let ((deltas 0) seen)
+        (dolist (event events)
+          (pcase (plist-get event :type)
+            ("message_update" (setq deltas (1+ deltas)))
+            ("extension_ui_request" (push deltas seen))))
+        (should (equal (nreverse seen) '(2 4))))
+      (should (< (cl-position "extension_ui_request" types :test #'equal :from-end t)
+                 (cl-position "message_end" types :test #'equal :from-end t))))))
 
 (ert-deftest pilish-fake-pi-test-tool-duration-wire-and-saved-roundtrip ()
   "Recorded timing is optional, top-level, and survives the subprocess store."

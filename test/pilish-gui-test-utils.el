@@ -50,7 +50,7 @@ session is otherwise unwound away before diagnostics run.")
 (defun pilish-gui-test--capture-failure-snapshot ()
   "Record session diagnostics before the fresh-session teardown."
   (setq pilish-gui-test--failure-snapshot nil)
-  (when-let ((session pilish-gui-test--session))
+  (when-let* ((session pilish-gui-test--session))
     (let ((chat-buf (plist-get session :chat-buffer))
           (proc (plist-get session :process))
           (parts nil))
@@ -290,7 +290,7 @@ FORMS must start with a literal session options plist containing an explicit
 
 (defun pilish-gui-test-idle-p ()
   "Return t when the chat buffer's `pilish--status' is `idle'."
-  (when-let ((chat-buf (plist-get pilish-gui-test--session :chat-buffer)))
+  (when-let* ((chat-buf (plist-get pilish-gui-test--session :chat-buffer)))
     (with-current-buffer chat-buf
       (eq pilish--status 'idle))))
 
@@ -361,19 +361,19 @@ and delta flush."
 
 (defun pilish-gui-test-chat-window ()
   "Get the chat window."
-  (when-let ((buf (plist-get pilish-gui-test--session :chat-buffer)))
+  (when-let* ((buf (plist-get pilish-gui-test--session :chat-buffer)))
     (get-buffer-window buf)))
 
 (defun pilish-gui-test-input-window ()
   "Get the input window."
-  (when-let ((buf (plist-get pilish-gui-test--session :input-buffer)))
+  (when-let* ((buf (plist-get pilish-gui-test--session :input-buffer)))
     (get-buffer-window buf)))
 
 (defun pilish-gui-test-top-line-number ()
   "Get the line number at the top of the chat window.
 This is stricter than window-start for detecting scroll drift."
-  (when-let ((win (pilish-gui-test-chat-window))
-             (buf (plist-get pilish-gui-test--session :chat-buffer)))
+  (when-let* ((win (pilish-gui-test-chat-window))
+              (buf (plist-get pilish-gui-test--session :chat-buffer)))
     (with-current-buffer buf
       (save-excursion
         (goto-char (window-start win))
@@ -381,8 +381,8 @@ This is stricter than window-start for detecting scroll drift."
 
 (defun pilish-gui-test-at-end-p ()
   "Return t if chat window is scrolled to end."
-  (when-let ((win (pilish-gui-test-chat-window))
-             (buf (plist-get pilish-gui-test--session :chat-buffer)))
+  (when-let* ((win (pilish-gui-test-chat-window))
+              (buf (plist-get pilish-gui-test--session :chat-buffer)))
     (with-current-buffer buf
       (>= (window-end win t) (1- (point-max))))))
 
@@ -390,15 +390,15 @@ This is stricter than window-start for detecting scroll drift."
   "Return t if chat window's point is at buffer end (following).
 This checks window-point, not window-end.  Window-point being at end
 is what determines if the window will auto-scroll during streaming."
-  (when-let ((win (pilish-gui-test-chat-window))
-             (buf (plist-get pilish-gui-test--session :chat-buffer)))
+  (when-let* ((win (pilish-gui-test-chat-window))
+              (buf (plist-get pilish-gui-test--session :chat-buffer)))
     (with-current-buffer buf
       (>= (window-point win) (1- (point-max))))))
 
 (defun pilish-gui-test-scroll-up (lines)
   "Scroll chat window up LINES lines (away from end)."
-  (when-let ((win (pilish-gui-test-chat-window))
-             (buf (plist-get pilish-gui-test--session :chat-buffer)))
+  (when-let* ((win (pilish-gui-test-chat-window))
+              (buf (plist-get pilish-gui-test--session :chat-buffer)))
     (with-selected-window win
       (with-current-buffer buf
         (goto-char (point-max))
@@ -409,18 +409,19 @@ is what determines if the window will auto-scroll during streaming."
 
 (defun pilish-gui-test-chat-content ()
   "Get chat buffer content as string."
-  (when-let ((buf (plist-get pilish-gui-test--session :chat-buffer)))
+  (when-let* ((buf (plist-get pilish-gui-test--session :chat-buffer)))
     (with-current-buffer buf
       (buffer-substring-no-properties (point-min) (point-max)))))
 
 (defun pilish-gui-test-chat-contains (text)
-  "Return t if chat buffer contains TEXT."
-  (when-let ((content (pilish-gui-test-chat-content)))
-    (string-match-p (regexp-quote text) content)))
+  "Return non-nil if the chat contains literal TEXT, matching case."
+  (when-let* ((content (pilish-gui-test-chat-content)))
+    (let ((case-fold-search nil))
+      (string-match-p (regexp-quote text) content))))
 
 (defun pilish-gui-test-chat-text-in-tool-block-p (text)
   "Return t if TEXT appears inside a tool block overlay."
-  (when-let ((buf (plist-get pilish-gui-test--session :chat-buffer)))
+  (when-let* ((buf (plist-get pilish-gui-test--session :chat-buffer)))
     (with-current-buffer buf
       (save-excursion
         (goto-char (point-min))
@@ -434,7 +435,7 @@ is what determines if the window will auto-scroll during streaming."
 
 (defun pilish-gui-test-chat-lines ()
   "Get number of lines in chat buffer."
-  (when-let ((buf (plist-get pilish-gui-test--session :chat-buffer)))
+  (when-let* ((buf (plist-get pilish-gui-test--session :chat-buffer)))
     (with-current-buffer buf
       (count-lines (point-min) (point-max)))))
 
