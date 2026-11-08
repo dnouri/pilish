@@ -5657,9 +5657,13 @@ reads it through the session link instead of the current buffer."
   (with-temp-buffer
     (pilish-chat-mode)
     (setq pilish--state '(:model (:name "claude-sonnet-4")))
-    (let ((header (pilish--header-line-string)))
-      ;; Should have local-map property
-      (should (get-text-property 0 'local-map header))
+    (let* ((header (pilish--header-line-string))
+           (map (get-text-property 0 'local-map header)))
+      (should map)
+      (dolist (area '(header-line mode-line))
+        (dolist (button '(mouse-1 mouse-2))
+          (should (eq (lookup-key map (vector area button))
+                      #'pilish--select-model-at-event))))
       ;; Should have mouse-face for highlight
       (should (get-text-property 0 'mouse-face header)))))
 
@@ -5677,10 +5681,96 @@ reads it through the session link instead of the current buffer."
       (should map)
       ;; Should have mouse-face for highlight
       (should (get-text-property pos 'mouse-face header))
-      (should (eq (lookup-key map [header-line mouse-1])
-                  #'pilish-cycle-thinking))
-      (should (eq (lookup-key map [header-line mouse-2])
-                  #'pilish-cycle-thinking)))))
+      (dolist (area '(header-line mode-line))
+        (dolist (button '(mouse-1 mouse-2))
+          (should (eq (lookup-key map (vector area button))
+                      #'pilish--cycle-thinking-at-event)))))))
+
+(ert-deftest pilish-test-header-click-targets-event-window ()
+  (let ((a (generate-new-buffer " *status-A*"))
+        (b (generate-new-buffer " *status-B*"))
+        (input (generate-new-buffer " *status-B-input*"))
+        entries)
+    (unwind-protect
+        (save-window-excursion
+          (delete-other-windows)
+          (let* ((wa (selected-window))
+                 (wb (split-window wa nil 'below)))
+            (dolist (spec (list (cons a 'process-A) (cons b 'process-B)))
+              (with-current-buffer (car spec)
+                (pilish-chat-mode)
+                (setq pilish--process (cdr spec)
+                      pilish--status 'idle)))
+            (with-current-buffer input
+              (pilish-input-mode)
+              (pilish--set-chat-buffer b))
+            (set-window-buffer wa a)
+            (set-window-buffer wb b)
+            (select-window wa)
+            (cl-letf (((symbol-function 'pilish--rpc-sync)
+                       (lambda (proc request &rest _)
+                         (push (list proc (plist-get request :type)
+                                     (selected-window)) entries)
+                         '(:success t :data (:models nil))))
+                      ((symbol-function 'completing-read)
+                       (lambda (&rest _) nil))
+                      ((symbol-function 'pilish--rpc-async)
+                       (lambda (proc request &rest _)
+                         (push (list proc (plist-get request :type)
+                                     (selected-window)) entries))))
+              ;; Call adapters directly: these are synthetic events, not clicks.
+              (dolist (buffer (list b input))
+                (set-window-buffer wb buffer)
+                (dolist (area '(header-line mode-line))
+                  (dolist (button '(mouse-1 mouse-2))
+                    (dolist (map (list pilish--header-model-map
+                                       pilish--header-thinking-map))
+                      (funcall (lookup-key map (vector area button))
+                               (list button (list wb area '(0 . 0) 0)))
+                      (should (eq (selected-window) wa))
+                      (should (eq (current-buffer) a))
+                      (should (eq (caar entries) 'process-B))
+                      (should (eq (nth 2 (car entries)) wb))))))
+              (should (= (length entries) 16))
+              (should (= (cl-count "cycle_thinking_level" entries
+                                   :key #'cadr :test #'equal) 8))
+              (dolist (key '("C-c C-m" "C-c C-t"))
+                (call-interactively (key-binding (kbd key)))
+                (should (eq (caar entries) 'process-A))
+                (should (eq (nth 2 (car entries)) wa))))))
+      (dolist (buffer (list a b input))
+        (kill-buffer buffer)))))
+
+(ert-deftest pilish-test-header-click-does-not-fall-back-to-selected-session ()
+  (save-window-excursion
+    (delete-other-windows)
+    (let* ((wa (selected-window))
+           (wb (split-window wa nil 'below))
+           (a (generate-new-buffer " *status-selected*"))
+           (other (generate-new-buffer " *status-unrelated*")))
+      (with-current-buffer a
+        (pilish-chat-mode)
+        (setq pilish--process 'process-A))
+      (set-window-buffer wa a)
+      (unwind-protect
+          (cl-letf (((symbol-function 'pilish--rpc-async)
+                     (lambda (&rest _) (ert-fail "Unexpected RPC"))))
+            (set-window-buffer wb other)
+            (pilish--cycle-thinking-at-event
+             (list 'mouse-1 (list wb 'mode-line '(0 . 0) 0)))
+            (should-error
+             (pilish--select-model-at-event
+              (list 'mouse-1 (list wb 'mode-line '(0 . 0) 0)))
+             :type 'user-error)
+            (should (eq (selected-window) wa))
+            (delete-window wb)
+            (dolist (command '(pilish--select-model-at-event
+                               pilish--cycle-thinking-at-event))
+              (funcall command
+                       (list 'mouse-1 (list wb 'mode-line '(0 . 0) 0))))
+            (should (eq (selected-window) wa)))
+        (kill-buffer other)
+        (kill-buffer a)))))
 
 (ert-deftest pilish-test-header-format-context-returns-nil-when-no-window ()
   "Context format returns nil when context window is 0."
