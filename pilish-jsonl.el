@@ -599,6 +599,17 @@ carries no trailing slash; Windows drives munge like \"C:\\x\" to
          (munged (replace-regexp-in-string "[/\\:]" "-" stripped)))
     (concat (file-name-as-directory base) "--" munged "--")))
 
+(defun pilish-jsonl-session-directory (cwd &optional root)
+  "Return the session directory for CWD, either custom or munged.
+PI_CODING_AGENT_SESSION_DIR, when non-empty and CWD is local, names
+pi's flat custom session directory, as pi resolves it below
+--session-dir; otherwise return `pilish-jsonl-session-dir-for-cwd'
+under ROOT."
+  (let ((custom (getenv "PI_CODING_AGENT_SESSION_DIR")))
+    (if (and custom (not (string-empty-p custom)) (not (file-remote-p cwd)))
+        (directory-file-name (expand-file-name custom))
+      (pilish-jsonl-session-dir-for-cwd cwd root))))
+
 (cl-defstruct (pilish--jsonl-info
                (:constructor pilish--jsonl-info-create))
   "Resumable session scan; the decoded buffer's point is its cursor."

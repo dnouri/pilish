@@ -474,7 +474,9 @@ Child forks are not deleted.
 #+html: <summary><strong>Session browser views, search, and defaults</strong></summary>
 
 The archive is =~/.pi/agent/sessions/= by default, or
-=$PI_CODING_AGENT_DIR/sessions/=.  Sessions saved by older Pi
+=$PI_CODING_AGENT_DIR/sessions/=, with a nonempty
+=$PI_CODING_AGENT_SESSION_DIR= selecting one flat directory for local
+projects, including the All projects view.  Sessions saved by older Pi
 releases can still be resumed.
 
 The three views have these ordering rules:
