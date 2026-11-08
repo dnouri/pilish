@@ -28,7 +28,9 @@ prompt behaviors:
 
 ``custom_message``
     A slash command that optionally emits one visible custom message without a
-    full assistant turn.
+    full assistant turn.  It can also rename the session and change the
+    thinking level the way an extension's ``pi.setSessionName`` and
+    ``pi.setThinkingLevel`` do, with Pi's change events.
 
 ``tool_stream``
     Emits the streamed tool-call and tool-execution event surface, then ends
@@ -102,6 +104,7 @@ class TextStreamPrompt:
     echo_user: bool = True
     steer_assistant_text: str | None = None
     handled_input: str | None = None
+    notifications: tuple[JsonDict, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -127,6 +130,8 @@ class CustomMessagePrompt:
     type: Literal["custom_message"]
     command_name: str
     message_text: str | None = None
+    session_name: str | None = None
+    thinking_level: str | None = None
 
 
 @dataclass(frozen=True)
@@ -267,6 +272,14 @@ def load_scenario(path: Path, name: str) -> Scenario:
             echo_user=bool(prompt_data.get("echo_user", True)),
             steer_assistant_text=prompt_data.get("steer_assistant_text"),
             handled_input=prompt_data.get("handled_input"),
+            notifications=tuple(
+                {
+                    "after_chunk": int(item["after_chunk"]),
+                    "notifyType": item.get("notify_type", "info"),
+                    "message": item["message"],
+                }
+                for item in prompt_data.get("notifications", [])
+            ),
         )
     elif prompt_type == "extension_dialog":
         prompt = ExtensionDialogPrompt(
@@ -290,6 +303,8 @@ def load_scenario(path: Path, name: str) -> Scenario:
             type="custom_message",
             command_name=prompt_data["command_name"],
             message_text=prompt_data.get("message_text"),
+            session_name=prompt_data.get("session_name"),
+            thinking_level=prompt_data.get("thinking_level"),
         )
     elif prompt_type == "tool_stream":
         duration_ms = prompt_data.get("duration_ms")
@@ -791,6 +806,17 @@ class FakePiHarness:
                 }
             )
             emitted_chunks.append(chunk)
+            for notification in behavior.notifications:
+                if notification["after_chunk"] == len(emitted_chunks):
+                    self._write_json(
+                        {
+                            "type": "extension_ui_request",
+                            "id": f"notify-{uuid.uuid4().hex[:8]}",
+                            "method": "notify",
+                            "message": notification["message"],
+                            "notifyType": notification["notifyType"],
+                        }
+                    )
             if not self._sleep_ms(behavior.delay_ms, abortable=True):
                 return False, self._build_aborted_assistant_message(
                     "".join(emitted_chunks)
@@ -828,6 +854,31 @@ class FakePiHarness:
         behavior: CustomMessagePrompt,
     ) -> None:
         """Run a slash command that may emit one visible custom message."""
+        if behavior.session_name is not None:
+            # Pi's setSessionName appends the entry, then reports the name.
+            self._append_session_entry(
+                {"type": "session_info", "name": behavior.session_name},
+                prefix="session-info",
+            )
+            self._write_json(
+                {"type": "session_info_changed", "name": behavior.session_name}
+            )
+        if (
+            behavior.thinking_level is not None
+            and behavior.thinking_level != self.state.thinking_level
+        ):
+            # Pi's setThinkingLevel reports only an actual change.
+            self.state.thinking_level = behavior.thinking_level
+            self._append_session_entry(
+                {
+                    "type": "thinking_level_change",
+                    "thinkingLevel": behavior.thinking_level,
+                },
+                prefix="thinking-level",
+            )
+            self._write_json(
+                {"type": "thinking_level_changed", "level": behavior.thinking_level}
+            )
         if not behavior.message_text:
             return
         followup = self._build_custom_message(

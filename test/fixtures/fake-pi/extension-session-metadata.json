@@ -1,0 +1,17 @@
+{
+  "description": "Extension-like slash command that renames the session and raises the thinking level.",
+  "commands": [
+    {
+      "name": "test-session-metadata",
+      "description": "Trigger fake extension session rename and thinking change",
+      "source": "extension",
+      "sourceInfo": { "scope": "project", "path": "test-extension.ts" }
+    }
+  ],
+  "prompt": {
+    "type": "custom_message",
+    "command_name": "/test-session-metadata",
+    "session_name": "Named by extension",
+    "thinking_level": "high"
+  }
+}

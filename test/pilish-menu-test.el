@@ -1641,6 +1641,31 @@ Pi v0.51.3+ renamed SlashCommandSource from \"template\" to \"prompt\"."
                               (not (null (derived-mode-p 'pilish-transcript-mode))))))))
           (transient--emergency-exit))))))
 
+(ert-deftest pilish-test-markup-menu-transcript-only ()
+  "Transcript menus expose the next markup action; input menus do not."
+  (save-window-excursion
+    (dolist (mode '(pilish-chat-mode pilish-snapshot-mode pilish-input-mode))
+      (with-temp-buffer
+        (funcall mode)
+        (unwind-protect
+            (progn
+              (switch-to-buffer (current-buffer))
+              (transient-setup 'pilish-menu)
+              (let ((suffix (pilish-test--suffix-key-bound-p "v")))
+                (if (derived-mode-p 'pilish-transcript-mode)
+                    (progn
+                      (should suffix)
+                      (should-not (oref suffix inactive))
+                      (should (eq (oref suffix command)
+                                  #'md-ts-toggle-hide-markup))
+                      (should (equal (transient-format-description suffix)
+                                     "show Markdown markup"))
+                      (setq-local md-ts-hide-markup nil)
+                      (should (equal (transient-format-description suffix)
+                                     "hide Markdown markup")))
+                  (should (oref suffix inactive)))))
+          (transient--emergency-exit))))))
+
 (ert-deftest pilish-test-transient-opens-session-and-tree-browsers ()
   "The main menu exposes the session and tree browser actions."
   (transient-setup 'pilish-menu)
@@ -3218,6 +3243,7 @@ The tree is built iteratively to avoid recursion in test setup."
 (ert-deftest pilish-test-toggle-thinking-display-overrides-per-block-states ()
   "Whole-buffer toggles apply one display mode to every completed thinking block."
   (let ((pilish-thinking-display 'hidden)
+        (pilish-thinking-fold-min-lines 1)
         shown-message)
     (with-temp-buffer
       (pilish-chat-mode)
@@ -3323,7 +3349,8 @@ The tree is built iteratively to avoid recursion in test setup."
 
 (ert-deftest pilish-test-toggle-thinking-display-keeps-live-custom-message-visible ()
   "Whole-buffer thinking toggles must not delete live custom messages."
-  (let ((pilish-thinking-display 'visible))
+  (let ((pilish-thinking-display 'visible)
+        (pilish-thinking-fold-min-lines 1))
     (with-temp-buffer
       (pilish-chat-mode)
       (pilish--display-session-history
@@ -3586,6 +3613,59 @@ The tree is built iteratively to avoid recursion in test setup."
                      '(:type "set_thinking_level" :level "high")))
       (should (equal (cadr commands) '(:type "get_state"))))
     (should (equal last-message "Pi: Thinking level: medium"))))
+
+(ert-deftest pilish-test-thinking-refresh-ignores-stale-state-after-switch ()
+  "A delayed thinking query cannot overwrite the completed switch's state."
+  (pilish-test-with-rpc-session (chat _input proc commands)
+    (pilish--refresh-thinking-level-state proc chat)
+    (let ((old-request (car commands)))
+      (pilish--refresh-session-state proc chat)
+      (pilish--dispatch-response
+       proc (list :type "response" :command "get_state"
+                  :id (plist-get (car commands) :id) :success t
+                  :data '(:sessionFile "/tmp/thinking-new.jsonl"
+                          :thinkingLevel "high" :isStreaming :false)))
+      (should-not (pilish--session-transition-active-p chat))
+      (pilish--dispatch-response
+       proc (list :type "response" :command "get_state"
+                  :id (plist-get old-request :id) :success t
+                  :data '(:sessionFile "/tmp/thinking-old.jsonl"
+                          :thinkingLevel "low" :isStreaming t)))
+      (with-current-buffer chat
+        (should (equal (plist-get pilish--state :session-file)
+                       "/tmp/thinking-new.jsonl"))
+        (should (equal (plist-get pilish--state :thinking-level) "high"))
+        (should (eq pilish--status 'idle)))
+      (should (= (hash-table-count
+                  (process-get proc 'pilish-pending-requests)) 0)))))
+
+(ert-deftest pilish-test-thinking-refresh-ignores-replaced-process ()
+  "A reply from the old process cannot replace its successor's state."
+  (pilish-test-with-rpc-session (chat _input proc commands)
+    (pilish--refresh-thinking-level-state proc chat)
+    (with-current-buffer chat
+      (pilish--set-process nil)
+      (pilish--apply-state-response
+       chat '(:success t :data (:sessionFile "/tmp/replacement.jsonl"
+                               :thinkingLevel "high"))))
+    (pilish--dispatch-response
+     proc (list :type "response" :command "get_state"
+                :id (plist-get (car commands) :id) :success t
+                :data '(:sessionFile "/tmp/old-process.jsonl"
+                        :thinkingLevel "low")))
+    (with-current-buffer chat
+      (should (equal (plist-get pilish--state :session-file)
+                     "/tmp/replacement.jsonl"))
+      (should (equal (plist-get pilish--state :thinking-level) "high")))))
+
+(ert-deftest pilish-test-thinking-refresh-defers-during-session-transition ()
+  "Only the transition's own query may refresh an unconfirmed session."
+  (pilish-test-with-rpc-session (chat _input proc commands)
+    (with-current-buffer chat
+      (pilish--begin-session-transition proc))
+    (pilish--refresh-thinking-level-state proc chat)
+    (should-not commands)
+    (should (pilish--session-transition-active-p chat))))
 
 (ert-deftest pilish-test-select-thinking-noop-when-unchanged ()
   "Thinking selector does not send RPC when the user picks the current level."

@@ -12,6 +12,7 @@ Tool output stays inside its owning block. Tool output uses bottom continuation 
 - `tool-viewport` preserves independent readers and keeps a following window filled as tool output grows and contracts.
 - `tool-point` keeps a reader on surviving text and uses the body start when replacement deletes the text under point.
 - `tool-cooling` retains output, literal protection, and inert recorded durations after older blocks cool.
+- `tool-other-session` keeps a session's tool blocks when another session's chat is killed.
 - `tool-details` exposes a completed tool's timestamp, literal command hint, and recorded execution time through the same inspector as replies and thinking.
 
 ## How to get to it (user POV)
@@ -23,6 +24,7 @@ Tool output stays inside its owning block. Tool output uses bottom continuation 
 - Read text after a live tool block while its output updates.
 - Place point inside preview text that a later preview or final result replaces.
 - Continue the conversation until older tool blocks cool.
+- Open several sessions and close one with `C-x k` in its chat.
 - Press `C-h .` on a completed tool for quick help, or `C-c C-p d` in a live chat for selected Help. Saved observers use `M-x pilish-describe-reply`.
 
 ## Driving it with Pilish harnesses
@@ -43,13 +45,15 @@ Preconditions:
 - **Restore point after replaced preview text.** Run `./test/run-gui-tests.sh --headless pilish-gui-test-tool-streaming-restores-deleted-point-to-body-start 2>&1 | tee "$RUN_DIR/preview-point.log"`. Record `preview-point.exit`. Then run `./test/run-gui-tests.sh --headless pilish-gui-test-tool-completion-restores-deleted-point-to-body-start 2>&1 | tee "$RUN_DIR/final-point.log"` and record `final-point.exit`. Both replacements leave point at the final body start.
 - **Keep independent views after completion.** Run `./test/run-gui-tests.sh --headless pilish-gui-test-tool-completion-keeps-independent-views-filled 2>&1 | tee "$RUN_DIR/completion-view.log"`. Record `completion-view.exit`. The follower stays filled through contraction and the next append, while the other reader keeps its exact start and point.
 - **Inspect through folds and cooling.** Run `./test/run-gui-tests.sh --headless pilish-gui-test-reply-details-keyboard-help-and-safe-quit 2>&1 | tee "$RUN_DIR/details.log"`. Record `details.exit`. Real `C-h .` and `C-c C-p d` show the same literal tool report on the header, collapsed output, expanded output, and cold block. Help `q` preserves the live process, draft, and session file.
-- **Check the proof.** Require zero statuses and nonempty logs for all fourteen commands. Require `chat-104.png`, `chat-54.png`, `chat-cooled.png`, and their matching `.el` files under `$RUN_DIR/tool-capture`. Require `bottom-54-collapsed.png` under `$RUN_DIR/bottom-controls`, `elapsed-compound-independent-edges.png` under `$RUN_DIR/live-duration`, `elapsed-minutes.png` and `elapsed-hours-narrow.png` under `$RUN_DIR/long-elapsed`, `duration-narrow-sibling.png` under `$RUN_DIR/duration-geometry`, and `fake-duration-resumed.png` plus `fake-duration-reloaded.png` under `$RUN_DIR/fake-duration`, with matching `.el` files. Use `test -s` for every file.
+- **Close another session.** Run `G1_CAPTURE="$RUN_DIR/other-session" ./test/run-gui-tests.sh --headless pilish-gui-test-killing-session-keeps-other-chat-tool-blocks 2>&1 | tee "$RUN_DIR/other-session.log"`. Record `other-session.exit`. With `hidden` input display, three fake sessions open in turn; the first runs a read tool. Real `C-x k` in the last session's chat leaves the first chat's hot and cold tool blocks unchanged. It writes `kill-before` and `kill-after` observations and PNG frames.
+- **Check the proof.** Require zero statuses and nonempty logs for all fifteen commands. Require `chat-104.png`, `chat-54.png`, `chat-cooled.png`, and their matching `.el` files under `$RUN_DIR/tool-capture`. Require `bottom-54-collapsed.png` under `$RUN_DIR/bottom-controls`, `elapsed-compound-independent-edges.png` under `$RUN_DIR/live-duration`, `elapsed-minutes.png` and `elapsed-hours-narrow.png` under `$RUN_DIR/long-elapsed`, `duration-narrow-sibling.png` under `$RUN_DIR/duration-geometry`, `fake-duration-resumed.png` plus `fake-duration-reloaded.png` under `$RUN_DIR/fake-duration`, and `kill-after.png` under `$RUN_DIR/other-session`, with matching `.el` files. Use `test -s` for every file.
 
 ## Gotchas
 
 - The large scenario and synthetic duration journeys do not execute real tools or prove a model selected them. The fake duration scenario proves the subprocess and persistence contract without executing a command.
 - The cursor-stability and replacement-view tests use synthetic chat buffers. They do not provide fake-subprocess or PNG evidence.
 - PNG capture requires `x-export-frames`. Missing PNGs make a screenshot requirement blocked even when the assertions pass.
+- Which buffer Emacs makes current while a session closes depends on window and buffer history. The other-session journey pins one history where another chat is next; it does not cover every layout.
 - Judge output within its owning block. A matching string elsewhere in the transcript is not evidence.
 - Only `bash`, `subagent`, and `subagent_resume` show inline duration rows. Read, edit, write, and other tools stay quiet. Missing recorded values stay quiet rather than falling back to the local clock.
 - A whole-run return receipt uses the same face and right-edge layout but is not tool output. The read-output journey owns its behavior and evidence.
