@@ -1547,6 +1547,13 @@ essential grammar prompt:
 (setopt pilish-essential-grammar-action 'warn)
 #+end_src
 
+** View a saved session without resuming
+
+Run =M-x pilish-view-session-file= and choose a Pi-v3 JSONL file to open
+an independent read-only observer without starting or resuming Pi.
+Press =g= to reread its captured file and =q= to close only that observer.
+A selected symlink whose target lies outside its own directory is refused.
+
 ** Activity phase hooks
 
 For custom UI changes tied to activity, add functions to

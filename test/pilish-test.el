@@ -66,6 +66,112 @@ still mock the RPC boundary, so the process is never used for I/O."
   (should-error
    (pilish-test-backend-spec 'bogus "prompt-lifecycle")))
 
+
+(ert-deftest pilish-test-view-session-file-creates-independent-observers ()
+  "Public file viewing is read-only, process-free and refreshes captured identity."
+  (let* ((directory (pilish-test--make-temp-directory "pilish-view-file-"))
+         (file (expand-file-name "saved.jsonl" directory))
+         (write-save
+          (lambda (text)
+            (with-temp-file file
+              (insert (json-serialize `(:type "session" :version 3 :id "saved"
+                                        :cwd ,directory)) "\n"
+                      (json-serialize `(:type "message" :id "answer" :parentId :null
+                                     :message (:role "assistant" :content ,text))) "\n"))))
+         first second)
+    (unwind-protect
+        (save-window-excursion
+          (funcall write-save "Saved answer")
+          (cl-letf (((symbol-function 'pilish--start-process)
+                     (lambda (&rest _) (ert-fail "Read-only viewing started Pi"))))
+            (setq first (pilish-view-session-file file)
+                  second (pilish-view-session-file file))
+            (should-not (eq first second))
+            (should (eq (window-buffer (selected-window)) second))
+            (with-current-buffer first
+              (should (derived-mode-p 'pilish-snapshot-mode))
+              (should buffer-read-only)
+              (should-not buffer-file-name)
+              (should-not (derived-mode-p 'pilish-chat-mode))
+              (should-not pilish--process)
+              (should (string-match-p "Saved answer" (buffer-string))))
+            (funcall write-save "Changed answer")
+            (with-current-buffer second
+              (setq second (pilish-snapshot-refresh)))
+            (with-current-buffer second
+              (should (string-match-p "Changed answer" (buffer-string))))
+            (with-current-buffer first
+              (should (string-match-p "Saved answer" (buffer-string))))))
+      (pilish-test--kill-live-buffers first second)
+      (delete-directory directory t))))
+
+(ert-deftest pilish-test-view-session-file-rejects-invalid-before-display ()
+  "Invalid saves fail before creating an observer or selecting a window."
+  (let* ((directory (pilish-test--make-temp-directory "pilish-view-invalid-"))
+         (file (expand-file-name "saved.jsonl" directory)))
+    (unwind-protect
+        (dolist (text '("not json\n" "{\"type\":\"session\"}\n"
+                        "{\"type\":\"session\",\"version\":2,\"id\":\"saved\"}\n"))
+          (with-temp-file file (insert text))
+          (let ((buffers (buffer-list)) (window (selected-window)))
+            (should-error (pilish-view-session-file file) :type 'user-error)
+            (should (equal (buffer-list) buffers))
+            (should (eq (selected-window) window))))
+      (delete-directory directory t))))
+
+(ert-deftest pilish-test-view-session-file-preserves-multihop-route ()
+  "The public command keeps a selected multi-hop TRAMP route in its target."
+  (let* ((route "/ssh:bastion|sudo:host:")
+         (file (concat route "/sessions/saved.jsonl"))
+         (default-directory "/tmp/")
+         captured)
+    (cl-letf (((symbol-function 'pilish-jsonl-read-session-header)
+               (lambda (path)
+                 (should (equal path file))
+                 (list :type "session" :version 3 :id "worker" :cwd "/work")))
+              ((symbol-function 'pilish-open-subagent-snapshot)
+               (lambda (target) (setq captured target) 'observer)))
+      (should (eq (pilish-view-session-file file) 'observer))
+      (should (equal (pilish--snapshot-target-anchor-file captured) file))
+      (should (equal (pilish--snapshot-target-root captured)
+                     (concat route "/sessions/")))
+      (should (equal (pilish--snapshot-target-file captured) "saved.jsonl")))))
+
+(ert-deftest pilish-test-view-session-file-refuses-explicit-symlink-outside ()
+  "An explicitly selected symlink that resolves outside its root is refused."
+  (pilish-test--with-snapshot-files
+    (let ((outside (expand-file-name "outside.jsonl" directory))
+          (link (expand-file-name "selected.jsonl" root)))
+      (pilish-test--snapshot-write outside (list header))
+      (make-symbolic-link outside link)
+      (save-window-excursion
+        (let ((buffers (buffer-list))
+              (window (selected-window))
+              (windows (window-state-get nil t))
+              failure)
+          (setq failure (should-error (pilish-view-session-file link)
+                                      :type 'user-error))
+          (should (string-match-p "escapes its storage root"
+                                  (error-message-string failure)))
+          (should (equal (buffer-list) buffers))
+          (should (eq (selected-window) window))
+          (should (equal (window-state-get nil t) windows)))))))
+
+(ert-deftest pilish-test-view-session-file-follows-symlink-inside-root ()
+  "A symlink whose target stays inside the selected directory is followed."
+  (pilish-test--with-snapshot-files
+    (pilish-test--snapshot-write
+     child (list header (pilish-test--snapshot-message "leaf" nil "Linked answer")))
+    (let ((link (expand-file-name "alias.jsonl" root))
+          observer)
+      (make-symbolic-link child link)
+      (unwind-protect
+          (save-window-excursion
+            (setq observer (pilish-view-session-file link))
+            (with-current-buffer observer
+              (should (string-match-p "Linked answer" (buffer-string)))))
+        (when (buffer-live-p observer) (kill-buffer observer))))))
+
 ;;; Main Entry Point
 
 (ert-deftest pilish-test-pilish-creates-chat-buffer ()

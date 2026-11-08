@@ -6,6 +6,7 @@ A saved Pi conversation opens in an independent read-only observer. Each tool re
 
 - `saved-recursive-tree` shows every declared descendant once, preserves ancestry, distinguishes duplicate labels without adding a header link, and leads each titled row with its task title, the agent label in parentheses, and turn and context stats. The title is linked on a chat's available first occurrence.
 - `saved-open` opens a linked child conversation in another window.
+- `saved-file-api` opens an existing Pi-v3 file through `pilish-view-session-file` without resuming Pi.
 - `saved-quit` closes only the observer and preserves the parent and draft.
 - `saved-refresh` rereads unchanged and changed files with native `g`.
 - `saved-failure` retains the last good observer when the saved file becomes invalid.
@@ -16,6 +17,7 @@ A saved Pi conversation opens in an independent read-only observer. Each tool re
 
 - Read the `Pi sessions` tree below the output preview. Output folds leave it visible.
 - Move to a saved-conversation link with `C-c ]` and press `RET`.
+- Run `M-x pilish-view-session-file` and choose a Pi-v3 JSONL file to open an observer without a tool link. Each invocation creates a separate observer.
 - Press `g` in the observer to reread its saved file.
 - Place point on a completed reply, thinking block, or tool block and run `M-x pilish-describe-reply` to inspect its saved details. No snapshot menu is added.
 - Read `Took …` beside saved bash or subagent output. No `Elapsed` timer appears.
@@ -30,6 +32,8 @@ Preconditions:
 
 - **Open a recursive tree.** Run `G1_CAPTURE="$RUN_DIR/recursive-tree" ./test/run-gui-tests.sh --headless pilish-gui-test-snapshot-recursive-tree-keyboard-journey 2>&1 | tee "$RUN_DIR/recursive-tree.log"`. Record `recursive-tree.exit`. The tree has six invocation rows and five exact actions at widths 104 and 54. Every row leads with its task title and agent label in parentheses, most rows show turns and context, and one chat renders an unknown-context marker. Links sit on the five available first-occurrence titles. Two reviewers have distinct suffixes, the tester resume is inert, and no link appears in the tool header. Native `C-c ]` and `RET` open every exact chat. Output folds and cooling preserve one tree. The parent process, draft, and saved files survive.
 - **Open, inspect, and quit.** Run `./test/run-gui-tests.sh --headless pilish-gui-test-snapshot-keyboard-other-window 2>&1 | tee "$RUN_DIR/open.log"`. Record `open.exit`. Native `C-h .` describes the session link and `RET` opens a read-only observer in another window. Real `C-h .` and `M-x pilish-describe-reply` inspect saved reply, thinking, and tool details. Help is selected and read-only. Reports omit live measurements and private content. Each Help `q` returns to the observer. The final `q` closes only that observer. The parent process, draft, and saved-file bytes survive.
+- **Check selected-file boundaries.** Run `make test SELECTOR=view-session-file 2>&1 | tee "$RUN_DIR/file-boundaries.log"`. Record `file-boundaries.exit`. The public command preserves a multihop route without connecting, refuses a selected cross-directory symlink without observer or window churn, and follows a same-directory symlink.
+- **Open a saved file directly.** Run `G1_CAPTURE="$RUN_DIR/file-capture" ./test/run-gui-tests.sh --headless pilish-gui-test-view-session-file-keyboard 2>&1 | tee "$RUN_DIR/file-api.log"`. Record `file-api.exit`. Native `M-x pilish-view-session-file` opens two independent read-only observers; unchanged and changed `g` refresh only the selected observer, and `q` closes it while leaving the other observer and parent alive. No RPC is sent. The parent process, draft, transcript and saved-file bytes survive. Require `view-session-file-{observer,refreshed}.{png,el}` under `$RUN_DIR/file-capture`.
 - **Refresh and fail safely.** Run `G1_CAPTURE="$RUN_DIR/capture" ./test/run-gui-tests.sh --headless pilish-gui-test-large-snapshot-refresh 2>&1 | tee "$RUN_DIR/refresh.log"`. Record `refresh.exit`. Native `g` preserves an unchanged view, publishes changed content to two windows, and retains the last good content after a failed read.
 - **Restore recorded duration.** Run `make test-snapshot SELECTOR=pilish-test-snapshot-refresh-preserves-and-replaces-recorded-tool-time 2>&1 | tee "$RUN_DIR/duration.log"`. Record `duration.exit`. The observer restores `Took 0.0s`, replaces it when the saved value changes, and retains the last good value after an invalid refresh. No live timer starts.
 - **Check the proof.** Require zero statuses and nonempty logs. Require `observer-104-unchanged.png`, `observer-54-unchanged.png`, `observer-changed.png`, `observer-failed.png`, and their matching `.el` files under `$RUN_DIR/capture`. For the recursive tree, require `recursive-tree-104-preview.png`, `recursive-tree-54-preview.png`, `recursive-tree-observer.png`, `recursive-tree-cold.png`, and their matching `.el` files under `$RUN_DIR/recursive-tree`. Use `test -s` for every file.
@@ -37,7 +41,7 @@ Preconditions:
 ## Gotchas
 
 - The recursive-tree journey uses a literal v2 declaration and scripted saved replies. It does not run pi-submarine or a real model. Historical v1 declarations remain flat and use the same strict opener.
-- `pilish-open-session-file` resumes a live session. It is not the observer entry point covered here.
+- `pilish-open-session-file` resumes a live session; `pilish-view-session-file` does not. Reads and rendering are synchronous, including for remote files; the fake-backed direct-file journey covers local files only. A selected symlink whose target resolves outside its own directory is refused; same-directory symlinks are accepted. The multihop regression checks captured route identity without a live TRAMP connection.
 - The observer reads valid Pi-v3 fixture records. It does not infer a child from a tool name or output text. It shows saved data, not unsaved parent output.
 - All saved block reports use detached metadata and need no live observer process. They omit live stream estimates and transient run-return receipts. Saved tool results with `durationMs` restore recorded execution times in details and eligible footers.
 - Native control help retains priority for `C-h .` and keeps its hover properties. Unit tests check that custom block metadata is absent from native hover properties. The headless keyboard journey does not prove physical PGTK hover.
