@@ -148,6 +148,114 @@
     (should (pilish-gui-test-input-window))
     (should (pilish-gui-test-verify-layout))))
 
+(ert-deftest pilish-gui-test-seed-history-from-opened-session ()
+  "Open and reload saved prompts, restore a draft, and resend a recalled prompt."
+  (let ((pilish-gui-test--large-trace nil)
+        (file (make-temp-file "pilish-gui-seed-history-" nil ".jsonl")))
+    (unwind-protect
+        (pilish-gui-test-with-fresh-session
+         (:backend fake :fake-scenario "prompt-lifecycle")
+         (let* ((chat (plist-get pilish-gui-test--session :chat-buffer))
+                (input (plist-get pilish-gui-test--session :input-buffer))
+                (dir (plist-get pilish-gui-test--session :directory))
+                (backend (plist-get pilish-gui-test--session :backend))
+                (pilish-executable (plist-get backend :executable))
+                (pilish-extra-args (plist-get backend :extra-args))
+                (first "Inspect the launch configuration")
+                (latest "Explain the shutdown path")
+                (draft "Compare both paths without editing files"))
+           (with-temp-file file
+             (dolist (record
+                      `((:type "session" :version 3 :id "seed-history"
+                         :timestamp "2026-02-03T04:05:00.000Z" :cwd ,dir)
+                        (:type "message" :id "first" :parentId :null
+                         :timestamp "2026-02-03T04:05:01.000Z"
+                         :message (:role "user" :content ,first))
+                        (:type "message" :id "latest" :parentId "first"
+                         :timestamp "2026-02-03T04:05:02.000Z"
+                         :message (:role "user"
+                                   :content [(:type "text" :text ,latest)]))))
+               (insert (json-encode record) "\n")))
+           (let ((bytes (with-temp-buffer
+                          (insert-file-contents-literally file)
+                          (buffer-string))))
+             (should (pilish-test-wait-until
+                      (lambda ()
+                        (with-current-buffer chat
+                          (not (pilish--session-busy-p)))) 8 0.01))
+             (select-window (get-buffer-window input))
+             (should-not (buffer-local-value 'pilish--input-ring input))
+             (pilish--history-add "Local-only prompt")
+             (execute-kbd-macro
+              (vconcat (kbd "M-x pilish-open-session-file RET") file (kbd "RET")))
+             (should (pilish-test-wait-until
+                      (lambda ()
+                        (with-current-buffer chat
+                          (and (not (pilish--session-transition-active-p))
+                               (equal (plist-get pilish--state :session-file) file)
+                               (string-match-p latest (buffer-string))))) 8 0.01))
+             (select-window (get-buffer-window input))
+             (insert draft)
+             (goto-char 7)
+             (dotimes (_ 2)
+               (let ((old-proc (buffer-local-value 'pilish--process chat)))
+                 (execute-kbd-macro (kbd "M-x pilish-reload RET"))
+                 (push '(reload "M-x pilish-reload RET")
+                       pilish-gui-test--large-trace)
+                 (should (pilish-test-wait-until
+                          (lambda ()
+                            (with-current-buffer chat
+                              (and (not (eq pilish--process old-proc))
+                                   (process-live-p pilish--process)
+                                   (not (pilish--session-transition-active-p))
+                                   (string-match-p latest (buffer-string)))))
+                          8 0.01)))
+               (select-window (get-buffer-window input))
+               (should (equal (buffer-string) draft))
+               (should (= (point) 7))
+               (should (equal (ring-elements pilish--input-ring)
+                              (list latest first "Local-only prompt"))))
+             (pilish-gui-test--large-evidence
+              "seed-history-reloaded"
+              (list :input (buffer-string) :point (point)
+                    :history (ring-elements pilish--input-ring)
+                    :commands (reverse pilish-gui-test--large-trace)))
+             (pilish-gui-test--large-command (kbd "M-p") 'pilish-previous-input)
+             (should (equal (buffer-string) latest))
+             (pilish-gui-test--large-evidence
+              "seed-history-recalled"
+              (list :input (buffer-string)
+                    :history (ring-elements pilish--input-ring)
+                    :commands (reverse pilish-gui-test--large-trace)))
+             (pilish-gui-test--large-command (kbd "M-p") 'pilish-previous-input)
+             (should (equal (buffer-string) first))
+             (pilish-gui-test--large-command (kbd "M-n") 'pilish-next-input)
+             (should (equal (buffer-string) latest))
+             (pilish-gui-test--large-command (kbd "M-n") 'pilish-next-input)
+             (should (equal (buffer-string) draft))
+             (should-not pilish--input-ring-index)
+             (pilish-gui-test--large-evidence
+              "seed-history-draft"
+              (list :input (buffer-string)
+                    :commands (reverse pilish-gui-test--large-trace)))
+             (should (equal bytes (with-temp-buffer
+                                    (insert-file-contents-literally file)
+                                    (buffer-string))))
+             (pilish-gui-test--large-command (kbd "M-p") 'pilish-previous-input)
+             (should (equal (buffer-string) latest))
+             (pilish-gui-test--large-command (kbd "C-c C-c") 'pilish-send)
+             (should (pilish-test-wait-until
+                      (lambda ()
+                        (and (pilish-gui-test-chat-contains
+                              (concat "Fake reply for: " latest))
+                             (pilish-gui-test-idle-p))) 8 0.01))
+             (should (string-empty-p (buffer-string)))
+             (pilish-gui-test--large-evidence
+              "seed-history-resent"
+              (list :input (buffer-string) :prompt latest
+                    :commands (reverse pilish-gui-test--large-trace))))))
+      (delete-file file))))
+
 (ert-deftest pilish-gui-test-session-switch-ignores-delayed-state ()
   "Native New Session survives delayed startup and thinking-state responses."
   (let ((dispatch (symbol-function 'pilish--dispatch-response))

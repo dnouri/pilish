@@ -3194,6 +3194,80 @@ Regression test for #27: history was shared across all sessions."
       (kill-buffer buf1)
       (kill-buffer buf2))))
 
+(ert-deftest pilish-test-seed-history-merges-visible-prompts-idempotently ()
+  "Only visible user text is merged, with local entries kept older."
+  (let ((messages [(:role "user" :content "first prompt")
+                   (:role "assistant" :content "not input")
+                   (:role "toolResult" :content "not input either")
+                   (:role "custom" :content "extension output" :display t)
+                   (:role "user" :content [(:type "image" :data "AA==")])
+                   (:role "user" :content "  \n ")
+                   (:role "user" :content [(:type "text" :text "second prompt")
+                                           (:type "image" :data "AA==")])
+                   (:role "user" :content "second prompt")
+                   (:role "user" :content "first prompt")]))
+    (with-temp-buffer
+      (pilish-input-mode)
+      (pilish--history-add "older command")
+      (pilish--history-add "first prompt")
+      (pilish--history-add "other session prompt")
+      (insert "current draft")
+      (dotimes (_ 2)
+        (pilish--seed-input-history (current-buffer) messages)
+        (should (equal (ring-elements pilish--input-ring)
+                       '("first prompt" "second prompt" "first prompt"
+                         "other session prompt" "older command"))))
+      (should (equal (buffer-string) "current draft"))
+      (dolist (expected '("first prompt" "second prompt" "first prompt"
+                          "other session prompt" "older command"))
+        (pilish-previous-input)
+        (should (equal (buffer-string) expected)))
+      (dotimes (_ 5) (pilish-next-input))
+      (should (equal (buffer-string) "current draft")))))
+
+(ert-deftest pilish-test-seed-history-keeps-ring-bound-and-input-point ()
+  "Seeding respects the history capacity without editing the draft."
+  (let ((pilish--input-ring-size 2))
+    (with-temp-buffer
+      (pilish-input-mode)
+      (insert "draft text")
+      (goto-char 3)
+      (let ((tick (buffer-chars-modified-tick)))
+        (pilish--seed-input-history
+         (current-buffer) [(:role "user" :content "one")
+                           (:role "user" :content "two")
+                           (:role "user" :content "three")])
+        (should (equal (ring-elements pilish--input-ring) '("three" "two")))
+        (should (= (buffer-chars-modified-tick) tick))
+        (should (= (point) 3))))))
+
+(ert-deftest pilish-test-seed-history-display-and-rerender-leave-navigation-alone ()
+  "Display-only replay and rerender leave linked input navigation untouched."
+  (let ((input (generate-new-buffer " *pilish-seed-input*")))
+    (unwind-protect
+        (with-temp-buffer
+          (pilish-chat-mode)
+          (setq pilish--input-buffer input)
+          (with-current-buffer input
+            (pilish-input-mode)
+            (pilish--history-add "local prompt")
+            (insert "unfinished draft")
+            (pilish-previous-input))
+          (let ((ring (buffer-local-value 'pilish--input-ring input)))
+            (pilish--display-session-history
+             [(:role "user" :content "displayed prompt")] (current-buffer))
+            (pilish--rerender-canonical-history)
+            (should (string-match-p "displayed prompt" (buffer-string)))
+            (with-current-buffer input
+              (should (eq ring pilish--input-ring))
+              (should (equal (ring-elements ring) '("local prompt")))
+              (should (= pilish--input-ring-index 0))
+              (should (equal pilish--input-saved "unfinished draft"))
+              (should (equal (buffer-string) "local prompt"))
+              (pilish-next-input)
+              (should (equal (buffer-string) "unfinished draft")))))
+      (pilish-test--kill-live-buffers input))))
+
 ;;; History Isearch (C-r incremental search)
 
 (ert-deftest pilish-test-history-isearch-empty-history-errors ()
@@ -5583,9 +5657,13 @@ reads it through the session link instead of the current buffer."
   (with-temp-buffer
     (pilish-chat-mode)
     (setq pilish--state '(:model (:name "claude-sonnet-4")))
-    (let ((header (pilish--header-line-string)))
-      ;; Should have local-map property
-      (should (get-text-property 0 'local-map header))
+    (let* ((header (pilish--header-line-string))
+           (map (get-text-property 0 'local-map header)))
+      (should map)
+      (dolist (area '(header-line mode-line))
+        (dolist (button '(mouse-1 mouse-2))
+          (should (eq (lookup-key map (vector area button))
+                      #'pilish--select-model-at-event))))
       ;; Should have mouse-face for highlight
       (should (get-text-property 0 'mouse-face header)))))
 
@@ -5603,10 +5681,96 @@ reads it through the session link instead of the current buffer."
       (should map)
       ;; Should have mouse-face for highlight
       (should (get-text-property pos 'mouse-face header))
-      (should (eq (lookup-key map [header-line mouse-1])
-                  #'pilish-cycle-thinking))
-      (should (eq (lookup-key map [header-line mouse-2])
-                  #'pilish-cycle-thinking)))))
+      (dolist (area '(header-line mode-line))
+        (dolist (button '(mouse-1 mouse-2))
+          (should (eq (lookup-key map (vector area button))
+                      #'pilish--cycle-thinking-at-event)))))))
+
+(ert-deftest pilish-test-header-click-targets-event-window ()
+  (let ((a (generate-new-buffer " *status-A*"))
+        (b (generate-new-buffer " *status-B*"))
+        (input (generate-new-buffer " *status-B-input*"))
+        entries)
+    (unwind-protect
+        (save-window-excursion
+          (delete-other-windows)
+          (let* ((wa (selected-window))
+                 (wb (split-window wa nil 'below)))
+            (dolist (spec (list (cons a 'process-A) (cons b 'process-B)))
+              (with-current-buffer (car spec)
+                (pilish-chat-mode)
+                (setq pilish--process (cdr spec)
+                      pilish--status 'idle)))
+            (with-current-buffer input
+              (pilish-input-mode)
+              (pilish--set-chat-buffer b))
+            (set-window-buffer wa a)
+            (set-window-buffer wb b)
+            (select-window wa)
+            (cl-letf (((symbol-function 'pilish--rpc-sync)
+                       (lambda (proc request &rest _)
+                         (push (list proc (plist-get request :type)
+                                     (selected-window)) entries)
+                         '(:success t :data (:models nil))))
+                      ((symbol-function 'completing-read)
+                       (lambda (&rest _) nil))
+                      ((symbol-function 'pilish--rpc-async)
+                       (lambda (proc request &rest _)
+                         (push (list proc (plist-get request :type)
+                                     (selected-window)) entries))))
+              ;; Call adapters directly: these are synthetic events, not clicks.
+              (dolist (buffer (list b input))
+                (set-window-buffer wb buffer)
+                (dolist (area '(header-line mode-line))
+                  (dolist (button '(mouse-1 mouse-2))
+                    (dolist (map (list pilish--header-model-map
+                                       pilish--header-thinking-map))
+                      (funcall (lookup-key map (vector area button))
+                               (list button (list wb area '(0 . 0) 0)))
+                      (should (eq (selected-window) wa))
+                      (should (eq (current-buffer) a))
+                      (should (eq (caar entries) 'process-B))
+                      (should (eq (nth 2 (car entries)) wb))))))
+              (should (= (length entries) 16))
+              (should (= (cl-count "cycle_thinking_level" entries
+                                   :key #'cadr :test #'equal) 8))
+              (dolist (key '("C-c C-m" "C-c C-t"))
+                (call-interactively (key-binding (kbd key)))
+                (should (eq (caar entries) 'process-A))
+                (should (eq (nth 2 (car entries)) wa))))))
+      (dolist (buffer (list a b input))
+        (kill-buffer buffer)))))
+
+(ert-deftest pilish-test-header-click-does-not-fall-back-to-selected-session ()
+  (save-window-excursion
+    (delete-other-windows)
+    (let* ((wa (selected-window))
+           (wb (split-window wa nil 'below))
+           (a (generate-new-buffer " *status-selected*"))
+           (other (generate-new-buffer " *status-unrelated*")))
+      (with-current-buffer a
+        (pilish-chat-mode)
+        (setq pilish--process 'process-A))
+      (set-window-buffer wa a)
+      (unwind-protect
+          (cl-letf (((symbol-function 'pilish--rpc-async)
+                     (lambda (&rest _) (ert-fail "Unexpected RPC"))))
+            (set-window-buffer wb other)
+            (pilish--cycle-thinking-at-event
+             (list 'mouse-1 (list wb 'mode-line '(0 . 0) 0)))
+            (should-error
+             (pilish--select-model-at-event
+              (list 'mouse-1 (list wb 'mode-line '(0 . 0) 0)))
+             :type 'user-error)
+            (should (eq (selected-window) wa))
+            (delete-window wb)
+            (dolist (command '(pilish--select-model-at-event
+                               pilish--cycle-thinking-at-event))
+              (funcall command
+                       (list 'mouse-1 (list wb 'mode-line '(0 . 0) 0))))
+            (should (eq (selected-window) wa)))
+        (kill-buffer other)
+        (kill-buffer a)))))
 
 (ert-deftest pilish-test-header-format-context-returns-nil-when-no-window ()
   "Context format returns nil when context window is 0."
