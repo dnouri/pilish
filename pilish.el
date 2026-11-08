@@ -133,13 +133,15 @@ Like a saved-conversation link, select the observer in another window.
 This never starts or resumes Pi and never changes any live session or
 draft.  Each call creates an independent observer; \`g' rereads its captured
 file identity.  Invalid or unreadable files signal an error before display.
+A symlink whose target resolves outside FILE's own directory is refused.
 Reads and rendering are synchronous, including for remote files."
   (interactive (list (pilish--read-session-file-name)))
   (let* ((file (pilish--route-preserving-expand-file-name file))
          (header (pilish-jsonl-read-session-header file))
          (target (pilish--snapshot-target-for-pi-v3
                   file (plist-get header :id)
-                  (file-name-directory file) (file-name-nondirectory file))))
+                  (pilish--route-preserving-file-name-directory file)
+                  (file-name-nondirectory file))))
     (unless target
       (user-error "Not a readable Pi session: %s" file))
     (pilish-open-subagent-snapshot target)))

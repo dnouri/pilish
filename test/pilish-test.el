@@ -120,6 +120,59 @@ still mock the RPC boundary, so the process is never used for I/O."
             (should (eq (selected-window) window))))
       (delete-directory directory t))))
 
+(ert-deftest pilish-test-view-session-file-preserves-multihop-route ()
+  "The public command keeps a selected multi-hop TRAMP route in its target."
+  (let* ((route "/ssh:bastion|sudo:host:")
+         (file (concat route "/sessions/saved.jsonl"))
+         (default-directory "/tmp/")
+         captured)
+    (cl-letf (((symbol-function 'pilish-jsonl-read-session-header)
+               (lambda (path)
+                 (should (equal path file))
+                 (list :type "session" :version 3 :id "worker" :cwd "/work")))
+              ((symbol-function 'pilish-open-subagent-snapshot)
+               (lambda (target) (setq captured target) 'observer)))
+      (should (eq (pilish-view-session-file file) 'observer))
+      (should (equal (pilish--snapshot-target-anchor-file captured) file))
+      (should (equal (pilish--snapshot-target-root captured)
+                     (concat route "/sessions/")))
+      (should (equal (pilish--snapshot-target-file captured) "saved.jsonl")))))
+
+(ert-deftest pilish-test-view-session-file-refuses-explicit-symlink-outside ()
+  "An explicitly selected symlink that resolves outside its root is refused."
+  (pilish-test--with-snapshot-files
+    (let ((outside (expand-file-name "outside.jsonl" directory))
+          (link (expand-file-name "selected.jsonl" root)))
+      (pilish-test--snapshot-write outside (list header))
+      (make-symbolic-link outside link)
+      (save-window-excursion
+        (let ((buffers (buffer-list))
+              (window (selected-window))
+              (windows (window-state-get nil t))
+              failure)
+          (setq failure (should-error (pilish-view-session-file link)
+                                      :type 'user-error))
+          (should (string-match-p "escapes its storage root"
+                                  (error-message-string failure)))
+          (should (equal (buffer-list) buffers))
+          (should (eq (selected-window) window))
+          (should (equal (window-state-get nil t) windows)))))))
+
+(ert-deftest pilish-test-view-session-file-follows-symlink-inside-root ()
+  "A symlink whose target stays inside the selected directory is followed."
+  (pilish-test--with-snapshot-files
+    (pilish-test--snapshot-write
+     child (list header (pilish-test--snapshot-message "leaf" nil "Linked answer")))
+    (let ((link (expand-file-name "alias.jsonl" root))
+          observer)
+      (make-symbolic-link child link)
+      (unwind-protect
+          (save-window-excursion
+            (setq observer (pilish-view-session-file link))
+            (with-current-buffer observer
+              (should (string-match-p "Linked answer" (buffer-string)))))
+        (when (buffer-live-p observer) (kill-buffer observer))))))
+
 ;;; Main Entry Point
 
 (ert-deftest pilish-test-pilish-creates-chat-buffer ()
