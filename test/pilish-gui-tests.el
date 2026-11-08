@@ -4733,7 +4733,6 @@ FAILURE permits an expected user error, whose native post hook may not run."
         (when (buffer-live-p browser) (kill-buffer browser))))))
 
 (ert-deftest pilish-gui-test-session-browser-env-directory-without-chat ()
-  "Open local env storage, then toggle All without starting a process."
   (let* ((sandbox (pilish-test--make-temp-directory "pi-gui-env-"))
          (agent (expand-file-name "agent" sandbox))
          (custom (expand-file-name "custom-sessions" sandbox))

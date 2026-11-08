@@ -5571,7 +5571,6 @@ and non-munged directories.  scope=current scans one directory."
                            (list path-a path-b)))))))))
 
 (ert-deftest pilish-test-browse-env-session-directory-without-chat ()
-  "Local env storage is flat in both scopes, without a linked chat."
   (let* ((sandbox (pilish-test--make-temp-directory "pi-env-scan-"))
          (agent (expand-file-name "agent" sandbox))
          (munged (expand-file-name "sessions/--home-fake-a--" agent))

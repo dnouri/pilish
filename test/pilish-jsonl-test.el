@@ -1511,7 +1511,6 @@ wrap the result in --…-- under ROOT (default: sessions-root)."
                  "/r/sessions/--a-b-c--")))
 
 (ert-deftest pilish-test-jsonl-session-directory ()
-  "PI_CODING_AGENT_SESSION_DIR replaces the munged default for local cwds."
   (let ((process-environment '("PI_CODING_AGENT_SESSION_DIR=/tmp/flat/")))
     (should (equal (pilish-jsonl-session-directory "/a/b") "/tmp/flat"))
     (should (equal (pilish-jsonl-session-directory "/ssh:h:/a/b" "/ssh:h:/r")
