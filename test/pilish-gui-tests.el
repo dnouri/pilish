@@ -590,6 +590,98 @@ follow-up that is sent as the next prompt once Pi finishes."
         :draft-lines (with-current-buffer (window-buffer input-win)
                        (count-lines (point-min) (point-max)))))
 
+(ert-deftest pilish-gui-test-custom-input-layout-keeps-sizing ()
+  "A right-side placement owns its height after opening and frame resizing."
+  (let ((pilish-input-window-height 0.25)
+        (pilish-split-input-window-function
+         (lambda (chat input)
+           (let ((window (split-window chat nil 'right)))
+             (set-window-buffer window input)
+             (set-window-dedicated-p window 'side)
+             window)))
+        (width (frame-width)) (height (frame-height)))
+    (unwind-protect
+        (pilish-gui-test-with-fresh-session
+          (:backend fake :fake-scenario "prompt-lifecycle")
+          (let ((chat (pilish-gui-test-chat-window))
+                (input (pilish-gui-test-input-window)))
+            (dolist (size '((104 . 30) (120 . 40)))
+              (set-frame-size nil (car size) (cdr size))
+              (should (pilish-test-wait-until
+                       (lambda () (and (= (frame-width) (car size))
+                                       (= (frame-height) (cdr size))))
+                       pilish-test-gui-timeout pilish-test-poll-interval))
+              (sit-for 0.1)
+              (should (eq (window-in-direction 'right chat) input))
+              (should (= (window-total-height chat) (window-total-height input)))
+              (should (= (window-total-height input)
+                         (window-total-height (frame-root-window))))
+              (let ((before (mapcar #'window-edges (list chat input))))
+                (pilish--rebalance-input-window chat input)
+                (pilish--maybe-rebalance-windows (selected-frame))
+                (should (equal before (mapcar #'window-edges (list chat input))))
+                (pilish-gui-test--large-evidence
+                 (format "custom-side-%d" (car size))
+                 (list :window-system window-system :package-user-dir package-user-dir
+                       :pilish-ui (symbol-file 'pilish--rebalance-input-window 'defun)
+                       :frame-size size :edges before))))))
+      (set-frame-size nil width height)
+      (sit-for 0.1))))
+
+(ert-deftest pilish-gui-test-input-rebalance-stays-on-resized-frame ()
+  "A nonselected frame's pair rebalances without changing the selected pair."
+  (let ((pilish-input-window-height 0.25)
+        (original (selected-frame))
+        frame)
+    (unwind-protect
+        (pilish-gui-test-with-fresh-session
+          (:backend fake :fake-scenario "prompt-lifecycle")
+          (let* ((chat (pilish-gui-test-chat-window))
+                 (input (pilish-gui-test-input-window))
+                 (chat-buffer (window-buffer chat))
+                 (input-buffer (window-buffer input)))
+            (setq frame (make-frame '((width . 104) (height . 40))))
+            (with-selected-frame frame
+              (set-window-buffer (selected-window) chat-buffer)
+              (let ((other-input (split-window nil -12 'below)))
+                (set-window-buffer other-input input-buffer)))
+            (select-frame original)
+            (window-resize input (- 10 (window-total-height input)) nil t)
+            (let* ((before (mapcar #'window-edges (list chat input)))
+                   (other-chat (frame-selected-window frame))
+                   (other-input (get-buffer-window input-buffer frame))
+                   (other-before (mapcar #'window-edges (list other-chat other-input))))
+              (should-not (= (window-total-height input)
+                             (pilish--input-height-for-window-height
+                              (+ (window-total-height chat) (window-total-height input)))))
+              (should-not (= (window-total-height other-input)
+                             (pilish--input-height-for-window-height
+                              (+ (window-total-height other-chat)
+                                 (window-total-height other-input)))))
+              (pilish--maybe-rebalance-windows frame)
+              (should (eq (selected-frame) original))
+              (should (equal before (mapcar #'window-edges (list chat input))))
+              (should (= (window-total-height other-input)
+                         (pilish--input-height-for-window-height
+                          (+ (window-total-height other-chat)
+                             (window-total-height other-input)))))
+              (pilish-gui-test--large-evidence
+               "frame-scoped-selected"
+               (list :window-system window-system :before before
+                     :after (mapcar #'window-edges (list chat input))))
+              (with-selected-frame frame
+                (redisplay t)
+                (pilish-gui-test--large-evidence
+                 "frame-scoped-resized"
+                 (list :before other-before
+                       :after (mapcar #'window-edges (list other-chat other-input))
+                       :input-height (window-total-height other-input)
+                       :target (pilish--input-height-for-window-height
+                                (+ (window-total-height other-chat)
+                                   (window-total-height other-input)))))))))
+      (when (frame-live-p frame) (delete-frame frame))
+      (select-frame original))))
+
 (ert-deftest pilish-gui-test-input-window-fits-draft ()
   "A `fit' input window follows a typed draft, stops at its cap, and shrinks.
 The session opens with a one-line input.  Typing three lines grows it to
