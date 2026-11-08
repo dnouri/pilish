@@ -3194,6 +3194,80 @@ Regression test for #27: history was shared across all sessions."
       (kill-buffer buf1)
       (kill-buffer buf2))))
 
+(ert-deftest pilish-test-seed-history-merges-visible-prompts-idempotently ()
+  "Only visible user text is merged, with local entries kept older."
+  (let ((messages [(:role "user" :content "first prompt")
+                   (:role "assistant" :content "not input")
+                   (:role "toolResult" :content "not input either")
+                   (:role "custom" :content "extension output" :display t)
+                   (:role "user" :content [(:type "image" :data "AA==")])
+                   (:role "user" :content "  \n ")
+                   (:role "user" :content [(:type "text" :text "second prompt")
+                                           (:type "image" :data "AA==")])
+                   (:role "user" :content "second prompt")
+                   (:role "user" :content "first prompt")]))
+    (with-temp-buffer
+      (pilish-input-mode)
+      (pilish--history-add "older command")
+      (pilish--history-add "first prompt")
+      (pilish--history-add "other session prompt")
+      (insert "current draft")
+      (dotimes (_ 2)
+        (pilish--seed-input-history (current-buffer) messages)
+        (should (equal (ring-elements pilish--input-ring)
+                       '("first prompt" "second prompt" "first prompt"
+                         "other session prompt" "older command"))))
+      (should (equal (buffer-string) "current draft"))
+      (dolist (expected '("first prompt" "second prompt" "first prompt"
+                          "other session prompt" "older command"))
+        (pilish-previous-input)
+        (should (equal (buffer-string) expected)))
+      (dotimes (_ 5) (pilish-next-input))
+      (should (equal (buffer-string) "current draft")))))
+
+(ert-deftest pilish-test-seed-history-keeps-ring-bound-and-input-point ()
+  "Seeding respects the history capacity without editing the draft."
+  (let ((pilish--input-ring-size 2))
+    (with-temp-buffer
+      (pilish-input-mode)
+      (insert "draft text")
+      (goto-char 3)
+      (let ((tick (buffer-chars-modified-tick)))
+        (pilish--seed-input-history
+         (current-buffer) [(:role "user" :content "one")
+                           (:role "user" :content "two")
+                           (:role "user" :content "three")])
+        (should (equal (ring-elements pilish--input-ring) '("three" "two")))
+        (should (= (buffer-chars-modified-tick) tick))
+        (should (= (point) 3))))))
+
+(ert-deftest pilish-test-seed-history-display-and-rerender-leave-navigation-alone ()
+  "Display-only replay and rerender leave linked input navigation untouched."
+  (let ((input (generate-new-buffer " *pilish-seed-input*")))
+    (unwind-protect
+        (with-temp-buffer
+          (pilish-chat-mode)
+          (setq pilish--input-buffer input)
+          (with-current-buffer input
+            (pilish-input-mode)
+            (pilish--history-add "local prompt")
+            (insert "unfinished draft")
+            (pilish-previous-input))
+          (let ((ring (buffer-local-value 'pilish--input-ring input)))
+            (pilish--display-session-history
+             [(:role "user" :content "displayed prompt")] (current-buffer))
+            (pilish--rerender-canonical-history)
+            (should (string-match-p "displayed prompt" (buffer-string)))
+            (with-current-buffer input
+              (should (eq ring pilish--input-ring))
+              (should (equal (ring-elements ring) '("local prompt")))
+              (should (= pilish--input-ring-index 0))
+              (should (equal pilish--input-saved "unfinished draft"))
+              (should (equal (buffer-string) "local prompt"))
+              (pilish-next-input)
+              (should (equal (buffer-string) "unfinished draft")))))
+      (pilish-test--kill-live-buffers input))))
+
 ;;; History Isearch (C-r incremental search)
 
 (ert-deftest pilish-test-history-isearch-empty-history-errors ()
