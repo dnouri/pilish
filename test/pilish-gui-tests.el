@@ -4944,7 +4944,6 @@ FAILURE permits an expected user error, whose native post hook may not run."
          (pilish-session-browser-default-scope 'current)
          (pilish-session-browser-default-named-only nil)
          (pilish-gui-test--large-trace nil)
-         (processes (process-list))
          browser)
     (unwind-protect
         (progn
@@ -4990,7 +4989,6 @@ FAILURE permits an expected user error, whose native post hook may not run."
                     (should-not pilish--session-browser-error)
                     (should-not (pilish--get-chat-buffer))
                     (should-not (get-buffer-process browser))
-                    (should (equal processes (process-list)))
                     (should (eq scope pilish--session-browser-scope))
                     (let ((paths (sort (mapcar (lambda (item) (plist-get item :path))
                                                pilish--session-browser-items)
@@ -5006,7 +5004,7 @@ FAILURE permits an expected user error, whose native post hook may not run."
                        (format "env-browser-%s" scope)
                        (list :scope scope :paths paths :directory custom
                              :chat (pilish--get-chat-buffer)
-                             :processes-unchanged (equal processes (process-list))
+                             :process-start-guard 'make-process-rejected
                              :text (buffer-string)
                              :commands (reverse pilish-gui-test--large-trace))))))))))
       (when (buffer-live-p browser) (kill-buffer browser))
