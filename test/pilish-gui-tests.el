@@ -538,7 +538,6 @@ follow-up that is sent as the next prompt once Pi finishes."
               (let ((other-input (split-window nil -12 'below)))
                 (set-window-buffer other-input input-buffer)))
             (select-frame original)
-            ;; Keep both pairs away from the target before the explicit hook.
             (window-resize input (- 10 (window-total-height input)) nil t)
             (let* ((before (mapcar #'window-edges (list chat input)))
                    (other-chat (frame-selected-window frame))
