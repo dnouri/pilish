@@ -882,7 +882,6 @@ and sending with \\`C-c C-c' returns it to one line."
                     (progn
                       (select-window (pilish-gui-test-input-window))
                       (execute-kbd-macro (vconcat "Unsent API draft" (kbd "RET") "Still here"))
-                      ;; Observe the normal wire seam: opening and rereading send no RPC.
                       (cl-letf (((symbol-function 'pilish--send-string)
                                  (lambda (proc line)
                                    (push (pilish--parse-json-line line) commands)

@@ -66,7 +66,6 @@ still mock the RPC boundary, so the process is never used for I/O."
   (should-error
    (pilish-test-backend-spec 'bogus "prompt-lifecycle")))
 
-;;; Saved Session File Viewing
 
 (ert-deftest pilish-test-view-session-file-creates-independent-observers ()
   "Public file viewing is read-only, process-free and refreshes captured identity."
