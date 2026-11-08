@@ -3895,6 +3895,75 @@ Binds `chat-win' and `input-win' for use in BODY."
         (pilish--rebalance-input-window chat-win input-win)
         (should (= (window-total-height input-win) before))))))
 
+(ert-deftest pilish-test-rebalance-leaves-right-side-input-alone ()
+  "Neither direct resizing nor the frame hook changes a custom side pair."
+  (save-window-excursion
+    (pilish-test-with-split-layout
+      (delete-window input-win)
+      (let* ((pilish-split-input-window-function
+              (lambda (chat input)
+                (let ((window (split-window chat nil 'right)))
+                  (set-window-buffer window input)
+                  window)))
+             (side (pilish-split-input-window chat-win input-buf))
+             (before (mapcar #'window-edges (list chat-win side))))
+        (dolist (pilish-input-window-height '(0.25 fit 10))
+          (pilish--rebalance-input-window chat-win side)
+          (pilish--maybe-rebalance-windows (selected-frame))
+          (should (equal before (mapcar #'window-edges (list chat-win side)))))))))
+
+(ert-deftest pilish-test-rebalance-mixed-layouts-keeps-ordinary-ratio ()
+  "A custom side pair cannot change another session's ordinary ratio."
+  (let ((pilish-input-window-height 0.25)
+        (window-min-height 4))
+    (save-window-excursion
+      (pilish-test-with-split-layout
+        (let ((chat-b (generate-new-buffer " *test-chat-B*"))
+              (input-b (generate-new-buffer " *test-input-B*")))
+          (unwind-protect
+              (let* ((column (split-window chat-win nil 'right))
+                     (side (split-window column nil 'right)))
+                (with-current-buffer chat-b
+                  (pilish-chat-mode)
+                  (pilish--set-input-buffer input-b))
+                (set-window-buffer column chat-b)
+                (set-window-buffer side input-b)
+                (pilish--rebalance-input-window chat-win input-win)
+                (let ((before (mapcar #'window-edges (list column side))))
+                  (pilish--maybe-rebalance-windows (selected-frame))
+                  (should (= (window-total-height input-win)
+                             (pilish--input-height-for-window-height
+                              (+ (window-total-height chat-win)
+                                 (window-total-height input-win)))))
+                  (should (equal before (mapcar #'window-edges (list column side))))))
+            (kill-buffer input-b)
+            (kill-buffer chat-b)))))))
+
+(ert-deftest pilish-test-rebalance-discovers-pairs-on-hook-frame ()
+  "Only pairs returned for the hook's frame have their geometry changed."
+  (let ((pilish-input-window-height 0.25)
+        (window-min-height 4))
+    (save-window-excursion
+      (pilish-test-with-split-layout
+        (delete-window input-win)
+        (let* ((other-chat (split-window chat-win nil 'right))
+               (other-input (split-window other-chat -8 'below))
+               (input-win (split-window chat-win -8 'below))
+               (before (mapcar #'window-edges (list other-chat other-input)))
+               (frame 'resized-frame))
+          (set-window-buffer input-win input-buf)
+          (cl-letf (((symbol-function 'window-list)
+                     (lambda (requested &optional minibuffer _window)
+                       (should (eq requested frame))
+                       (should (eq minibuffer 'no-mini))
+                       (list chat-win input-win))))
+            (pilish--maybe-rebalance-windows frame))
+          (should (= (window-total-height input-win)
+                     (pilish--input-height-for-window-height
+                      (+ (window-total-height chat-win)
+                         (window-total-height input-win)))))
+          (should (equal before (mapcar #'window-edges (list other-chat other-input)))))))))
+
 (ert-deftest pilish-test-chat-mode-adds-size-change-hook ()
   "Chat mode installs the window-size-change rebalance hook."
   (with-temp-buffer

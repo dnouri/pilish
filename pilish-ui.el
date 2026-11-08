@@ -2253,11 +2253,12 @@ In every case, clamp the result to the range
 
 (defun pilish--rebalance-input-window (chat-win input-win)
   "Adjust INPUT-WIN height to match the configured ratio.
-CHAT-WIN and INPUT-WIN must be a vertically stacked pair.
-Only resizes when `pilish-input-window-height' is a float."
+Resize only when INPUT-WIN is directly below CHAT-WIN and
+`pilish-input-window-height' is a float.  Leave other layouts alone."
   (when (and (floatp pilish-input-window-height)
              (window-live-p chat-win)
-             (window-live-p input-win))
+             (window-live-p input-win)
+             (eq (window-in-direction 'below chat-win) input-win))
     (let* ((total (+ (window-total-height chat-win)
                      (window-total-height input-win)))
            (target (pilish--input-height-for-window-height total))
@@ -2371,18 +2372,19 @@ pending timer until it runs; a command that yields can run several fits."
                    (pilish-fit-input-window win)))))))))
 
 (defun pilish--maybe-rebalance-windows (frame)
-  "Rebalance pi chat/input window pairs after FRAME is resized.
-Intended for `window-size-change-functions'."
+  "Rebalance input windows directly below their chats on FRAME.
+Leave custom layouts to their window manager.  Intended for
+`window-size-change-functions'."
   (when (eq pilish-input-window-height 'fit)
     (pilish--fit-input-windows-on-resize frame))
   (when (floatp pilish-input-window-height)
-    (dolist (win (window-list nil 'no-mini))
-      (when-let* ((input-buf (buffer-local-value
-                              'pilish--input-buffer
-                              (window-buffer win)))
-                  (input-win (get-buffer-window input-buf)))
-        (unless (eq win input-win)
-          (pilish--rebalance-input-window win input-win))))))
+    (dolist (win (window-list frame 'no-mini))
+      (when-let* (((with-current-buffer (window-buffer win)
+                    (derived-mode-p 'pilish-chat-mode)))
+                  (input-buf (buffer-local-value
+                              'pilish--input-buffer (window-buffer win)))
+                  (input-win (pilish--paired-input-window win input-buf)))
+        (pilish--rebalance-input-window win input-win)))))
 
 (defun pilish--windows-by-height (&optional windows)
   "Return live WINDOWS sorted by descending height.
@@ -2483,10 +2485,11 @@ here.  The default splits CHAT-WIN and puts the input below it.
 Window managers that keep chat and input windows in their own
 arrangement wrap or replace the default with `add-function'.  The
 function may place the window anywhere.  Pilish passes only chat
-windows at least twice `window-min-height' tall.  `fit' sizing (see
-`pilish-input-window-height') applies only to an input window directly
-below its chat window, and when several input windows are visible,
-Pilish prefers the one below the selected chat window.")
+windows at least twice `window-min-height' tall.  `fit' sizing and
+automatic height maintenance (see `pilish-input-window-height') apply
+only to an input window directly below its chat window; custom layouts
+own their sizing.  When several input windows are visible, Pilish
+prefers the one below the selected chat window.")
 
 (defun pilish-split-input-window (chat-win input-buf)
   "Show INPUT-BUF in a new window for CHAT-WIN and return that window.
