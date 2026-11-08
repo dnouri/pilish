@@ -1191,6 +1191,72 @@ BINDING-SPEC is (DIR CHAT-NAME INPUT-NAME PROC).  DIR is evaluated once."
             (pilish--finish-session-transition new-generation)))
       (pilish-test--kill-live-buffers chat-buf))))
 
+(ert-deftest pilish-test-load-session-history-seeds-linked-input-after-display ()
+  "Successful loads seed the linked input only, after displaying its prompts."
+  (let ((input (generate-new-buffer " *pilish-history-input*"))
+        (proc (start-process "test-history-seed" nil "cat"))
+        callback)
+    (unwind-protect
+        (with-temp-buffer
+          (pilish-chat-mode)
+          (setq pilish--process proc
+                pilish--input-buffer input)
+          (with-current-buffer input
+            (pilish-input-mode)
+            (pilish--history-add "local prompt")
+            (insert "draft"))
+          (cl-letf (((symbol-function 'pilish--rpc-async)
+                     (lambda (_proc _cmd cb) (setq callback cb)))
+                    ((symbol-function 'pilish--refresh-header) #'ignore))
+            (let ((chat (current-buffer))
+                  (messages [(:role "user" :content "resumed prompt")]))
+              (dotimes (_ 2)
+                (pilish--load-session-history proc nil chat)
+                (with-temp-buffer
+                  (pilish-input-mode)
+                  (funcall callback (list :success t :data (list :messages messages)))
+                  (should-not pilish--input-ring))
+                (should (string-match-p "resumed prompt" (buffer-string)))
+                (with-current-buffer input
+                  (should (equal (ring-elements pilish--input-ring)
+                                 '("resumed prompt" "local prompt")))))
+              (with-current-buffer input
+                (pilish-previous-input)
+                (should (equal (buffer-string) "resumed prompt"))
+                (pilish-next-input)
+                (should (equal (buffer-string) "draft"))))))
+      (when (process-live-p proc) (delete-process proc))
+      (pilish-test--kill-live-buffers input))))
+
+(ert-deftest pilish-test-load-session-history-failure-does-not-seed-input ()
+  "Failed RPC or replay must not seed unshown prompts into input history."
+  (let ((input (generate-new-buffer " *pilish-history-failed-input*"))
+        (proc (start-process "test-history-seed-failed" nil "cat"))
+        callback)
+    (unwind-protect
+        (with-temp-buffer
+          (pilish-chat-mode)
+          (setq pilish--process proc
+                pilish--input-buffer input)
+          (with-current-buffer input
+            (pilish-input-mode)
+            (pilish--history-add "local prompt"))
+          (cl-letf (((symbol-function 'pilish--rpc-async)
+                     (lambda (_proc _cmd cb) (setq callback cb))))
+            (pilish--load-session-history proc nil (current-buffer))
+            (funcall callback '(:success :false :error "load failed"))
+            (pilish--load-session-history proc nil (current-buffer))
+            (cl-letf (((symbol-function 'pilish--replay-history)
+                       (lambda (&rest _) (error "replay failed"))))
+              (should-error
+               (funcall callback '(:success t :data
+                                   (:messages [(:role "user"
+                                                :content "unshown prompt")]))))))
+          (with-current-buffer input
+            (should (equal (ring-elements pilish--input-ring) '("local prompt")))))
+      (when (process-live-p proc) (delete-process proc))
+      (pilish-test--kill-live-buffers input))))
+
 (ert-deftest pilish-test-load-session-history-ignores-stale-older-response ()
   "Only the newest in-flight history request may rebuild the chat buffer."
   (let* ((chat-buf (get-buffer-create "*pilish-test-history-load-generation*"))

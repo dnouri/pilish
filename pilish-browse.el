@@ -4172,18 +4172,18 @@ overflow the Lisp stack."
 (defun pilish--browse-current-session-directory ()
   "Return the session directory for the \"current\" scope, or nil.
 Resolution order: the optional menu-supplied session list directory
-when menu.el is loaded, then the munged stable session directory of the
+when menu.el is loaded, then the `pilish-jsonl-session-directory' of the
 linked chat buffer — rooted on that directory's own host when remote —
-then the munged project directory; the last works with no session at
+then that of the project directory; the last works with no session at
 all.  Signals when resolution itself fails."
   (or (and (fboundp 'pilish--session-list-directory)
            (pilish--session-list-directory))
       (when-let* ((chat-buf pilish--chat-buffer))
         (and (buffer-live-p chat-buf)
              (let ((cwd (pilish--chat-session-directory chat-buf)))
-               (pilish-jsonl-session-dir-for-cwd
+               (pilish-jsonl-session-directory
                 cwd (pilish-jsonl-sessions-root cwd)))))
-      (pilish-jsonl-session-dir-for-cwd
+      (pilish-jsonl-session-directory
        (pilish--session-directory))))
 
 (defun pilish--browse-project-directory ()

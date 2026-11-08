@@ -47,6 +47,7 @@
 
 (declare-function pilish-session-browser "pilish-browse")
 (declare-function pilish-tree-browser "pilish-browse")
+(declare-function pilish--seed-input-history "pilish-input" (input-buffer messages))
 
 (defconst pilish--minimum-transient-version "0.9.0"
   "Minimum supported transient version.")
@@ -444,6 +445,8 @@ from async callbacks, pass CHAT-BUF explicitly."
                                                      0)))
                                        (pilish--display-session-history
                                         messages chat-buf)
+                                       (pilish--seed-input-history
+                                        pilish--input-buffer messages)
                                        ;; Refresh header after loading history (resume/fork).
                                        (pilish--refresh-header)
                                        (when callback

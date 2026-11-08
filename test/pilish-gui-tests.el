@@ -148,6 +148,114 @@
     (should (pilish-gui-test-input-window))
     (should (pilish-gui-test-verify-layout))))
 
+(ert-deftest pilish-gui-test-seed-history-from-opened-session ()
+  "Open and reload saved prompts, restore a draft, and resend a recalled prompt."
+  (let ((pilish-gui-test--large-trace nil)
+        (file (make-temp-file "pilish-gui-seed-history-" nil ".jsonl")))
+    (unwind-protect
+        (pilish-gui-test-with-fresh-session
+         (:backend fake :fake-scenario "prompt-lifecycle")
+         (let* ((chat (plist-get pilish-gui-test--session :chat-buffer))
+                (input (plist-get pilish-gui-test--session :input-buffer))
+                (dir (plist-get pilish-gui-test--session :directory))
+                (backend (plist-get pilish-gui-test--session :backend))
+                (pilish-executable (plist-get backend :executable))
+                (pilish-extra-args (plist-get backend :extra-args))
+                (first "Inspect the launch configuration")
+                (latest "Explain the shutdown path")
+                (draft "Compare both paths without editing files"))
+           (with-temp-file file
+             (dolist (record
+                      `((:type "session" :version 3 :id "seed-history"
+                         :timestamp "2026-02-03T04:05:00.000Z" :cwd ,dir)
+                        (:type "message" :id "first" :parentId :null
+                         :timestamp "2026-02-03T04:05:01.000Z"
+                         :message (:role "user" :content ,first))
+                        (:type "message" :id "latest" :parentId "first"
+                         :timestamp "2026-02-03T04:05:02.000Z"
+                         :message (:role "user"
+                                   :content [(:type "text" :text ,latest)]))))
+               (insert (json-encode record) "\n")))
+           (let ((bytes (with-temp-buffer
+                          (insert-file-contents-literally file)
+                          (buffer-string))))
+             (should (pilish-test-wait-until
+                      (lambda ()
+                        (with-current-buffer chat
+                          (not (pilish--session-busy-p)))) 8 0.01))
+             (select-window (get-buffer-window input))
+             (should-not (buffer-local-value 'pilish--input-ring input))
+             (pilish--history-add "Local-only prompt")
+             (execute-kbd-macro
+              (vconcat (kbd "M-x pilish-open-session-file RET") file (kbd "RET")))
+             (should (pilish-test-wait-until
+                      (lambda ()
+                        (with-current-buffer chat
+                          (and (not (pilish--session-transition-active-p))
+                               (equal (plist-get pilish--state :session-file) file)
+                               (string-match-p latest (buffer-string))))) 8 0.01))
+             (select-window (get-buffer-window input))
+             (insert draft)
+             (goto-char 7)
+             (dotimes (_ 2)
+               (let ((old-proc (buffer-local-value 'pilish--process chat)))
+                 (execute-kbd-macro (kbd "M-x pilish-reload RET"))
+                 (push '(reload "M-x pilish-reload RET")
+                       pilish-gui-test--large-trace)
+                 (should (pilish-test-wait-until
+                          (lambda ()
+                            (with-current-buffer chat
+                              (and (not (eq pilish--process old-proc))
+                                   (process-live-p pilish--process)
+                                   (not (pilish--session-transition-active-p))
+                                   (string-match-p latest (buffer-string)))))
+                          8 0.01)))
+               (select-window (get-buffer-window input))
+               (should (equal (buffer-string) draft))
+               (should (= (point) 7))
+               (should (equal (ring-elements pilish--input-ring)
+                              (list latest first "Local-only prompt"))))
+             (pilish-gui-test--large-evidence
+              "seed-history-reloaded"
+              (list :input (buffer-string) :point (point)
+                    :history (ring-elements pilish--input-ring)
+                    :commands (reverse pilish-gui-test--large-trace)))
+             (pilish-gui-test--large-command (kbd "M-p") 'pilish-previous-input)
+             (should (equal (buffer-string) latest))
+             (pilish-gui-test--large-evidence
+              "seed-history-recalled"
+              (list :input (buffer-string)
+                    :history (ring-elements pilish--input-ring)
+                    :commands (reverse pilish-gui-test--large-trace)))
+             (pilish-gui-test--large-command (kbd "M-p") 'pilish-previous-input)
+             (should (equal (buffer-string) first))
+             (pilish-gui-test--large-command (kbd "M-n") 'pilish-next-input)
+             (should (equal (buffer-string) latest))
+             (pilish-gui-test--large-command (kbd "M-n") 'pilish-next-input)
+             (should (equal (buffer-string) draft))
+             (should-not pilish--input-ring-index)
+             (pilish-gui-test--large-evidence
+              "seed-history-draft"
+              (list :input (buffer-string)
+                    :commands (reverse pilish-gui-test--large-trace)))
+             (should (equal bytes (with-temp-buffer
+                                    (insert-file-contents-literally file)
+                                    (buffer-string))))
+             (pilish-gui-test--large-command (kbd "M-p") 'pilish-previous-input)
+             (should (equal (buffer-string) latest))
+             (pilish-gui-test--large-command (kbd "C-c C-c") 'pilish-send)
+             (should (pilish-test-wait-until
+                      (lambda ()
+                        (and (pilish-gui-test-chat-contains
+                              (concat "Fake reply for: " latest))
+                             (pilish-gui-test-idle-p))) 8 0.01))
+             (should (string-empty-p (buffer-string)))
+             (pilish-gui-test--large-evidence
+              "seed-history-resent"
+              (list :input (buffer-string) :prompt latest
+                    :commands (reverse pilish-gui-test--large-trace))))))
+      (delete-file file))))
+
 (ert-deftest pilish-gui-test-session-switch-ignores-delayed-state ()
   "Native New Session survives delayed startup and thinking-state responses."
   (let ((dispatch (symbol-function 'pilish--dispatch-response))
@@ -481,6 +589,98 @@ follow-up that is sent as the next prompt once Pi finishes."
         :chat-total (window-total-height chat-win)
         :draft-lines (with-current-buffer (window-buffer input-win)
                        (count-lines (point-min) (point-max)))))
+
+(ert-deftest pilish-gui-test-custom-input-layout-keeps-sizing ()
+  "A right-side placement owns its height after opening and frame resizing."
+  (let ((pilish-input-window-height 0.25)
+        (pilish-split-input-window-function
+         (lambda (chat input)
+           (let ((window (split-window chat nil 'right)))
+             (set-window-buffer window input)
+             (set-window-dedicated-p window 'side)
+             window)))
+        (width (frame-width)) (height (frame-height)))
+    (unwind-protect
+        (pilish-gui-test-with-fresh-session
+          (:backend fake :fake-scenario "prompt-lifecycle")
+          (let ((chat (pilish-gui-test-chat-window))
+                (input (pilish-gui-test-input-window)))
+            (dolist (size '((104 . 30) (120 . 40)))
+              (set-frame-size nil (car size) (cdr size))
+              (should (pilish-test-wait-until
+                       (lambda () (and (= (frame-width) (car size))
+                                       (= (frame-height) (cdr size))))
+                       pilish-test-gui-timeout pilish-test-poll-interval))
+              (sit-for 0.1)
+              (should (eq (window-in-direction 'right chat) input))
+              (should (= (window-total-height chat) (window-total-height input)))
+              (should (= (window-total-height input)
+                         (window-total-height (frame-root-window))))
+              (let ((before (mapcar #'window-edges (list chat input))))
+                (pilish--rebalance-input-window chat input)
+                (pilish--maybe-rebalance-windows (selected-frame))
+                (should (equal before (mapcar #'window-edges (list chat input))))
+                (pilish-gui-test--large-evidence
+                 (format "custom-side-%d" (car size))
+                 (list :window-system window-system :package-user-dir package-user-dir
+                       :pilish-ui (symbol-file 'pilish--rebalance-input-window 'defun)
+                       :frame-size size :edges before))))))
+      (set-frame-size nil width height)
+      (sit-for 0.1))))
+
+(ert-deftest pilish-gui-test-input-rebalance-stays-on-resized-frame ()
+  "A nonselected frame's pair rebalances without changing the selected pair."
+  (let ((pilish-input-window-height 0.25)
+        (original (selected-frame))
+        frame)
+    (unwind-protect
+        (pilish-gui-test-with-fresh-session
+          (:backend fake :fake-scenario "prompt-lifecycle")
+          (let* ((chat (pilish-gui-test-chat-window))
+                 (input (pilish-gui-test-input-window))
+                 (chat-buffer (window-buffer chat))
+                 (input-buffer (window-buffer input)))
+            (setq frame (make-frame '((width . 104) (height . 40))))
+            (with-selected-frame frame
+              (set-window-buffer (selected-window) chat-buffer)
+              (let ((other-input (split-window nil -12 'below)))
+                (set-window-buffer other-input input-buffer)))
+            (select-frame original)
+            (window-resize input (- 10 (window-total-height input)) nil t)
+            (let* ((before (mapcar #'window-edges (list chat input)))
+                   (other-chat (frame-selected-window frame))
+                   (other-input (get-buffer-window input-buffer frame))
+                   (other-before (mapcar #'window-edges (list other-chat other-input))))
+              (should-not (= (window-total-height input)
+                             (pilish--input-height-for-window-height
+                              (+ (window-total-height chat) (window-total-height input)))))
+              (should-not (= (window-total-height other-input)
+                             (pilish--input-height-for-window-height
+                              (+ (window-total-height other-chat)
+                                 (window-total-height other-input)))))
+              (pilish--maybe-rebalance-windows frame)
+              (should (eq (selected-frame) original))
+              (should (equal before (mapcar #'window-edges (list chat input))))
+              (should (= (window-total-height other-input)
+                         (pilish--input-height-for-window-height
+                          (+ (window-total-height other-chat)
+                             (window-total-height other-input)))))
+              (pilish-gui-test--large-evidence
+               "frame-scoped-selected"
+               (list :window-system window-system :before before
+                     :after (mapcar #'window-edges (list chat input))))
+              (with-selected-frame frame
+                (redisplay t)
+                (pilish-gui-test--large-evidence
+                 "frame-scoped-resized"
+                 (list :before other-before
+                       :after (mapcar #'window-edges (list other-chat other-input))
+                       :input-height (window-total-height other-input)
+                       :target (pilish--input-height-for-window-height
+                                (+ (window-total-height other-chat)
+                                   (window-total-height other-input)))))))))
+      (when (frame-live-p frame) (delete-frame frame))
+      (select-frame original))))
 
 (ert-deftest pilish-gui-test-input-window-fits-draft ()
   "A `fit' input window follows a typed draft, stops at its cap, and shrinks.
@@ -4780,6 +4980,7 @@ FAILURE permits an expected user error, whose native post hook may not run."
          (pilish-gui-test--large-trace nil)
          browser)
     (setenv "PI_CODING_AGENT_DIR" root)
+    (setenv "PI_CODING_AGENT_SESSION_DIR" nil)
     (let* ((dir (pilish-jsonl-session-dir-for-cwd root))
            (path (expand-file-name "session.jsonl" dir)))
       (make-directory dir t)
@@ -4829,6 +5030,84 @@ FAILURE permits an expected user error, whose native post hook may not run."
               (should (plist-member (car pilish--session-browser-items) :searchText))
               (should (string-match-p "Ordinary opening" (buffer-string)))))
         (when (buffer-live-p browser) (kill-buffer browser))))))
+
+(ert-deftest pilish-gui-test-session-browser-env-directory-without-chat ()
+  (let* ((sandbox (pilish-test--make-temp-directory "pi-gui-env-"))
+         (agent (expand-file-name "agent" sandbox))
+         (custom (expand-file-name "custom-sessions" sandbox))
+         (project-a (expand-file-name "project-a" sandbox))
+         (project-b (expand-file-name "project-b" sandbox))
+         (path-a (expand-file-name "a.jsonl" custom))
+         (path-b (expand-file-name "b.jsonl" custom))
+         (process-environment (copy-sequence process-environment))
+         (pilish-session-browser-default-scope 'current)
+         (pilish-session-browser-default-named-only nil)
+         (pilish-gui-test--large-trace nil)
+         browser)
+    (unwind-protect
+        (progn
+          (make-directory project-a)
+          (make-directory project-b)
+          (setenv "PI_CODING_AGENT_DIR" agent)
+          (setenv "PI_CODING_AGENT_SESSION_DIR" (concat custom "/"))
+          (let ((decoy (expand-file-name
+                        "decoy.jsonl"
+                        (pilish-jsonl-session-dir-for-cwd project-a))))
+            (dolist (fixture (list (list path-a project-a "Env project A")
+                                   (list path-b project-b "Env project B")
+                                   (list decoy project-a "Default tree decoy")))
+              (pcase-let ((`(,path ,cwd ,title) fixture))
+                (make-directory (file-name-directory path) t)
+                (with-temp-file path
+                  (insert (json-encode
+                           (list :type "session" :version 3 :id title
+                                 :cwd cwd :timestamp "2026-01-01T00:00:00Z"))
+                          "\n"
+                          (json-encode
+                           (list :type "message" :id "first"
+                                 :message (list :role "user" :content title)))
+                          "\n")))))
+          (save-window-excursion
+            (with-temp-buffer
+              (switch-to-buffer (current-buffer))
+              (setq default-directory (file-name-as-directory project-a))
+              (let ((project-find-functions nil))
+                (cl-letf (((symbol-function 'make-process)
+                           (lambda (&rest _) (ert-fail "Browser started a process"))))
+                  (should-not (pilish--get-chat-buffer))
+                  (execute-kbd-macro (kbd "M-x pilish-session-browser RET"))
+                  (should (derived-mode-p 'pilish-session-browser-mode))
+                  (push '("M-x pilish-session-browser RET") pilish-gui-test--large-trace)
+                  (setq browser (current-buffer))
+                  (dolist (scope '(current all))
+                    (when (eq scope 'all)
+                      (pilish-gui-test--large-command
+                       (kbd "t") 'pilish-session-browser-toggle-scope))
+                    (should (pilish-test-wait-until
+                             (lambda () (not pilish--session-browser-loading))))
+                    (should-not pilish--session-browser-error)
+                    (should-not (pilish--get-chat-buffer))
+                    (should-not (get-buffer-process browser))
+                    (should (eq scope pilish--session-browser-scope))
+                    (let ((paths (sort (mapcar (lambda (item) (plist-get item :path))
+                                               pilish--session-browser-items)
+                                       #'string<)))
+                      (should (equal paths (if (eq scope 'current)
+                                              (list path-a)
+                                            (list path-a path-b))))
+                      (should (string-match-p "Env project A" (buffer-string)))
+                      (should (eq (and (string-match-p "Env project B" (buffer-string)) t)
+                                  (eq scope 'all)))
+                      (should-not (string-match-p "Default tree decoy" (buffer-string)))
+                      (pilish-gui-test--large-evidence
+                       (format "env-browser-%s" scope)
+                       (list :scope scope :paths paths :directory custom
+                             :chat (pilish--get-chat-buffer)
+                             :process-start-guard 'make-process-rejected
+                             :text (buffer-string)
+                             :commands (reverse pilish-gui-test--large-trace))))))))))
+      (when (buffer-live-p browser) (kill-buffer browser))
+      (delete-directory sandbox t))))
 
 (ert-deftest pilish-gui-test-large-browser-fold-and-copy ()
   "Both broad browsers preserve canonical folds, hidden data and live margin hits."

@@ -2253,11 +2253,12 @@ In every case, clamp the result to the range
 
 (defun pilish--rebalance-input-window (chat-win input-win)
   "Adjust INPUT-WIN height to match the configured ratio.
-CHAT-WIN and INPUT-WIN must be a vertically stacked pair.
-Only resizes when `pilish-input-window-height' is a float."
+Resize only when INPUT-WIN is directly below CHAT-WIN and
+`pilish-input-window-height' is a float.  Leave other layouts alone."
   (when (and (floatp pilish-input-window-height)
              (window-live-p chat-win)
-             (window-live-p input-win))
+             (window-live-p input-win)
+             (eq (window-in-direction 'below chat-win) input-win))
     (let* ((total (+ (window-total-height chat-win)
                      (window-total-height input-win)))
            (target (pilish--input-height-for-window-height total))
@@ -2371,18 +2372,19 @@ pending timer until it runs; a command that yields can run several fits."
                    (pilish-fit-input-window win)))))))))
 
 (defun pilish--maybe-rebalance-windows (frame)
-  "Rebalance pi chat/input window pairs after FRAME is resized.
-Intended for `window-size-change-functions'."
+  "Rebalance input windows directly below their chats on FRAME.
+Leave custom layouts to their window manager.  Intended for
+`window-size-change-functions'."
   (when (eq pilish-input-window-height 'fit)
     (pilish--fit-input-windows-on-resize frame))
   (when (floatp pilish-input-window-height)
-    (dolist (win (window-list nil 'no-mini))
-      (when-let* ((input-buf (buffer-local-value
-                              'pilish--input-buffer
-                              (window-buffer win)))
-                  (input-win (get-buffer-window input-buf)))
-        (unless (eq win input-win)
-          (pilish--rebalance-input-window win input-win))))))
+    (dolist (win (window-list frame 'no-mini))
+      (when-let* (((with-current-buffer (window-buffer win)
+                    (derived-mode-p 'pilish-chat-mode)))
+                  (input-buf (buffer-local-value
+                              'pilish--input-buffer (window-buffer win)))
+                  (input-win (pilish--paired-input-window win input-buf)))
+        (pilish--rebalance-input-window win input-win)))))
 
 (defun pilish--windows-by-height (&optional windows)
   "Return live WINDOWS sorted by descending height.
@@ -2461,8 +2463,8 @@ selected input window, then the tallest input window."
 
 (defun pilish--split-input-below-chat (chat-buf input-buf)
   "Show INPUT-BUF in a new window below the best visible CHAT-BUF window.
-The new window is soft-dedicated so `display-buffer' never targets it.
-Return the new input window, or nil when no chat window can be split."
+The window is made by `pilish-split-input-window'.  Return the new input
+window, or nil when no chat window can be split."
   (when-let* ((chat-win
                (or (and (eq (window-buffer (selected-window)) chat-buf)
                         (pilish--window-can-split-for-input-p
@@ -2471,6 +2473,37 @@ Return the new input window, or nil when no chat window can be split."
                    (cl-find-if #'pilish--window-can-split-for-input-p
                                (pilish--windows-by-height
                                 (get-buffer-window-list chat-buf nil))))))
+    (pilish-split-input-window chat-win input-buf)))
+
+(defvar pilish-split-input-window-function #'pilish--split-input-window-below
+  "Function that shows an input buffer in a new window for a chat window.
+It is called with CHAT-WIN and INPUT-BUF and returns the input window, or
+nil when CHAT-WIN cannot take one.  Every input window Pilish opens for a
+chat, including the session layout and `pilish-open-input', comes from
+here.  The default splits CHAT-WIN and puts the input below it.
+
+Window managers that keep chat and input windows in their own
+arrangement wrap or replace the default with `add-function'.  The
+function may place the window anywhere.  Pilish passes only chat
+windows at least twice `window-min-height' tall.  `fit' sizing and
+automatic height maintenance (see `pilish-input-window-height') apply
+only to an input window directly below its chat window; custom layouts
+own their sizing.  When several input windows are visible, Pilish
+prefers the one below the selected chat window.")
+
+(defun pilish-split-input-window (chat-win input-buf)
+  "Show INPUT-BUF in a new window for CHAT-WIN and return that window.
+Call `pilish-split-input-window-function'.  By default the window is
+below CHAT-WIN, its height follows
+`pilish-input-window-height', the window is soft-dedicated so
+`display-buffer' never targets it, and the result is nil when CHAT-WIN is
+too small to split."
+  (funcall pilish-split-input-window-function chat-win input-buf))
+
+(defun pilish--split-input-window-below (chat-win input-buf)
+  "Split CHAT-WIN and show INPUT-BUF below it; return the new window or nil.
+The default `pilish-split-input-window-function'."
+  (when (pilish--window-can-split-for-input-p chat-win)
     (let ((input-win
            (split-window
             chat-win (- (pilish--input-height-for-window chat-win))
@@ -3335,19 +3368,39 @@ header line under `pilish-header-line-location'."
         (with-current-buffer buf
           (force-mode-line-update))))))
 
+(defun pilish--select-model-at-event (event)
+  "Select the model in the live window named by mouse EVENT."
+  (interactive "e")
+  (let ((window (posn-window (event-start event))))
+    (when (window-live-p window)
+      (with-selected-window window
+        (pilish-select-model)))))
+
+(defun pilish--cycle-thinking-at-event (event)
+  "Cycle thinking in the live window named by mouse EVENT."
+  (interactive "e")
+  (let ((window (posn-window (event-start event))))
+    (when (window-live-p window)
+      (with-selected-window window
+        (pilish-cycle-thinking)))))
+
 (defvar pilish--header-model-map
   (let ((map (make-sparse-keymap)))
-    (define-key map [header-line mouse-1] #'pilish-select-model)
-    (define-key map [header-line mouse-2] #'pilish-select-model)
+    (define-key map [header-line mouse-1] #'pilish--select-model-at-event)
+    (define-key map [header-line mouse-2] #'pilish--select-model-at-event)
+    (define-key map [mode-line mouse-1] #'pilish--select-model-at-event)
+    (define-key map [mode-line mouse-2] #'pilish--select-model-at-event)
     map)
-  "Keymap for clicking model name in header-line.")
+  "Keymap for clicking the model name in the header or mode line.")
 
 (defvar pilish--header-thinking-map
   (let ((map (make-sparse-keymap)))
-    (define-key map [header-line mouse-1] #'pilish-cycle-thinking)
-    (define-key map [header-line mouse-2] #'pilish-cycle-thinking)
+    (define-key map [header-line mouse-1] #'pilish--cycle-thinking-at-event)
+    (define-key map [header-line mouse-2] #'pilish--cycle-thinking-at-event)
+    (define-key map [mode-line mouse-1] #'pilish--cycle-thinking-at-event)
+    (define-key map [mode-line mouse-2] #'pilish--cycle-thinking-at-event)
     map)
-  "Keymap for clicking thinking level in header-line.")
+  "Keymap for clicking the thinking level in the header or mode line.")
 
 (defun pilish--header-format-context (percent context-window)
   "Format context usage for header-line display.
