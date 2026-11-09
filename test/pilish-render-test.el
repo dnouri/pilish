@@ -5344,10 +5344,10 @@ When PARTIAL-TEXT is supplied it must precede the outcome, never be erased."
 
 (defun pilish-test--require-history-parser-restart ()
   "Require the real grammars and supported native replay layout."
-  (unless (and (= emacs-major-version 30)
+  (unless (and (>= emacs-major-version 30)
                (treesit-language-available-p 'markdown)
                (treesit-language-available-p 'markdown-inline))
-    (ert-skip "Native parser restart requires Emacs 30 and Markdown grammars"))
+    (ert-skip "Native parser restart requires Emacs 30 or later and Markdown grammars"))
   (should (pilish--history-parser-restart-plan)))
 
 (ert-deftest pilish-test-replay-replaces-tagged-cache-and-keeps-parser-services ()
@@ -5392,7 +5392,9 @@ When PARTIAL-TEXT is supplied it must precede the outcome, never be erased."
               (goto-char (point-max))
               (insert "\nLater **streamed** text.\n")
               (treesit-parser-root-node treesit-primary-parser))
-            (should (> updates 0)))
+            ;; Emacs 30's primary parser updates ranges from its notifier;
+            ;; later versions update them during fontification below.
+            (when notifiers (should (> updates 0))))
           (font-lock-ensure (point-min) (point-max))
           (goto-char (point-min))
           (search-forward "streamed")
@@ -5674,66 +5676,71 @@ When PARTIAL-TEXT is supplied it must precede the outcome, never be erased."
         (with-temp-buffer
           (pilish-chat-mode)
           (pilish-test--require-history-parser-restart)
-          (let* ((before (copy-sequence before-change-functions))
-                 (after (copy-sequence after-change-functions))
-                 (default-before (default-value 'before-change-functions))
-                 (default-after (default-value 'after-change-functions))
-                 (failure (list condition "replay failure" phase))
-                 (target (pcase phase
-                           ('install 'treesit-parser-delete)
-                           ('render 'pilish--display-history-messages)
-                           ('compound 'pilish--font-lock-ensure-excluding-property)
-                           ('cooling 'pilish--cool-completed-tool-blocks-outside-hot-tail)
-                           ('table 'pilish--postprocess-history-buffer)
-                           ('seed 'treesit-parser-root-node)))
-                 (original (symbol-function target))
-                 (notifiers (treesit-parser-notifiers treesit-primary-parser))
-                 fired)
-            (unwind-protect
-                (progn
-                  (unless local
-                    (set-default 'before-change-functions before)
-                    (set-default 'after-change-functions after)
-                    (kill-local-variable 'before-change-functions)
-                    (kill-local-variable 'after-change-functions))
-                  (cl-letf (((symbol-function target)
-                             (lambda (&rest args)
-                               (unless fired
-                                 (setq fired t)
-                                 (signal (car failure) (cdr failure)))
-                               (apply original args))))
-                    (should (equal failure
-                                   (condition-case err
-                                       (pilish--replay-history
-                                        (current-buffer)
-                                        (if (eq phase 'seed)
-                                            [(:role "assistant" :content "No table")]
-                                          (pilish-test--nested-history-messages)))
-                                     ((error quit) err)))))
-                  (should fired)
-                  (should (memq treesit-primary-parser (treesit-parser-list)))
-                  (should (equal notifiers (treesit-parser-notifiers treesit-primary-parser)))
-                  (should (equal before before-change-functions))
-                  (should (equal after after-change-functions))
-                  (should (eq local (local-variable-p 'before-change-functions)))
-                  (should (eq local (local-variable-p 'after-change-functions)))
-                  (should-not (seq-some
-                               (lambda (overlay)
-                                 (when-let* ((parser (overlay-get overlay 'treesit-parser)))
-                                   (not (memq parser (treesit-parser-list nil nil t)))))
-                               (append (car (overlay-lists)) (cdr (overlay-lists)))))
-                  (pilish--replay-history (current-buffer) [(:role "assistant" :content "Healthy **again**")])
-                  (font-lock-ensure (point-min) (point-max))
-                  (goto-char (point-min))
-                  (should (search-forward "again" nil t)))
-              (set-default 'before-change-functions default-before)
-              (set-default 'after-change-functions default-after))))))))
+          ;; Seeding parses only parsers that carry notifiers (Emacs 30).
+          (unless (and (eq phase 'seed)
+                       (not (treesit-parser-notifiers treesit-primary-parser)))
+            (let* ((before (copy-sequence before-change-functions))
+                   (after (copy-sequence after-change-functions))
+                   (default-before (default-value 'before-change-functions))
+                   (default-after (default-value 'after-change-functions))
+                   (failure (list condition "replay failure" phase))
+                   (target (pcase phase
+                             ('install 'treesit-parser-delete)
+                             ('render 'pilish--display-history-messages)
+                             ('compound 'pilish--font-lock-ensure-excluding-property)
+                             ('cooling 'pilish--cool-completed-tool-blocks-outside-hot-tail)
+                             ('table 'pilish--postprocess-history-buffer)
+                             ('seed 'treesit-parser-root-node)))
+                   (original (symbol-function target))
+                   (notifiers (treesit-parser-notifiers treesit-primary-parser))
+                   fired)
+              (unwind-protect
+                  (progn
+                    (unless local
+                      (set-default 'before-change-functions before)
+                      (set-default 'after-change-functions after)
+                      (kill-local-variable 'before-change-functions)
+                      (kill-local-variable 'after-change-functions))
+                    (cl-letf (((symbol-function target)
+                               (lambda (&rest args)
+				 (unless fired
+                                   (setq fired t)
+                                   (signal (car failure) (cdr failure)))
+				 (apply original args))))
+                      (should (equal failure
+                                     (condition-case err
+					 (pilish--replay-history
+                                          (current-buffer)
+                                          (if (eq phase 'seed)
+                                              [(:role "assistant" :content "No table")]
+                                            (pilish-test--nested-history-messages)))
+                                       ((error quit) err)))))
+                    (should fired)
+                    (should (memq treesit-primary-parser (treesit-parser-list)))
+                    (should (equal notifiers (treesit-parser-notifiers treesit-primary-parser)))
+                    (should (equal before before-change-functions))
+                    (should (equal after after-change-functions))
+                    (should (eq local (local-variable-p 'before-change-functions)))
+                    (should (eq local (local-variable-p 'after-change-functions)))
+                    (should-not (seq-some
+				 (lambda (overlay)
+                                   (when-let* ((parser (overlay-get overlay 'treesit-parser)))
+                                     (not (memq parser (treesit-parser-list nil nil t)))))
+				 (append (car (overlay-lists)) (cdr (overlay-lists)))))
+                    (pilish--replay-history (current-buffer) [(:role "assistant" :content "Healthy **again**")])
+                    (font-lock-ensure (point-min) (point-max))
+                    (goto-char (point-min))
+                    (should (search-forward "again" nil t)))
+		(set-default 'before-change-functions default-before)
+		(set-default 'after-change-functions default-after)))))))))
 
 (ert-deftest pilish-test-replay-quit-wins-over-secondary-cleanup-error ()
   "A transient notifier cleanup failure neither replaces quit nor loses service."
   (with-temp-buffer
     (pilish-chat-mode)
     (pilish-test--require-history-parser-restart)
+    (unless (treesit-parser-notifiers treesit-primary-parser)
+      (ert-skip "This Emacs's parser layout has no notifiers to restore"))
     (let ((add (symbol-function 'treesit-parser-add-notifier))
           (notifiers (treesit-parser-notifiers treesit-primary-parser))
           failed)
@@ -5796,6 +5803,35 @@ When PARTIAL-TEXT is supplied it must precede the outcome, never be erased."
             (should (eq before-local (local-variable-p 'before-change-functions)))
             (should (eq after-local (local-variable-p 'after-change-functions)))))
       (when (buffer-live-p chat) (kill-buffer chat)))))
+
+(ert-deftest pilish-test-replay-restarts-nested-embedded-parser-layout ()
+  "Nested local hosts and hosted global parsers do not block the restart.
+Emacs 31 and later record both; replay must still drop every local parser
+so a long chat's rebuild does not record each insertion in all of them."
+  (with-temp-buffer
+    (pilish-chat-mode)
+    (pilish-test--require-history-parser-restart)
+    (let* ((inline-host (treesit-parser-create 'markdown-inline nil t 'embedded))
+           (nested (treesit-parser-create 'markdown-inline nil t 'embedded))
+           (global (car (treesit-parser-list nil 'markdown-inline)))
+           (host-overlay (make-overlay 1 1))
+           (nested-overlay (make-overlay 1 1))
+           (global-overlay (make-overlay 1 1)))
+      (overlay-put host-overlay 'treesit-parser inline-host)
+      (overlay-put host-overlay 'treesit-host-parser treesit-primary-parser)
+      (overlay-put nested-overlay 'treesit-parser nested)
+      (overlay-put nested-overlay 'treesit-host-parser inline-host)
+      (overlay-put global-overlay 'treesit-parser global)
+      (overlay-put global-overlay 'treesit-host-parser inline-host)
+      (should (pilish--history-parser-restart-plan))
+      (pilish--replay-history (current-buffer) [(:role "assistant" :content "Fresh **text**")])
+      (should-not (treesit-parser-list nil nil 'embedded))
+      (should-not (memq nested (treesit-parser-list nil nil t)))
+      (should-not (seq-some #'overlay-buffer (list host-overlay nested-overlay global-overlay)))
+      (font-lock-ensure (point-min) (point-max))
+      (goto-char (point-min))
+      (search-forward "text")
+      (should (memq 'bold (ensure-list (get-text-property (1- (point)) 'face)))))))
 
 (ert-deftest pilish-test-replay-foreign-parser-layout-is-unchanged ()
   "Foreign tags, duplicates, notifiers, overlays and shared text use compatibility."
