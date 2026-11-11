@@ -502,6 +502,20 @@ active, so stale callbacks from older session switches cannot unlock it."
             (when completion
               (funcall completion answers))))))))
 
+(defun pilish--transition-rpc-async
+    (chat-buf generation proc command callback)
+  "Send COMMAND to PROC with CALLBACK for transition GENERATION of CHAT-BUF.
+When the request cannot be sent, finish GENERATION before re-signaling, so
+a failed write does not leave CHAT-BUF refusing input.  GENERATION may be
+nil when CHAT-BUF was not live."
+  (condition-case err
+      (pilish--rpc-async proc command callback)
+    ((error quit)
+     (when (and generation (buffer-live-p chat-buf))
+       (with-current-buffer chat-buf
+         (pilish--finish-session-transition generation)))
+     (signal (car err) (cdr err)))))
+
 (defun pilish--refresh-transition-state-and-history
     (proc chat-buf generation &optional session-file history-callback
           completion)
@@ -818,8 +832,8 @@ once its refreshes have answered or the reload did not take over."
            (generation (when (buffer-live-p chat-buf)
                          (with-current-buffer chat-buf
                            (pilish--begin-session-transition proc)))))
-      (pilish--rpc-async
-       proc
+      (pilish--transition-rpc-async
+       chat-buf generation proc
        (list :type "switch_session" :sessionPath session-path)
        (lambda (response)
          (when (pilish--session-transition-current-p
@@ -1414,7 +1428,8 @@ Captures chat and input buffers at call time (before the async RPC)."
          (generation (when (buffer-live-p chat-buf)
                        (with-current-buffer chat-buf
                          (pilish--begin-session-transition proc)))))
-    (pilish--rpc-async proc (list :type "fork" :entryId entry-id)
+    (pilish--transition-rpc-async chat-buf generation
+      proc (list :type "fork" :entryId entry-id)
       (lambda (response)
         (when (pilish--session-transition-current-p
                chat-buf proc generation)

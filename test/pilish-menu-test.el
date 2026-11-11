@@ -1965,6 +1965,46 @@ Return (OUTCOMES-BEFORE-STATE OUTCOMES TRANSITION-ACTIVE HISTORY-SHOWN)."
          (should-not (process-live-p (car pilish-test--reload-processes)))
          (should (eq pilish--process old-proc)))))))
 
+;;; Session-switch write failures
+
+(defun pilish-test--transition-write-failure (start)
+  "Call START with a chat and its process while every RPC write fails.
+Return the transition state and pending request count after START signals."
+  (let ((chat-buf (generate-new-buffer "*pilish-test-transition-write*"))
+        (proc (start-process "test-transition-write" nil "cat")))
+    (set-process-query-on-exit-flag proc nil)
+    (unwind-protect
+        (cl-letf (((symbol-function 'process-send-string)
+                   (lambda (_proc _text) (error "Pipe closed"))))
+          (with-current-buffer chat-buf
+            (pilish-chat-mode)
+            (pilish--set-chat-session-identity temporary-file-directory)
+            (setq pilish--process proc)
+            (should-error (funcall start proc chat-buf))
+            (list (pilish--session-transition-active-p)
+                  (hash-table-count (pilish--get-pending-requests proc)))))
+      (when (process-live-p proc)
+        (delete-process proc))
+      (kill-buffer chat-buf))))
+
+(ert-deftest pilish-test-resume-write-failure-releases-transition ()
+  "A switch_session request that cannot be sent leaves resume input usable."
+  (cl-letf (((symbol-function 'pilish--session-file-cwd-or-error)
+             (lambda (_path) temporary-file-directory))
+            ((symbol-function 'pilish--find-session) #'ignore))
+    (should (equal (pilish-test--transition-write-failure
+                    (lambda (proc chat-buf)
+                      (pilish--resume-selected-session
+                       proc chat-buf "/tmp/selected-session.jsonl")))
+                   '(nil 0)))))
+
+(ert-deftest pilish-test-fork-write-failure-releases-transition ()
+  "A fork request that cannot be sent leaves the chat accepting input."
+  (should (equal (pilish-test--transition-write-failure
+                  (lambda (proc _chat-buf)
+                    (pilish--execute-fork proc "entry-1")))
+                 '(nil 0))))
+
 ;;; Slash Commands via RPC (get_commands)
 
 (ert-deftest pilish-test-fetch-commands-parses-response ()
