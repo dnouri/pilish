@@ -3615,7 +3615,7 @@ Catches wiring bugs like requiring deleted modules."
         (optional-called nil))
     (cl-letf (((symbol-function 'pilish--check-pi) (lambda (&optional _directory) t))
               ((symbol-function 'pilish--maybe-install-essential-grammars)
-               (lambda () (setq essential-called t)))
+               (lambda (&optional _background) (setq essential-called t)))
               ((symbol-function 'pilish--maybe-warn-incompatible-markdown-grammar)
                (lambda () (setq compatibility-called t)))
               ((symbol-function 'pilish--maybe-install-optional-grammars)

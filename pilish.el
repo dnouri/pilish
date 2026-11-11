@@ -164,41 +164,12 @@ Evil states apply to them."
   (when (and pilish-evil-integration (featurep 'evil))
     (require 'pilish-evil nil t)))
 
-(defvar pilish-session-environment-functions nil
-  "Functions that supply environment overrides for a session's Pi process.
-Each function is called for interactive and background sessions with the
-chat buffer and directory when the session starts its first process,
-and returns an alist of \(NAME . VALUE) entries, where a nil VALUE
-removes NAME.  Pilish keeps
-the combined result for the session, so `pilish-reload' starts its new
-process with the same environment.  Earlier entries win: environment
-passed to `pilish-start-session' first, then functions in hook order.
-A function that signals an error is reported as a warning and supplies
-nothing.  The overrides apply only to that session's processes, never
-to the global `process-environment'.")
-
-(defun pilish--session-environment (chat-buf dir)
-  "Return the environment `pilish-session-environment-functions' supply.
-Each function receives CHAT-BUF and DIR."
-  (apply #'append
-         (mapcar (lambda (function)
-                   (condition-case-unless-debug err
-                       (funcall function chat-buf dir)
-                     (error
-                      (display-warning
-                       'pilish
-                       (format "Session environment function %S failed: %s"
-                               function (error-message-string err))
-                       :error)
-                      nil)))
-                 pilish-session-environment-functions)))
-
-(defun pilish--setup-session (dir &optional session args environment background)
+(cl-defun pilish--setup-session
+    (dir &optional session &key args environment background)
   "Set up a new or existing session for DIR with optional SESSION name.
-The first process the session starts takes ARGS and ENVIRONMENT, then
-`pilish-session-environment-functions'; the session keeps them for every
-later process (see `pilish--start-process').  BACKGROUND means the
-caller already checked dependencies, so nothing prompts the user.
+A new session keeps ARGS and ENVIRONMENT as its own launch options (see
+`pilish--launch-options').  BACKGROUND means nobody is there to answer
+questions, as for `pilish--check-dependencies'.
 Returns the chat buffer."
   (pilish--maybe-load-evil-integration)
   (let* ((chat-buf (pilish--get-or-create-buffer :chat dir session))
@@ -210,19 +181,10 @@ Returns the chat buffer."
       (pilish--set-input-buffer input-buf)
       ;; Start process if not already running
       (unless (and pilish--process (process-live-p pilish--process))
-        (unless background
-          (pilish--check-dependencies dir))
+        (pilish--check-dependencies dir background)
         (unless pilish--launch-options
-          (setq pilish--launch-options
-                (list :args args
-                      :environment
-                      (append environment
-                              (pilish--session-environment chat-buf dir)))))
-        (pilish--set-process
-         (pilish--start-process
-          dir
-          (plist-get pilish--launch-options :args)
-          (plist-get pilish--launch-options :environment)))
+          (pilish--set-launch-options args environment))
+        (pilish--set-process (pilish--start-session-process dir))
         (setq new-session t)
         ;; Associate process events and ownership with this chat buffer.
         (when (processp pilish--process)
@@ -275,19 +237,7 @@ Returns the chat buffer."
       (pilish--set-chat-buffer chat-buf))
     chat-buf))
 
-(defvar treesit-auto-install-grammar)  ; Emacs 31+
-
-(defun pilish--check-background-dependencies (dir)
-  "Signal an error unless a session can start in DIR without asking.
-Unlike `pilish--check-dependencies', which offers to install what is
-missing, this fails when the Pi executable or an essential tree-sitter
-grammar is missing."
-  (unless (pilish--check-pi dir)
-    (error "Pilish: %s not found in the execution path of %s"
-           (car pilish-executable) dir))
-  (when-let* ((missing (pilish--missing-essential-grammars)))
-    (error "Pilish: essential tree-sitter grammars missing: %s"
-           (mapconcat #'symbol-name missing ", "))))
+(defvar treesit-auto-install-grammar)  ; Emacs 31+, in treesit.el
 
 ;;;###autoload
 (cl-defun pilish-start-session
@@ -295,27 +245,37 @@ grammar is missing."
   "Start a session in DIRECTORY without displaying it.
 Return the session's chat buffer.  NAME names the session as
 \\[universal-argument] \\[pilish] does; nil selects DIRECTORY's default
-session.  Starting a session that already exists is an error.
+session.  Unlike \\[pilish], which shows a session that already exists,
+this signals an error for one: its launch options could not be applied,
+and a caller should not adopt a session it did not start.
 
 SESSION-FILE resumes that saved Pi session and renders its history.  Its
 recorded working directory must be DIRECTORY; a nil DIRECTORY means that
 recorded directory.
 
 ARGS is a list of extra Pi command-line arguments, placed after
-`pilish-extra-args'.  ENVIRONMENT is an alist of (NAME . VALUE)
-overrides, where a nil VALUE removes NAME; it takes precedence over
-`pilish-session-environment-functions'.  Both apply only to this
-session's processes, and `pilish-reload' keeps them.
+`pilish-extra-args'.  As for that variable, arguments that select Pi's
+mode or session, such as --mode, --session, --continue or --resume,
+break Pilish's RPC connection; use SESSION-FILE to resume.  ENVIRONMENT
+is an alist of (NAME . VALUE) overrides, where a nil VALUE removes NAME;
+it takes precedence over `pilish-session-environment-functions'.  Both
+apply to every Pi process of this session, including `pilish-reload',
+and to no other process.
 
-Pilish neither prompts to install dependencies nor waits for Pi.
-Returning a buffer does not mean Pi has answered the initial state
-request or finished resuming;
-this function provides no readiness callback.  A missing Pi executable
-or essential tree-sitter grammar, an invalid name, directory or
-SESSION-FILE is an error that leaves no session behind.  Pi's later
-startup errors appear in the chat; a failed resume is reported in the
-echo area, as for interactive sessions.  To show the session, run
-\\[pilish] from its directory, with a prefix argument for a named session.
+Dependencies are checked as by \\[pilish], except that nothing asks:
+a missing Pi executable is an error, and so are missing essential
+tree-sitter grammars when `pilish-essential-grammar-action' is `prompt'.
+With `auto' they are installed and with `warn' the session starts after
+a warning.  Optional grammars are not offered.
+
+Pilish does not wait for Pi.  Returning a buffer does not mean Pi has
+answered the initial state request or finished resuming; this function
+provides no readiness callback.  A failed dependency check, an invalid
+name, directory, SESSION-FILE, ARGS or ENVIRONMENT is an error that
+leaves no session behind.  Pi's later startup errors appear in the chat;
+a failed resume is reported in the echo area, as for interactive
+sessions.  To show the session, run \\[pilish] from its directory, with
+a prefix argument for a named session.
 
 Remote directories use the existing TRAMP process launcher and path
 rules.  TRAMP may prompt for authentication, and dependency checks and
@@ -325,6 +285,9 @@ all setup is asynchronous."
               (and (stringp name) (not (string-empty-p name))))
     (error "Pilish: session name must be nil or a nonempty string: %S"
            name))
+  (unless (and (proper-list-p args) (seq-every-p #'stringp args))
+    (error "Pilish: arguments must be a list of strings: %S" args))
+  (pilish--check-environment environment)
   (let* ((session-file (and session-file
                             (pilish--route-preserving-expand-file-name
                              session-file)))
@@ -344,12 +307,13 @@ all setup is asynchronous."
               (get-buffer (pilish--buffer-name :input dir name)))
       (error "Pilish: session already exists: %s"
              (pilish--buffer-name :chat dir name)))
-    (pilish--check-background-dependencies dir)
     (condition-case err
-        ;; A frameless daemon has nobody to answer a grammar prompt.
+        ;; Mode setup runs when the buffers are created, and nobody is
+        ;; there to answer Emacs's own grammar installation prompt.
         (let* ((treesit-auto-install-grammar 'never)
                (chat-buf (pilish--setup-session
-                          dir name args environment t)))
+                          dir name :args args :environment environment
+                          :background t)))
           (when session-file
             (pilish--resume-selected-session
              (buffer-local-value 'pilish--process chat-buf)

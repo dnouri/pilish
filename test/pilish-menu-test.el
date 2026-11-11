@@ -611,19 +611,21 @@ BINDING-SPEC is (DIR CHAT-NAME INPUT-NAME PROC).  DIR is evaluated once."
 ;;; Reconnect Tests
 
 (ert-deftest pilish-test-reload-keeps-session-launch-options ()
-  "Reload restarts Pi with the session's own arguments and environment."
+  "Reload restarts Pi with the session's own arguments and environment.
+Environment functions run again, so reload picks up their current values."
   (let* ((launch nil)
          (new-proc nil)
+         (token "rotated")
+         (pilish-session-environment-functions
+          (list (lambda (_chat _dir) (list (cons "PILISH_TOKEN" token)))))
          (dir (pilish-test--make-temp-directory "pilish-test-reload-launch-"))
          (chat-buf (get-buffer-create "*pilish-test-reload-launch-chat*")))
     (unwind-protect
         (with-current-buffer chat-buf
           (pilish-chat-mode)
           (pilish--set-chat-session-identity dir)
-          (setq pilish--state '(:session-file "/tmp/launch-session.jsonl")
-                pilish--launch-options
-                '(:args ("--model" "m")
-                  :environment (("PILISH_A" . "x"))))
+          (setq pilish--state '(:session-file "/tmp/launch-session.jsonl"))
+          (pilish--set-launch-options '("--model" "m") '(("PILISH_A" . "x")))
           (cl-letf (((symbol-function 'pilish--start-process)
                      (lambda (&rest args)
                        (setq launch args
@@ -634,7 +636,8 @@ BINDING-SPEC is (DIR CHAT-NAME INPUT-NAME PROC).  DIR is evaluated once."
             (pilish-reload)
             (should (equal launch
                            (list dir '("--model" "m")
-                                 '(("PILISH_A" . "x")))))))
+                                 '(("PILISH_A" . "x")
+                                   ("PILISH_TOKEN" . "rotated")))))))
       (when (process-live-p new-proc)
         (delete-process new-proc))
       (kill-buffer chat-buf)

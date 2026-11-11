@@ -1669,12 +1669,12 @@ parsing the transcript:
 
 ** Starting sessions from Lisp
 
-=pilish-start-session= starts a session without showing it or offering
-to install dependencies, for packages that manage several Pi sessions.
-It returns the chat buffer without waiting for Pi's initial state
-response or a saved session's resume to finish.  Returning is not a
-ready-to-submit signal, and the function provides no readiness callback.
-Synchronous setup checks can still block, especially on remote file access.
+=pilish-start-session= starts a session without showing it or asking
+anything, for packages that manage several Pi sessions.  It returns the
+chat buffer without waiting for Pi's initial state response or a saved
+session's resume to finish.  Returning is not a ready-to-submit signal,
+and the function provides no readiness callback.  Synchronous setup
+checks can still block, especially on remote file access.
 
 #+begin_src emacs-lisp
 ;; The directory's default session, as M-x pilish would start it.
@@ -1691,22 +1691,27 @@ Synchronous setup checks can still block, especially on remote file access.
 
 The session behaves like one started interactively; =M-x pilish= (with
 a prefix argument and the name for a named session) shows it.  Its
-arguments follow =pilish-extra-args=, and its environment applies only
-to its own Pi processes.  =pilish-reload= keeps both.  Starting a
-session that already exists is an error.  So is a missing Pi
-executable or essential grammar: unlike =M-x pilish=, it never offers
-to install them.
+arguments follow =pilish-extra-args=; like those, arguments that select
+Pi's mode or session (=--mode=, =--session=, =--continue=, =--resume=)
+break the RPC connection, so use =:session-file= to resume.  Its
+environment applies only to its own Pi processes.  =pilish-reload= keeps
+both.  Starting a session that already exists is an error, where
+=M-x pilish= would show it.  Dependencies are checked as for =M-x
+pilish=, without questions: a missing Pi executable is an error, and so
+are missing essential grammars unless =pilish-essential-grammar-action=
+is =auto= (install them) or =warn= (start after a warning).  Optional
+grammars are not offered.
 
 To give every session, interactive or not, extra environment, add a
 function to =pilish-session-environment-functions=.  It receives the
-chat buffer and the directory before the session's first Pi process
-starts and returns an alist of =(NAME . VALUE)= entries; a nil value
-removes the variable.  Use =:environment= for values specific to one
-launcher call; use the hook for policy shared by interactive and
-background sessions.  Explicit =:environment= entries take precedence,
-then hook entries in hook order.  The combined environment is saved once
-for the session, including reloads and respawns after exit; the hook is
-not called again for those processes.
+chat buffer and the directory each time the session starts a Pi process,
+including reloads and respawns after exit, and returns an alist of
+=(NAME . VALUE)= entries; a nil value removes the variable.  It runs
+during process startup, so return promptly.  Use =:environment= for
+values specific to one launcher call; use the hook for policy shared by
+interactive and background sessions, or for values that change, such as
+tokens.  Explicit =:environment= entries take precedence, then hook
+entries in hook order.
 
 #+begin_src emacs-lisp
 (add-hook 'pilish-session-environment-functions

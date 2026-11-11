@@ -589,11 +589,7 @@ rebuilds the chat buffer from session history."
                                session-file dir))
                 (old-proc pilish--process))
             (setq pilish--status 'idle)
-            (let* ((new-proc (pilish--start-process
-                              dir
-                              (plist-get pilish--launch-options :args)
-                              (plist-get pilish--launch-options
-                                         :environment)))
+            (let* ((new-proc (pilish--start-session-process dir))
                    (generation (pilish--begin-session-transition
                                 new-proc)))
               (when (processp new-proc)

@@ -2009,8 +2009,8 @@ commands in `pilish-test--background-commands'."
                 ((symbol-function 'pilish--check-pi) (lambda (&rest _) t))
                 ((symbol-function 'pilish--missing-essential-grammars)
                  (lambda () nil))
-                ((symbol-function 'pilish--check-dependencies)
-                 (lambda (&rest _) (error "Interactive dependency check")))
+                ((symbol-function 'pilish--maybe-install-optional-grammars)
+                 (lambda () (error "Optional grammars offered")))
                 ((symbol-function 'pilish--display-buffers)
                  (lambda (&rest _) (error "Session displayed")))
                 ((symbol-function 'y-or-n-p)
@@ -2098,7 +2098,8 @@ A nil name selects the directory default; a string names the session."
       (delete-directory root t))))
 
 (ert-deftest pilish-test-start-session-fails-without-prerequisites ()
-  "Missing Pi or essential grammars fail before any buffer or process exists."
+  "Missing Pi, or essential grammars it may not ask about, fail cleanly.
+No buffer or process remains."
   (let ((root (pilish-test--make-temp-directory "pilish-test-bg-deps-")))
     (unwind-protect
         (pilish-test--with-background-startup
@@ -2108,12 +2109,42 @@ A nil name selects the directory default; a string names the session."
                      (cadr (should-error (pilish-start-session root nil))))))
           (cl-letf (((symbol-function 'pilish--missing-essential-grammars)
                      (lambda () '(markdown))))
-            (should (string-match-p
-                     "grammars missing: markdown"
-                     (cadr (should-error (pilish-start-session root nil))))))
+            (let ((pilish-essential-grammar-action 'prompt))
+              (should (string-match-p
+                       "grammars missing: markdown"
+                       (cadr (should-error (pilish-start-session root nil)))))))
           (should-not pilish-test--background-launches)
           (should-not (get-buffer (pilish-test--chat-buffer-name root)))
           (should-not (get-buffer (pilish-test--input-buffer-name root))))
+      (delete-directory root t))))
+
+(ert-deftest pilish-test-start-session-follows-essential-grammar-action ()
+  "Background starts honor `pilish-essential-grammar-action' without asking.
+`warn' starts after a warning and `auto' installs before starting."
+  (let ((root (pilish-test--make-temp-directory "pilish-test-bg-grammar-"))
+        (missing '(markdown))
+        (warnings nil)
+        (installed nil))
+    (unwind-protect
+        (pilish-test--with-background-startup
+          (cl-letf (((symbol-function 'pilish--missing-essential-grammars)
+                     (lambda () missing))
+                    ((symbol-function 'pilish--install-grammars)
+                     (lambda (grammars)
+                       (setq installed grammars missing nil)
+                       (length grammars)))
+                    ((symbol-function 'display-warning)
+                     (lambda (_type message &rest _) (push message warnings))))
+            (let ((pilish-essential-grammar-action 'warn))
+              (should (buffer-live-p (pilish-start-session root "warn")))
+              (should (string-match-p "markdown" (car warnings)))
+              (should-not installed))
+            (let ((pilish-essential-grammar-action 'auto))
+              (should (buffer-live-p (pilish-start-session root "auto")))
+              (should (equal installed '(markdown))))
+            (should (= 2 (length pilish-test--background-launches)))))
+      (pilish-test--kill-session-buffers root "warn")
+      (pilish-test--kill-session-buffers root "auto")
       (delete-directory root t))))
 
 (ert-deftest pilish-test-start-session-removes-buffers-when-start-fails ()
@@ -2130,11 +2161,12 @@ A nil name selects the directory default; a string names the session."
       (pilish-test--kill-session-buffers root)
       (delete-directory root t))))
 
-(ert-deftest pilish-test-session-launch-options-apply-from-first-spawn ()
+(ert-deftest pilish-test-session-launch-options-apply-to-every-spawn ()
   "Explicit environment wins over hooks; options persist without leaking.
-Environment functions run once, before the first spawn, and a failing
-function only warns.  A respawn reuses the stored options, and another
-session of the same directory gets none of them."
+Environment functions run for every spawn, so a respawn gets their current
+values, and a failing or malformed function only warns.  A respawn reuses
+the session's own options, and another session of the same directory gets
+none of them."
   (let* ((root (pilish-test--make-temp-directory "pilish-test-bg-env-"))
          (global-environment (copy-sequence process-environment))
          (calls nil)
@@ -2142,8 +2174,10 @@ session of the same directory gets none of them."
          (pilish-session-environment-functions
           (list (lambda (chat dir)
                   (push (list chat dir) calls)
-                  (list (cons "PILISH_A" "hook") (cons "PILISH_B" "hook")))
-                (lambda (_chat _dir) (error "Broken hook")))))
+                  (list (cons "PILISH_A" "hook")
+                        (cons "PILISH_B" (format "hook-%d" (length calls)))))
+                (lambda (_chat _dir) (error "Broken hook"))
+                (lambda (_chat _dir) '(("BAD=NAME" . "x"))))))
     (unwind-protect
         (pilish-test--with-background-startup
           (cl-letf (((symbol-function 'display-warning)
@@ -2152,24 +2186,29 @@ session of the same directory gets none of them."
                          root "env" :args '("--model" "m")
                          :environment '(("PILISH_A" . "explicit")))))
               (should (equal calls (list (list chat root))))
-              (should (string-match-p "Broken hook" (car warnings)))
+              (should (= 2 (length warnings)))
+              (should (string-match-p "Broken hook" (cadr warnings)))
+              (should (string-match-p "BAD=NAME" (car warnings)))
               (should (equal (car pilish-test--background-launches)
                              (list root '("--model" "m")
                                    '(("PILISH_A" . "explicit")
                                      ("PILISH_A" . "hook")
-                                     ("PILISH_B" . "hook")))))
-              ;; The process dies; reopening the session respawns it with the
-              ;; stored options and without asking the functions again.
+                                     ("PILISH_B" . "hook-1")))))
+              ;; The process dies; reopening the session respawns it with its
+              ;; own options and the functions' current values.
               (delete-process (buffer-local-value 'pilish--process chat))
-              (pilish--setup-session root "env" nil nil t)
-              (should (= 1 (length calls)))
+              (pilish--setup-session root "env" :background t)
+              (should (= 2 (length calls)))
               (should (equal (car pilish-test--background-launches)
-                             (cadr pilish-test--background-launches)))
+                             (list root '("--model" "m")
+                                   '(("PILISH_A" . "explicit")
+                                     ("PILISH_A" . "hook")
+                                     ("PILISH_B" . "hook-2")))))
               (pilish-start-session root "other")
               (should (equal (car pilish-test--background-launches)
                              (list root nil
                                    '(("PILISH_A" . "hook")
-                                     ("PILISH_B" . "hook")))))
+                                     ("PILISH_B" . "hook-3")))))
               (should (equal process-environment global-environment)))))
       (pilish-test--kill-session-buffers root "env")
       (pilish-test--kill-session-buffers root "other")
@@ -2186,6 +2225,12 @@ session of the same directory gets none of them."
           (should-error (pilish-start-session other nil :session-file file))
           (should-not pilish-test--background-launches)
           (should-not (get-buffer (pilish-test--chat-buffer-name other)))
+          ;; An explicit directory that names the recorded one is accepted.
+          (let ((chat (pilish-start-session (directory-file-name root) "explicit"
+                                            :session-file file)))
+            (should (equal (buffer-name chat)
+                           (pilish-test--chat-buffer-name root "explicit")))
+            (should (equal (caar pilish-test--background-launches) root)))
           (let ((chat (pilish-start-session nil "resumed" :session-file file)))
             (should (equal (buffer-name chat)
                            (pilish-test--chat-buffer-name root "resumed")))
@@ -2200,9 +2245,26 @@ session of the same directory gets none of them."
                          (lambda (command)
                            (equal (plist-get command :type) "prompt"))
                          pilish-test--background-commands))))
+      (pilish-test--kill-session-buffers root "explicit")
       (pilish-test--kill-session-buffers root "resumed")
       (delete-directory root t)
       (delete-directory other t))))
+
+(ert-deftest pilish-test-start-session-validates-args-and-environment ()
+  "Malformed ARGS or ENVIRONMENT are refused before anything starts."
+  (let ((root (pilish-test--make-temp-directory "pilish-test-bg-validate-")))
+    (unwind-protect
+        (pilish-test--with-background-startup
+          (should-error (pilish-start-session root nil :args "--model"))
+          (should-error (pilish-start-session root nil :args '("--model" 1)))
+          (should-error (pilish-start-session root nil :environment '("A=b")))
+          (should-error (pilish-start-session root nil
+                                              :environment '(("A=B" . "c"))))
+          (should-error (pilish-start-session root nil
+                                              :environment '(("A" . 1))))
+          (should-not pilish-test--background-launches)
+          (should-not (get-buffer (pilish-test--chat-buffer-name root))))
+      (delete-directory root t))))
 
 (provide 'pilish-test)
 ;;; pilish-test.el ends here
