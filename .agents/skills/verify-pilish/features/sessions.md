@@ -9,7 +9,7 @@ The session and tree browsers support native folding, searching, copying, and sc
 - `tree-browser` applies the same native actions to projected conversation nodes.
 - `session-resume` selects a saved session in the real browser, invokes its switch command, and rebuilds the chat history.
 - `session-state-ownership` keeps a newly selected session's identity and header state when an older startup or thinking-level state response arrives.
-- `background-start` starts a new and a resumed session with `pilish-start-session`. Neither changes the window layout or sends a prompt; `pilish` with the name later shows the resumed history.
+- `background-start` starts a new and a resumed session with `pilish-start-session`. Neither changes the window layout or sends a prompt; `pilish-show-session` later shows the resumed history.
 
 ## How to get to it (user POV)
 
@@ -17,7 +17,7 @@ The session and tree browsers support native folding, searching, copying, and sc
 - Export `PI_CODING_AGENT_SESSION_DIR`, open `M-x pilish-session-browser` from a local project without starting Pi, and press `t` for All projects.
 - Select a saved session and run `M-x pilish-session-browser-switch` to resume it.
 - Use `C-c C-n` for a new session while a background state query is outstanding.
-- Call `pilish-start-session` from Lisp, then show the session with `C-u M-x pilish`.
+- Call `pilish-start-session` from Lisp, then show the session with `pilish-show-session`.
 
 ## Driving it with Pilish harnesses
 

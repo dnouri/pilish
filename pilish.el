@@ -274,8 +274,7 @@ provides no readiness callback.  A failed dependency check, an invalid
 name, directory, SESSION-FILE, ARGS or ENVIRONMENT is an error that
 leaves no session behind.  Pi's later startup errors appear in the chat;
 a failed resume is reported in the echo area, as for interactive
-sessions.  To show the session, run \\[pilish] from its directory, with
-a prefix argument for a named session.
+sessions.  `pilish-show-session' shows the session.
 
 Remote directories use the existing TRAMP process launcher and path
 rules.  TRAMP may prompt for authentication, and dependency checks and
@@ -327,6 +326,22 @@ all setup is asynchronous."
            (when (buffer-live-p buffer)
              (kill-buffer buffer))))
        (signal (car err) (cdr err))))))
+
+(defun pilish-show-session (chat-buffer)
+  "Show the session whose chat buffer is CHAT-BUFFER, as \\[pilish] does.
+This displays a session started with `pilish-start-session' without
+changing `default-directory'.  It neither starts nor restarts Pi; use
+`pilish-reload' for a session whose process has exited.  Return
+CHAT-BUFFER."
+  (unless (and (buffer-live-p chat-buffer)
+               (with-current-buffer chat-buffer
+                 (derived-mode-p 'pilish-chat-mode))
+               (buffer-live-p (buffer-local-value 'pilish--input-buffer
+                                                  chat-buffer)))
+    (error "Pilish: not a session chat buffer: %S" chat-buffer))
+  (pilish--show-session-buffers
+   chat-buffer (buffer-local-value 'pilish--input-buffer chat-buffer))
+  chat-buffer)
 
 (defun pilish--show-session-buffers (chat-buf input-buf)
   "Show CHAT-BUF and INPUT-BUF, focusing input when both are visible.

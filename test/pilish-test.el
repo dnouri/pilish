@@ -2266,5 +2266,27 @@ none of them."
           (should-not (get-buffer (pilish-test--chat-buffer-name root))))
       (delete-directory root t))))
 
+(ert-deftest pilish-test-show-session-displays-background-session ()
+  "`pilish-show-session' displays a background session from anywhere.
+It does not depend on `default-directory' and starts no process."
+  (let ((root (pilish-test--make-temp-directory "pilish-test-bg-show-"))
+        (displayed nil))
+    (unwind-protect
+        (pilish-test--with-background-startup
+          (let ((chat (pilish-start-session root "shown")))
+            (cl-letf (((symbol-function 'pilish--display-buffers)
+                       (lambda (chat-buf input-buf &rest _)
+                         (setq displayed (list chat-buf input-buf)))))
+              (let ((default-directory temporary-file-directory))
+                (should (eq (pilish-show-session chat) chat))))
+            (should (equal displayed
+                           (list chat (buffer-local-value
+                                       'pilish--input-buffer chat))))
+            (should (= 1 (length pilish-test--background-launches)))
+            (with-temp-buffer
+              (should-error (pilish-show-session (current-buffer))))))
+      (pilish-test--kill-session-buffers root "shown")
+      (delete-directory root t))))
+
 (provide 'pilish-test)
 ;;; pilish-test.el ends here

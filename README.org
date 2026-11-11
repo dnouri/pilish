@@ -1670,8 +1670,9 @@ parsing the transcript:
 ** Starting sessions from Lisp
 
 =pilish-start-session= starts a session without showing it or asking
-anything, for packages that manage several Pi sessions.  It returns the
-chat buffer without waiting for Pi's initial state response or a saved
+anything, for packages that manage several Pi sessions, and
+=pilish-show-session= shows it later from anywhere.  It returns the chat
+buffer without waiting for Pi's initial state response or a saved
 session's resume to finish.  Returning is not a ready-to-submit signal,
 and the function provides no readiness callback.  Synchronous setup
 checks can still block, especially on remote file access.
@@ -1690,7 +1691,7 @@ checks can still block, especially on remote file access.
 #+end_src
 
 The session behaves like one started interactively; =M-x pilish= (with
-a prefix argument and the name for a named session) shows it.  Its
+a prefix argument and the name for a named session) finds it too.  Its
 arguments follow =pilish-extra-args=; like those, arguments that select
 Pi's mode or session (=--mode=, =--session=, =--continue=, =--resume=)
 break the RPC connection, so use =:session-file= to resume.  Its

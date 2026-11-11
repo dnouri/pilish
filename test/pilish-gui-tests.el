@@ -372,10 +372,10 @@ conversation once it is displayed."
                                       (buffer-name (window-buffer window)))
                                     (window-list))
                    :background (list (buffer-name fresh) (buffer-name resumed))))
-            ;; Displaying the session uses the ordinary command.
+            ;; Showing it needs no `default-directory' in its project.
             (delete-other-windows)
-            (let ((default-directory dir))
-              (pilish "resumed"))
+            (let ((default-directory temporary-file-directory))
+              (pilish-show-session resumed))
             (should (get-buffer-window resumed))
             (with-selected-window (get-buffer-window resumed)
               (goto-char (point-min))
