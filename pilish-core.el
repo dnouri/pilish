@@ -814,22 +814,37 @@ COMMAND is passed as `$0' and `$@' to preserve the original argv exactly."
                          pilish--remote-ready-marker)))
           command))
 
+(defun pilish--process-environment (overrides)
+  "Return `process-environment' with OVERRIDES applied.
+OVERRIDES is an alist of (NAME . VALUE); a nil VALUE removes NAME, and
+an earlier entry wins over a later one for the same NAME.  The result is
+built as data, not with `setenv', whose `TZ' handling would change the
+time zone of this Emacs."
+  (let (names entries)
+    (pcase-dolist (`(,name . ,value) overrides)
+      (unless (member name names)
+        (push name names)
+        (push (if value (concat name "=" value) name) entries)))
+    (append (nreverse entries)
+            (cl-remove-if (lambda (entry)
+                            (member (substring entry 0 (string-search "=" entry))
+                                    names))
+                          process-environment))))
+
 (defun pilish--start-process (directory &optional args environment)
   "Start pi RPC process in DIRECTORY.
 ARGS are extra command-line arguments for this process only.  ENVIRONMENT
-is an alist of (NAME . VALUE) overrides for this process only; a nil VALUE
-removes NAME, and an earlier entry wins over a later one for the same NAME.
+is an alist of (NAME . VALUE) overrides for this process only, as
+`pilish--process-environment' applies them.
 Returns the process object."
   (let* ((default-directory directory)
-         (process-environment (copy-sequence process-environment))
+         (process-environment (pilish--process-environment environment))
          (remote-start-p (pilish--remote-prefix directory))
          (command (pilish--pi-command args))
          (process-command (if remote-start-p
                               (pilish--remote-start-command command)
                             command))
          (stderr-buf (generate-new-buffer " *pilish-stderr*")))
-    (dolist (entry (reverse environment))
-      (setenv (car entry) (cdr entry)))
     (condition-case err
         (let ((proc (make-process
                      :name "pi"

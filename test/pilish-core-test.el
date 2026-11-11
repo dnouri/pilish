@@ -1394,7 +1394,8 @@ and starting in DIRECTORY or `/tmp/'."
 
 (ert-deftest pilish-test-start-process-environment-reaches-only-that-process ()
   "Per-process environment overrides reach Pi and leave Emacs unchanged.
-An earlier entry wins over a later one, and a nil value unsets."
+An earlier entry wins over a later one, and a nil value unsets.  `TZ'
+reaches Pi without changing this Emacs's time zone, which `setenv' would."
   (let* ((dir (pilish-test--make-temp-directory "pilish-test-env-"))
          (out (expand-file-name "env.out" dir))
          (global-environment (copy-sequence process-environment))
@@ -1402,12 +1403,13 @@ An earlier entry wins over a later one, and a nil value unsets."
                                     process-environment))
          (pilish-executable
           (list "sh" "-c"
-                (format (concat "printf '%%s|%%s|%%s\\n' \"$PILISH_TEST_A\" "
-                                "\"${PILISH_TEST_UNSET-unset}\" \"$*\" > %s")
+                (format (concat "printf '%%s|%%s|%%s|%%s\\n' \"$PILISH_TEST_A\" "
+                                "\"${PILISH_TEST_UNSET-unset}\" \"$TZ\" \"$*\" > %s")
                         (shell-quote-argument out))
                 "pi"))
          (pilish-extra-args nil)
          (pilish-project-trust-policy 'default)
+         (zone (current-time-zone))
          (proc nil))
     (unwind-protect
         (progn
@@ -1415,12 +1417,14 @@ An earlier entry wins over a later one, and a nil value unsets."
                       dir '("--extra")
                       '(("PILISH_TEST_A" . "first")
                         ("PILISH_TEST_A" . "second")
-                        ("PILISH_TEST_UNSET"))))
+                        ("PILISH_TEST_UNSET")
+                        ("TZ" . "UTC-14"))))
           (should (pilish-test-wait-for-process-exit proc))
           (should (equal (with-temp-buffer
                            (insert-file-contents out)
                            (buffer-string))
-                         "first|unset|--mode rpc --extra\n"))
+                         "first|unset|UTC-14|--mode rpc --extra\n"))
+          (should (equal (current-time-zone) zone))
           (should-not (getenv "PILISH_TEST_A"))
           (should (equal (getenv "PILISH_TEST_UNSET") "global"))
           (should (equal (cdr process-environment) global-environment)))
@@ -1428,6 +1432,16 @@ An earlier entry wins over a later one, and a nil value unsets."
         (pilish--cleanup-process-stderr-buffer proc)
         (delete-process proc))
       (delete-directory dir t))))
+
+(ert-deftest pilish-test-process-environment-keeps-one-entry-per-name ()
+  "Overrides replace existing entries and keep only the first per name.
+TRAMP hands every entry that differs from the global environment to
+`env', where a later duplicate would win."
+  (let ((process-environment '("A=old" "B=keep" "C=old")))
+    (should (equal (pilish--process-environment
+                    '(("A" . "new") ("A" . "later") ("C")))
+                   '("A=new" "C" "B=keep")))
+    (should (equal process-environment '("A=old" "B=keep" "C=old")))))
 
 (ert-deftest pilish-test-start-process-captures-stderr-separately ()
   "start-process routes stderr away from the JSON-RPC stdout pipe."
