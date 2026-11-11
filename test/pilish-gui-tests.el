@@ -3464,9 +3464,11 @@ Return observations suitable for the graphical evidence file."
             (pilish-reload (lambda (outcome) (push outcome failures))))
           (wait (lambda () (and failures (settled-p))))
           (should (= (length failures) 1))
-          ;; Pi may exit before or after the switch request is written.
+          ;; Pi may exit before or after the switch request is written:
+          ;; a pending request reports `exited', a failed write `failed'.
+          (should (memq (car (car failures)) '(exited failed)))
           (should (string-match-p "Process exited\\|not running"
-                                  (car failures)))
+                                  (cdr (car failures))))
           (should (eq (current-process) live-proc))
           (should (process-live-p live-proc))
           (should (history-p))
