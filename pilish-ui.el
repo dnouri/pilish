@@ -2037,9 +2037,133 @@ canonical history, so rebuilding now would erase that visible turn."
        (not (pilish--command-pending-p (pilish--get-process) "compact"))
        (null pilish--local-user-message)))
 
+(defun pilish-session-chat-buffer (&optional buffer)
+  "Return the session chat linked to BUFFER, or nil outside a session.
+BUFFER is a buffer or buffer name, defaulting to the current buffer.
+Dead, missing, unrelated and saved snapshot buffers return nil.  An input
+buffer resolves to its live chat even when Pi has stopped.  No process is
+started and no window is displayed or selected."
+  (when-let* ((buffer (get-buffer (or buffer (current-buffer))))
+              ((buffer-live-p buffer)))
+    (with-current-buffer buffer
+      (cond
+       ((derived-mode-p 'pilish-chat-mode) buffer)
+       ((and (derived-mode-p 'pilish-input-mode)
+             (buffer-live-p pilish--chat-buffer)
+             (with-current-buffer pilish--chat-buffer
+               (derived-mode-p 'pilish-chat-mode)))
+        pilish--chat-buffer)))))
+
+(defun pilish--copy-session-value (value &optional properties)
+  "Copy session data VALUE, including nested strings, vectors and hash tables.
+String properties are omitted unless PROPERTIES is non-nil; in that case
+their data values are copied too, as needed for extension status faces."
+  (cond
+   ((stringp value)
+    (let ((copy (substring-no-properties value))
+          (pos 0))
+      (when properties
+        (while (< pos (length value))
+          (let ((end (next-property-change pos value (length value))))
+            (set-text-properties
+             pos end (pilish--copy-session-value
+                      (text-properties-at pos value) t) copy)
+            (setq pos end))))
+      copy))
+   ((consp value) (cons (pilish--copy-session-value (car value) properties)
+                       (pilish--copy-session-value (cdr value) properties)))
+   ((vectorp value)
+    (apply #'vector (mapcar (lambda (item)
+                             (pilish--copy-session-value item properties))
+                           value)))
+   ((hash-table-p value)
+    (let ((copy (copy-hash-table value)))
+      (clrhash copy)
+      (maphash (lambda (key item)
+                 (puthash (pilish--copy-session-value key properties)
+                          (pilish--copy-session-value item properties) copy))
+               value)
+      copy))
+   (t value)))
+
 (defvar-local pilish--extension-status nil
   "Alist of extension status messages for header-line display.
-Keys are extension identifiers (strings), values are status text.")
+Keys are extension identifiers (strings), values are status text.
+Change it only through `pilish--set-extension-status' and
+`pilish--clear-extension-statuses', which run
+`pilish-extension-status-functions'.")
+
+(defcustom pilish-extension-status-functions nil
+  "Functions called after an extension status of a session changed.
+Each function is called with three arguments:
+
+  CHAT-BUFFER KEY TEXT
+
+KEY is the extension's `statusKey' and TEXT its new status text, or nil
+when the status was cleared.  A session reset, such as starting a new
+session, clears every status and calls the functions once per cleared
+KEY.  Setting a status to its current text and properties calls nothing.
+
+The functions run in CHAT-BUFFER after the change is complete, so
+`pilish-session-extension-status' already returns TEXT.  KEY and TEXT
+are independent copies for each function, including TEXT's properties and
+nested property values.  An error in one function is reported as a
+warning and does not stop the others.  This is an abnormal hook."
+  :type 'hook
+  :group 'pilish)
+
+(defun pilish-session-extension-status (&optional buffer key)
+  "Return a copy of BUFFER's extension status, or nil without a session.
+BUFFER follows `pilish-session-chat-buffer'.  With KEY, return that
+status's text; without KEY, return an alist of (KEY . TEXT) in header-line
+order.  Text properties, including faces, are retained; their nested data
+values are copied too.  Changing returned data cannot change the session.
+`pilish-extension-status-functions' reports changes.  No RPC is sent."
+  (when-let* ((chat (pilish-session-chat-buffer buffer)))
+    (let ((statuses (buffer-local-value 'pilish--extension-status chat)))
+      (pilish--copy-session-value
+       (if key (cdr (assoc key statuses)) statuses) t))))
+
+(defun pilish--run-extension-status-functions (key text)
+  "Run `pilish-extension-status-functions' for KEY and TEXT in this buffer.
+User functions are isolated so a customization error cannot break event
+handling."
+  (let ((chat-buffer (current-buffer)))
+    (dolist (fn pilish-extension-status-functions)
+      (condition-case-unless-debug err
+          (with-current-buffer chat-buffer
+            (funcall fn chat-buffer (pilish--copy-session-value key)
+                     (pilish--copy-session-value text t)))
+        (error
+         (display-warning
+          'pilish
+          (format "Extension status function %S failed: %s"
+                  fn (error-message-string err))
+          :error))))))
+
+(defun pilish--set-extension-status (key text)
+  "Set extension status KEY to TEXT in the current chat buffer.
+Nil TEXT clears the status.  Run `pilish-extension-status-functions'
+when the text changed."
+  (let ((old (cdr (assoc key pilish--extension-status))))
+    (setq pilish--extension-status
+          (assoc-delete-all key pilish--extension-status))
+    (when text
+      (push (cons key text) pilish--extension-status))
+    (force-mode-line-update t)
+    (unless (equal-including-properties old text)
+      (pilish--run-extension-status-functions key text))))
+
+(defun pilish--clear-extension-statuses ()
+  "Clear every extension status in the current chat buffer.
+Run `pilish-extension-status-functions' once per cleared key, in
+header-line order, after all statuses are cleared."
+  (let ((keys (mapcar #'car pilish--extension-status)))
+    (setq pilish--extension-status nil)
+    (when keys
+      (force-mode-line-update t))
+    (dolist (key keys)
+      (pilish--run-extension-status-functions key nil))))
 
 (defvar-local pilish--held-chat-notices nil
   "Chat notices waiting for streaming or compaction to end, newest first.")

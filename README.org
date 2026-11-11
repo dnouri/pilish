@@ -1533,6 +1533,83 @@ restore a nested saved-conversation tree after reload unless its producer
 persists the declaration in another supported field.  It never infers the
 missing references from run metadata, output, or the pi-submarine manifest.
 
+** Session inspection API
+
+Integrations can inspect session buffers without starting Pi or changing
+windows.  =pilish-session-chat-buffer= resolves a chat or linked input
+buffer; =pilish-session-input-buffer= and =pilish-session-process= return
+its existing input and process.  Each accepts a buffer or buffer name,
+defaulting to the current buffer.  Missing, dead, unrelated and read-only
+snapshot buffers return nil.  A stopped chat is still a session; its
+process may have exited, so check =process-live-p= before using it.
+
+The same buffer argument works with =pilish-session-directory=, =-name=
+(the Emacs session suffix), =-title= (Pi's conversation title), =-file=
+(Pi's session file, not a saved Markdown transcript), =-model=,
+=-context-usage=, =-queued-prompts=, =-running-tools=,
+=-extension-status= and =-busy-p=.  These report the latest observed state
+without RPC or disk reads.  Data results are independent copies, including
+nested strings, lists, vectors and hash tables.  Metadata and queue strings
+omit text properties; extension-status strings retain them and copy their
+nested data values.  Buffer and process accessors return the actual handles,
+not copies.  Queue order matches the header:
+backend follow-ups, local follow-ups in FIFO order, then steering.  An
+unreported backend queue is unknown, not necessarily empty.
+
+=-running-tools= lists unfinished root tool call IDs from the live registry
+in unspecified order: announced or executing calls with an observed ID.
+Argument-streaming previews without authoritative IDs are not listed;
+completed, cooled and saved-history blocks do not count.  =-busy-p= uses an
+observed-work policy: pending prompts, session/model changes, compaction,
+non-idle activity, known queues or unfinished tools count.  It is broader
+than the internal send-readiness predicate and is not a fresh backend query.
+Unknown work is not proof of idleness.
+
+=pilish-session-exists-p= takes a directory and optional session name
+(nil for the default session), and checks for existing buffers even when
+Pi is stopped.  It does not resolve directory symlinks.
+
+#+begin_src emacs-lisp
+(let ((chat (pilish-session-chat-buffer)))
+  (when chat
+    (list (pilish-session-title chat)
+          (plist-get (pilish-session-model chat) :id)
+          (pilish-session-busy-p chat))))
+#+end_src
+
+** Extension status hooks
+
+To show extension statuses somewhere else, such as a tab bar or a
+session list, read them with =pilish-session-extension-status= and
+follow changes with =pilish-extension-status-functions=.  Each function
+receives:
+
+#+begin_src emacs-lisp
+(CHAT-BUFFER KEY TEXT)
+#+end_src
+
+=KEY= is the =statusKey= and =TEXT= the new text without ANSI colors,
+or nil when the status was cleared.  Setting a status to its current
+text and properties calls nothing.  Starting a new session clears every
+status and calls the functions once per cleared key.  The functions run after the
+change, so the accessor already returns =TEXT=.
+
+=(pilish-session-extension-status BUFFER KEY)= returns one status's
+text; without =KEY= it returns an alist of all statuses in header-line
+order.  =BUFFER= is optional and follows the session inspection API above:
+chat, linked input, either buffer's name, or the current buffer by default.
+Both return independent copies, including text properties and their nested
+data values (for example a face plist).  Each observer receives its own
+copies, so it cannot alter another observer's arguments or the session.
+
+#+begin_src emacs-lisp
+(defun my-pi-message-plan-mode (chat key text)
+  (when (equal key "plan-mode")
+    (message "%s: %s" (buffer-name chat) (or text "plan mode off"))))
+
+(add-hook 'pilish-extension-status-functions #'my-pi-message-plan-mode)
+#+end_src
+
 ** Activity phase hooks
 
 For custom UI changes tied to activity, add functions to
