@@ -259,19 +259,31 @@ NEW-PHASE when session buffers are relinked or reset."
   :group 'pilish)
 
 (defcustom pilish-session-identity-functions nil
-  "Functions called with CHAT-BUFFER after its session identity changes.
-Identity consists of the saved session file, stable session directory and
-chat buffer name.  The first successful state response also notifies.
-Repeated state responses with the same identity do not notify.  Session
-transitions coalesce state and buffer changes until the transition finishes.
-If a transition's state refresh fails, wait for a successful state response
-before notifying; do not publish new buffer names with a stale session file.
+  "Functions called after a chat's session identity changes.
+Each function receives CHAT-BUFFER, SESSION-FILE, DIRECTORY and NAME: the
+saved session file (nil when Pi reports none), the stable session directory
+and the chat buffer's live name.  These make up the identity.  File and
+directory are compared by their canonical spellings, so a symlink alias of
+the same local file or directory is not a change; remote names are
+compared as written.  NAME is the live name rather than the name Pilish
+chose, so uniquification and manual renames are changes: observers that
+restore or display buffers by name need the actual name.
 
-Functions run after Pilish applies state or retargets its buffer pair;
-manual buffer renames are observed at the next such update.  The process
-may be stopped and the input buffer may be missing.  Observers should not
-change session identity themselves.  Errors are reported as warnings and
-remaining observers still run, unless `debug-on-error' is non-nil."
+The first successful state response also notifies.  Repeated state
+responses with the same identity do not notify.  Session transitions
+coalesce state and buffer changes until the transition finishes.  If a
+transition's state refresh fails, wait for the next successful state
+response, such as a reload's, before notifying; do not publish new buffer
+names with a stale session file.
+
+Functions run synchronously after Pilish applies state or retargets its
+buffer pair, often from the process filter; they should return promptly.
+Manual buffer renames are observed at the next such update.  The process
+may be stopped and the input buffer may be missing.  Killing the chat
+buffer is not announced; use `kill-buffer-hook' or `buffer-live-p'.
+Observers should not change session identity themselves.  Errors are
+reported as warnings and remaining observers still run, unless
+`debug-on-error' is non-nil."
   :type 'hook
   :group 'pilish)
 
@@ -3660,23 +3672,29 @@ the session's input buffer."
                          (pilish--force-header-line-update chat-buf)))))))
 
 (defvar-local pilish--announced-session-identity nil
-  "Session identity last reported to `pilish-session-identity-functions'.")
+  "Canonical session identity last reported to observers.
+See `pilish-session-identity-functions'.")
 
 (defun pilish--note-session-identity ()
   "Notify observers of the current chat's changed, coherent session identity.
-Defer notification until an active session transition finishes."
+Defer notification until an active session transition finishes.  Compare
+canonical file and directory spellings, so symlink aliases of the same saved
+file or directory are not changes."
   (when (and (derived-mode-p 'pilish-chat-mode)
              (not pilish--session-transition-active)
              (not pilish--session-identity-state-pending))
-    (let ((identity (list (plist-get pilish--state :session-file)
-                          (pilish--chat-session-directory)
-                          (buffer-name))))
+    (let* ((file (plist-get pilish--state :session-file))
+           (directory (pilish--chat-session-directory))
+           (name (buffer-name))
+           (identity (list (pilish--canonical-session-path file)
+                           (pilish--canonical-session-path directory)
+                           name)))
       (unless (equal identity pilish--announced-session-identity)
         (setq pilish--announced-session-identity identity)
         (let ((chat-buffer (current-buffer)))
           (dolist (function pilish-session-identity-functions)
             (condition-case-unless-debug err
-                (funcall function chat-buffer)
+                (funcall function chat-buffer file directory name)
               (error
                (display-warning
                 'pilish

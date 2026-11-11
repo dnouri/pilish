@@ -3828,9 +3828,9 @@ Pi's isStreaming includes post-run processing, not just the low-level loop."
            (response '(:success t :data (:sessionFile "/tmp/initial.jsonl")))
            (seen nil)
            (pilish-session-identity-functions
-            (list (lambda (buffer)
+            (list (lambda (buffer file _directory _name)
                     (should (eq buffer chat))
-                    (push (plist-get pilish--state :session-file) seen)))))
+                    (push file seen)))))
       (pilish--apply-state-response chat '(:success :false))
       (should-not seen)
       (pilish--apply-state-response chat response)
@@ -3852,9 +3852,11 @@ Pi's isStreaming includes post-run processing, not just the low-level loop."
           (pilish--set-chat-session-identity "/tmp/identity-before/")
           (pilish--set-input-buffer input)
           (let ((pilish-session-identity-functions
-                 (list (lambda (buffer)
+                 (list (lambda (buffer _file directory name)
                          (should (eq buffer chat))
-                         (should (equal (buffer-name)
+                         (should (equal directory "/tmp/identity-after/"))
+                         (should (equal name (buffer-name buffer)))
+                         (should (equal name
                                         (pilish--buffer-name
                                          :chat "/tmp/identity-after/")))
                          (with-current-buffer input
@@ -3881,11 +3883,9 @@ Pi's isStreaming includes post-run processing, not just the low-level loop."
     (let* ((chat (current-buffer))
            (seen nil)
            (pilish-session-identity-functions
-            (list (lambda (buffer)
+            (list (lambda (buffer &rest identity)
                     (should (eq buffer chat))
-                    (push (list (plist-get pilish--state :session-file)
-                                (pilish--chat-session-directory)
-                                (buffer-name)) seen))))
+                    (push identity seen))))
            (generation (pilish--begin-session-transition)))
       (pilish--retarget-session-buffers "/tmp/identity-new/")
       (pilish--apply-state-response
@@ -3912,12 +3912,8 @@ Pi's isStreaming includes post-run processing, not just the low-level loop."
       (let ((seen nil)
             (pilish-session-identity-functions nil))
         (setq pilish-session-identity-functions
-              (list (lambda (buffer)
-                      (push (list (plist-get (buffer-local-value
-                                               'pilish--state buffer)
-                                              :session-file)
-                                  (pilish--chat-session-directory buffer)
-                                  (buffer-name buffer)) seen))))
+              (list (lambda (_buffer &rest identity)
+                      (push identity seen))))
         (pilish--refresh-thinking-level-state proc chat)
         (let* ((stale-request (car commands))
                (generation (pilish--begin-session-transition proc)))
@@ -3960,7 +3956,7 @@ Pi's isStreaming includes post-run processing, not just the low-level loop."
           (pilish-session-identity-functions nil)
           (name "identity-startup-stale"))
       (setq pilish-session-identity-functions
-            (list (lambda (buffer) (push buffer seen))))
+            (list (lambda (buffer &rest _) (push buffer seen))))
       (with-current-buffer chat
         (pilish--set-chat-session-identity "/tmp/" name)
         (setq pilish--process nil))
@@ -4003,8 +3999,7 @@ Pi's isStreaming includes post-run processing, not just the low-level loop."
      (current-buffer) '(:success t :data (:sessionFile "/tmp/old.jsonl")))
     (let* ((seen nil)
            (pilish-session-identity-functions
-            (list (lambda (_buffer)
-                    (push (plist-get pilish--state :session-file) seen))))
+            (list (lambda (_buffer file &rest _) (push file seen))))
            (generation (pilish--begin-session-transition)))
       (pilish--retarget-session-buffers "/tmp/identity-unconfirmed/")
       (pilish--apply-state-response (current-buffer) '(:success :false))
@@ -4023,9 +4018,7 @@ Pi's isStreaming includes post-run processing, not just the low-level loop."
       (let ((seen nil)
             (pilish-session-identity-functions nil))
         (setq pilish-session-identity-functions
-              (list (lambda (buffer)
-                      (push (plist-get (buffer-local-value 'pilish--state buffer)
-                                       :session-file) seen))))
+              (list (lambda (_buffer file &rest _) (push file seen))))
         (cl-letf (((symbol-function 'pilish--update-session-name-from-file) #'ignore))
           (pilish--execute-fork proc "user-1")
           (pilish--dispatch-response
@@ -4059,7 +4052,7 @@ Pi's isStreaming includes post-run processing, not just the low-level loop."
           (seen nil))
       (pilish--apply-state-response (current-buffer) response)
       (let ((pilish-session-identity-functions
-             (list (lambda (buffer) (push (buffer-name buffer) seen)))))
+             (list (lambda (_buffer _file _directory name) (push name seen)))))
         (rename-buffer " *identity-renamed*" t)
         (pilish--apply-state-response (current-buffer) response)
         (pilish--apply-state-response (current-buffer) response)
@@ -4073,8 +4066,8 @@ Pi's isStreaming includes post-run processing, not just the low-level loop."
            (seen nil)
            (debug-on-error nil)
            (pilish-session-identity-functions
-            (list (lambda (_buffer) (error "Identity observer failed"))
-                  (lambda (buffer) (push buffer seen)))))
+            (list (lambda (&rest _) (error "Identity observer failed"))
+                  (lambda (buffer &rest _) (push buffer seen)))))
       (cl-letf (((symbol-function 'display-warning)
                  (lambda (type message level &rest _)
                    (should (eq type 'pilish))
@@ -4093,10 +4086,44 @@ Pi's isStreaming includes post-run processing, not just the low-level loop."
         (seen nil))
     (kill-buffer chat)
     (let ((pilish-session-identity-functions
-           (list (lambda (buffer) (push buffer seen)))))
+           (list (lambda (buffer &rest _) (push buffer seen)))))
       (pilish--apply-state-response
        chat '(:success t :data (:sessionFile "/tmp/late.jsonl")))
       (should-not seen))))
+
+(ert-deftest pilish-test-session-identity-ignores-symlink-aliases ()
+  "Symlink spellings of the same saved file and directory are not changes.
+macOS reaches /tmp and $TMPDIR through symlinks, so Pi and Pilish can spell
+one file or directory differently across resume and reload."
+  (let* ((real (file-name-as-directory
+                (file-truename (make-temp-file "pilish-identity-" t))))
+         (link (file-name-as-directory
+                (concat (directory-file-name real) "-link")))
+         (seen nil))
+    (make-symbolic-link (directory-file-name real) (directory-file-name link))
+    (unwind-protect
+        (with-temp-buffer
+          (pilish-chat-mode)
+          (pilish--set-chat-session-identity link)
+          (let ((pilish-session-identity-functions
+                 (list (lambda (_buffer &rest identity) (push identity seen))))
+                (state (lambda (dir file)
+                         (pilish--apply-state-response
+                          (current-buffer)
+                          `(:success t
+                            :data (:sessionFile ,(expand-file-name file dir)))))))
+            (funcall state link "a.jsonl")
+            (pilish--set-chat-session-identity real)
+            (funcall state real "a.jsonl")
+            ;; Observers keep the first announced spelling.
+            (should (equal seen (list (list (expand-file-name "a.jsonl" link)
+                                            link (buffer-name)))))
+            (funcall state real "b.jsonl")
+            (should (equal (car seen) (list (expand-file-name "b.jsonl" real)
+                                            real (buffer-name))))
+            (should (= (length seen) 2))))
+      (delete-file (directory-file-name link))
+      (delete-directory real t))))
 
 ;;; Input Window Height (integer and float ratio)
 
