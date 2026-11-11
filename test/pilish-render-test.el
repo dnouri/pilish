@@ -8748,6 +8748,53 @@ since we don't display them locally. Let pi's message_start handle it."
       (should (equal pilish--extension-status '(("git" . "synced"))))
       (should (string-match-p "Broken consumer" (car warnings))))))
 
+(ert-deftest pilish-test-extension-status-function-killing-chat-stops-notification ()
+  "A function that kills the chat is named once; later functions are skipped."
+  (let (warnings calls)
+    (cl-letf (((symbol-function 'display-warning)
+               (lambda (_type message &rest _) (push message warnings)))
+              ((default-value 'pilish-extension-status-functions)
+               (list (lambda (&rest _) (push 'global calls)))))
+      ;; Setting a status: buffer-local functions, then global ones via t.
+      (let ((chat (generate-new-buffer " *chat*")))
+        (cl-letf (((symbol-function 'pilish-test--status-killer)
+                   (lambda (_c _k _t) (push 'killer calls) (kill-buffer chat)))
+                  ((symbol-function 'pilish-test--status-witness)
+                   (lambda (_c _k _t) (push 'witness calls))))
+          (with-current-buffer chat
+            (pilish-chat-mode)
+            (add-hook 'pilish-extension-status-functions
+                      'pilish-test--status-witness nil t)
+            (pilish--set-extension-status "k" "v")
+            (should (equal (reverse calls) '(witness global)))
+            (setq calls nil)
+            (add-hook 'pilish-extension-status-functions
+                      'pilish-test--status-killer nil t)
+            (let ((debug-on-error nil))
+              (pilish--set-extension-status "k" "w"))))
+        (should-not (buffer-live-p chat))
+        (should (equal calls '(killer)))
+        (should (equal warnings
+                       '("Extension status function pilish-test--status-killer \
+killed  *chat*; later functions skipped"))))
+      ;; Clearing several statuses stops at the first key whose function kills.
+      (setq warnings nil calls nil)
+      (let ((chat (generate-new-buffer " *chat*"))
+            (other (generate-new-buffer " *other*")))
+        (unwind-protect
+            (with-current-buffer chat
+              (pilish-chat-mode)
+              (setq pilish--extension-status '(("a" . "1") ("b" . "2")))
+              (setq-local pilish-extension-status-functions
+                          (list (lambda (buffer key _text)
+                                  (push (cons (buffer-name buffer) key) calls)
+                                  (set-buffer other)
+                                  (kill-buffer buffer))))
+              (pilish--clear-extension-statuses))
+          (kill-buffer other))
+        (should (equal calls '((" *chat*" . "a"))))
+        (should (= (length warnings) 1))))))
+
 (ert-deftest pilish-test-extension-ui-set-working-message ()
   "extension_ui_request setWorkingMessage stores working text."
   (with-temp-buffer

@@ -327,6 +327,11 @@ still mock the RPC boundary, so the process is never used for I/O."
           (setq pilish--activity-phase "idle" pilish--followup-queue '("waiting"))
           (should (pilish-session-busy-p input))
           (setq pilish--followup-queue nil)
+          ;; An observed empty backend queue is idle, not queued work.
+          (process-put proc 'pilish-queue-snapshot '(:followUp [] :steering []))
+          (should-not (pilish-session-busy-p input))
+          (process-put proc 'pilish-queue-snapshot '(:followUp [] :steering ["steer"]))
+          (should (pilish-session-busy-p input))
           (process-put proc 'pilish-queue-snapshot '(:followUp ["backend"] :steering []))
           (should (pilish-session-busy-p input))
           (delete-process proc)
@@ -351,12 +356,12 @@ still mock the RPC boundary, so the process is never used for I/O."
             (setq default-directory "/tmp/"))
           (should (equal (pilish-session-directory input) root))
           (should (pilish-session-exists-p root "feature"))
-          ;; A lone input still reserves the default session's buffer name.
+          ;; An input without a live chat is not an inspectable session.
           (with-temp-buffer
             (rename-buffer (pilish--buffer-name :input root))
             (pilish-input-mode)
-            (should (pilish-session-exists-p root)))
-          (should-not (pilish-session-exists-p root)))
+            (should-not (pilish-session-chat-buffer (current-buffer)))
+            (should-not (pilish-session-exists-p root))))
       (pilish-test--kill-live-buffers input chat)
       (delete-directory root t))))
 
@@ -420,6 +425,45 @@ still mock the RPC boundary, so the process is never used for I/O."
               (pilish--set-extension-status "git" text)))
           (should (= (length seen) 2)))
       (pilish-test--kill-live-buffers input chat))))
+
+(ert-deftest pilish-test-session-accessors-copy-long-deep-and-circular-data ()
+  "Copies of long, deep, shared and circular data complete and stay independent."
+  (let* ((long (make-list 100000 'x))
+         (deep (let ((value "bottom"))
+                 (dotimes (_ 100000) (setq value (list value)))
+                 value))
+         (cycle (list (copy-sequence "a") (copy-sequence "b")))
+         (shared (copy-sequence "shared"))
+         (key (list (copy-sequence "key")))
+         (table (make-hash-table :test #'equal))
+         (text (propertize "status" 'data (list long cycle (vector shared shared) table))))
+    (setcdr (cdr cycle) cycle)
+    (puthash key deep table)
+    (with-temp-buffer
+      (pilish-chat-mode)
+      (pilish--set-extension-status "k" text)
+      (let* ((copy (pilish-session-extension-status nil "k"))
+             (data (get-text-property 0 'data copy)))
+        (should (equal copy "status"))
+        ;; Long lists keep their length.
+        (should (= (length (nth 0 data)) 100000))
+        (should-not (eq (nth 0 data) long))
+        ;; Cycles stay cycles of independent strings.
+        (let ((copied-cycle (nth 1 data)))
+          (should (eq (cddr copied-cycle) copied-cycle))
+          (should (equal (car copied-cycle) "a"))
+          (aset (car copied-cycle) 0 ?X)
+          (should (equal (car cycle) "a")))
+        ;; Shared elements stay shared within the copy only.
+        (let ((vector (nth 2 data)))
+          (should (eq (aref vector 0) (aref vector 1)))
+          (should-not (eq (aref vector 0) shared)))
+        ;; Hash keys are looked up by their completed copies; depth is unbounded.
+        (let ((copied-deep (gethash '("key") (nth 3 data))))
+          (should copied-deep)
+          (should-not (eq copied-deep deep))
+          (dotimes (_ 100000) (setq copied-deep (car copied-deep)))
+          (should (equal copied-deep "bottom")))))))
 
 (ert-deftest pilish-test-session-accessors-running-tools-use-live-registry ()
   "Live tool IDs are copied; finished and history blocks do not count."

@@ -1549,7 +1549,8 @@ The same buffer argument works with =pilish-session-directory=, =-name=
 =-context-usage=, =-queued-prompts=, =-running-tools=,
 =-extension-status= and =-busy-p=.  These report the latest observed state
 without RPC or disk reads.  Data results are independent copies, including
-nested strings, lists, vectors and hash tables.  Metadata and queue strings
+nested strings, lists, vectors and hash tables of any length or depth;
+shared and circular structure is copied as such.  Metadata and queue strings
 omit text properties; extension-status strings retain them and copy their
 nested data values.  Buffer and process accessors return the actual handles,
 not copies.  Queue order matches the header:
@@ -1563,11 +1564,14 @@ completed, cooled and saved-history blocks do not count.  =-busy-p= uses an
 observed-work policy: pending prompts, session/model changes, compaction,
 non-idle activity, known queues or unfinished tools count.  It is broader
 than the internal send-readiness predicate and is not a fresh backend query.
-Unknown work is not proof of idleness.
+Unknown work is not proof of idleness.  It copies nothing, so a mode line
+or tab bar can call it on every refresh.
 
 =pilish-session-exists-p= takes a directory and optional session name
-(nil for the default session), and checks for existing buffers even when
-Pi is stopped.  It does not resolve directory symlinks.
+(nil for the default session) and checks for the session's chat buffer,
+even when Pi is stopped; every existing session can be inspected with the
+accessors above.  It does not resolve directory symlinks, and it is
+autoloaded, so it can be called before Pilish is loaded.
 
 #+begin_src emacs-lisp
 (let ((chat (pilish-session-chat-buffer)))
@@ -1593,6 +1597,13 @@ or nil when the status was cleared.  Setting a status to its current
 text and properties calls nothing.  Starting a new session clears every
 status and calls the functions once per cleared key.  The functions run after the
 change, so the accessor already returns =TEXT=.
+
+The functions run synchronously while Pilish handles Pi's events, usually
+from its process filter.  Return promptly, and do not wait for Pi or
+submit prompts, start, reload or switch sessions from a function; use a
+timer for such work.  An error in one function becomes a warning and the
+others still run.  A function that kills =CHAT-BUFFER= ends the
+notification with a warning naming it.
 
 =(pilish-session-extension-status BUFFER KEY)= returns one status's
 text; without =KEY= it returns an alist of all statuses in header-line

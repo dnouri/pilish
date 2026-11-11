@@ -219,13 +219,8 @@ BUFFER follows `pilish-session-chat-buffer'.  Order matches the header:
 Pi's reported follow-ups, local follow-ups in FIFO order, then reported
 steering.  Unreported Pi queues are not included."
   (when-let* ((chat (pilish-session-chat-buffer buffer)))
-    (with-current-buffer chat
-      (let ((snapshot (pilish--process-queue-snapshot pilish--process)))
-        (pilish--copy-session-value
-         (append (plist-get snapshot :followUp)
-                 (pilish--followups-in-fifo-order)
-                 (plist-get snapshot :steering)
-                 nil))))))
+    (pilish--copy-session-value
+     (apply #'append (pilish--queued-prompt-groups chat)))))
 
 (defun pilish-session-running-tools (&optional buffer)
   "Return a copy of BUFFER's known unfinished root tool call IDs.
@@ -246,29 +241,23 @@ unobserved backend tool is unknown, not necessarily absent."
   "Return non-nil when BUFFER's session has active or known queued work.
 BUFFER follows `pilish-session-chat-buffer'.  This observed-work policy
 includes pending prompts, model/session changes, compaction, non-idle
-activity and unfinished
-tools, not just streamed output.  It is broader than the send-readiness
-predicate: known queues also count.  No RPC or fresh Pi query is made."
+activity, known queues and unfinished tools, not just streamed output.
+It is broader than the send-readiness predicate.  No RPC or fresh Pi
+query is made, and nothing is copied, so frequent polling is cheap."
   (when-let* ((chat (pilish-session-chat-buffer buffer)))
-    (and (or (pilish--session-busy-p chat)
-             (not (member (buffer-local-value 'pilish--activity-phase chat)
-                          '(nil "idle")))
-             (pilish-session-queued-prompts chat)
-             (pilish-session-running-tools chat))
-         t)))
+    (and (pilish--session-observed-work-p chat) t)))
 
+;;;###autoload
 (defun pilish-session-exists-p (directory &optional name)
-  "Return non-nil when DIRECTORY's session NAME has chat or input buffers.
+  "Return non-nil when DIRECTORY's session NAME has a chat buffer.
 NAME nil means the directory's default session.  Stopped sessions count;
-no process is started.  DIRECTORY is expanded with a trailing slash, not
-resolved through symlinks, matching Pilish's normal session lookup."
-  (let* ((directory (pilish--normalize-directory directory))
-         (input (get-buffer (pilish--buffer-name :input directory name))))
-    (and (or (pilish--find-session directory name)
-             (and input
-                  (with-current-buffer input
-                    (derived-mode-p 'pilish-input-mode))))
-         t)))
+no process is started.  The chat is found by its session identity, so a
+chat renamed or visiting a transcript still counts; an input buffer
+without a live chat does not.  Every session that exists can be inspected
+with the other session accessors.  DIRECTORY is expanded with a trailing
+slash, not resolved through symlinks, matching Pilish's normal lookup."
+  (and (pilish--find-session (pilish--normalize-directory directory) name)
+       t))
 
 ;;;; Main Entry Point
 

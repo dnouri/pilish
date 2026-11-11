@@ -1911,6 +1911,30 @@ Follow-ups are processed in FIFO order: first pushed, first sent."
   "Return queued follow-up messages in the order they would be sent."
   (reverse pilish--followup-queue))
 
+(defun pilish--queued-prompt-groups (&optional chat-buf)
+  "Return CHAT-BUF's known queued prompts as (FOLLOW-UPS STEERING).
+When CHAT-BUF is nil, inspect the current buffer.  FOLLOW-UPS are Pi's
+reported follow-ups, then local follow-ups in FIFO order; STEERING is
+Pi's reported steering.  An unavailable backend snapshot contributes no
+entries, not a claim that its queues are empty.  The texts are the
+session's own strings; copy them before handing them out."
+  (with-current-buffer (or chat-buf (current-buffer))
+    (let ((snapshot (pilish--process-queue-snapshot pilish--process)))
+      (list (append (plist-get snapshot :followUp)
+                    (pilish--followups-in-fifo-order))
+            (append (plist-get snapshot :steering) nil)))))
+
+(defun pilish--session-queued-p (&optional chat-buf)
+  "Return non-nil when CHAT-BUF has a known queued prompt.
+When CHAT-BUF is nil, inspect the current buffer.  Like
+`pilish--queued-prompt-groups', but without allocating."
+  (with-current-buffer (or chat-buf (current-buffer))
+    (let ((snapshot (pilish--process-queue-snapshot pilish--process)))
+      (or pilish--followup-queue
+          ;; Pi reports its queues as JSON arrays, decoded as vectors.
+          (> (length (plist-get snapshot :followUp)) 0)
+          (> (length (plist-get snapshot :steering)) 0)))))
+
 (defun pilish--restore-input-text (text &optional prompt-image)
   "Restore TEXT and optional PROMPT-IMAGE to the linked input buffer.
 Recovered text is older than any draft currently in the input buffer, so it is
@@ -2005,6 +2029,19 @@ transitions, prompt requests and correlated manual compaction requests."
         (pilish--prompt-start-wait-active-p)
         (pilish--command-pending-p (pilish--get-process) "compact"))))
 
+(defun pilish--session-observed-work-p (&optional chat-buf)
+  "Return non-nil when CHAT-BUF has active, queued or unfinished work.
+When CHAT-BUF is nil, inspect the current buffer.  This extends the
+send-readiness predicate `pilish--session-busy-p' with a non-idle activity
+phase, known queued prompts and unfinished root tools.  It allocates
+nothing, so status displays can poll it."
+  (with-current-buffer (or chat-buf (current-buffer))
+    (or (pilish--session-busy-p)
+        (not (member pilish--activity-phase '(nil "idle")))
+        (pilish--session-queued-p)
+        (and pilish--live-tool-blocks
+             (> (hash-table-count pilish--live-tool-blocks) 0)))))
+
 (defun pilish--session-steerable-p (&optional chat-buf)
   "Return non-nil when CHAT-BUF has a run that can receive backend steering.
 When CHAT-BUF is nil, inspect the current buffer.  An unstarted local prompt
@@ -2057,34 +2094,60 @@ started and no window is displayed or selected."
 (defun pilish--copy-session-value (value &optional properties)
   "Copy session data VALUE, including nested strings, vectors and hash tables.
 String properties are omitted unless PROPERTIES is non-nil; in that case
-their data values are copied too, as needed for extension status faces."
-  (cond
-   ((stringp value)
-    (let ((copy (substring-no-properties value))
-          (pos 0))
-      (when properties
-        (while (< pos (length value))
-          (let ((end (next-property-change pos value (length value))))
-            (set-text-properties
-             pos end (pilish--copy-session-value
-                      (text-properties-at pos value) t) copy)
-            (setq pos end))))
-      copy))
-   ((consp value) (cons (pilish--copy-session-value (car value) properties)
-                       (pilish--copy-session-value (cdr value) properties)))
-   ((vectorp value)
-    (apply #'vector (mapcar (lambda (item)
-                             (pilish--copy-session-value item properties))
-                           value)))
-   ((hash-table-p value)
-    (let ((copy (copy-hash-table value)))
-      (clrhash copy)
-      (maphash (lambda (key item)
-                 (puthash (pilish--copy-session-value key properties)
-                          (pilish--copy-session-value item properties) copy))
-               value)
-      copy))
-   (t value)))
+their data values are copied too, as needed for extension status faces.
+The copy keeps VALUE's shared and circular structure.  It uses a work
+list instead of recursion, so long, deeply nested and circular data is
+copied completely without reaching `max-lisp-eval-depth'."
+  (let ((copies (make-hash-table :test #'eq))
+        ;; (ORIGINAL . COPY) containers whose contents are not copied yet.
+        (pending nil)
+        ;; Hash entries and string properties wait until every copy is
+        ;; complete: a key's hash and a property list must not change later.
+        (entries nil)
+        (string-properties nil))
+    (cl-flet ((copy (object)
+                (or (gethash object copies)
+                    (let ((new (cond
+                                ((stringp object) (substring-no-properties object))
+                                ((consp object) (cons nil nil))
+                                ((vectorp object) (make-vector (length object) nil))
+                                ((hash-table-p object)
+                                 (let ((table (copy-hash-table object)))
+                                   (clrhash table)
+                                   table)))))
+                      (if (null new)
+                          object
+                        (puthash object new copies)
+                        (unless (and (stringp object) (not properties))
+                          (push (cons object new) pending))
+                        new)))))
+      (let ((result (copy value)))
+        (while pending
+          (pcase-let ((`(,original . ,new) (pop pending)))
+            (cond
+             ((stringp original)
+              (let ((pos 0)
+                    (end (length original)))
+                (while (< pos end)
+                  (let ((next (next-property-change pos original end)))
+                    (push (list pos next (copy (text-properties-at pos original)) new)
+                          string-properties)
+                    (setq pos next)))))
+             ((consp original)
+              (setcar new (copy (car original)))
+              (setcdr new (copy (cdr original))))
+             ((vectorp original)
+              (dotimes (i (length original))
+                (aset new i (copy (aref original i)))))
+             (t
+              (maphash (lambda (key item)
+                         (push (list (copy key) (copy item) new) entries))
+                       original)))))
+        (pcase-dolist (`(,key ,item ,table) (nreverse entries))
+          (puthash key item table))
+        (pcase-dolist (`(,start ,end ,plist ,string) string-properties)
+          (set-text-properties start end plist string))
+        result))))
 
 (defvar-local pilish--extension-status nil
   "Alist of extension status messages for header-line display.
@@ -2108,7 +2171,17 @@ The functions run in CHAT-BUFFER after the change is complete, so
 `pilish-session-extension-status' already returns TEXT.  KEY and TEXT
 are independent copies for each function, including TEXT's properties and
 nested property values.  An error in one function is reported as a
-warning and does not stop the others.  This is an abnormal hook."
+warning and does not stop the others.  A function that kills CHAT-BUFFER
+ends the notification: the remaining functions are skipped with one
+warning naming that function.  This is an abnormal hook; buffer-local
+functions run in CHAT-BUFFER, followed by the global ones when the local
+value includes t, as `add-hook' arranges.
+
+The functions run synchronously while Pilish handles Pi's events, usually
+from the process filter.  They should return promptly and must not wait
+for Pi or re-enter the session protocol, for example by submitting
+prompts or starting, reloading or switching sessions; defer such work
+with a timer."
   :type 'hook
   :group 'pilish)
 
@@ -2127,19 +2200,31 @@ values are copied too.  Changing returned data cannot change the session.
 (defun pilish--run-extension-status-functions (key text)
   "Run `pilish-extension-status-functions' for KEY and TEXT in this buffer.
 User functions are isolated so a customization error cannot break event
-handling."
-  (let ((chat-buffer (current-buffer)))
-    (dolist (fn pilish-extension-status-functions)
-      (condition-case-unless-debug err
-          (with-current-buffer chat-buffer
-            (funcall fn chat-buffer (pilish--copy-session-value key)
-                     (pilish--copy-session-value text t)))
-        (error
+handling.  Return non-nil when a function killed this buffer; the
+remaining functions are then skipped."
+  (let ((chat-buffer (current-buffer))
+        (chat-name (buffer-name)))
+    (run-hook-wrapped
+     'pilish-extension-status-functions
+     (lambda (fn)
+       (condition-case-unless-debug err
+           (with-current-buffer chat-buffer
+             (funcall fn chat-buffer (pilish--copy-session-value key)
+                      (pilish--copy-session-value text t)))
+         (error
+          (display-warning
+           'pilish
+           (format "Extension status function %S failed: %s"
+                   fn (error-message-string err))
+           :error)))
+       ;; A killed chat cannot host later functions; stop at its killer.
+       (unless (buffer-live-p chat-buffer)
          (display-warning
           'pilish
-          (format "Extension status function %S failed: %s"
-                  fn (error-message-string err))
-          :error))))))
+          (format "Extension status function %S killed %s; later functions skipped"
+                  fn chat-name)
+          :error)
+         t)))))
 
 (defun pilish--set-extension-status (key text)
   "Set extension status KEY to TEXT in the current chat buffer.
@@ -2162,8 +2247,8 @@ header-line order, after all statuses are cleared."
     (setq pilish--extension-status nil)
     (when keys
       (force-mode-line-update t))
-    (dolist (key keys)
-      (pilish--run-extension-status-functions key nil))))
+    (while (and keys (not (pilish--run-extension-status-functions
+                           (pop keys) nil))))))
 
 (defvar-local pilish--held-chat-notices nil
   "Chat notices waiting for streaming or compaction to end, newest first.")
@@ -3588,11 +3673,8 @@ An unavailable backend snapshot contributes no entries, not a claim that
 its queues are empty.  Follow-ups retain backend order then FIFO order."
   (when (buffer-live-p chat-buffer)
     (with-current-buffer chat-buffer
-      (let* ((snapshot (pilish--process-queue-snapshot pilish--process))
-             (followups (append (plist-get snapshot :followUp)
-                                (pilish--followups-in-fifo-order)))
-             (steering (plist-get snapshot :steering))
-             (count (+ (length followups) (length steering))))
+      (pcase-let* ((`(,followups ,steering) (pilish--queued-prompt-groups))
+                   (count (+ (length followups) (length steering))))
         (when (> count 0)
           (let ((help (mapconcat
                        #'identity
