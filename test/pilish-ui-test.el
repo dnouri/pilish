@@ -3818,6 +3818,286 @@ Pi's isStreaming includes post-run processing, not just the low-level loop."
             (should (null pilish--unsupported-extension-ui-methods-warned))))
       (kill-buffer chat-buf))))
 
+;;; Session identity observers
+
+(ert-deftest pilish-test-session-identity-initial-and-changed-state ()
+  "Notify on first state and changed files, but not failure or unchanged state."
+  (with-temp-buffer
+    (pilish-chat-mode)
+    (let* ((chat (current-buffer))
+           (response '(:success t :data (:sessionFile "/tmp/initial.jsonl")))
+           (seen nil)
+           (pilish-session-identity-functions
+            (list (lambda (buffer)
+                    (should (eq buffer chat))
+                    (push (plist-get pilish--state :session-file) seen)))))
+      (pilish--apply-state-response chat '(:success :false))
+      (should-not seen)
+      (pilish--apply-state-response chat response)
+      (should (equal seen '("/tmp/initial.jsonl")))
+      (pilish--apply-state-response chat response)
+      (should (= (length seen) 1))
+      (pilish--apply-state-response
+       chat '(:success t :data (:sessionFile "/tmp/forked.jsonl")))
+      (should (equal seen '("/tmp/forked.jsonl" "/tmp/initial.jsonl"))))))
+
+(ert-deftest pilish-test-session-identity-retarget-observes-linked-pair ()
+  "Retarget notifies only after both buffers have coherent names and directories."
+  (let ((chat (generate-new-buffer " *identity-chat*"))
+        (input (generate-new-buffer " *identity-input*"))
+        (seen nil))
+    (unwind-protect
+        (with-current-buffer chat
+          (pilish-chat-mode)
+          (pilish--set-chat-session-identity "/tmp/identity-before/")
+          (pilish--set-input-buffer input)
+          (let ((pilish-session-identity-functions
+                 (list (lambda (buffer)
+                         (should (eq buffer chat))
+                         (should (equal (buffer-name)
+                                        (pilish--buffer-name
+                                         :chat "/tmp/identity-after/")))
+                         (with-current-buffer input
+                           (should (equal default-directory
+                                          "/tmp/identity-after/"))
+                           (should (equal (buffer-name)
+                                          (pilish--buffer-name
+                                           :input "/tmp/identity-after/")))
+                           (should (eq pilish--chat-buffer chat)))
+                         (push buffer seen)))))
+            (pilish--retarget-session-buffers "/tmp/identity-after/")
+            (pilish--retarget-session-buffers "/tmp/identity-after/")
+            (should (equal seen (list chat)))))
+      (kill-buffer input)
+      (kill-buffer chat))))
+
+(ert-deftest pilish-test-session-identity-transition-coalesces-updates ()
+  "A resume that changes file, directory and name announces only its final identity."
+  (with-temp-buffer
+    (pilish-chat-mode)
+    (pilish--set-chat-session-identity "/tmp/identity-old/")
+    (pilish--apply-state-response
+     (current-buffer) '(:success t :data (:sessionFile "/tmp/old.jsonl")))
+    (let* ((chat (current-buffer))
+           (seen nil)
+           (pilish-session-identity-functions
+            (list (lambda (buffer)
+                    (should (eq buffer chat))
+                    (push (list (plist-get pilish--state :session-file)
+                                (pilish--chat-session-directory)
+                                (buffer-name)) seen))))
+           (generation (pilish--begin-session-transition)))
+      (pilish--retarget-session-buffers "/tmp/identity-new/")
+      (pilish--apply-state-response
+       chat '(:success t :data (:sessionFile "/tmp/new.jsonl")))
+      (should-not seen)
+      ;; A stale completion must neither publish partial state nor end the guard.
+      (pilish--finish-session-transition (1- generation))
+      (should-not seen)
+      (pilish--finish-session-transition generation)
+      (should (equal seen
+                     (list (list "/tmp/new.jsonl" "/tmp/identity-new/"
+                                 (pilish--buffer-name
+                                  :chat "/tmp/identity-new/")))))
+      (pilish--finish-session-transition generation)
+      (should (= (length seen) 1)))))
+
+(ert-deftest pilish-test-session-identity-stale-thinking-refresh-cannot-confirm-resume ()
+  "An old thinking query cannot confirm a resume whose own state refresh fails."
+  (pilish-test-with-rpc-session (chat _input proc commands)
+    (with-current-buffer chat
+      (pilish--set-chat-session-identity "/tmp/identity-old/")
+      (pilish--apply-state-response
+       chat '(:success t :data (:sessionFile "/tmp/old.jsonl")))
+      (let ((seen nil)
+            (pilish-session-identity-functions nil))
+        (setq pilish-session-identity-functions
+              (list (lambda (buffer)
+                      (push (list (plist-get (buffer-local-value
+                                               'pilish--state buffer)
+                                              :session-file)
+                                  (pilish--chat-session-directory buffer)
+                                  (buffer-name buffer)) seen))))
+        (pilish--refresh-thinking-level-state proc chat)
+        (let* ((stale-request (car commands))
+               (generation (pilish--begin-session-transition proc)))
+          (pilish--retarget-session-buffers "/tmp/identity-new/")
+          (pilish--refresh-session-state proc chat nil generation)
+          (let ((current-request (car commands)))
+            ;; The old query was issued before the switch, even though its
+            ;; successful response arrives during the new transition.
+            (pilish--dispatch-response
+             proc (list :type "response" :command "get_state"
+                        :id (plist-get stale-request :id) :success t
+                        :data '(:sessionFile "/tmp/old.jsonl"
+                                :thinkingLevel "stale")))
+            (should pilish--session-identity-state-pending)
+            (should-not (equal (plist-get pilish--state :thinking-level) "stale"))
+            (pilish--dispatch-response
+             proc (list :type "response" :command "get_state"
+                        :id (plist-get current-request :id) :success :false
+                        :error "State refresh failed"))
+            (pilish--finish-session-transition generation)
+            (should-not seen))
+          ;; A fresh query issued after the failed transition can confirm its
+          ;; current identity; repeated authoritative state is a no-op.
+          (dotimes (_ 2)
+            (pilish--refresh-thinking-level-state proc chat)
+            (pilish--dispatch-response
+             proc (list :type "response" :command "get_state"
+                        :id (plist-get (car commands) :id) :success t
+                        :data '(:sessionFile "/tmp/new.jsonl"
+                                :thinkingLevel "high"))))
+          (should (equal seen
+                         (list (list "/tmp/new.jsonl" "/tmp/identity-new/"
+                                     (pilish--buffer-name
+                                      :chat "/tmp/identity-new/"))))))))))
+
+(ert-deftest pilish-test-session-identity-stale-startup-refresh-cannot-confirm-resume ()
+  "Startup's delayed state reply is not authoritative for a newer session switch."
+  (pilish-test-with-rpc-session (chat input proc commands)
+    (let ((seen nil)
+          (pilish-session-identity-functions nil)
+          (name "identity-startup-stale"))
+      (setq pilish-session-identity-functions
+            (list (lambda (buffer) (push buffer seen))))
+      (with-current-buffer chat
+        (pilish--set-chat-session-identity "/tmp/" name)
+        (setq pilish--process nil))
+      (with-current-buffer input
+        (rename-buffer (pilish--buffer-name :input "/tmp/" name)))
+      (cl-letf (((symbol-function 'pilish--check-dependencies) #'ignore)
+                ((symbol-function 'pilish--start-process) (lambda (_dir) proc))
+                ((symbol-function 'pilish--fetch-commands) #'ignore))
+        (should (eq (pilish--setup-session "/tmp/" name) chat)))
+      (let ((startup-request (car commands)))
+        (should (equal (plist-get startup-request :type) "get_state"))
+        (with-current-buffer chat
+          (let ((generation (pilish--begin-session-transition proc)))
+            (pilish--retarget-session-buffers "/tmp/identity-startup-resume/")
+            (pilish--dispatch-response
+             proc (list :type "response" :command "get_state"
+                        :id (plist-get startup-request :id) :success t
+                        :data '(:sessionFile "/tmp/startup-old.jsonl")))
+            (should pilish--session-identity-state-pending)
+            (should-not (plist-get pilish--state :session-file))
+            (pilish--apply-state-response chat '(:success :false))
+            (pilish--finish-session-transition generation)
+            (should-not seen)))))))
+
+(ert-deftest pilish-test-session-identity-thinking-refresh-defers-to-active-transition ()
+  "A query started before switch acknowledgment must not race its owned refresh."
+  (pilish-test-with-rpc-session (chat _input proc commands)
+    (with-current-buffer chat
+      (pilish--begin-session-transition proc)
+      (pilish--refresh-thinking-level-state proc chat)
+      (should-not commands)
+      (should pilish--session-identity-state-pending))))
+
+(ert-deftest pilish-test-session-identity-failed-refresh-keeps-unconfirmed-state-private ()
+  "A failed resume refresh never announces new names alongside the old saved file."
+  (with-temp-buffer
+    (pilish-chat-mode)
+    (pilish--set-chat-session-identity "/tmp/identity-old/")
+    (pilish--apply-state-response
+     (current-buffer) '(:success t :data (:sessionFile "/tmp/old.jsonl")))
+    (let* ((seen nil)
+           (pilish-session-identity-functions
+            (list (lambda (_buffer)
+                    (push (plist-get pilish--state :session-file) seen))))
+           (generation (pilish--begin-session-transition)))
+      (pilish--retarget-session-buffers "/tmp/identity-unconfirmed/")
+      (pilish--apply-state-response (current-buffer) '(:success :false))
+      (pilish--finish-session-transition generation)
+      (should-not seen)
+      (pilish--apply-state-response
+       (current-buffer) '(:success t :data (:sessionFile "/tmp/confirmed.jsonl")))
+      (should (equal seen '("/tmp/confirmed.jsonl"))))))
+
+(ert-deftest pilish-test-session-identity-fork-notifies-after-state-and-history ()
+  "The real fork lifecycle publishes one identity after its two refreshes finish."
+  (pilish-test-with-rpc-session (chat _input proc commands)
+    (with-current-buffer chat
+      (pilish--apply-state-response
+       chat '(:success t :data (:sessionFile "/tmp/original.jsonl")))
+      (let ((seen nil)
+            (pilish-session-identity-functions nil))
+        (setq pilish-session-identity-functions
+              (list (lambda (buffer)
+                      (push (plist-get (buffer-local-value 'pilish--state buffer)
+                                       :session-file) seen))))
+        (cl-letf (((symbol-function 'pilish--update-session-name-from-file) #'ignore))
+          (pilish--execute-fork proc "user-1")
+          (pilish--dispatch-response
+           proc (list :type "response" :command "fork"
+                      :id (plist-get (car commands) :id)
+                      :success t :data '(:text "Forked prompt")))
+          (let ((state-request (cl-find "get_state" commands
+                                        :key (lambda (cmd) (plist-get cmd :type))
+                                        :test #'equal))
+                (history-request (cl-find "get_messages" commands
+                                          :key (lambda (cmd) (plist-get cmd :type))
+                                          :test #'equal)))
+            (should state-request)
+            (should history-request)
+            (pilish--dispatch-response
+             proc (list :type "response" :command "get_state"
+                        :id (plist-get state-request :id)
+                        :success t :data '(:sessionFile "/tmp/forked.jsonl")))
+            (should-not seen)
+            (pilish--dispatch-response
+             proc (list :type "response" :command "get_messages"
+                        :id (plist-get history-request :id)
+                        :success t :data '(:messages [])))
+            (should (equal seen '("/tmp/forked.jsonl")))))))))
+
+(ert-deftest pilish-test-session-identity-observes-rename-without-process ()
+  "Stopped chats and absent inputs do not prevent notification on buffer rename."
+  (with-temp-buffer
+    (pilish-chat-mode)
+    (let ((response '(:success t :data (:sessionFile "/tmp/same.jsonl")))
+          (seen nil))
+      (pilish--apply-state-response (current-buffer) response)
+      (let ((pilish-session-identity-functions
+             (list (lambda (buffer) (push (buffer-name buffer) seen)))))
+        (rename-buffer " *identity-renamed*" t)
+        (pilish--apply-state-response (current-buffer) response)
+        (pilish--apply-state-response (current-buffer) response)
+        (should (equal seen (list (buffer-name))))))))
+
+(ert-deftest pilish-test-session-identity-observer-errors-are-isolated ()
+  "A failed observer warns once and cannot block later observers or state updates."
+  (with-temp-buffer
+    (pilish-chat-mode)
+    (let* ((warnings nil)
+           (seen nil)
+           (debug-on-error nil)
+           (pilish-session-identity-functions
+            (list (lambda (_buffer) (error "Identity observer failed"))
+                  (lambda (buffer) (push buffer seen)))))
+      (cl-letf (((symbol-function 'display-warning)
+                 (lambda (type message level &rest _)
+                   (should (eq type 'pilish))
+                   (should (eq level :error))
+                   (push message warnings))))
+        (dotimes (_ 2)
+          (pilish--apply-state-response
+           (current-buffer) '(:success t :data (:sessionFile "/tmp/error.jsonl"))))
+        (should (equal seen (list (current-buffer))))
+        (should (= (length warnings) 1))
+        (should (string-match-p "Identity observer failed" (car warnings)))))))
+
+(ert-deftest pilish-test-session-identity-ignores-missing-chat ()
+  "Late state responses for a killed chat leave observers untouched."
+  (let ((chat (generate-new-buffer " *identity-dead*"))
+        (seen nil))
+    (kill-buffer chat)
+    (let ((pilish-session-identity-functions
+           (list (lambda (buffer) (push buffer seen)))))
+      (pilish--apply-state-response
+       chat '(:success t :data (:sessionFile "/tmp/late.jsonl")))
+      (should-not seen))))
+
 ;;; Input Window Height (integer and float ratio)
 
 (ert-deftest pilish-test-input-height-integer-returns-configured-value ()

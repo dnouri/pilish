@@ -1533,6 +1533,33 @@ restore a nested saved-conversation tree after reload unless its producer
 persists the declaration in another supported field.  It never infers the
 missing references from run metadata, output, or the pi-submarine manifest.
 
+** Session identity hooks
+
+Add observers to =pilish-session-identity-functions= to refresh your own
+session index or buffer list.  Each function receives the chat buffer
+when its saved session file, stable directory or buffer name changes.
+The first successful state response notifies too; repeated unchanged
+responses do not.  Resume, fork and reload coalesce their state and buffer
+updates until the session transition finishes.  If its state refresh
+fails, notification waits for a successful state response so it does not
+combine new buffer names with a stale saved file.  Earlier background
+state replies cannot confirm a newer transition.  A manual buffer rename
+(including saving a transcript with =write-file=) is observed on the next
+state refresh or retarget, not immediately.
+
+#+begin_src emacs-lisp
+(defun my-pi-identity-changed (chat)
+  (message "Pi session identity changed: %s" (buffer-name chat)))
+
+(add-hook 'pilish-session-identity-functions #'my-pi-identity-changed)
+#+end_src
+
+The process may be stopped and the input buffer may be missing.
+Observers should not modify session identity themselves.  Errors are
+reported as warnings without skipping the remaining observers (unless
+=debug-on-error= is enabled).  With no observers, display behavior is
+unchanged.
+
 ** Activity phase hooks
 
 For custom UI changes tied to activity, add functions to
