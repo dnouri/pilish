@@ -217,6 +217,43 @@ Also verifies that the new session-file is stored in state for reload to work."
       (when (buffer-live-p chat-buf)
         (kill-buffer chat-buf)))))
 
+(ert-deftest pilish-test-new-session-reports-cleared-extension-statuses ()
+  "A new session clears each status and reports it after the reset is complete."
+  (pilish-test-with-rpc-session (chat _input proc commands)
+    (let (calls)
+      (pilish-test--stdout
+       proc
+       '(:type "extension_ui_request" :id "1" :method "setStatus"
+         :statusKey "git" :statusText "synced")
+       '(:type "extension_ui_request" :id "2" :method "setStatus"
+         :statusKey "plan" :statusText "plan mode"))
+      (with-current-buffer chat
+        (setq pilish--session-name "Old session")
+        (setq-local pilish-extension-status-functions
+                    (list (lambda (buffer key text)
+                            (push (list key text
+                                        (pilish-session-extension-status buffer)
+                                        (buffer-local-value
+                                         'pilish--session-name buffer))
+                                  calls))))
+        (cl-letf (((symbol-function 'message) #'ignore))
+          (pilish-new-session)
+          (let ((request (car commands)))
+            (should (equal (plist-get request :type) "new_session"))
+            (pilish--dispatch-response
+             proc (list :type "response" :id (plist-get request :id)
+                        :command "new_session" :success t
+                        :data '(:cancelled :false)))))
+        ;; Header order, every status already gone, the rest of the reset done.
+        (should (equal (reverse calls)
+                       '(("plan" nil nil nil)
+                         ("git" nil nil nil))))
+        (should-not (pilish-session-extension-status chat))
+        ;; A reset without statuses reports nothing.
+        (setq calls nil)
+        (pilish--reset-session-state)
+        (should-not calls)))))
+
 (ert-deftest pilish-test-new-session-refuses-prompt-preflight ()
   "New session cannot discard a prompt whose acceptance is unresolved."
   (with-temp-buffer

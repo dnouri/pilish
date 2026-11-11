@@ -110,6 +110,10 @@ Example:
 }
 ```
 
+Optional `statuses` first emits one `setStatus` request per entry, in order.
+An entry without `text` clears its `key`, omitting `statusText` as Pi's RPC
+mode does. `extension-status.json` sets two statuses and clears an unset one.
+
 ## `tool_stream`
 
 Emits the current delta-only lifecycle: `toolcall_start`, argument
