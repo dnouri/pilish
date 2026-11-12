@@ -737,7 +737,7 @@ The main buffers:
 | =C-c C-n=                 | chat         | New session                                 |
 | =C-c C-e=                 | chat         | Export session to HTML                      |
 | =C-c C-c=                 | chat         | Compact conversation context                |
-| =C-c C-m=                 | chat         | Select model                                |
+| =C-c C-m=                 | input, chat  | Select model                                |
 | =C-c C-t=                 | chat         | Cycle thinking level                        |
 | =C-c C-y=                 | chat         | Copy last message                           |
 
