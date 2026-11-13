@@ -2845,9 +2845,7 @@ Fontification stays out of the log."
                  (lambda (&rest args) (push (cons 'before args) ,changes)) nil t)
        (add-hook 'after-change-functions
                  (lambda (&rest args) (push (cons 'after args) ,changes)) nil t)
-       (cl-letf (((symbol-function 'pilish--font-lock-ensure-excluding-property)
-                  #'ignore))
-         ,@body))))
+       ,@body)))
 
 (ert-deftest pilish-test-compound-redraw-is-one-change ()
   "One compound rewrite is one edit for change hooks."
@@ -5421,16 +5419,14 @@ When PARTIAL-TEXT is supplied it must precede the outcome, never be erased."
           (should (= (treesit-node-end root) (point-max))))))))
 
 (ert-deftest pilish-test-replay-compound-defers-transcript-but-not-scratch-fontification ()
-  "Compound history never paints partial text; isolated shell paint still works."
+  "Compound paints leave transcript fontification to jit-lock; shell paint works."
   (with-temp-buffer
     (pilish-chat-mode)
     (let ((chat (current-buffer))
           (pilish-hot-tail-turn-count 100)
           (ensure (symbol-function 'font-lock-ensure))
           (scratch-calls 0)
-          (transcript-paints 0)
-          (compound-paints 0)
-          (redraw (symbol-function 'pilish--font-lock-ensure-excluding-property)))
+          (transcript-paints 0))
       (cl-letf (((symbol-function 'font-lock-ensure)
                  (lambda (&rest args)
                    (if (eq (current-buffer) chat)
@@ -5438,14 +5434,8 @@ When PARTIAL-TEXT is supplied it must precede the outcome, never be erased."
                          (should-not pilish--defer-history-postprocessing)
                          (cl-incf transcript-paints))
                      (cl-incf scratch-calls))
-                   (apply ensure args)))
-                ((symbol-function 'pilish--font-lock-ensure-excluding-property)
-                 (lambda (&rest args)
-                   (when pilish--defer-history-postprocessing
-                     (cl-incf compound-paints))
-                   (apply redraw args))))
+                   (apply ensure args))))
         (pilish--replay-history (current-buffer) (pilish-test--nested-history-messages))
-        (should (> compound-paints 0))
         (let ((pilish--defer-history-postprocessing t))
           (should (text-property-not-all
                    0 19 'face nil
@@ -5459,8 +5449,11 @@ When PARTIAL-TEXT is supplied it must precede the outcome, never be erased."
                         (pilish-test--all-tool-overlays))))
           (should overlay)
           (goto-char (overlay-start overlay))
-          (pilish-toggle-tool-section)
-          (should (> transcript-paints before)))))))
+          (let ((text (buffer-string)))
+            (pilish-toggle-tool-section)
+            (should-not (equal text (buffer-string))))
+          ;; Only what a window shows gets fontified, at redisplay.
+          (should (= transcript-paints before)))))))
 
 (defun pilish-test--replay-before-parser-restart (messages)
   "Run the c820396 replay body independently of the parser restart wrapper."
@@ -5471,14 +5464,7 @@ When PARTIAL-TEXT is supplied it must precede the outcome, never be erased."
       (erase-buffer)
       (pilish--with-transcript-construction
         (let ((pilish--defer-history-postprocessing t))
-          (cl-letf (((symbol-function 'pilish--font-lock-ensure-excluding-property)
-                     (lambda (start end property)
-                       (catch 'font-lock-failed
-                         (dolist (range (pilish--ranges-excluding-property start end property))
-                           (condition-case nil
-                               (font-lock-ensure (car range) (cdr range))
-                             (error (throw 'font-lock-failed nil))))))))
-            (pilish--display-history-messages messages)))
+          (pilish--display-history-messages messages))
         (goto-char (point-max))
         (unless (bolp) (insert "\n"))
         (pilish--set-message-start-marker nil)
@@ -5495,7 +5481,7 @@ When PARTIAL-TEXT is supplied it must precede the outcome, never be erased."
    (marker-position pilish--hot-tail-start)
    (cl-loop
     for property in '(face font-lock-face invisible display line-prefix wrap-prefix
-                      pilish-details pilish-no-fontify pilish-cold-tool-block
+                      pilish-details pilish-cold-tool-block
                       pilish-assistant-outcome pilish-subagent-name
                       pilish-argument-literal pilish-argument-guard pilish-tool-section
                       button action md-ts-link-help-echo md-ts-link-static-target)
@@ -5668,7 +5654,7 @@ When PARTIAL-TEXT is supplied it must precede the outcome, never be erased."
 
 (ert-deftest pilish-test-replay-failure-restores-live-parsers-and-hook-locality ()
   "Installation, render, cooling, table and seed failures keep a usable mode."
-  (dolist (phase '(install render compound cooling table seed))
+  (dolist (phase '(install render cooling table seed))
     (dolist (condition '(error quit))
       (dolist (local (if (memq phase '(render cooling)) '(t nil) '(t)))
         (with-temp-buffer
@@ -5682,7 +5668,6 @@ When PARTIAL-TEXT is supplied it must precede the outcome, never be erased."
                  (target (pcase phase
                            ('install 'treesit-parser-delete)
                            ('render 'pilish--display-history-messages)
-                           ('compound 'pilish--font-lock-ensure-excluding-property)
                            ('cooling 'pilish--cool-completed-tool-blocks-outside-hot-tail)
                            ('table 'pilish--postprocess-history-buffer)
                            ('seed 'treesit-parser-root-node)))
@@ -9593,7 +9578,6 @@ no payload at all."
         (should (= 1 (length positions)))
         (should (<= (overlay-start overlay) position))
         (should (< position (overlay-end overlay)))
-        (should (get-text-property position 'pilish-no-fontify))
         (should (equal '(image :type png :data "preview")
                        (get-text-property position 'display)))
         (should (string-match-p
@@ -11419,105 +11403,15 @@ Call inside `with-temp-buffer' after `pilish-chat-mode'."
     (should (eq (get-text-property (match-beginning 0) 'font-lock-face)
                 'pilish-tool-output))))
 
-(ert-deftest pilish-test-generic-tool-details-marked-no-fontify ()
-  "Generic details text is marked as excluded from markdown fontification."
-  (with-temp-buffer
-    (pilish-chat-mode)
-    (pilish-test--insert-generic-tool
-     "Done" '(:mode "single" :exitCode 0))
-    (goto-char (point-min))
-    (should (search-forward "Done" nil t))
-    (should-not (get-text-property (match-beginning 0)
-                                   'pilish-no-fontify))
-    (should (search-forward "**Details**" nil t))
-    (should (get-text-property (match-beginning 0)
-                               'pilish-no-fontify))
-    (should (search-forward "\"mode\"" nil t))
-    (should (get-text-property (match-beginning 0)
-                               'pilish-no-fontify))))
-
-(ert-deftest pilish-test-propertize-details-region-marks-entire-string ()
-  "Details helper should mark every character as no-fontify metadata."
+(ert-deftest pilish-test-propertize-details-region-styles-entire-string ()
+  "Details helper gives every character the tool-output face."
   (let* ((json "{\n  \"mode\": \"single\"\n}")
          (details (pilish--propertize-details-region json)))
     (should (equal (substring-no-properties details)
                    (concat "**Details**\n" json)))
     (dotimes (idx (length details))
-      (should (get-text-property idx 'pilish-no-fontify details))
       (should (eq (get-text-property idx 'font-lock-face details)
                   'pilish-tool-output)))))
-
-(ert-deftest pilish-test-generic-tool-toggle-skips-details-font-lock ()
-  "Toggle fontification excludes details metadata ranges."
-  (with-temp-buffer
-    (pilish-chat-mode)
-    (let* ((pilish-tool-preview-lines 5)
-           (content (mapconcat (lambda (n) (format "line%d" n))
-                               (number-sequence 1 30)
-                               "\n"))
-           (details (list :summary (make-string 3000 ?x)))
-           (font-lock-calls nil))
-      (pilish-test--insert-generic-tool content details)
-      (goto-char (point-min))
-      (pilish-test--search-output-control)
-      (let ((btn (button-at (1- (point)))))
-        (should btn)
-        (cl-letf (((symbol-function 'font-lock-ensure)
-                   (lambda (start end)
-                     (push (cons start end) font-lock-calls)
-                     (save-excursion
-                       (goto-char start)
-                       (when (search-forward "**Details**" end t)
-                         (error "Stack overflow in regexp matcher"))))))
-          (pilish--toggle-tool-output btn)))
-      (should font-lock-calls)
-      (dolist (range font-lock-calls)
-        (should-not
-         (save-excursion
-           (goto-char (car range))
-           (search-forward "**Details**" (cdr range) t)))))))
-
-(ert-deftest pilish-test-generic-tool-with-path-toggle-skips-details-font-lock ()
-  "Generic tool with path keeps details excluded during toggle fontification."
-  (with-temp-buffer
-    (pilish-chat-mode)
-    (let* ((pilish-tool-preview-lines 5)
-           (content (mapconcat (lambda (n) (format "line%d" n))
-                               (number-sequence 1 30)
-                               "\n"))
-           (details (list :summary (make-string 3000 ?x)))
-           (font-lock-calls nil))
-      (pilish--display-tool-start "custom_tool" '(:path "/tmp/example.py"))
-      (pilish--display-tool-end
-       "custom_tool" '(:path "/tmp/example.py")
-       (list (list :type "text" :text content))
-       details nil)
-      (goto-char (point-min))
-      (pilish-test--search-output-control)
-      (let ((btn (button-at (1- (point)))))
-        (should btn)
-        (let ((full-content (plist-get (pilish--tool-output-view-snapshot
-                                        (pilish-test--output-view btn)) :text)))
-          (should (string-match-p "\\*\\*Details\\*\\*" full-content))
-          (should (let ((match-pos (string-match "\\*\\*Details\\*\\*" full-content)))
-                    (and match-pos
-                         (get-text-property match-pos
-                                            'pilish-no-fontify
-                                            full-content)))))
-        (cl-letf (((symbol-function 'font-lock-ensure)
-                   (lambda (start end)
-                     (push (cons start end) font-lock-calls)
-                     (save-excursion
-                       (goto-char start)
-                       (when (search-forward "**Details**" end t)
-                         (error "Stack overflow in regexp matcher"))))))
-          (pilish--toggle-tool-output btn)))
-      (should font-lock-calls)
-      (dolist (range font-lock-calls)
-        (should-not
-         (save-excursion
-           (goto-char (car range))
-           (search-forward "**Details**" (cdr range) t)))))))
 
 (ert-deftest pilish-test-generic-tool-nil-details-unchanged ()
   "Generic tool with nil details shows only content text."
@@ -20330,17 +20224,11 @@ fixture; a test may dynamically override it inside FUNCTION."
           (should (eq #'pilish--dispatch-button
                       (key-binding (kbd "<return>"))))
           (let ((toggle-count 0)
-                (font-lock-bounds nil)
-                (toggle (symbol-function 'pilish--toggle-tool-output))
-                (native-font-lock (symbol-function 'font-lock-ensure)))
+                (toggle (symbol-function 'pilish--toggle-tool-output)))
             (cl-letf (((symbol-function 'pilish--toggle-tool-output)
                        (lambda (button)
                          (cl-incf toggle-count)
                          (funcall toggle button)))
-                      ((symbol-function 'font-lock-ensure)
-                       (lambda (&optional start end)
-                         (push (list start end) font-lock-bounds)
-                         (funcall native-font-lock start end)))
                       ((symbol-function 'find-file)
                        (lambda (&rest _)
                          (ert-fail "Tool-button RET called file visitor")))
@@ -20348,14 +20236,7 @@ fixture; a test may dynamically override it inside FUNCTION."
                        (lambda (&rest _)
                          (ert-fail "Tool-button RET called file visitor"))))
               (execute-kbd-macro (kbd "RET")))
-            (should (= 1 toggle-count))
-            (should font-lock-bounds)
-            (should
-             (seq-every-p
-              (lambda (bounds)
-                (and (integerp (car bounds))
-                     (integerp (cadr bounds))))
-              font-lock-bounds)))
+            (should (= 1 toggle-count)))
           (goto-char (point-min))
           (should (search-forward "four" nil t))
           (goto-char (point-min))
@@ -21971,6 +21852,81 @@ not render synchronously."
     ;; ...but the latest partial result is pending and one timer is armed
     (should (assoc "call_1" pilish--pending-tool-updates))
     (should (timerp pilish--tool-update-flush-timer))))
+
+(ert-deftest pilish-test-tool-update-waits-until-the-chat-is-shown ()
+  "A hidden chat paints no preview; showing it paints the latest one."
+  (let ((chat (generate-new-buffer "*pilish-hidden-preview*")))
+    (unwind-protect
+        (with-current-buffer chat
+          (pilish-chat-mode)
+          (pilish--handle-display-event
+           '(:type "tool_execution_start" :toolName "bash" :toolCallId "call_1"
+                   :args (:command "long-running")))
+          (pilish-test--send-tool-execution-update "call_1" "alpha-first\n")
+          (let ((timer pilish--tool-update-flush-timer)
+                (text (buffer-string)))
+            (cancel-timer timer)
+            (cl-letf (((symbol-function 'input-pending-p) #'ignore))
+              (apply (timer--function timer) (timer--args timer)))
+            ;; Kept, unpainted and without a polling timer.
+            (should (equal text (buffer-string)))
+            (should-not pilish--tool-update-flush-timer)
+            (pilish-test--send-tool-execution-update "call_1" "bravo-second\n")
+            (cancel-timer pilish--tool-update-flush-timer)
+            (setq pilish--tool-update-flush-timer nil)
+            (should (= 1 (length pilish--pending-tool-updates))))
+          (save-window-excursion
+            (set-window-buffer (selected-window) chat)
+            (pilish--flush-tool-updates-on-display (selected-window))
+            (let ((timer pilish--tool-update-flush-timer))
+              (should (timerp timer))
+              (cancel-timer timer)
+              (cl-letf (((symbol-function 'input-pending-p) #'ignore))
+                (apply (timer--function timer) (timer--args timer)))))
+          (should (string-match-p "bravo-second" (buffer-string)))
+          (should-not (string-match-p "alpha-first" (buffer-string)))
+          (should-not pilish--pending-tool-updates))
+      (kill-buffer chat))))
+
+(ert-deftest pilish-test-tool-update-hidden-preview-yields-to-the-result ()
+  "A preview held while hidden never paints after its tool ended."
+  (with-temp-buffer
+    (pilish-chat-mode)
+    (pilish--handle-display-event
+     '(:type "tool_execution_start" :toolName "bash" :toolCallId "call_1"
+             :args (:command "long-running")))
+    (pilish-test--send-tool-execution-update "call_1" "stale-preview\n")
+    (pilish--handle-display-event
+     '(:type "tool_execution_end" :toolName "bash" :toolCallId "call_1"
+             :result (:content [(:type "text" :text "final-result")])))
+    (should-not pilish--pending-tool-updates)
+    (should (string-match-p "final-result" (buffer-string)))
+    (should-not (string-match-p "stale-preview" (buffer-string)))))
+
+(ert-deftest pilish-test-tool-end-is-one-change ()
+  "A tool result paints its body as one edit for change hooks."
+  ;; Each insertion otherwise makes md-ts reparse the whole chat.
+  (with-temp-buffer
+    (pilish-chat-mode)
+    (pilish--handle-display-event
+     '(:type "tool_execution_start" :toolName "runner" :toolCallId "call_1"
+             :args (:command "x")))
+    (let* ((block (pilish--tool-block-get "call_1"))
+           (start (marker-position (pilish--tool-block-header-end block)))
+           (befores nil))
+      (add-hook 'before-change-functions
+                (lambda (beg _end) (push beg befores)) nil t)
+      (pilish--handle-display-event
+       '(:type "tool_execution_end" :toolName "runner" :toolCallId "call_1"
+               :result (:content [(:type "text" :text "line one\nline two")]
+                        :details (:note "kept"))))
+      (should (string-match-p "line two" (buffer-string)))
+      (should (string-match-p "Details" (buffer-string)))
+      ;; The separate newline after a block ending the chat lies past the body.
+      (should (equal (seq-filter (lambda (beg)
+                                   (< beg (marker-position (pilish--tool-block-end-marker block))))
+                                 befores)
+                     (list start))))))
 
 (ert-deftest pilish-test-tool-update-supersedes-without-rearm ()
   "A second update for the same tool call replaces the pending preview
@@ -24643,113 +24599,6 @@ a slot, so downstream consumers that skip blanks still get N content lines."
     (should (equal (car result) ""))
     (should (eq (cdr result) t))))
 
-;;; Fontify Exclusion Helpers
-
-(ert-deftest pilish-test-font-lock-ensure-excluding-property-splits-ranges ()
-  "Font-lock helper should call only contiguous non-excluded ranges."
-  (with-temp-buffer
-    (insert "aaaBBBcccDDDeee")
-    (put-text-property 4 7 'pilish-no-fontify t)
-    (put-text-property 10 13 'pilish-no-fontify t)
-    (let ((calls nil))
-      (cl-letf (((symbol-function 'font-lock-ensure)
-                 (lambda (start end)
-                   (push (cons start end) calls))))
-        (pilish--font-lock-ensure-excluding-property
-         (point-min) (point-max) 'pilish-no-fontify))
-      (should (equal (nreverse calls)
-                     '((1 . 4) (7 . 10) (13 . 16)))))))
-
-(ert-deftest pilish-test-font-lock-ensure-excluding-property-excludes-any-non-nil ()
-  "Font-lock helper should treat any non-nil PROP value as excluded."
-  (with-temp-buffer
-    (insert "aaaBBBccc")
-    (put-text-property 4 7 'pilish-no-fontify :details)
-    (let ((calls nil))
-      (cl-letf (((symbol-function 'font-lock-ensure)
-                 (lambda (start end)
-                   (push (cons start end) calls))))
-        (pilish--font-lock-ensure-excluding-property
-         (point-min) (point-max) 'pilish-no-fontify))
-      (should (equal (nreverse calls)
-                     '((1 . 4) (7 . 10)))))))
-
-(ert-deftest pilish-test-font-lock-ensure-excluding-property-fontifies-large-ranges ()
-  "Font-lock helper should still process large non-excluded regions."
-  (with-temp-buffer
-    (insert (make-string 70000 ?x))
-    (let ((called nil))
-      (cl-letf (((symbol-function 'font-lock-ensure)
-                 (lambda (&rest _args)
-                   (setq called t))))
-        (pilish--font-lock-ensure-excluding-property
-         (point-min) (point-max) 'pilish-no-fontify))
-      (should called))))
-
-(ert-deftest pilish-test-font-lock-ensure-excluding-property-error-silent-without-debug ()
-  "Font-lock errors should not emit user-visible messages when debug is off."
-  (with-temp-buffer
-    (insert "abcdef")
-    (let ((debug-on-error nil)
-          (message-called nil))
-      (cl-letf (((symbol-function 'font-lock-ensure)
-                 (lambda (&rest _args)
-                   (error "Broken font-lock")))
-                ((symbol-function 'message)
-                 (lambda (&rest _args)
-                   (setq message-called t))))
-        (pilish--font-lock-ensure-excluding-property
-         (point-min) (point-max) 'pilish-no-fontify))
-      (should-not message-called))))
-
-(ert-deftest pilish-test-font-lock-ensure-excluding-property-error-logs-in-debug ()
-  "Font-lock errors should log diagnostics when debug mode is enabled."
-  (with-temp-buffer
-    (insert "abcdef")
-    (let ((debug-on-error t)
-          (message-text nil))
-      (cl-letf (((symbol-function 'font-lock-ensure)
-                 (lambda (&rest _args)
-                   (error "Broken font-lock")))
-                ((symbol-function 'message)
-                 (lambda (fmt &rest args)
-                   (setq message-text (apply #'format fmt args)))))
-        (pilish--font-lock-ensure-excluding-property
-         (point-min) (point-max) 'pilish-no-fontify))
-      (should (string-match-p "toggle fontification failed"
-                              (or message-text ""))))))
-
-(ert-deftest pilish-test-font-lock-ensure-excluding-property-stops-after-first-error ()
-  "Font-lock helper should stop processing ranges after the first error."
-  (with-temp-buffer
-    (insert "aaaBBBccc")
-    (put-text-property 4 7 'pilish-no-fontify t)
-    (let ((debug-on-error t)
-          (font-lock-calls 0)
-          (message-count 0))
-      (cl-letf (((symbol-function 'font-lock-ensure)
-                 (lambda (&rest _args)
-                   (setq font-lock-calls (1+ font-lock-calls))
-                   (error "Broken font-lock")))
-                ((symbol-function 'message)
-                 (lambda (&rest _args)
-                   (setq message-count (1+ message-count)))))
-        (pilish--font-lock-ensure-excluding-property
-         (point-min) (point-max) 'pilish-no-fontify))
-      (should (= font-lock-calls 1))
-      (should (= message-count 1)))))
-
-(ert-deftest pilish-test-font-lock-ensure-excluding-property-swallows-errors ()
-  "Font-lock helper should not propagate font-lock errors."
-  (with-temp-buffer
-    (insert "abcdef")
-    (cl-letf (((symbol-function 'font-lock-ensure)
-               (lambda (&rest _args)
-                 (error "Broken font-lock"))))
-      (pilish--font-lock-ensure-excluding-property
-       (point-min) (point-max) 'pilish-no-fontify)
-      (should t))))
-
 ;;; Extract Text from Content
 
 (ert-deftest pilish-test-extract-text-from-content-single-block ()
@@ -26146,6 +25995,8 @@ events where the header text hasn't changed."
           (pilish-test--nested-event
            "tool_execution_end" "prefix" nil :toolName "codemode" :isError nil
            :result '(:content [(:type "text" :text "one\ntwo\nthree\nfour")]))
+          ;; What redisplay does for a shown chat: Markdown hides the fence.
+          (font-lock-ensure)
           (let* ((block (pilish--nested-tool-owner "prefix"))
                  (ov (pilish--tool-block-overlay block))
                  (button (pilish--find-toggle-button-in-region
