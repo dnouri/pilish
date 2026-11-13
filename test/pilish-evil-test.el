@@ -177,6 +177,21 @@ of the suite."
      (should (eq (lookup-key map "q") #'pilish-evil-close-input))
      (should (eq (lookup-key map "?") #'pilish-menu)))))
 
+(ert-deftest pilish-evil-test-double-return-only-overrides-insert-when-enabled ()
+  "Opt-in double-RET works in insert state without changing normal-state send."
+  (pilish-evil-test--with-evil
+   (pilish-evil-setup)
+   (with-temp-buffer
+     (pilish-input-mode)
+     (evil-local-mode 1)
+     (evil-insert-state)
+     (let ((pilish-send-on-double-return nil))
+       (should (eq (key-binding (kbd "RET")) #'newline)))
+     (let ((pilish-send-on-double-return 0.5))
+       (should (eq (key-binding (kbd "RET")) #'pilish-newline-or-send))
+       (evil-normal-state)
+       (should (eq (key-binding (kbd "RET")) #'pilish-send))))))
+
 (ert-deftest pilish-evil-test-copy-raw-markdown-default ()
   "Setup copies raw markdown buffer-locally in chat buffers by default."
   (pilish-evil-test--with-evil
