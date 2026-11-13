@@ -566,6 +566,152 @@ follow-up that is sent as the next prompt once Pi finishes."
       (set-frame-size nil width height)
       (sit-for 0.1))))
 
+(defun pilish-gui-test--submission-draft-state (input)
+  "Return INPUT's protected draft, image and history state."
+  (with-current-buffer input
+    (list :text (buffer-string) :point (point) :modified (buffer-modified-p)
+          :image (copy-tree pilish--draft-prompt-image)
+          :history (and pilish--input-ring (ring-elements pilish--input-ring))
+          :history-index pilish--input-ring-index :saved-input pilish--input-saved)))
+
+(ert-deftest pilish-gui-test-submit-prompt-preserves-draft ()
+  "API and steering replies preserve a typed draft, real image and focus."
+  (let* ((root (pilish-test--make-temp-directory "pilish-gui-submit-"))
+         (fixture (pilish-test--read-json-fixture "fake-pi/input-dispositions.json"))
+         (image-file (expand-file-name "draft.png" root))
+         (width (frame-width)) (height (frame-height)))
+    (unwind-protect
+        (progn
+          (set-frame-size nil 104 34)
+          ;; Fixture pacing leaves time to observe the queue; waits below use
+          ;; events, not a delay as evidence that the request has completed.
+          (plist-put (plist-get fixture :prompt) :delay_ms 100)
+          (plist-put (plist-get fixture :prompt) :chunk_count 20)
+          (with-temp-file (expand-file-name "api.json" root)
+            (insert (json-serialize fixture)))
+          (pilish-test--write-prompt-image image-file 'png)
+          (pilish-gui-test-end-session)
+          (pilish-gui-test-start-session
+           nil (list :backend 'fake :fake-scenario "api"
+                     :fake-extra-args (list "--scenario-dir" root)))
+          (let* ((chat (plist-get pilish-gui-test--session :chat-buffer))
+                 (input (plist-get pilish-gui-test--session :input-buffer))
+                 (proc (plist-get pilish-gui-test--session :process))
+                 (window (get-buffer-window input))
+                 started queued handled rejected)
+            (select-window window)
+            (execute-kbd-macro "This draft belongs to the user.")
+            (execute-kbd-macro (kbd "RET"))
+            (execute-kbd-macro "It must stay here while the API sends other text.")
+            (pilish-test--attach-image image-file)
+            (goto-char 5)
+            (pilish--history-add "Earlier local prompt")
+            (let ((before (pilish-gui-test--submission-draft-state input)))
+              (pilish-gui-test--large-evidence "api-draft-before" before)
+              (pilish-submit-prompt chat "API initial request"
+                                    (lambda (r) (setq started r)))
+              (should (pilish-test-wait-until
+                       (lambda () (and started
+                                       (eq (buffer-local-value 'pilish--status chat)
+                                           'streaming)))
+                       5 0.01 proc))
+              (should (equal (plist-get (plist-get started :data) :disposition) "started"))
+              (pilish-submit-prompt chat "Busy API follow-up"
+                                    (lambda (r) (setq rejected r)))
+              (should (pilish-test-wait-until (lambda () rejected) 5 0.01 proc))
+              (should (eq (plist-get rejected :success) :false))
+              (pilish-submit-prompt chat "API steering message"
+                                    (lambda (r) (setq queued r)) "steer")
+              (should (pilish-test-wait-until
+                       (lambda ()
+                         (and queued
+                              (equal (plist-get (pilish--process-queue-snapshot proc)
+                                                :steering)
+                                     ["API steering message"])))
+                       5 0.01 proc))
+              (should (equal (plist-get (plist-get queued :data) :disposition) "queued"))
+              (should (equal before (pilish-gui-test--submission-draft-state input)))
+              (should (eq (selected-window) window))
+              (pilish-gui-test--large-evidence
+               "api-draft-with-queue"
+               (list :draft (pilish-gui-test--submission-draft-state input)
+                     :queue (pilish--process-queue-snapshot proc) :response queued))
+              (pilish-submit-prompt chat "consume without a run"
+                                    (lambda (r) (setq handled r)))
+              (should (pilish-test-wait-until (lambda () handled) 5 0.01 proc))
+              (should (equal (plist-get (plist-get handled :data) :disposition) "handled"))
+              (should (pilish-test-wait-until
+                       (lambda ()
+                         (and (eq (buffer-local-value 'pilish--status chat) 'idle)
+                              (not (buffer-local-value 'pilish--prompt-waits chat))
+                              (pilish-gui-test-chat-contains
+                               "Steered fake reply for: API steering message")))
+                       8 0.01 proc))
+              (should (equal before (pilish-gui-test--submission-draft-state input)))
+              (should (eq (selected-window) window))
+              (should-not (buffer-local-value 'pilish--followup-queue chat))
+              (should (equal (plist-get (pilish--process-queue-snapshot proc) :steering) []))
+              (pilish-gui-test--large-evidence
+               "api-draft-after"
+               (list :draft (pilish-gui-test--submission-draft-state input)
+                     :started started :queued queued :handled handled :rejected rejected
+                     :queue (pilish--process-queue-snapshot proc))))))
+      (pilish-gui-test-end-session)
+      (delete-directory root t)
+      (set-frame-size nil width height))))
+
+(ert-deftest pilish-gui-test-submit-prompt-interleaves-user-send ()
+  "A pre-start API reserves submission; user send queues without losing a new draft."
+  (let ((width (frame-width)) (height (frame-height)))
+    (unwind-protect
+        (progn
+          (set-frame-size nil 104 34)
+          (pilish-gui-test-with-fresh-session
+            (:backend fake :fake-scenario "prompt-lifecycle"
+                      :fake-extra-args ("--pre-start-delay-ms=1000"))
+            (let* ((chat (plist-get pilish-gui-test--session :chat-buffer))
+                   (input (plist-get pilish-gui-test--session :input-buffer))
+                   (proc (plist-get pilish-gui-test--session :process))
+                   (window (get-buffer-window input))
+                   response)
+              (select-window window)
+              (execute-kbd-macro "User follow-up before the API run starts")
+              (pilish-submit-prompt chat "API request before agent_start"
+                                    (lambda (r) (setq response r)))
+              (should (eq (buffer-local-value 'pilish--status chat) 'sending))
+              (execute-kbd-macro (kbd "C-c C-c"))
+              (with-current-buffer chat
+                (should (eq pilish--status 'sending))
+                (should (equal pilish--followup-queue
+                               '("User follow-up before the API run starts")))
+                (should-not pilish--prompt-wait)
+                (should (= 1 (length pilish--prompt-waits))))
+              (execute-kbd-macro "New draft stays while both requests complete.")
+              (goto-char 4)
+              (let ((protected (pilish-gui-test--submission-draft-state input)))
+                (pilish-gui-test--large-evidence
+                 "api-pre-start-user-queued"
+                 (list :draft protected
+                       :requests (length (buffer-local-value 'pilish--prompt-waits chat))
+                       :local-queue (buffer-local-value 'pilish--followup-queue chat)))
+                (should (pilish-test-wait-until
+                         (lambda ()
+                           (and response
+                                (eq (buffer-local-value 'pilish--status chat) 'idle)
+                                (not (buffer-local-value 'pilish--prompt-waits chat))
+                                (not (buffer-local-value 'pilish--followup-queue chat))
+                                (pilish-gui-test-chat-contains
+                                 "Fake reply for: User follow-up before the API run starts")))
+                         10 0.01 proc))
+                (should (equal (plist-get (plist-get response :data) :disposition) "started"))
+                (should (equal protected (pilish-gui-test--submission-draft-state input)))
+                (should (eq (selected-window) window))
+                (pilish-gui-test--large-evidence
+                 "api-interleaved-after"
+                 (list :draft protected :response response
+                       :queue (pilish--process-queue-snapshot proc)))))))
+      (set-frame-size nil width height))))
+
 (defun pilish-gui-test--settle-input-fit (input-buf)
   "Wait until INPUT-BUF's pending fit has run, then redisplay."
   (should (pilish-test-wait-until

@@ -128,7 +128,7 @@ Required now:
 - `agent_start`
 - `agent_end`
 - `agent_settled`
-- `queue_update` (the empty queue notification from `clear_queue`)
+- `queue_update` (snapshots of the single steering slot; see below)
 - `message_start`
 - `message_update`
 - `message_end`
@@ -244,12 +244,31 @@ The slot holds the last accepted text, not a full queue. Its
 messages does not change it. Pilish's production sends are unchanged: it
 uses ordinary `prompt`, without a `streamingBehavior` option, for its local FIFO.
 
+Every slot change emits a `queue_update` snapshot of the slot,
+`{"steering": [TEXT] or [], "followUp": []}`, following Pi's
+`agent-session.ts` emission points:
+
+- **Enter or replace:** an accepted `steer` or `prompt` with
+  `streamingBehavior: "steer"` emits `steering: [TEXT]` before its `queued`
+  response. A replacement shows only the newest text, where Pi would list both
+  queued messages.
+- **Delivery:** the continuation that consumes the slot emits the current slot
+  just before that turn's user `message_start` (normally empty, unless a newer
+  steer arrived). After an abort, this follows the continuation's `agent_start`.
+- **Clear:** `clear_queue` emits `steering: []` before its response, even when
+  nothing was queued, as Pi does.
+- **Discard:** stopping a worker for a session reset or final settlement emits
+  `steering: []` only when it drops a queued message.
+
+Handled, rejected, and failed input emits no `queue_update` and leaves the slot
+unchanged. `followUp` is always empty: queued follow-ups stay out of scope.
+
 ### Abort and queue clearing
 
 `clear_queue` removes the pending text-only steering message and returns
 `data: {"steering": ["removed text"], "followUp": []}` (empty arrays when
 nothing was queued). It emits `queue_update` with empty arrays before its
-correlated response. The fake does not model a complete queue-update stream.
+correlated response.
 
 `abort` waits for the worker to settle before acknowledging. Like Pi, abort
 alone does not discard a pending steering continuation: the text-stream
