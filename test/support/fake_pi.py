@@ -372,10 +372,17 @@ class FakePiHarness:
         self._session_entries: list[JsonDict] = []
         self._entry_by_id: dict[str, JsonDict] = {}
         self._leaf_id: str | None = None
-        self._session_root_dir = tempfile.TemporaryDirectory(
-            prefix="fake-pi-", dir=session_dir
-        )
-        self._session_root = Path(self._session_root_dir.name)
+        # Like Pi's, session files outlive the process: a reload hands one to
+        # the next process.  A caller's --session-dir owns them; without one,
+        # the fake removes its private root when it exits.
+        self._session_root_dir: tempfile.TemporaryDirectory[str] | None = None
+        if session_dir is None:
+            self._session_root_dir = tempfile.TemporaryDirectory(prefix="fake-pi-")
+            self._session_root = Path(self._session_root_dir.name)
+        else:
+            self._session_root = Path(
+                tempfile.mkdtemp(prefix="fake-pi-", dir=session_dir)
+            )
         model = {
             "id": "fake-model",
             "name": "Fake Model",
@@ -397,7 +404,8 @@ class FakePiHarness:
             return 0
         finally:
             self._stop_active_run()
-            self._session_root_dir.cleanup()
+            if self._session_root_dir is not None:
+                self._session_root_dir.cleanup()
 
     def handle(self, command: JsonDict) -> None:
         """Handle a single RPC command."""
