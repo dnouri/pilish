@@ -6146,6 +6146,8 @@ shows complete lines only)."
 ;; records the latest partial result for its tool call, and one buffer-local
 ;; one-shot timer renders the pending previews at a humane cadence.  Typing
 ;; always wins: the flush re-arms instead of rendering while input is pending.
+;; Hidden chats render nothing: their previews wait, still latest-wins, until
+;; a window shows the chat, and a tool's end discards its preview unpainted.
 
 (defconst pilish--tool-update-render-interval 0.25
   "Seconds between coalesced renders of streaming tool output previews.
@@ -6157,14 +6159,42 @@ Internal constant, not a user option.")
 (defvar-local pilish--tool-update-flush-timer nil
   "The one pending one-shot flush timer for tool updates, or nil.
 At most one timer exists per chat buffer; updates never cancel or rearm
-it.  Only the flush itself schedules a further attempt (typing-wins).")
+it.  Only the flush itself schedules a further attempt (typing-wins), and
+a window starting to show the chat schedules one for waiting previews.")
 
-(defun pilish--schedule-tool-update-flush ()
-  "Arm the one-shot tool-update flush timer for the current buffer."
+(defun pilish--schedule-tool-update-flush (&optional delay)
+  "Arm the one-shot tool-update flush timer for the current buffer.
+It fires after DELAY seconds, by default the render interval."
   (setq pilish--tool-update-flush-timer
-        (run-at-time pilish--tool-update-render-interval nil
-                     #'pilish--flush-tool-updates
+        (run-at-time (or delay pilish--tool-update-render-interval) nil
+                     #'pilish--flush-shown-tool-updates
                      (current-buffer))))
+
+(defun pilish--flush-shown-tool-updates (buffer)
+  "Flush BUFFER's pending tool previews if a window on any frame shows it.
+Timer callback for `pilish--tool-update-flush-timer'.  A hidden chat keeps
+its previews pending without a timer; `pilish--flush-tool-updates-on-display'
+schedules their paint when a window shows the chat again."
+  (when (buffer-live-p buffer)
+    (if (get-buffer-window buffer t)
+        (pilish--flush-tool-updates buffer)
+      (with-current-buffer buffer
+        (setq pilish--tool-update-flush-timer nil)))))
+
+(defun pilish--flush-tool-updates-on-display (window)
+  "Schedule an immediate paint of previews held while WINDOW's chat was hidden.
+Buffer-local `window-buffer-change-functions' entry of chat buffers."
+  (with-current-buffer (window-buffer window)
+    (when (and pilish--pending-tool-updates
+               (not pilish--tool-update-flush-timer))
+      (pilish--schedule-tool-update-flush 0))))
+
+(defun pilish--setup-tool-update-display ()
+  "Paint previews held while the current chat was hidden once it is shown."
+  (add-hook 'window-buffer-change-functions
+            #'pilish--flush-tool-updates-on-display nil t))
+
+(add-hook 'pilish-chat-mode-hook #'pilish--setup-tool-update-display)
 
 (defun pilish--queue-tool-update (tool-call-id partial-result)
   "Record PARTIAL-RESULT as the pending paint for TOOL-CALL-ID.
@@ -6190,7 +6220,7 @@ is pending, and an armed timer keeps its deadline.  No chat text changes."
 
 (defun pilish--flush-tool-updates (buffer)
   "Render pending tool update previews in BUFFER, then leave clean state.
-Timer callback for `pilish--tool-update-flush-timer'.  Clears the
+Runs from `pilish--flush-shown-tool-updates' for shown chats.  Clears the
 timer slot first so updates arriving during the flush can schedule a fresh
 pass.  While user input is pending, renders nothing and schedules one
 retry; typing wins over preview refresh.  Errors during rendering cannot

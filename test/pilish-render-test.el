@@ -21853,6 +21853,56 @@ not render synchronously."
     (should (assoc "call_1" pilish--pending-tool-updates))
     (should (timerp pilish--tool-update-flush-timer))))
 
+(ert-deftest pilish-test-tool-update-waits-until-the-chat-is-shown ()
+  "A hidden chat paints no preview; showing it paints the latest one."
+  (let ((chat (generate-new-buffer "*pilish-hidden-preview*")))
+    (unwind-protect
+        (with-current-buffer chat
+          (pilish-chat-mode)
+          (pilish--handle-display-event
+           '(:type "tool_execution_start" :toolName "bash" :toolCallId "call_1"
+                   :args (:command "long-running")))
+          (pilish-test--send-tool-execution-update "call_1" "alpha-first\n")
+          (let ((timer pilish--tool-update-flush-timer)
+                (text (buffer-string)))
+            (cancel-timer timer)
+            (cl-letf (((symbol-function 'input-pending-p) #'ignore))
+              (apply (timer--function timer) (timer--args timer)))
+            ;; Kept, unpainted and without a polling timer.
+            (should (equal text (buffer-string)))
+            (should-not pilish--tool-update-flush-timer)
+            (pilish-test--send-tool-execution-update "call_1" "bravo-second\n")
+            (cancel-timer pilish--tool-update-flush-timer)
+            (setq pilish--tool-update-flush-timer nil)
+            (should (= 1 (length pilish--pending-tool-updates))))
+          (save-window-excursion
+            (set-window-buffer (selected-window) chat)
+            (pilish--flush-tool-updates-on-display (selected-window))
+            (let ((timer pilish--tool-update-flush-timer))
+              (should (timerp timer))
+              (cancel-timer timer)
+              (cl-letf (((symbol-function 'input-pending-p) #'ignore))
+                (apply (timer--function timer) (timer--args timer)))))
+          (should (string-match-p "bravo-second" (buffer-string)))
+          (should-not (string-match-p "alpha-first" (buffer-string)))
+          (should-not pilish--pending-tool-updates))
+      (kill-buffer chat))))
+
+(ert-deftest pilish-test-tool-update-hidden-preview-yields-to-the-result ()
+  "A preview held while hidden never paints after its tool ended."
+  (with-temp-buffer
+    (pilish-chat-mode)
+    (pilish--handle-display-event
+     '(:type "tool_execution_start" :toolName "bash" :toolCallId "call_1"
+             :args (:command "long-running")))
+    (pilish-test--send-tool-execution-update "call_1" "stale-preview\n")
+    (pilish--handle-display-event
+     '(:type "tool_execution_end" :toolName "bash" :toolCallId "call_1"
+             :result (:content [(:type "text" :text "final-result")])))
+    (should-not pilish--pending-tool-updates)
+    (should (string-match-p "final-result" (buffer-string)))
+    (should-not (string-match-p "stale-preview" (buffer-string)))))
+
 (ert-deftest pilish-test-tool-end-is-one-change ()
   "A tool result paints its body as one edit for change hooks."
   ;; Each insertion otherwise makes md-ts reparse the whole chat.
