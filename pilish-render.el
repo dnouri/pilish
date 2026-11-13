@@ -10820,10 +10820,13 @@ notifiers in registration order, and an explicitly owned replacement."
 
 (defun pilish--history-parser-restart-plan ()
   "Inventory a supported md-ts parser layout, or return nil for compatibility.
-Only Emacs 30's known native API and unshared md-ts buffers are supported.
-Inventory does not create, parse, delete, or reconfigure any parser."
+Only the native API of Emacs 30 and later and unshared md-ts buffers are
+supported.  Local parsers may be hosted by a global parser or, for nested
+embeddings, by another local parser; the primary parser carries Emacs 30's
+range notifier or, from Emacs 31, none.  Inventory does not create, parse,
+delete, or reconfigure any parser."
   (cl-block supported
-    (unless (and (= emacs-major-version 30)
+    (unless (and (>= emacs-major-version 30)
                  (derived-mode-p 'md-ts-mode)
                  (not (buffer-base-buffer))
                  (not (seq-some
@@ -10849,15 +10852,18 @@ Inventory does not create, parse, delete, or reconfigure any parser."
            (primary treesit-primary-parser)
            local-parsers languages entries)
       (dolist (overlay overlays)
-        (let ((parser (overlay-get overlay 'treesit-parser))
-              (host (overlay-get overlay 'treesit-host-parser)))
+        (let* ((parser (overlay-get overlay 'treesit-parser))
+               (host (overlay-get overlay 'treesit-host-parser))
+               (tag (pilish--history-parser-tag parser)))
+          ;; From Emacs 31 an overlay also records a global parser that an
+          ;; embedded parser hosts; it is replaced with the other globals.
           (unless (and (memq parser originals)
-                       (eq (pilish--history-parser-tag parser) 'embedded)
+                       (memq tag '(nil embedded))
                        (not (memq parser local-parsers))
                        (memq host originals)
-                       (null (pilish--history-parser-tag host)))
+                       (memq (pilish--history-parser-tag host) '(nil embedded)))
             (cl-return-from supported nil))
-          (push parser local-parsers)))
+          (when tag (push parser local-parsers))))
       (dolist (parser originals)
         (let ((tag (pilish--history-parser-tag parser))
               (language (treesit-parser-language parser))
@@ -10873,8 +10879,8 @@ Inventory does not create, parse, delete, or reconfigure any parser."
                      (if (eq parser primary)
                          (and (eq language 'markdown)
                               (null (treesit-parser-included-ranges parser))
-                              (equal notifiers
-                                     (list (intern "treesit--font-lock-mark-ranges-to-fontify"))))
+                              (member notifiers
+                                      (list nil (list (intern "treesit--font-lock-mark-ranges-to-fontify")))))
                        (null notifiers))
                      (pcase language
                        ('markdown (eq parser primary))
