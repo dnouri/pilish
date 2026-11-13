@@ -2781,7 +2781,7 @@ Other repaints select retained facts through the existing update ordering."
                                             :fullOutputPath))
                 ((stringp path)))
       (insert (propertize (concat "Full output: " (pilish--tool-display-value-string path) "\n")
-                          'pilish-no-fontify t 'pilish-tool-section 'full-output)))
+                          'pilish-tool-section 'full-output)))
     (when-let* ((calls (pilish--tool-block-nested-calls block)))
       (let* ((start (point))
              (width (max 24 (pilish--chat-display-width)))
@@ -2817,8 +2817,7 @@ Other repaints select retained facts through the existing update ordering."
               (insert "\n" rows-text))
             (when-let* (((eq (pilish--nested-call-source call) 'saved))
                         (bytes (pilish--nested-call-arguments-bytes call)))
-              (insert (propertize (format " saved arguments omitted (%d bytes)" bytes)
-                                  'pilish-no-fontify t)))
+              (insert (format " saved arguments omitted (%d bytes)" bytes)))
             (insert "\n")
             (when (or presentation (pilish--nested-call-conversations call))
               (pilish--insert-tool-output-section
@@ -2826,10 +2825,10 @@ Other repaints select retained facts through the existing update ordering."
             (add-text-properties child-start (point) (list 'pilish-tool-section section))))
         (when (pilish--tool-block-history-p block)
           (insert (propertize "Child outputs are not saved in sessions.\n"
-                              'pilish-no-fontify t 'pilish-tool-section 'children)))))
+                              'pilish-tool-section 'children)))))
     (when (pilish--tool-block-summary-incomplete-p block)
       (insert (propertize "Incomplete saved call summary\n"
-                          'pilish-no-fontify t 'pilish-tool-section 'children)))
+                          'pilish-tool-section 'children)))
     (setf (pilish--tool-block-script-line-map block) script-line-map)))
 
 (defun pilish--toggle-compound-tool-section (button)
@@ -2967,8 +2966,7 @@ retained facts through the existing queue."
            (view (pilish--capture-tool-rewrite-view))
            (inhibit-read-only t))
       (save-excursion
-        ;; Header annotation and fontification can touch text outside the
-        ;; body bounds.
+        ;; Header annotation can touch text outside the body bounds.
         (pilish--with-one-change-call start old-end
           (remove-overlays start old-end 'pilish-diff-overlay t)
           ;; A hidden child list can omit sections from the next paint entirely.
@@ -2980,8 +2978,8 @@ retained facts through the existing queue."
           (pilish--insert-compound-tool-body block toggled-section output-selection)
           (set-marker header start)
           (set-marker end (point)))
-        (pilish--tool-block-refresh-overlay block)
-        (pilish--font-lock-ensure-excluding-property start (point) 'pilish-no-fontify))
+        ;; Jit-lock fontifies the new body when, and as far as, it is shown.
+        (pilish--tool-block-refresh-overlay block))
       (let* ((new-end (marker-position end))
              (new-sections
               (pilish--tool-section-bounds
@@ -3589,7 +3587,7 @@ With INERT, retain row identity for viewport mapping without a control."
                        (append (when locator
                                  (append (list 'pilish-argument-address locator)
                                          (unless inert (list 'pilish-argument-locator locator))))
-                               (list 'pilish-argument-literal t 'pilish-no-fontify t 'rear-nonsticky t))
+                               (list 'pilish-argument-literal t 'rear-nonsticky t))
                        text)
   text)
 
@@ -3775,8 +3773,8 @@ local primary splice; other row addresses and actual output stay outside it."
       (put-text-property 0 (length title) 'pilish-argument-address locator title))
     (when node
       (add-text-properties 0 (length title)
-                           (list 'pilish-nested-summary t 'pilish-nested-call-id node-id
-                                 'pilish-no-fontify t) title))
+                           (list 'pilish-nested-summary t 'pilish-nested-call-id node-id)
+                           title))
     (when rest
       (setq remaining
             (mapconcat (lambda (row)
@@ -3798,7 +3796,7 @@ local primary splice; other row addresses and actual output stay outside it."
                               (concat guard text
                                       (propertize (concat "\n" fence "\n")
                                                   'display "" 'pilish-tool-diagnostic-guard t))
-                              'pilish-nested-summary t 'pilish-no-fontify t)))
+                              'pilish-nested-summary t)))
             (setq remaining (if remaining (concat remaining "\n" diagnostic) diagnostic))))))
     (cons title remaining)))
 
@@ -3957,8 +3955,7 @@ Output, diff overlays and markers outside this address span stay in place."
           (goto-char start)
           (insert (propertize text 'pilish-tool-section (cons 'child node-id)
                               'pilish-nested-root-id (pilish--tool-block-tool-call-id block)))
-          (pilish--tool-block-refresh-overlay block)
-          (pilish--font-lock-ensure-excluding-property start new-end 'pilish-no-fontify))
+          (pilish--tool-block-refresh-overlay block))
         (let ((new-spans (pilish--argument--locator-spans start new-end))
               (anchor (pilish--argument--find-locator-position locator start new-end)))
           (pilish--restore-tool-rewrite-view
@@ -4683,7 +4680,6 @@ frame whether to show IMAGE or FALLBACK."
          (append
           (list 'face 'pilish-tool-header
                 'fontified t
-                'pilish-no-fontify t
                 'pilish-image-preview t
                 'rear-nonsticky t
                 'help-echo fallback)
@@ -5006,13 +5002,9 @@ with `:object-type \\='plist'.  Returns nil when PLIST-DATA is nil."
       (json-encode parsed))))
 
 (defun pilish--propertize-details-region (details-json)
-  "Return DETAILS-JSON as a details section marked as metadata.
-The details payload keeps tool-output styling while setting
-`pilish-no-fontify' so explicit markdown fontification
-can safely skip this region."
+  "Return DETAILS-JSON as a details section in tool-output styling."
   (propertize (concat "**Details**\n" details-json)
-              'font-lock-face 'pilish-tool-output
-              'pilish-no-fontify t))
+              'font-lock-face 'pilish-tool-output))
 
 (defun pilish--remove-subagent-button (start end &optional object)
   "Remove owned button behavior in START..END of OBJECT, not its characters."
@@ -5054,15 +5046,14 @@ Retire old guards and link faces before restoring the new tree's ownership."
         (let ((next (next-single-property-change position 'pilish-conversation-tree nil end)))
           (when (get-text-property position 'pilish-conversation-tree)
             (remove-text-properties
-             position next '(pilish-conversation-tree nil pilish-conversation-guard nil
-                             pilish-no-fontify nil display nil)))
+             position next '(pilish-conversation-tree nil pilish-conversation-guard nil display nil)))
           (setq position next)))
       (setq position 0)
       (while (< position (length source))
         (let ((next (next-single-property-change position 'pilish-conversation-tree source (length source))))
           (when (get-text-property position 'pilish-conversation-tree source)
-            (add-text-properties (+ start position) (+ start next)
-                                 '(pilish-conversation-tree t pilish-no-fontify t))
+            (put-text-property (+ start position) (+ start next)
+                               'pilish-conversation-tree t)
             (let ((guard position))
               (while (< guard next)
                 (let ((guard-end (next-single-property-change guard 'pilish-conversation-guard source next)))
@@ -5171,7 +5162,7 @@ PATH-METADATA-POLICY is forwarded to `pilish--tool-block-create'."
                 (repair-literal nil))
             (with-silent-modifications
               (dolist (property '(line-prefix wrap-prefix pilish-argument-locator pilish-argument-address
-                                  pilish-argument-literal pilish-no-fontify rear-nonsticky
+                                  pilish-argument-literal rear-nonsticky
                                   pilish-argument-guard pilish-argument-value font-lock-face))
                 (let ((position 0))
                   (while (< position (length new-header))
@@ -5180,8 +5171,8 @@ PATH-METADATA-POLICY is forwarded to `pilish--tool-block-create'."
                            (value (get-text-property position property new-header)))
                       (unless (equal-including-properties value (get-text-property (+ start position) property))
                         (when (and (get-text-property position 'pilish-argument-literal new-header)
-                                   (memq property '(pilish-argument-literal pilish-no-fontify
-                                                    pilish-argument-guard font-lock-face)))
+                                   (memq property '(pilish-argument-literal pilish-argument-guard
+                                                    font-lock-face)))
                           (setq repair-literal t))
                         (put-text-property (+ start position) (+ start next) property value))
                       (setq position next)))))
@@ -6535,20 +6526,6 @@ if none exists, render the result at point without a live overlay."
         (setq pos next)))
     (nreverse ranges)))
 
-(defun pilish--font-lock-ensure-excluding-property (start end prop)
-  "Fontify START..END while skipping regions where PROP is non-nil.
-Stops after the first font-lock error to avoid repeated failures.
-Full history replay defers transcript fontification until all edits finish."
-  (unless pilish--defer-history-postprocessing
-    (catch 'pilish--font-lock-failed
-      (dolist (range (pilish--ranges-excluding-property start end prop))
-        (condition-case err
-            (font-lock-ensure (car range) (cdr range))
-          (error
-           (when debug-on-error
-             (message "pilish: toggle fontification failed: %S" err))
-           (throw 'pilish--font-lock-failed nil)))))))
-
 (defun pilish--toggle-tool-output (button)
   "Toggle BUTTON's exact output section through its owner's painted view.
 Preserve source-row and image positions without applying pending updates."
@@ -6583,8 +6560,7 @@ Preserve source-row and image positions without applying pending updates."
             (goto-char start)
             (pilish--insert-tool-output-section block nil nil selection)
             (set-marker (pilish--tool-block-end-marker block) (point)))
-          (pilish--tool-block-refresh-overlay block)
-          (pilish--font-lock-ensure-excluding-property start (point) 'pilish-no-fontify))
+          (pilish--tool-block-refresh-overlay block))
         (let* ((new-end (overlay-end overlay))
                (new-sections (pilish--tool-section-bounds
                               start new-end
@@ -7381,7 +7357,7 @@ Return :cold-body and transient absolute :deleted-spans for view mapping."
          deleted-spans)
     (dolist (property '(pilish-tool-section pilish-nested-summary pilish-nested-root-id
                        pilish-nested-call-id pilish-image-preview pilish-tool-diagnostic-guard
-                       pilish-no-fontify pilish-subagent-name pilish-tool-fold-heading
+                       pilish-subagent-name pilish-tool-fold-heading
                        pilish-conversation-tree pilish-conversation-guard
                        pilish-tool-output-footer
                        pilish-tool-footer-align-width pilish-tool-footer-break-width
