@@ -670,8 +670,7 @@ reported as a warning and does not change the reload."
   "Stop PROC, a fresh reload process that did not take over the session."
   (when (processp proc)
     (pilish--unregister-display-handler proc)
-    (when (process-live-p proc)
-      (delete-process proc))))
+    (pilish--terminate-process proc)))
 
 (defun pilish--reload-session (settle)
   "Reload the current session; call SETTLE with an outcome KIND and DETAIL.
@@ -785,8 +784,7 @@ once its refreshes have answered or the reload did not take over."
                              (not (eq old-proc new-proc)))
                     (pilish--skip-process-kill-confirmation old-proc)
                     (pilish--unregister-display-handler old-proc)
-                    (when (process-live-p old-proc)
-                      (delete-process old-proc)))
+                    (pilish--terminate-process old-proc))
                   (when (buffer-live-p chat-buf)
                     (with-current-buffer chat-buf
                       (pilish--set-process new-proc)))

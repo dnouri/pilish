@@ -3858,7 +3858,7 @@ Return observations suitable for the graphical evidence file."
         (execute-kbd-macro (kbd "M-x pilish-reload RET"))
         (wait (lambda () (and (not (eq (current-process) first-proc))
                               (settled-p) (history-p))))
-        (should-not (process-live-p first-proc))
+        (should (pilish-test-wait-for-process-exit first-proc))
         (should (equal (with-current-buffer input (buffer-string)) draft))
         (capture "reload-interactive")
         ;; A Lisp caller hears about the reload exactly once.
@@ -3876,7 +3876,7 @@ Return observations suitable for the graphical evidence file."
           (should (equal outcomes
                          '((:outcome nil :process-changed t
                             :history-shown t :transition-active nil))))
-          (should-not (process-live-p second-proc))
+          (should (pilish-test-wait-for-process-exit second-proc))
           (should (process-live-p (current-process)))
           (should (equal (with-current-buffer input (buffer-string)) draft))
           (capture "reload-callback-success"))
