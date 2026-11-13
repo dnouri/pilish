@@ -2720,6 +2720,24 @@ ACTION defaults to the script/list toggle; output supplies its own action."
     (let ((code (pilish--tool-arg-get (pilish--tool-block-args block) :code)))
       (and (stringp code) (not (string-empty-p code)) code))))
 
+(defmacro pilish--with-one-change-call (beg end &rest body)
+  "Run BODY, notifying change hooks once for its edits within BEG..END.
+Each insertion otherwise reruns md-ts's definition checks, which reparse
+the whole chat.  A non-local exit from BODY still runs the final
+after-change call before it continues.  Return BODY's value."
+  (declare (indent 2) (debug t))
+  (let ((failure (make-symbol "failure"))
+        (result (make-symbol "result"))
+        (err (make-symbol "err")))
+    `(let (,failure ,result)
+       (combine-change-calls ,beg ,end
+         (condition-case ,err
+             (setq ,result (progn ,@body))
+           ((error quit) (setq ,failure ,err))))
+       (when ,failure
+         (signal (car ,failure) (cdr ,failure)))
+       ,result)))
+
 (defun pilish--insert-compound-tool-body (block &optional toggled-section output-selection)
   "Insert BLOCK's compound body at point without child tool overlays.
 An output TOGGLED-SECTION reuses the root output's last painted snapshot.
@@ -2947,28 +2965,21 @@ retained facts through the existing queue."
              (list (cons 'script (pilish--tool-block-script-line-map block))
                    (cons 'output (pilish--tool-block-line-map block)))))
            (view (pilish--capture-tool-rewrite-view))
-           (inhibit-read-only t)
-           (failure nil))
+           (inhibit-read-only t))
       (save-excursion
-        ;; Notify change hooks once for the body.  Header annotation and
-        ;; fontification can touch text outside these bounds.
-        (combine-change-calls start old-end
-          ;; A non-local exit would skip the final after-change call.
-          (condition-case err
-              (progn
-                (remove-overlays start old-end 'pilish-diff-overlay t)
-                ;; A hidden child list can omit sections from the next paint entirely.
-                (pilish--detach-tool-output-footer (pilish--tool-block-output-view block))
-                (dolist (call (pilish--tool-block-nested-calls block))
-                  (pilish--detach-tool-output-footer (pilish--nested-call-output-view call)))
-                (delete-region start old-end)
-                (goto-char start)
-                (pilish--insert-compound-tool-body block toggled-section output-selection)
-                (set-marker header start)
-                (set-marker end (point)))
-            ((error quit) (setq failure err))))
-        (when failure
-          (signal (car failure) (cdr failure)))
+        ;; Header annotation and fontification can touch text outside the
+        ;; body bounds.
+        (pilish--with-one-change-call start old-end
+          (remove-overlays start old-end 'pilish-diff-overlay t)
+          ;; A hidden child list can omit sections from the next paint entirely.
+          (pilish--detach-tool-output-footer (pilish--tool-block-output-view block))
+          (dolist (call (pilish--tool-block-nested-calls block))
+            (pilish--detach-tool-output-footer (pilish--nested-call-output-view call)))
+          (delete-region start old-end)
+          (goto-char start)
+          (pilish--insert-compound-tool-body block toggled-section output-selection)
+          (set-marker header start)
+          (set-marker end (point)))
         (pilish--tool-block-refresh-overlay block)
         (pilish--font-lock-ensure-excluding-property start (point) 'pilish-no-fontify))
       (let* ((new-end (marker-position end))
@@ -6494,10 +6505,11 @@ if none exists, render the result at point without a live overlay."
                body-start old-end body-start
                (lambda ()
                  (save-excursion
-                   (goto-char body-start)
-                   (delete-region body-start old-end)
-                   (pilish--insert-tool-output-section block nil presentation)
-                   (set-marker end-marker (point))
+                   (pilish--with-one-change-call body-start old-end
+                     (goto-char body-start)
+                     (delete-region body-start old-end)
+                     (pilish--insert-tool-output-section block nil presentation)
+                     (set-marker end-marker (point)))
                    (pilish--tool-block-refresh-overlay block)
                    ;; Error content and the overlay face suffice; no error badge.
                    (pilish--tool-overlay-finalize
@@ -6505,9 +6517,10 @@ if none exists, render the result at point without a live overlay."
                    (when (eobp) (insert "\n"))))))
           (pilish--with-scroll-preservation
             (save-excursion
-              (goto-char (point-max))
-              (pilish--insert-tool-output-section nil nil presentation)
-              (insert "\n"))))))))
+              (pilish--with-one-change-call (point-max) (point-max)
+                (goto-char (point-max))
+                (pilish--insert-tool-output-section nil nil presentation)
+                (insert "\n")))))))))
 
 (defun pilish--ranges-excluding-property (start end prop)
   "Return contiguous ranges in START..END where PROP is nil."
@@ -6565,10 +6578,11 @@ Preserve source-row and image positions without applying pending updates."
           (pilish--redraw-compound-tool block section selection)
         (save-excursion
           (remove-overlays start old-end 'pilish-diff-overlay t)
-          (delete-region start old-end)
-          (goto-char start)
-          (pilish--insert-tool-output-section block nil nil selection)
-          (set-marker (pilish--tool-block-end-marker block) (point))
+          (pilish--with-one-change-call start old-end
+            (delete-region start old-end)
+            (goto-char start)
+            (pilish--insert-tool-output-section block nil nil selection)
+            (set-marker (pilish--tool-block-end-marker block) (point)))
           (pilish--tool-block-refresh-overlay block)
           (pilish--font-lock-ensure-excluding-property start (point) 'pilish-no-fontify))
         (let* ((new-end (overlay-end overlay))

@@ -21972,6 +21972,31 @@ not render synchronously."
     (should (assoc "call_1" pilish--pending-tool-updates))
     (should (timerp pilish--tool-update-flush-timer))))
 
+(ert-deftest pilish-test-tool-end-is-one-change ()
+  "A tool result paints its body as one edit for change hooks."
+  ;; Each insertion otherwise makes md-ts reparse the whole chat.
+  (with-temp-buffer
+    (pilish-chat-mode)
+    (pilish--handle-display-event
+     '(:type "tool_execution_start" :toolName "runner" :toolCallId "call_1"
+             :args (:command "x")))
+    (let* ((block (pilish--tool-block-get "call_1"))
+           (start (marker-position (pilish--tool-block-header-end block)))
+           (befores nil))
+      (add-hook 'before-change-functions
+                (lambda (beg _end) (push beg befores)) nil t)
+      (pilish--handle-display-event
+       '(:type "tool_execution_end" :toolName "runner" :toolCallId "call_1"
+               :result (:content [(:type "text" :text "line one\nline two")]
+                        :details (:note "kept"))))
+      (should (string-match-p "line two" (buffer-string)))
+      (should (string-match-p "Details" (buffer-string)))
+      ;; The separate newline after a block ending the chat lies past the body.
+      (should (equal (seq-filter (lambda (beg)
+                                   (< beg (marker-position (pilish--tool-block-end-marker block))))
+                                 befores)
+                     (list start))))))
+
 (ert-deftest pilish-test-tool-update-supersedes-without-rearm ()
   "A second update for the same tool call replaces the pending preview
 without rearming the flush timer; one flush renders only the latest."
