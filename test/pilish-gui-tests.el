@@ -148,6 +148,148 @@
     (should (pilish-gui-test-input-window))
     (should (pilish-gui-test-verify-layout))))
 
+(ert-deftest pilish-gui-test-session-browser-focuses-live-session ()
+  (pilish-gui-test-with-fresh-session
+    (:backend fake :fake-scenario "prompt-lifecycle")
+    (let* ((source-chat (plist-get pilish-gui-test--session :chat-buffer))
+           (source-input (plist-get pilish-gui-test--session :input-buffer))
+           (source-proc (plist-get pilish-gui-test--session :process))
+           (dir (plist-get pilish-gui-test--session :directory))
+           (backend (plist-get pilish-gui-test--session :backend))
+           (pilish-executable (plist-get backend :executable))
+           (pilish-extra-args (plist-get backend :extra-args))
+           (default-directory dir)
+           (pilish-quit-without-confirmation t)
+           target-chat target-input target-proc browser)
+      (should (pilish-test-wait-until
+               (lambda ()
+                 (with-current-buffer source-chat
+                   (plist-get pilish--state :session-file)))
+               pilish-test-gui-timeout pilish-test-poll-interval source-proc))
+      (let ((source-file (with-current-buffer source-chat
+                           (plist-get pilish--state :session-file))))
+        (unwind-protect
+            (let ((target-file
+                   (expand-file-name "already-live-target.jsonl"
+                                     (file-name-directory source-file))))
+              (with-temp-file target-file
+                (dolist (record
+                         `((:type "session" :version 3 :id "already-live-target"
+                            :timestamp "2026-03-01T10:00:00.000Z" :cwd ,dir)
+                           (:type "message" :id "target-message" :parentId :null
+                            :timestamp "2026-03-01T10:00:01.000Z"
+                            :message (:role "user"
+                                      :content "Target session is already live"))
+                           (:type "session_info" :id "target-name"
+                            :parentId "target-message"
+                            :timestamp "2026-03-01T10:00:02.000Z"
+                            :name "Already running target")))
+                  (insert (json-encode record) "\n")))
+              (pilish "browser-live-target")
+              (setq target-chat (pilish--find-session dir "browser-live-target"))
+              (should (buffer-live-p target-chat))
+              (setq target-input
+                    (buffer-local-value 'pilish--input-buffer target-chat))
+              (should (pilish-test-wait-until
+                       (lambda ()
+                         (process-live-p
+                          (buffer-local-value 'pilish--process target-chat)))
+                       pilish-test-gui-timeout pilish-test-poll-interval))
+              (setq target-proc
+                    (buffer-local-value 'pilish--process target-chat))
+              (with-current-buffer target-chat
+                (pilish--resume-selected-session
+                 target-proc target-chat target-file))
+              (should (pilish-test-wait-until
+                       (lambda ()
+                         (with-current-buffer target-chat
+                           (and (not (pilish--session-transition-active-p))
+                                (equal (plist-get pilish--state :session-file)
+                                       target-file)
+                                (string-match-p "Target session is already live"
+                                                (buffer-string)))))
+                       pilish-test-gui-timeout pilish-test-poll-interval
+                       target-proc))
+              (pilish--show-session-buffers source-chat source-input)
+              (select-window (get-buffer-window source-input))
+              (execute-kbd-macro (kbd "C-c C-r"))
+              (setq browser (current-buffer))
+              (should (derived-mode-p 'pilish-session-browser-mode))
+              (should (pilish-test-wait-until
+                       (lambda ()
+                         (with-current-buffer browser
+                           (and (not pilish--session-browser-loading)
+                                (progn
+                                  (goto-char (point-min))
+                                  (search-forward "Already running target" nil t)))))
+                       pilish-test-gui-timeout pilish-test-poll-interval
+                       source-proc))
+              (with-current-buffer browser
+                (beginning-of-line)
+                (should (equal (pilish--session-browser-path-at-point)
+                               target-file)))
+              (should (eq (pilish--browse-live-session-chat-buffer target-file)
+                          target-chat))
+              (let ((original-rpc (symbol-function 'pilish--rpc-async))
+                    source-commands target-commands)
+                (cl-letf (((symbol-function 'pilish--rpc-async)
+                           (lambda (proc command &rest args)
+                             (cond
+                              ((eq proc source-proc)
+                               (push command source-commands))
+                              ((eq proc target-proc)
+                               (push command target-commands)))
+                             (apply original-rpc proc command args))))
+                  (execute-kbd-macro (kbd "RET"))
+                  (let ((source-switch
+                         (seq-find
+                          (lambda (command)
+                            (equal (plist-get command :type) "switch_session"))
+                          source-commands)))
+                    (when source-switch
+                      (should
+                       (pilish-test-wait-until
+                        (lambda ()
+                          (with-current-buffer source-chat
+                            (not (pilish--session-transition-active-p))))
+                        pilish-test-gui-timeout pilish-test-poll-interval
+                        source-proc)))
+                    (pilish-gui-test--large-evidence
+                     "browser-live-target"
+                     (list :source-commands (reverse source-commands)
+                           :target-commands (reverse target-commands)
+                           :selected-buffer (buffer-name (current-buffer))
+                           :source-file-before source-file
+                           :source-file-after
+                           (with-current-buffer source-chat
+                             (plist-get pilish--state :session-file))
+                           :source-process-preserved
+                           (eq (buffer-local-value 'pilish--process source-chat)
+                               source-proc)
+                           :target-process-preserved
+                           (eq (buffer-local-value 'pilish--process target-chat)
+                               target-proc)))
+                    (should-not source-switch))
+                  (should-not
+                   (seq-find
+                    (lambda (command)
+                      (equal (plist-get command :type) "switch_session"))
+                    target-commands))
+                  (should (eq (current-buffer) target-input))
+                  (should (eq (window-buffer (selected-window)) target-input))
+                  (should (get-buffer-window target-chat))
+                  (should (eq (buffer-local-value 'pilish--process source-chat)
+                              source-proc))
+                  (should (eq (buffer-local-value 'pilish--process target-chat)
+                              target-proc))
+                  (should (process-live-p source-proc))
+                  (should (process-live-p target-proc))
+                  (should (equal
+                           (with-current-buffer source-chat
+                             (plist-get pilish--state :session-file))
+                           source-file)))))
+          (pilish-test--kill-live-buffers browser target-input target-chat))))))
+
 (ert-deftest pilish-gui-test-seed-history-from-opened-session ()
   "Open and reload saved prompts, restore a draft, and resend a recalled prompt."
   (let ((pilish-gui-test--large-trace nil)
