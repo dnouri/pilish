@@ -836,6 +836,35 @@ SPEC is (SESSION SCENARIO &rest EXTRA-ARGS)."
                        "Test message from extension"))
         (should-not (file-exists-p session-file))))))
 
+(ert-deftest pilish-fake-pi-test-custom-message-sets-statuses-before-output ()
+  "Scenario statuses are setStatus requests, sent before the custom output."
+  (pilish-fake-pi-test-with-process (proc "extension-status")
+    (pilish-fake-pi-test--send
+     proc '(:id "status" :type "prompt" :message "/test-status"))
+    (let* ((events (pilish-fake-pi-test--collect-until
+                    proc (lambda (event)
+                           (equal (plist-get event :id) "status"))))
+           (requests (seq-filter
+                      (lambda (event)
+                        (equal (plist-get event :type) "extension_ui_request"))
+                      events)))
+      (should (equal (mapcar (lambda (request)
+                               (list (plist-get request :method)
+                                     (plist-get request :statusKey)
+                                     (and (plist-member request :statusText) t)
+                                     (plist-get request :statusText)))
+                             requests)
+                     '(("setStatus" "git" t "synced")
+                       ("setStatus" "plan" t "\e[38;5;226m⏸ plan\e[39m")
+                       ("setStatus" "stale" nil nil))))
+      (should (< (cl-position (car (last requests)) events)
+                 (cl-position-if (lambda (event)
+                                   (equal (plist-get event :type) "message_start"))
+                                 events)))
+      (should (equal (plist-get (plist-get (car (last events)) :data)
+                                :disposition)
+                     "handled")))))
+
 (ert-deftest pilish-fake-pi-test-generated-session-is-valid-v3-with-entry-rpcs ()
   "A normal fake prompt persists valid v3 entries and exposes their raw IDs."
   (pilish-fake-pi-test-with-process (proc "prompt-lifecycle")

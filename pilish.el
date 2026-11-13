@@ -146,6 +146,119 @@ Reads and rendering are synchronous, including for remote files."
       (user-error "Not a readable Pi session: %s" file))
     (pilish-open-subagent-snapshot target)))
 
+;;;; Session Inspection
+
+;; Buffer resolution and copying live in pilish-ui for extension-status hooks.
+
+(defun pilish--session-value (buffer variable &optional key)
+  "Copy VARIABLE's value from BUFFER's chat, or nil without a chat.
+When KEY is non-nil, copy that plist member instead of the whole value."
+  (when-let* ((chat (pilish-session-chat-buffer buffer)))
+    (let ((value (buffer-local-value variable chat)))
+      (pilish--copy-session-value (if key (plist-get value key) value)))))
+
+(defun pilish-session-input-buffer (&optional buffer)
+  "Return the live input buffer owned by BUFFER's session, or nil.
+BUFFER follows `pilish-session-chat-buffer'.  No input is created."
+  (when-let* ((chat (pilish-session-chat-buffer buffer))
+              (input (buffer-local-value 'pilish--input-buffer chat))
+              ((buffer-live-p input)))
+    (with-current-buffer input
+      (and (derived-mode-p 'pilish-input-mode)
+           (eq pilish--chat-buffer chat)
+           input))))
+
+(defun pilish-session-process (&optional buffer)
+  "Return BUFFER's session process, or nil if none was assigned.
+BUFFER follows `pilish-session-chat-buffer'.  The returned process may have
+exited; use `process-live-p' to check it.  This does not start a process."
+  (when-let* ((chat (pilish-session-chat-buffer buffer))
+              (process (buffer-local-value 'pilish--process chat)))
+    (and (processp process) process)))
+
+(defun pilish-session-directory (&optional buffer)
+  "Return a copy of BUFFER's session directory, or nil without a session.
+BUFFER follows `pilish-session-chat-buffer'.  The directory stays tied to
+the session even when its chat visits a Markdown transcript elsewhere."
+  (when-let* ((chat (pilish-session-chat-buffer buffer)))
+    (pilish--copy-session-value (pilish--chat-session-directory chat))))
+
+(defun pilish-session-name (&optional buffer)
+  "Return BUFFER's named-session suffix, or nil for the default session.
+BUFFER follows `pilish-session-chat-buffer'.  This is the Emacs session
+name, not Pi's conversation title; the returned string is a copy."
+  (pilish--session-value buffer 'pilish--canonical-session-name))
+
+(defun pilish-session-title (&optional buffer)
+  "Return a copy of Pi's conversation title for BUFFER, or nil if unnamed.
+BUFFER follows `pilish-session-chat-buffer'."
+  (let ((title (pilish--session-value buffer 'pilish--session-name)))
+    (and (stringp title) (not (string-empty-p title)) title)))
+
+(defun pilish-session-file (&optional buffer)
+  "Return a copy of BUFFER's last reported Pi session pathname, or nil.
+BUFFER follows `pilish-session-chat-buffer'.  This is not the chat's
+visited Markdown transcript file, and no disk or RPC lookup is made."
+  (pilish--session-value buffer 'pilish--state :session-file))
+
+(defun pilish-session-model (&optional buffer)
+  "Return BUFFER's last reported model plist, or nil if unknown.
+BUFFER follows `pilish-session-chat-buffer'.  The result (including nested
+values) is a copy; typical keys include :id, :name and :provider."
+  (pilish--session-value buffer 'pilish--state :model))
+
+(defun pilish-session-context-usage (&optional buffer)
+  "Return BUFFER's last reported context usage plist, or nil if unknown.
+BUFFER follows `pilish-session-chat-buffer'.  The result is a copy, with
+keys such as :percent, :tokens and :contextWindow.  No RPC is sent."
+  (pilish--session-value buffer 'pilish--cached-stats :contextUsage))
+
+(defun pilish-session-queued-prompts (&optional buffer)
+  "Return a copy of BUFFER's known queued prompt texts, or nil if none.
+BUFFER follows `pilish-session-chat-buffer'.  Order matches the header:
+Pi's reported follow-ups, local follow-ups in FIFO order, then reported
+steering.  Unreported Pi queues are not included."
+  (when-let* ((chat (pilish-session-chat-buffer buffer)))
+    (pilish--copy-session-value
+     (apply #'append (pilish--queued-prompt-groups chat)))))
+
+(defun pilish-session-running-tools (&optional buffer)
+  "Return a copy of BUFFER's known unfinished root tool call IDs.
+BUFFER follows `pilish-session-chat-buffer'.  Order is unspecified.
+The live registry includes announced or executing calls with an observed
+ID, not argument-streaming previews without authoritative IDs.  Completed,
+cooled and saved-history blocks are excluded.  No RPC is sent; an
+unobserved backend tool is unknown, not necessarily absent."
+  (when-let* ((chat (pilish-session-chat-buffer buffer))
+              (live (buffer-local-value 'pilish--live-tool-blocks chat)))
+    (let (ids)
+      (maphash (lambda (id _block)
+                 (push (pilish--copy-session-value id) ids))
+               live)
+      ids)))
+
+(defun pilish-session-busy-p (&optional buffer)
+  "Return non-nil when BUFFER's session has active or known queued work.
+BUFFER follows `pilish-session-chat-buffer'.  This observed-work policy
+includes pending prompts, model/session changes, compaction, non-idle
+activity, known queues and unfinished tools, not just streamed output.
+It is broader than the send-readiness predicate.  No RPC or fresh Pi
+query is made, and nothing is copied, so frequent polling is cheap."
+  (when-let* ((chat (pilish-session-chat-buffer buffer)))
+    (and (pilish--session-observed-work-p chat) t)))
+
+;;;###autoload
+(defun pilish-session-exists-p (directory &optional name)
+  "Return non-nil when DIRECTORY's session NAME has a chat buffer.
+NAME nil means the directory's default session.  Stopped sessions count;
+no process is started.  The chat is found by its session identity, so a
+chat renamed or visiting a transcript still counts; an input buffer
+without a live chat does not.  Every session that exists can be inspected
+with the other session accessors.  DIRECTORY is expanded with a trailing
+slash, not resolved through symlinks, matching Pilish's normal lookup."
+  (and (pilish--find-session (pilish--normalize-directory directory) name)
+       t))
+
 ;;;; Main Entry Point
 
 (defcustom pilish-evil-integration t

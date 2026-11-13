@@ -172,6 +172,352 @@ still mock the RPC boundary, so the process is never used for I/O."
               (should (string-match-p "Linked answer" (buffer-string)))))
         (when (buffer-live-p observer) (kill-buffer observer))))))
 
+;;; Public Session Inspection
+
+(ert-deftest pilish-test-session-accessors-resolve-chat-and-input-without-display ()
+  "Both buffer types expose the same copied data without selecting a window."
+  (let* ((buffers (pilish-test--make-open-session-command-buffers))
+         (chat (car buffers)) (input (cadr buffers)) (proc (caddr buffers))
+         (window (selected-window))
+         (current (current-buffer)))
+    (unwind-protect
+        (progn
+          (with-current-buffer chat
+            (pilish--set-chat-session-identity "/tmp/project/" "feature")
+            (setq pilish--session-name "Conversation"
+                  pilish--state '(:session-file "/tmp/session.jsonl"
+                                  :model (:id "model" :provider "provider"))
+                  pilish--cached-stats '(:contextUsage (:percent 12 :tokens 42))
+                  pilish--status 'idle))
+          (dolist (buffer (list chat input (buffer-name chat) (buffer-name input)))
+            (should (eq (pilish-session-chat-buffer buffer) chat))
+            (should (eq (pilish-session-input-buffer buffer) input))
+            (should (eq (pilish-session-process buffer) proc))
+            (should (equal (pilish-session-directory buffer) "/tmp/project/"))
+            (should (equal (pilish-session-name buffer) "feature"))
+            (should (equal (pilish-session-title buffer) "Conversation"))
+            (should (equal (pilish-session-file buffer) "/tmp/session.jsonl"))
+            (should (equal (pilish-session-model buffer)
+                           '(:id "model" :provider "provider")))
+            (should (equal (pilish-session-context-usage buffer)
+                           '(:percent 12 :tokens 42)))
+            (should-not (pilish-session-queued-prompts buffer))
+            (should-not (pilish-session-busy-p buffer)))
+          (with-current-buffer input
+            (should (eq (pilish-session-chat-buffer) chat))
+            (should (eq (pilish-session-input-buffer) input))
+            (should (equal (pilish-session-title) "Conversation")))
+          (should (eq (selected-window) window))
+          (should (eq (current-buffer) current)))
+      (pilish-test--kill-live-buffers input chat))))
+
+(ert-deftest pilish-test-session-accessors-copy-nested-data-and-queue-text ()
+  "Changing returned containers or strings cannot change session state."
+  (let* ((buffers (pilish-test--make-open-session-command-buffers))
+         (chat (car buffers)) (input (cadr buffers)) (proc (caddr buffers)))
+    (unwind-protect
+        (progn
+          (with-current-buffer chat
+            (pilish--set-chat-session-identity
+             (copy-sequence "/tmp/project/") (copy-sequence "feature"))
+            (setq pilish--session-name (copy-sequence "Title")
+                  pilish--state
+                  (list :session-file (copy-sequence "/tmp/session.jsonl")
+                        :model (list :id (copy-sequence "model")
+                                     :input (vector (copy-sequence "text"))
+                                     :cost (list :input 1)))
+                  pilish--cached-stats
+                  (list :contextUsage (list :percent 12 :tokens 42))
+                  pilish--followup-queue (list (copy-sequence "new local")
+                                              (copy-sequence "old local"))))
+          (process-put proc 'pilish-queue-snapshot
+                       (list :followUp (vector (copy-sequence "backend"))
+                             :steering (vector (copy-sequence "steer"))))
+          (let ((model (pilish-session-model chat))
+                (usage (pilish-session-context-usage chat))
+                (queue (pilish-session-queued-prompts chat)))
+            (should (equal queue '("backend" "old local" "new local" "steer")))
+            (aset (plist-get model :id) 0 ?X)
+            (aset (aref (plist-get model :input) 0) 0 ?X)
+            (aset (plist-get model :input) 0 "other")
+            (setf (plist-get (plist-get model :cost) :input) 999
+                  (plist-get usage :percent) 99)
+            (dolist (text queue) (aset text 0 ?X))
+            (setcar queue "replaced")
+            (should (equal (pilish-session-model chat)
+                           '(:id "model" :input ["text"] :cost (:input 1))))
+            (should (= (plist-get (pilish-session-context-usage chat) :percent) 12))
+            (should (equal (pilish-session-queued-prompts chat)
+                           '("backend" "old local" "new local" "steer"))))
+          (dolist (accessor '(pilish-session-directory pilish-session-name
+                              pilish-session-title pilish-session-file))
+            (let ((before (funcall accessor chat)))
+              (aset (funcall accessor chat) 0 ?X)
+              (should (equal before (funcall accessor chat))))))
+      (pilish-test--kill-live-buffers input chat))))
+
+(ert-deftest pilish-test-session-accessors-return-nil-for-non-session-buffers ()
+  "Missing, dead, unrelated and snapshot buffers never resolve as live chats."
+  (let ((dead (generate-new-buffer " *pilish-accessor-dead*"))
+        (snapshot (generate-new-buffer " *pilish-accessor-snapshot*")))
+    (kill-buffer dead)
+    (unwind-protect
+        (progn
+          (with-current-buffer snapshot (pilish-snapshot-mode))
+          (with-temp-buffer
+            ;; A stale link in a non-session buffer must not be trusted.
+            (setq-local pilish--chat-buffer snapshot)
+            (dolist (buffer (list dead " *pilish-no-such-buffer*" snapshot
+                                  (current-buffer) nil))
+              (dolist (accessor '(pilish-session-chat-buffer
+                                  pilish-session-input-buffer pilish-session-process
+                                  pilish-session-directory pilish-session-name
+                                  pilish-session-title pilish-session-file
+                                  pilish-session-model pilish-session-context-usage
+                                  pilish-session-queued-prompts pilish-session-busy-p
+                                  pilish-session-running-tools
+                                  pilish-session-extension-status))
+                (should-not (funcall accessor buffer))))))
+      (kill-buffer snapshot))))
+
+(ert-deftest pilish-test-session-accessors-distinguish-stopped-and-missing-session ()
+  "Stopped chats remain inspectable; deleted input/chat links return nil."
+  (let* ((buffers (pilish-test--make-open-session-command-buffers))
+         (chat (car buffers)) (input (cadr buffers)) (proc (caddr buffers)))
+    (unwind-protect
+        (progn
+          (with-current-buffer chat
+            (pilish--set-chat-session-identity "/tmp/project/")
+            (setq pilish--status 'idle pilish--state nil))
+          (delete-process proc)
+          (should (eq (pilish-session-chat-buffer input) chat))
+          (should (eq (pilish-session-process input) proc))
+          (should-not (process-live-p (pilish-session-process input)))
+          (should-not (pilish-session-name chat))
+          (should-not (pilish-session-title chat))
+          (should-not (pilish-session-model chat))
+          (should-not (pilish-session-context-usage chat))
+          (should-not (pilish-session-busy-p chat))
+          (with-current-buffer input (setq pilish--chat-buffer nil))
+          (should-not (pilish-session-input-buffer chat))
+          (should-not (pilish-session-chat-buffer input))
+          (with-current-buffer input (setq pilish--chat-buffer chat))
+          (kill-buffer input)
+          (should-not (pilish-session-input-buffer chat))
+          (kill-buffer chat)
+          (should-not (pilish-session-chat-buffer chat)))
+      (pilish-test--kill-live-buffers input chat))))
+
+(ert-deftest pilish-test-session-accessors-busy-includes-pending-and-queued-work ()
+  "The public busy predicate includes non-streaming work and known queues."
+  (let* ((buffers (pilish-test--make-open-session-command-buffers))
+         (chat (car buffers)) (input (cadr buffers)) (proc (caddr buffers)))
+    (unwind-protect
+        (with-current-buffer chat
+          (setq pilish--status 'idle)
+          (should-not (pilish-session-busy-p input))
+          (dolist (status '(sending streaming compacting))
+            (setq pilish--status status)
+            (should (eq (pilish-session-busy-p input) t)))
+          (setq pilish--status 'idle
+                pilish--prompt-wait (pilish--make-prompt-wait :process proc))
+          (should (pilish-session-busy-p input))
+          (setq pilish--prompt-wait nil pilish--activity-phase "running")
+          (should (pilish-session-busy-p input))
+          (setq pilish--activity-phase "idle" pilish--followup-queue '("waiting"))
+          (should (pilish-session-busy-p input))
+          (setq pilish--followup-queue nil)
+          ;; An observed empty backend queue is idle, not queued work.
+          (process-put proc 'pilish-queue-snapshot '(:followUp [] :steering []))
+          (should-not (pilish-session-busy-p input))
+          (process-put proc 'pilish-queue-snapshot '(:followUp [] :steering ["steer"]))
+          (should (pilish-session-busy-p input))
+          (process-put proc 'pilish-queue-snapshot '(:followUp ["backend"] :steering []))
+          (should (pilish-session-busy-p input))
+          (delete-process proc)
+          (should-not (pilish-session-queued-prompts input))
+          (should-not (pilish-session-busy-p input)))
+      (pilish-test--kill-live-buffers input chat))))
+
+(ert-deftest pilish-test-session-accessors-exists-uses-canonical-directory-and-name ()
+  "Existence includes stopped and renamed chats but not other sessions."
+  (let ((root (pilish-test--make-temp-directory "pilish-accessor-exists-"))
+        chat input)
+    (unwind-protect
+        (cl-letf (((symbol-function 'pilish--start-process) (lambda (_) nil))
+                  ((symbol-function 'pilish--check-dependencies) #'ignore))
+          (setq chat (pilish--setup-session root "feature")
+                input (pilish-session-input-buffer chat))
+          (should (eq (pilish-session-exists-p (directory-file-name root) "feature") t))
+          (should-not (pilish-session-exists-p root))
+          (should-not (pilish-session-exists-p root "another"))
+          (with-current-buffer chat
+            (rename-buffer " *pilish-renamed-transcript*")
+            (setq default-directory "/tmp/"))
+          (should (equal (pilish-session-directory input) root))
+          (should (pilish-session-exists-p root "feature"))
+          ;; An input without a live chat is not an inspectable session.
+          (with-temp-buffer
+            (rename-buffer (pilish--buffer-name :input root))
+            (pilish-input-mode)
+            (should-not (pilish-session-chat-buffer (current-buffer)))
+            (should-not (pilish-session-exists-p root))))
+      (pilish-test--kill-live-buffers input chat)
+      (delete-directory root t))))
+
+(ert-deftest pilish-test-session-accessors-status-properties-are-isolated ()
+  "Status text keeps its faces without sharing their mutable data."
+  (let* ((buffers (pilish-test--make-open-session-command-buffers))
+         (chat (car buffers)) (input (cadr buffers))
+         (color (copy-sequence "green"))
+         (face (list :foreground color))
+         (help (vector (copy-sequence "details")))
+         (extra (make-hash-table :test 'equal))
+         seen)
+    (puthash "state" (list (copy-sequence "ready")) extra)
+    (unwind-protect
+        (progn
+          (with-current-buffer chat
+            (setq-local pilish-extension-status-functions
+                        (list (lambda (_buffer key text)
+                                (aset key 0 ?X)
+                                (aset text 0 ?X)
+                                (aset (plist-get (get-text-property 0 'face text)
+                                                 :foreground) 0 ?X)
+                                (aset (aref (get-text-property 0 'help-echo text) 0) 0 ?X)
+                                (aset (car (gethash "state" (get-text-property 0 'data text))) 0 ?X)
+                                (set-buffer input))
+                              (lambda (_buffer key text)
+                                (should (eq (current-buffer) chat))
+                                (push (cons key text) seen))))
+            (pilish--set-extension-status
+             "git" (propertize "synced" 'face face 'help-echo help 'data extra)))
+          (should (equal (caar seen) "git"))
+          (should (equal (cdar seen) "synced"))
+          (should (equal (get-text-property 0 'face (cdar seen))
+                         '(:foreground "green")))
+          (dolist (buffer (list chat input (buffer-name chat) (buffer-name input)))
+            (let* ((all (pilish-session-extension-status buffer))
+                   (text (pilish-session-extension-status buffer "git")))
+              (should (equal (cdar all) text))
+              (should (equal (get-text-property 0 'face text)
+                             '(:foreground "green")))
+              (should (equal (get-text-property 0 'help-echo text) ["details"]))
+              (should (equal (gethash "state" (get-text-property 0 'data text))
+                             '("ready")))
+              (should-not (eq (get-text-property 0 'data (cdar all))
+                              (get-text-property 0 'data text)))
+              (aset (plist-get (get-text-property 0 'face text) :foreground) 0 ?X)
+              (aset (aref (get-text-property 0 'help-echo text) 0) 0 ?X)
+              (aset (car (gethash "state" (get-text-property 0 'data text))) 0 ?X)
+              (setcar all '("replaced" . "value"))))
+          (with-current-buffer input
+            (should (equal (pilish-session-extension-status) '(("git" . "synced")))))
+          (should (equal color "green"))
+          (should (equal help ["details"]))
+          (should (equal (gethash "state" extra) '("ready")))
+          ;; Property-only updates are observable, identical repeats are not.
+          (with-current-buffer chat
+            (setq-local pilish-extension-status-functions
+                        (list (lambda (_buffer key text) (push (cons key text) seen))))
+            (let ((text (propertize "synced" 'face (list :foreground "blue"))))
+              (pilish--set-extension-status "git" text)
+              (pilish--set-extension-status "git" text)))
+          (should (= (length seen) 2)))
+      (pilish-test--kill-live-buffers input chat))))
+
+(ert-deftest pilish-test-session-accessors-copy-long-deep-and-circular-data ()
+  "Copies of long, deep, shared and circular data complete and stay independent."
+  (let* ((long (make-list 100000 'x))
+         (deep (let ((value "bottom"))
+                 (dotimes (_ 100000) (setq value (list value)))
+                 value))
+         (cycle (list (copy-sequence "a") (copy-sequence "b")))
+         (shared (copy-sequence "shared"))
+         (key (list (copy-sequence "key")))
+         (table (make-hash-table :test #'equal))
+         (text (propertize "status" 'data (list long cycle (vector shared shared) table))))
+    (setcdr (cdr cycle) cycle)
+    (puthash key deep table)
+    (with-temp-buffer
+      (pilish-chat-mode)
+      (pilish--set-extension-status "k" text)
+      (let* ((copy (pilish-session-extension-status nil "k"))
+             (data (get-text-property 0 'data copy)))
+        (should (equal copy "status"))
+        ;; Long lists keep their length.
+        (should (= (length (nth 0 data)) 100000))
+        (should-not (eq (nth 0 data) long))
+        ;; Cycles stay cycles of independent strings.
+        (let ((copied-cycle (nth 1 data)))
+          (should (eq (cddr copied-cycle) copied-cycle))
+          (should (equal (car copied-cycle) "a"))
+          (aset (car copied-cycle) 0 ?X)
+          (should (equal (car cycle) "a")))
+        ;; Shared elements stay shared within the copy only.
+        (let ((vector (nth 2 data)))
+          (should (eq (aref vector 0) (aref vector 1)))
+          (should-not (eq (aref vector 0) shared)))
+        ;; Hash keys are looked up by their completed copies; depth is unbounded.
+        (let ((copied-deep (gethash '("key") (nth 3 data))))
+          (should copied-deep)
+          (should-not (eq copied-deep deep))
+          (dotimes (_ 100000) (setq copied-deep (car copied-deep)))
+          (should (equal copied-deep "bottom")))))))
+
+(ert-deftest pilish-test-session-accessors-running-tools-use-live-registry ()
+  "Live tool IDs are copied; finished and history blocks do not count."
+  (let* ((buffers (pilish-test--make-open-session-command-buffers))
+         (chat (car buffers)) (input (cadr buffers)))
+    (unwind-protect
+        (with-current-buffer chat
+          (setq pilish--status 'idle pilish--activity-phase "idle")
+          (should-not (pilish-session-running-tools input))
+          (pilish--display-tool-start "bash" '(:command "true") (copy-sequence "t1"))
+          (pilish--display-tool-start "bash" '(:command "true") (copy-sequence "t2"))
+          (dolist (buffer (list chat input (buffer-name chat) (buffer-name input) nil))
+            (let ((ids (pilish-session-running-tools buffer)))
+              (should (equal (sort ids #'string<) '("t1" "t2")))
+              (aset (car ids) 0 ?X)
+              (setcar ids "replaced")))
+          (should (pilish-session-busy-p input))
+          (let ((finished (gethash "t2" pilish--live-tool-blocks)))
+            (pilish--display-tool-end "bash" '(:command "true")
+                                      '((:type "text" :text "done")) nil nil finished)
+            (should (overlay-buffer (pilish--tool-block-overlay finished)))
+            (should (equal (pilish-session-running-tools input) '("t1"))))
+          (pilish--finalize-live-tool-blocks 'pilish-tool-block-error)
+          (should-not (pilish-session-running-tools input))
+          (should-not (pilish-session-busy-p input))
+          (pilish--display-session-history
+           [(:role "assistant" :content [(:type "toolCall" :id "old" :name "bash"
+                                          :arguments (:command "true"))])
+             (:role "toolResult" :toolCallId "old" :toolName "bash"
+                    :content [(:type "text" :text "saved")])])
+          (should-not (pilish-session-running-tools input)))
+      (pilish-test--kill-live-buffers input chat))))
+
+(ert-deftest pilish-test-session-accessors-running-tools-wait-for-call-id ()
+  "Argument previews are not counted until an authoritative ID is known."
+  (with-temp-buffer
+    (pilish-chat-mode)
+    (pilish--handle-display-event '(:type "agent_start"))
+    (pilish--handle-display-event
+     '(:type "message_start" :message (:role "assistant" :content [])))
+    (pilish-test--send-assistant-message-update
+     '(:type "toolcall_start" :contentIndex 0 :id "provisional" :toolName "bash"))
+    (pilish-test--send-assistant-message-update
+     '(:type "toolcall_delta" :contentIndex 0 :delta "{\"command\":\"true\"}"))
+    (pilish--flush-stream-deltas)
+    (should-not (pilish-session-running-tools))
+    (should (pilish-session-busy-p))
+    (pilish-test--send-assistant-message-update
+     '(:type "toolcall_end" :contentIndex 0
+       :toolCall (:type "toolCall" :id "authoritative" :name "bash"
+                        :arguments (:command "true"))))
+    (should (equal (pilish-session-running-tools) '("authoritative")))
+    (pilish--finalize-live-tool-blocks 'pilish-tool-block-error)))
+
 ;;; Main Entry Point
 
 (ert-deftest pilish-test-pilish-creates-chat-buffer ()
