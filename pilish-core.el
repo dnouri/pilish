@@ -626,6 +626,32 @@ may also reset this wall-clock observation baseline."
   (unless (process-live-p proc)
     (pilish--handle-process-exit proc event)))
 
+(defvar pilish--process-shutdown-grace 5
+  "Seconds a Pi process may take to exit after its stdin closes.
+Pi then disposes its runtime: it aborts the run, runs extension shutdown
+handlers and finishes credential writes in progress, such as a refreshed
+OAuth token whose predecessor the provider already revoked.")
+
+(defun pilish--terminate-process (process)
+  "Ask live Pi PROCESS to shut down; kill it if it does not.
+Closing stdin lets Pi dispose its runtime and exit by itself.  Pilish
+ignores its further output; its exit runs the usual exit cleanup.  It is
+killed if it still runs after `pilish--process-shutdown-grace' seconds,
+or at once when its stdin cannot be closed."
+  (when (process-live-p process)
+    (set-process-filter process #'ignore)
+    (condition-case nil
+        (progn
+          (process-send-eof process)
+          (run-at-time pilish--process-shutdown-grace nil
+                       #'pilish--kill-unfinished-process process))
+      (error (delete-process process)))))
+
+(defun pilish--kill-unfinished-process (process)
+  "Kill PROCESS if it still runs after its shutdown grace period."
+  (when (process-live-p process)
+    (delete-process process)))
+
 (defun pilish--dispatch-response (proc json)
   "Dispatch JSON response from PROC to callback or event handler.
 Response routing order: explicit ID, id-less `:command' match, then

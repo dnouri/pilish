@@ -614,8 +614,7 @@ buffer from session history."
                                       old-proc)
                                      (pilish--unregister-display-handler
                                       old-proc)
-                                     (when (process-live-p old-proc)
-                                       (delete-process old-proc)))
+                                     (pilish--terminate-process old-proc))
                                    (when (buffer-live-p chat-buf)
                                      (with-current-buffer chat-buf
                                        (pilish--set-process new-proc)))
@@ -636,8 +635,7 @@ buffer from session history."
                                (pilish--refresh-commands-ignoring-errors
                                 new-proc chat-buf generation dir)))
                          (pilish--unregister-display-handler new-proc)
-                         (when (process-live-p new-proc)
-                           (delete-process new-proc))
+                         (pilish--terminate-process new-proc)
                          (if (and cancelled
                                   (not (pilish--json-false-p cancelled)))
                              (message "Pi: Reload cancelled")

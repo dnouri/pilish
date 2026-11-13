@@ -1496,6 +1496,43 @@ done"))
       (when (process-live-p proc)
         (delete-process proc)))))
 
+(ert-deftest pilish-test-terminate-process-closes-stdin ()
+  "Terminating Pi closes its stdin; its own exit runs the cleanup."
+  (let* ((pilish-executable (pilish-test-fake-pi-executable))
+         (pilish-extra-args (pilish-test-fake-pi-extra-args "prompt-lifecycle"))
+         (proc (pilish--start-process default-directory))
+         (stderr-buf (process-get proc 'pilish-stderr-buf))
+         (response nil))
+    (unwind-protect
+        (progn
+          (puthash "req_1" (lambda (r) (setq response r))
+                   (pilish--get-pending-requests proc))
+          (pilish--terminate-process proc)
+          (should (pilish-test-wait-for-process-exit proc 10))
+          (should (eq (process-status proc) 'exit))
+          (should (eq (plist-get response :processExit) t))
+          (should (eql (plist-get response :exitCode) 0))
+          (should-not (buffer-live-p stderr-buf)))
+      (when (process-live-p proc)
+        (delete-process proc)))))
+
+(ert-deftest pilish-test-terminate-process-kills-after-grace ()
+  "A Pi that ignores stdin EOF is killed after the grace period."
+  (let* ((pilish--process-shutdown-grace 0.1)
+         (pilish-executable '("sh" "-c" "exec sleep 30"))
+         (pilish-extra-args nil)
+         (proc (pilish--start-process default-directory))
+         (stderr-buf (process-get proc 'pilish-stderr-buf)))
+    (unwind-protect
+        (progn
+          (pilish--terminate-process proc)
+          (should (process-live-p proc))
+          (should (pilish-test-wait-for-process-exit proc 5))
+          (should (eq (process-status proc) 'signal))
+          (should-not (buffer-live-p stderr-buf)))
+      (when (process-live-p proc)
+        (delete-process proc)))))
+
 (ert-deftest pilish-test-process-exit-includes-exit-code ()
   "Process exit errors include the process exit code."
   (let ((fake-proc (start-process "pilish-exit-code" nil
