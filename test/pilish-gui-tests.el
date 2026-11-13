@@ -3679,7 +3679,7 @@ Return observations suitable for the graphical evidence file."
                                   (and (not (eq pilish--process proc))
                                        (not (pilish--session-transition-active-p))
                                        (string-match-p "Took 2m 5s" (buffer-string))))))
-               (should-not (process-live-p proc))
+               (should (pilish-test-wait-for-process-exit proc))
                (setq proc (buffer-local-value 'pilish--process chat))
                (setf (plist-get pilish-gui-test--session :process) proc)
                (should (member "tool-duration" (process-command proc)))

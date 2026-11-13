@@ -644,21 +644,39 @@ SPEC is (SESSION SCENARIO &rest EXTRA-ARGS)."
     (should (string-match-p "scenario not found: does-not-exist" output))
     (should-not (string-match-p "Traceback" output))))
 
+(defun pilish-fake-pi-test--session-root-after-exit (proc)
+  "Return PROC's session root after closing its stdin and awaiting exit."
+  (pilish-fake-pi-test--send proc '(:type "get_state"))
+  (let* ((response (pilish-fake-pi-test--pop-object proc))
+         (session-file (plist-get (plist-get response :data) :sessionFile))
+         (session-root (directory-file-name (file-name-directory session-file))))
+    (should (file-directory-p session-root))
+    (process-send-eof proc)
+    (should
+     (pilish-test-wait-until
+      (lambda () (not (process-live-p proc)))
+      pilish-fake-pi-test--timeout
+      0.01))
+    session-root))
+
 (ert-deftest pilish-fake-pi-test-cleans-session-root-on-exit ()
-  "The fake removes its temporary session directory when the process exits."
+  "Without --session-dir, the fake removes its private session root on exit."
+  (let ((command (list (pilish-test-python-executable)
+                       pilish-test-fake-pi-script)))
+    (cl-letf (((symbol-function 'pilish-test-fake-pi-executable)
+               (lambda () command)))
+      (pilish-fake-pi-test-with-process (proc "prompt-lifecycle")
+        (should-not (file-exists-p
+                     (pilish-fake-pi-test--session-root-after-exit proc)))))))
+
+(ert-deftest pilish-fake-pi-test-keeps-session-dir-files-on-exit ()
+  "With --session-dir, session files outlive the fake, as Pi's do.
+A reload hands the session file to the next process."
   (pilish-fake-pi-test-with-process (proc "prompt-lifecycle")
-    (pilish-fake-pi-test--send proc '(:type "get_state"))
-    (let* ((response (pilish-fake-pi-test--pop-object proc))
-           (session-file (plist-get (plist-get response :data) :sessionFile))
-           (session-root (directory-file-name (file-name-directory session-file))))
+    (let ((session-root (pilish-fake-pi-test--session-root-after-exit proc)))
       (should (file-directory-p session-root))
-      (process-send-eof proc)
-      (should
-       (pilish-test-wait-until
-        (lambda () (not (process-live-p proc)))
-        pilish-fake-pi-test--timeout
-        0.01))
-      (should-not (file-exists-p session-root)))))
+      (should (file-in-directory-p session-root
+                                   (pilish-test--fake-pi-session-dir))))))
 
 (ert-deftest pilish-fake-pi-test-get-commands-returns-configured-commands ()
   "get_commands returns the scenario's slash-command list." 

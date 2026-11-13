@@ -157,13 +157,29 @@ redisplay, and subprocess event delivery.")
       (executable-find "python")
       (ert-skip "python3 or python not found")))
 
+(defvar pilish-test--fake-pi-session-dir nil
+  "Directory holding this Emacs's fake-pi session files, or nil.")
+
+(defun pilish-test--fake-pi-session-dir ()
+  "Return this Emacs's fake-pi session directory, creating it once.
+Pi keeps session files after it exits, and a reload hands one to the
+next process, so the files outlive each fake.  Emacs removes the
+directory when it exits."
+  (or pilish-test--fake-pi-session-dir
+      (let ((dir (make-temp-file "pilish-fake-pi-sessions-" t)))
+        (add-hook 'kill-emacs-hook
+                  (lambda () (delete-directory dir t)))
+        (setq pilish-test--fake-pi-session-dir dir))))
+
 (defun pilish-test-fake-pi-executable ()
   "Return the command list for launching the fake-pi harness.
 Uses python3 in the test suite so local and CI runs do not need a
 separate uv dependency, while the script itself still keeps uv metadata
-and an executable shebang for manual runs."
+and an executable shebang for manual runs.  Session files go to
+`pilish-test--fake-pi-session-dir'."
   (list (pilish-test-python-executable)
-        pilish-test-fake-pi-script))
+        pilish-test-fake-pi-script
+        "--session-dir" (pilish-test--fake-pi-session-dir)))
 
 (defun pilish-test-fake-pi-extra-args (scenario &optional extra-args)
   "Return fake-pi CLI args for SCENARIO plus optional EXTRA-ARGS."

@@ -568,7 +568,7 @@ BINDING-SPEC is (DIR CHAT-NAME INPUT-NAME PROC).  DIR is evaluated once."
       (should (= prompt-count 1))
       (should-not (get-buffer chat-name))
       (should-not (get-buffer input-name))
-      (should-not (process-live-p proc)))))
+      (should (pilish-test-wait-for-process-exit proc)))))
 
 (ert-deftest pilish-test-kill-chat-kills-input ()
   "Killing chat buffer also kills input buffer."
@@ -783,7 +783,7 @@ BINDING-SPEC is (DIR CHAT-NAME INPUT-NAME PROC).  DIR is evaluated once."
               (pilish-reload)
               (should (eq pilish--process old-proc))
               (should (process-live-p old-proc))
-              (should-not (process-live-p new-proc))
+              (should (pilish-test-wait-for-process-exit new-proc))
               (should-not (pilish--session-transition-active-p))
               (should (equal shown-message
                              "Pi: Failed to reload - nope")))))
@@ -823,7 +823,7 @@ BINDING-SPEC is (DIR CHAT-NAME INPUT-NAME PROC).  DIR is evaluated once."
               (pilish-reload)
               (should (eq pilish--process old-proc))
               (should (process-live-p old-proc))
-              (should-not (process-live-p new-proc))
+              (should (pilish-test-wait-for-process-exit new-proc))
               (should-not (pilish--session-transition-active-p))
               (should (equal shown-message "Pi: Reload cancelled")))))
       (when (and old-proc (process-live-p old-proc))

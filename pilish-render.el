@@ -1713,8 +1713,7 @@ which asks upfront before any buffers are touched."
                                                pilish--session-transition-process))))
       (when (processp proc)
         (pilish--unregister-display-handler proc)
-        (when (process-live-p proc)
-          (delete-process proc))))
+        (pilish--terminate-process proc)))
     (when (and pilish--input-buffer (buffer-live-p pilish--input-buffer))
       (let ((input-buf pilish--input-buffer))
         ;; Unlink both ways first.  Otherwise the input's own cleanup kills

@@ -476,6 +476,12 @@ This keeps the first user on disk even if its assistant never completes.
 File existence is checked under the existing session lock; there is no second
 persistence-state owner.
 
+Each fake allocates its session files in its own `fake-pi-*` directory. As with
+Pi, they outlive the process when a caller passes `--session-dir`: a reload
+hands the session file to the next process, and the caller removes the
+directory. The test helpers pass one per Emacs and delete it when Emacs exits.
+Without `--session-dir`, the fake removes its private directory on exit.
+
 Materialized files use strict LF-delimited UTF-8 JSONL. The switch loader also
 accepts blank lines and an optional CR before LF, but every nonblank line must
 be strict JSON. Real Pi emits `message_end` before appending that message;
