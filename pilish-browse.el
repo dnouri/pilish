@@ -1097,31 +1097,6 @@ so scan order never leaks."
                               (plist-get b :path) "")))))))
     (_ items)))
 
-(defun pilish--canonical-session-path (path &optional memo anchor)
-  "Return PATH's canonical spelling for session family identity.
-Remote spellings keep their full TRAMP route as the identity — never
-resolved, so no remote filesystem is contacted and distinct routes
-stay distinct identities.  Local spellings resolve symlinks along
-the whole path through `file-truename', so alias spellings of one
-file — a symlinked sessions directory or a symlinked session file
-itself — denote one family.  A spelling `file-truename' cannot
-resolve, such as a symlink cycle, keeps its lexical form instead of
-signaling — like pi's realpath fallback.  MEMO, when non-nil, is a
-hash table caching canonical spellings across calls; ANCHOR, when
-non-nil, anchors relative spellings as
-`pilish--route-preserving-expand-file-name' does."
-  (when (stringp path)
-    (let ((expanded (pilish--route-preserving-expand-file-name path anchor)))
-      (if (pilish--remote-prefix-for-path expanded)
-          expanded
-        (let ((memo (or memo (make-hash-table :test 'equal))))
-          (or (gethash expanded memo)
-              (puthash expanded
-                       (condition-case nil
-                           (file-truename expanded)
-                         (error expanded))
-                       memo)))))))
-
 (defun pilish--session-item-key (item &optional memo)
   "Return ITEM's canonical identity key.
 A present `:canonicalPath' (see `pilish--session-enrich-item') wins,

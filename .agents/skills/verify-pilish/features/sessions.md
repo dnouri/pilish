@@ -8,6 +8,7 @@ The session and tree browsers support native folding, searching, copying, and sc
 - `sessions-dir-env` selects a nonempty `PI_CODING_AGENT_SESSION_DIR` as flat local storage without a linked chat. Current project filters by saved cwd; All projects lists only that custom directory, not the default archive tree.
 - `tree-browser` applies the same native actions to projected conversation nodes.
 - `session-resume` selects a saved session in the real browser, invokes its switch command, and rebuilds the chat history.
+- `session-identity` lets custom observers follow initial session state, new-session, resume and a buffer rename observed on the next state refresh, without treating a symlinked spelling of the same saved file as a change.
 - `session-state-ownership` keeps a newly selected session's identity and header state when an older startup or thinking-level state response arrives.
 
 ## How to get to it (user POV)
@@ -15,6 +16,7 @@ The session and tree browsers support native folding, searching, copying, and sc
 - Use the margin, `TAB`, `S-TAB`, `/`, `M-w`, and ordinary scrolling in an open session or tree browser.
 - Export `PI_CODING_AGENT_SESSION_DIR`, open `M-x pilish-session-browser` from a local project without starting Pi, and press `t` for All projects.
 - Select a saved session and run `M-x pilish-session-browser-switch` to resume it.
+- Register an observer with `pilish-session-identity-functions`, use `C-c C-n`, then open the original file with `pilish-open-session-file`.
 - Use `C-c C-n` for a new session while a background state query is outstanding.
 
 ## Driving it with Pilish harnesses
@@ -27,6 +29,7 @@ Preconditions:
 - **Browse environment-selected storage without a chat.** Run `G1_CAPTURE="$RUN_DIR/env-capture" ./test/run-gui-tests.sh --headless pilish-gui-test-session-browser-env-directory-without-chat 2>&1 | tee "$RUN_DIR/env-browser.log"`. Record `env-browser.exit`. Native `M-x pilish-session-browser` shows only the current cwd's custom-directory session; native `t` shows both custom-directory projects and excludes the default-tree decoy. Both observations require no linked chat and no process start. Require `env-browser-current` and `env-browser-all` `.el` and `.png` files under `$RUN_DIR/env-capture`.
 - **Search saved text for the first time.** Run `./test/run-gui-tests.sh --headless pilish-gui-test-session-browser-first-search-from-disk 2>&1 | tee "$RUN_DIR/first-search.log"`. Record `first-search.exit`. Opening has no search corpus; `/` finds late saved text, a later missing query shows no matches, and clearing then refreshing retains full text.
 - **Resume through the browser.** Run `./bench/run-reload-resume-bench.sh --scenario smoke -c 1 --out-dir "$RUN_DIR/reload-resume" 2>&1 | tee "$RUN_DIR/resume.log"`. Record `resume.exit`. The resume lane selects the target section, calls `pilish-session-browser-switch`, and checks rebuilt history.
+- **Observe identity changes.** Run `G1_CAPTURE="$RUN_DIR/identity-capture" ./test/run-gui-tests.sh --headless pilish-gui-test-session-identity-observes-new-and-resume 2>&1 | tee "$RUN_DIR/identity.log"`. Record `identity.exit`. The fake stores sessions under a symlinked `TMPDIR` and reports resolved spellings after each switch. The observer receives exactly one initial notification, one after `C-c C-n` starts a new session, none after a reload that only changes the saved file's spelling, one after opening the original saved file, and one after reload refreshes a manually renamed buffer. Require `identity-after-new.el` and `identity-after-resume-and-rename.el` under `$RUN_DIR/identity-capture`.
 - **Keep the switched session current.** Run `G1_CAPTURE="$RUN_DIR/state-capture" ./test/run-gui-tests.sh --headless pilish-gui-test-session-switch-ignores-delayed-state 2>&1 | tee "$RUN_DIR/state-ownership.log"`. Record `state-ownership.exit`. Two native `C-c C-n` actions retain their current saved file and header state when older startup/thinking replies are released; the final prompt still receives a reply and preserves the unsent draft. Require `delayed-startup-state`, `delayed-thinking-state` and `switched-session-current` `.el` and `.png` evidence under `$RUN_DIR/state-capture`.
 - **Check the proof.** Require zero statuses and nonempty logs. Require `.png` and `.el` files for `browser-pilish-session-browser-mode-folded`, `browser-pilish-session-browser-mode-unfolded`, `browser-pilish-tree-browser-mode-folded`, and `browser-pilish-tree-browser-mode-unfolded` under `$RUN_DIR/browser-capture`. Require at least one nonempty `result.json` under `$RUN_DIR/reload-resume`.
 
@@ -36,6 +39,7 @@ Preconditions:
 - The env-browser journey uses isolated local JSONL files and never starts Pi; it proves browser discovery and scope filtering, not CLI storage configuration or remote access.
 - The state-ownership journey controls delivery of real fake-Pi `get_state` responses to reproduce the interleaving. It calls the background thinking refresh directly; it does not cover the thinking selector's completion UI or claim that Pi replies out of order in every runtime.
 - The large browser scenario uses 2,000 synthetic rows in each browser. It enters the modes directly with session search already enabled and does not prove first-search disk loading or resume those rows.
+- Identity evidence uses the deterministic fake's actual RPC changes; it does not exercise real Pi or arbitrary buffer renames without a later state refresh. Its project directory uses its resolved spelling: opening a saved file whose recorded cwd is another spelling of the session's directory starts a separate session pair.
 - PNG capture requires `x-export-frames`. Missing PNGs make the screenshot requirement blocked even when the assertions pass.
 - The resume bench calls `pilish-session-browser-switch` directly. These recipes do not cover the `C-c C-r`, `/resume`, or `C-c C-p w` opening aliases, or `RET` key dispatch.
 - The reload and resume scenario proves correctness only. Do not cite its timings as a performance result.

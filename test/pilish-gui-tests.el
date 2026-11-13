@@ -256,6 +256,85 @@
                     :commands (reverse pilish-gui-test--large-trace))))))
       (delete-file file))))
 
+(ert-deftest pilish-gui-test-session-identity-observes-new-and-resume ()
+  "Observers follow new-session, resume and buffer rename across path spellings.
+The fake's session store is reached through a symlinked $TMPDIR, as on macOS,
+and the fake reports resolved saved-file spellings after every switch, so a
+reload without a change must not notify."
+  (let* ((real (file-name-as-directory
+                (file-truename (make-temp-file "pilish-identity-" t))))
+         (link (concat (directory-file-name real) "-link"))
+         (dir (file-name-as-directory (expand-file-name "project" real)))
+         (store (file-name-as-directory (expand-file-name "store" link)))
+         (process-environment (cons (concat "TMPDIR=" store)
+                                    process-environment))
+         (seen nil)
+         (pilish-session-identity-functions
+          (list (lambda (_chat &rest identity) (push identity seen)))))
+    (make-directory dir)
+    (make-directory (expand-file-name "store" real))
+    (make-symbolic-link (directory-file-name real) link)
+    (setq pilish-gui-test--failure-snapshot nil)
+    (pilish-gui-test-end-session)
+    (unwind-protect
+        (progn
+          (pilish-gui-test-start-session
+           dir '(:backend fake :fake-scenario "prompt-lifecycle"))
+          (let* ((chat (plist-get pilish-gui-test--session :chat-buffer))
+                 (process (plist-get pilish-gui-test--session :process))
+                 (backend (plist-get pilish-gui-test--session :backend))
+                 (pilish-executable (plist-get backend :executable))
+                 (pilish-extra-args (plist-get backend :extra-args))
+                 (initial-file (with-current-buffer chat
+                                 (plist-get pilish--state :session-file)))
+                 (reload
+                  (lambda ()
+                    (let ((old (buffer-local-value 'pilish--process chat)))
+                      (with-current-buffer chat
+                        (call-interactively #'pilish-reload))
+                      (should (pilish-test-wait-until
+                               (lambda ()
+                                 (with-current-buffer chat
+                                   (and (not (eq pilish--process old))
+                                        (process-live-p pilish--process)
+                                        (not (pilish--session-transition-active-p))
+                                        (not pilish--session-identity-state-pending))))
+                               8 0.01))))))
+            (should (string-prefix-p store initial-file))
+            (should (equal seen (list (list initial-file dir (buffer-name chat)))))
+            (pilish-gui-test-send "Observe this session identity")
+            (select-window (pilish-gui-test-chat-window))
+            (pilish-gui-test--large-command (kbd "C-c C-n") 'pilish-new-session)
+            (should (pilish-test-wait-until
+                     (lambda () (= (length seen) 2)) 5 0.01 process))
+            (should-not (file-equal-p (caar seen) initial-file))
+            (should (equal (cdar seen) (cdadr seen)))
+            ;; Reload switches to the resolved spelling of the same saved file.
+            (funcall reload)
+            (should (= (length seen) 2))
+            (should-not (equal (with-current-buffer chat
+                                 (plist-get pilish--state :session-file))
+                               (caar seen)))
+            (pilish-gui-test--large-evidence "identity-after-new" (reverse seen))
+            ;; Opening the original saved file uses the same session buffer pair.
+            (should (eq (pilish-open-session-file initial-file) chat))
+            (should (pilish-test-wait-until
+                     (lambda () (= (length seen) 3)) 5 0.01))
+            (should (file-equal-p (caar seen) initial-file))
+            (with-current-buffer chat
+              (rename-buffer " *identity-observer-renamed*" t))
+            ;; Reload's state refresh observes the ordinary Emacs buffer rename.
+            (funcall reload)
+            (should (= (length seen) 4))
+            (should (file-equal-p (caar seen) initial-file))
+            (should (equal (nth 2 (car seen)) " *identity-observer-renamed*"))
+            (pilish-gui-test--large-evidence "identity-after-resume-and-rename"
+                                             (reverse seen))))
+      (pilish-gui-test--capture-failure-snapshot)
+      (pilish-gui-test-end-session)
+      (delete-file link)
+      (delete-directory real t))))
+
 (ert-deftest pilish-gui-test-session-switch-ignores-delayed-state ()
   "Native New Session survives delayed startup and thinking-state responses."
   (let ((dispatch (symbol-function 'pilish--dispatch-response))
