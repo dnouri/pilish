@@ -864,10 +864,7 @@ The gesture works without the Evil integration, mirroring
         (delete-other-windows)))))
 
 (ert-deftest pilish-test-show-session-buffers-hidden-launches-chat-only ()
-  "A fresh session launches chat-only when display is `hidden'.
-`pilish--show-session-buffers' honors
-`pilish-input-window-display', so a `hidden' session starts
-without an input window."
+  "A fresh session launches chat-only when display is `hidden'."
   (let ((root "/tmp/pilish-test-show-hidden/")
         (pilish-input-window-display 'hidden))
     (make-directory root t)
@@ -879,7 +876,15 @@ without an input window."
             (delete-other-windows)
             (pilish--show-session-buffers chat input)
             (should (get-buffer-window chat))
-            (should-not (get-buffer-window input)))
+            (should-not (get-buffer-window input))
+            (should (eq (selected-window) (get-buffer-window chat)))
+            (with-temp-buffer
+              (let ((other-window (split-window-right)))
+                (set-window-buffer other-window (current-buffer))
+                (select-window other-window))
+              (pilish--show-session-buffers chat input)
+              (should-not (get-buffer-window input))
+              (should (eq (selected-window) (get-buffer-window chat)))))
         (pilish-test--kill-session-buffers root)
         (delete-other-windows)))))
 

@@ -120,6 +120,7 @@
 ;;; Code:
 
 (require 'cl-lib)
+(require 'pilish-ui)
 (require 'pilish-menu)
 (require 'pilish-input)
 (require 'pilish-browse)
@@ -349,17 +350,6 @@ CHAT-BUFFER."
   (pilish--show-session-buffers
    chat-buffer (buffer-local-value 'pilish--input-buffer chat-buffer))
   chat-buffer)
-
-(defun pilish--show-session-buffers (chat-buf input-buf)
-  "Show CHAT-BUF and INPUT-BUF, focusing input when both are visible.
-When `pilish-input-window-display' is `hidden', a freshly
-displayed session starts with only the chat window visible."
-  (if (and (get-buffer-window-list chat-buf nil)
-           (get-buffer-window-list input-buf nil))
-      (pilish--focus-input-window chat-buf input-buf)
-    (pilish--display-buffers
-     chat-buf input-buf
-     (eq pilish-input-window-display 'hidden))))
 
 (defun pilish--dired-regular-file-at-point ()
   "Return Dired's regular file at point, or nil."
