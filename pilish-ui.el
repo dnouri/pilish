@@ -1228,6 +1228,7 @@ removing the instructional header that would otherwise appear."
     (define-key map (kbd "C-c C-c") #'pilish-send)
     (define-key map (kbd "TAB") #'pilish-complete)
     (define-key map (kbd "C-c C-k") #'pilish-abort)
+    (define-key map (kbd "C-c C-m") #'pilish-select-model)
     (define-key map (kbd "C-c C-p") #'pilish-menu)
     (define-key map (kbd "C-c C-r") #'pilish-session-browser)
     (define-key map (kbd "M-p") #'pilish-previous-input)
