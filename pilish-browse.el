@@ -4671,19 +4671,28 @@ That is nil, the default session, when it is free, else \"2\", \"3\", ..."
 The browser has no live chat to switch, so no other view's conversation
 changes: PATH starts in the first free session of its recorded cwd
 \(`pilish--browse-free-session-name').  The cwd is validated before the
-browser window is dismissed.  Return the chat buffer."
+browser window is dismissed; if opening then fails or is quit, as when
+dependencies are missing or the frame is too small for the session
+layout, the window configuration from before the dismissal returns, so
+the browser stays shown.  Return the chat buffer."
   ;; `pilish' requires this file, but the autoloaded browser can run
   ;; before it is loaded.
   (require 'pilish)
-  (let ((browser (current-buffer))
-        (dir (pilish--session-file-cwd-or-error path)))
-    (when (eq (window-buffer) browser)
-      (quit-window))
-    (let ((chat-buf (pilish--open-session-file-in-session
-                     path (pilish--browse-free-session-name dir))))
-      (with-current-buffer browser
-        (setq pilish--chat-buffer chat-buf))
-      chat-buf)))
+  (let* ((browser (current-buffer))
+         (dir (pilish--session-file-cwd-or-error path))
+         (config (current-window-configuration))
+         (chat-buf nil))
+    (unwind-protect
+        (progn
+          (when (eq (window-buffer) browser)
+            (quit-window))
+          (setq chat-buf (pilish--open-session-file-in-session
+                          path (pilish--browse-free-session-name dir))))
+      (unless chat-buf
+        (set-window-configuration config)))
+    (with-current-buffer browser
+      (setq pilish--chat-buffer chat-buf))
+    chat-buf))
 
 (defun pilish--browse-switch-session (path)
   "Activate a live owner of PATH, or open or resume PATH.
