@@ -4698,26 +4698,35 @@ The browser has no live chat to switch, so no other view's conversation
 changes: a live view that already has PATH open is shown, otherwise PATH
 starts in the first free session of its recorded cwd
 \(`pilish--browse-free-session-name').  The cwd is validated before the
-browser window is dismissed.  Return the chat buffer."
+browser window is dismissed; if opening then fails or is quit, as when
+dependencies are missing or the frame is too small for the session
+layout, the window configuration from before the dismissal returns, so
+the browser stays shown.  Return the chat buffer."
   ;; `pilish' requires this file, but the autoloaded browser can run
   ;; before it is loaded.
   (require 'pilish)
   (let* ((browser (current-buffer))
          (open (pilish--browse-live-session-chat-buffer path))
-         (dir (unless open (pilish--session-file-cwd-or-error path))))
-    (when (eq (window-buffer) browser)
-      (quit-window))
-    (let ((chat-buf
-           (if open
-               (progn
-                 (pilish--show-session-buffers
-                  open (buffer-local-value 'pilish--input-buffer open))
-                 open)
-             (pilish--open-session-file-in-session
-              path (pilish--browse-free-session-name dir)))))
-      (with-current-buffer browser
-        (setq pilish--chat-buffer chat-buf))
-      chat-buf)))
+         (dir (unless open (pilish--session-file-cwd-or-error path)))
+         (config (current-window-configuration))
+         (chat-buf nil))
+    (unwind-protect
+        (progn
+          (when (eq (window-buffer) browser)
+            (quit-window))
+          (setq chat-buf
+                (if open
+                    (progn
+                      (pilish--show-session-buffers
+                       open (buffer-local-value 'pilish--input-buffer open))
+                      open)
+                  (pilish--open-session-file-in-session
+                   path (pilish--browse-free-session-name dir)))))
+      (unless chat-buf
+        (set-window-configuration config)))
+    (with-current-buffer browser
+      (setq pilish--chat-buffer chat-buf))
+    chat-buf))
 
 (defun pilish--browse-switch-session (path)
   "Switch the linked chat session to session file PATH.

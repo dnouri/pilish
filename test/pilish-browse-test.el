@@ -7086,6 +7086,41 @@ starting another.  Each result becomes the browser's linked chat."
       (mapc #'kill-buffer (cons other-chat created))
       (delete-directory project-dir t))))
 
+(ert-deftest pilish-test-switch-without-chat-failure-keeps-browser-shown ()
+  "A failed open from a browser without a chat leaves the browser shown.
+The cwd check passes, so the browser window is dismissed; opening then
+fails in the dependency check.  The error propagates, the browser is
+back in its window and stays unlinked."
+  (let* ((project-dir (file-name-as-directory
+                       (make-temp-file "pilish-browse-own-view-fail-" t)))
+         (file (expand-file-name "s.jsonl" project-dir))
+         (dead-chat (generate-new-buffer "*dead-chat*"))
+         (browser (generate-new-buffer "*test-browser*")))
+    (unwind-protect
+        (progn
+          (pilish-test--write-session-file
+           file "hello" (directory-file-name project-dir))
+          (kill-buffer dead-chat)
+          (cl-letf (((symbol-function 'pilish--browse-live-session-chat-buffer)
+                     #'ignore)
+                    ((symbol-function 'pilish--check-dependencies)
+                     (lambda (_dir) (user-error "Missing dependency")))
+                    ((symbol-function 'pilish--setup-session)
+                     (lambda (&rest _) (error "Session must not start"))))
+            (save-window-excursion
+              (switch-to-buffer browser)
+              (pilish-session-browser-mode)
+              (setq pilish--chat-buffer dead-chat)
+              (should (equal (cadr (should-error
+                                    (pilish--browse-switch-session file)
+                                    :type 'user-error))
+                             "Missing dependency"))
+              (should (eq (window-buffer (selected-window)) browser))
+              (should (eq (buffer-local-value 'pilish--chat-buffer browser)
+                          dead-chat)))))
+      (kill-buffer browser)
+      (delete-directory project-dir t))))
+
 (ert-deftest pilish-test-quit-when-settled ()
   "--browse-quit-when-settled waits out the transition, then quits only
 when the chat landed on the requested session file AND the window still
