@@ -46,6 +46,6 @@ Keep implementation ownership out of the map. The feature file names user paths,
 - [Compose and send](./compose-and-send.md) covers session layout, header-line placement, consecutive prompt submission, busy-send steering and follow-ups, fitted input height, hide-after-send composing, and returning the chat to its end on submit.
 - [Read streamed output](./read-output.md) covers streaming, Markdown markup visibility, thinking display, scrolling, table resizing, live and recorded durations, transient run-return receipts, extension notices kept in the chat, completed-block inspection, and image previews prepared before graphical display.
 - [Work with tool blocks](./tool-blocks.md) covers tool output, bottom controls, durations, explicit tool details, native folds, child arguments, cursor stability, cooling, and survival when another session closes.
-- [Browse and resume sessions](./sessions.md) covers session and tree browser actions plus browser-based resume.
+- [Browse and resume sessions](./sessions.md) covers session and tree browser actions, browser-based resume, and background sessions started from Lisp.
 - [Open saved conversations](./saved-conversations.md) covers recursive saved-chat trees, direct file viewing without resuming, independent observers, completed-block inspection, recorded durations, refresh, failure retention, and observer-only quit.
 - [Answer extension editor prompts](./extension-dialogs.md) covers the multiline editor buffer, submission, cancellation, and draft safety.

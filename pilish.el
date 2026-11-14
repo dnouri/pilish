@@ -119,6 +119,7 @@
 
 ;;; Code:
 
+(require 'cl-lib)
 (require 'pilish-menu)
 (require 'pilish-input)
 (require 'pilish-browse)
@@ -163,10 +164,20 @@ Evil states apply to them."
   (when (and pilish-evil-integration (featurep 'evil))
     (require 'pilish-evil nil t)))
 
-(defun pilish--setup-session (dir &optional session)
+(cl-defun pilish--setup-session
+    (dir &optional session &key args environment background)
   "Set up a new or existing session for DIR with optional SESSION name.
+A new session keeps ARGS and ENVIRONMENT as its own launch options (see
+`pilish--launch-options').  BACKGROUND means nobody is there to answer
+questions, as for `pilish--check-dependencies'.
 Returns the chat buffer."
   (pilish--maybe-load-evil-integration)
+  ;; Install essential grammars before buffer creation runs Markdown modes.
+  (let ((existing (pilish--find-session dir session)))
+    (unless (and existing
+                 (with-current-buffer existing
+                   (and pilish--process (process-live-p pilish--process))))
+      (pilish--check-dependencies dir background)))
   (let* ((chat-buf (pilish--get-or-create-buffer :chat dir session))
          (input-buf (pilish--get-or-create-buffer :input dir session))
          (new-session nil))
@@ -176,8 +187,9 @@ Returns the chat buffer."
       (pilish--set-input-buffer input-buf)
       ;; Start process if not already running
       (unless (and pilish--process (process-live-p pilish--process))
-        (pilish--check-dependencies dir)
-        (pilish--set-process (pilish--start-process dir))
+        (unless pilish--launch-options
+          (pilish--set-launch-options args environment))
+        (pilish--set-process (pilish--start-session-process dir))
         (setq new-session t)
         ;; Associate process events and ownership with this chat buffer.
         (when (processp pilish--process)
@@ -229,6 +241,114 @@ Returns the chat buffer."
       (setq default-directory dir)
       (pilish--set-chat-buffer chat-buf))
     chat-buf))
+
+(defvar treesit-auto-install-grammar)  ; Emacs 31+, in treesit.el
+
+;;;###autoload
+(cl-defun pilish-start-session
+    (directory name &key session-file args environment)
+  "Start a session in DIRECTORY without displaying it.
+Return the session's chat buffer.  NAME names the session as
+\\[universal-argument] \\[pilish] does; nil selects DIRECTORY's default
+session.  Unlike \\[pilish], which shows a session that already exists,
+this signals an error for one: its launch options could not be applied,
+and a caller should not adopt a session it did not start.
+
+SESSION-FILE resumes that saved Pi session and renders its history.  Its
+recorded working directory must be DIRECTORY; a nil DIRECTORY means that
+recorded directory.
+
+ARGS is a list of extra Pi command-line arguments, placed after
+`pilish-extra-args'.  As for that variable, arguments that select Pi's
+mode or session, such as --mode, --session, --continue or --resume,
+break Pilish's RPC connection; use SESSION-FILE to resume.  ENVIRONMENT
+is an alist of (NAME . VALUE) overrides, where a nil VALUE removes NAME;
+it takes precedence over `pilish-session-environment-functions'.  Both
+apply to every Pi process of this session, including `pilish-reload',
+and to no other process.
+
+Dependencies are checked as by \\[pilish], except that nothing asks:
+a missing Pi executable is an error, and so are missing essential
+tree-sitter grammars when `pilish-essential-grammar-action' is `prompt'.
+With `auto' they are installed and with `warn' the session starts after
+a warning.  Optional grammars are not offered.
+
+Pilish does not wait for Pi.  Returning a buffer does not mean Pi has
+answered the initial state request or finished resuming; this function
+provides no readiness callback.  A failed dependency check, an invalid
+name, directory, SESSION-FILE, ARGS or ENVIRONMENT is an error that
+leaves no session behind.  Pi's later startup errors appear in the chat;
+a failed resume is reported in the echo area, as for interactive
+sessions.  `pilish-show-session' shows the session.
+
+Remote directories use the existing TRAMP process launcher and path
+rules.  TRAMP may prompt for authentication, and dependency checks and
+file reads may block on remote access; non-displaying does not mean
+all setup is asynchronous."
+  (unless (or (null name)
+              (and (stringp name) (not (string-empty-p name))))
+    (error "Pilish: session name must be nil or a nonempty string: %S"
+           name))
+  (unless (and (proper-list-p args) (seq-every-p #'stringp args))
+    (error "Pilish: arguments must be a list of strings: %S" args))
+  (pilish--check-environment environment)
+  (let* ((session-file (and session-file
+                            (pilish--route-preserving-expand-file-name
+                             session-file)))
+         (recorded-dir (and session-file
+                            (pilish--normalize-directory
+                             (pilish--session-file-cwd-or-error
+                              session-file))))
+         (dir (cond (directory (pilish--normalize-directory directory))
+                    (recorded-dir)
+                    (t (error "Pilish: a session needs a directory")))))
+    (unless (file-directory-p dir)
+      (error "Pilish: not a directory: %s" dir))
+    (when (and recorded-dir (not (equal recorded-dir dir)))
+      (error "Pilish: session file %s belongs to %s, not %s"
+             session-file recorded-dir dir))
+    (when (or (pilish--find-session dir name)
+              (get-buffer (pilish--buffer-name :input dir name)))
+      (error "Pilish: session already exists: %s"
+             (pilish--buffer-name :chat dir name)))
+    (condition-case err
+        ;; Mode setup runs when the buffers are created, and nobody is
+        ;; there to answer Emacs's own grammar installation prompt.
+        (let* ((treesit-auto-install-grammar 'never)
+               (chat-buf (pilish--setup-session
+                          dir name :args args :environment environment
+                          :background t)))
+          (when session-file
+            (pilish--resume-selected-session
+             (buffer-local-value 'pilish--process chat-buf)
+             chat-buf session-file))
+          chat-buf)
+      ((error quit)
+       (let ((pilish-quit-without-confirmation t))
+         (dolist (buffer (list (or (pilish--find-session dir name)
+                                   (get-buffer
+                                    (pilish--buffer-name :chat dir name)))
+                               (get-buffer
+                                (pilish--buffer-name :input dir name))))
+           (when (buffer-live-p buffer)
+             (kill-buffer buffer))))
+       (signal (car err) (cdr err))))))
+
+(defun pilish-show-session (chat-buffer)
+  "Show the session whose chat buffer is CHAT-BUFFER, as \\[pilish] does.
+This displays a session started with `pilish-start-session' without
+changing `default-directory'.  It neither starts nor restarts Pi; use
+`pilish-reload' for a session whose process has exited.  Return
+CHAT-BUFFER."
+  (unless (and (buffer-live-p chat-buffer)
+               (with-current-buffer chat-buffer
+                 (derived-mode-p 'pilish-chat-mode))
+               (buffer-live-p (buffer-local-value 'pilish--input-buffer
+                                                  chat-buffer)))
+    (error "Pilish: not a session chat buffer: %S" chat-buffer))
+  (pilish--show-session-buffers
+   chat-buffer (buffer-local-value 'pilish--input-buffer chat-buffer))
+  chat-buffer)
 
 (defun pilish--show-session-buffers (chat-buf input-buf)
   "Show CHAT-BUF and INPUT-BUF, focusing input when both are visible.

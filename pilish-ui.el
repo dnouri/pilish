@@ -1377,6 +1377,73 @@ of the current session in the selected frame."
 (defvar-local pilish--process nil
   "The pi RPC subprocess for this session.")
 
+(defvar-local pilish--launch-options nil
+  "This session's own Pi arguments and environment, or nil.
+A plist with :args, extra Pi arguments, and :environment, an alist of
+\(NAME . VALUE) overrides, as `pilish-start-session' takes them.  Every
+Pi process of the session starts with them; see
+`pilish--start-session-process'.")
+
+(defvar pilish-session-environment-functions nil
+  "Functions that supply environment overrides for a session's Pi process.
+Each function is called with the chat buffer and directory whenever the
+session starts a Pi process, including for `pilish-reload', and returns
+an alist of \(NAME . VALUE) entries, where a nil VALUE removes NAME.
+It runs in the middle of process startup, so it should return promptly.
+Earlier entries win: environment passed to `pilish-start-session' first,
+then functions in hook order.  A function that signals an error or
+returns something else is reported as a warning and supplies nothing.
+The overrides apply only to that session's processes, never to the
+global `process-environment'.")
+
+(defun pilish--check-environment (environment)
+  "Signal an error unless ENVIRONMENT is a (NAME . VALUE) alist.
+NAME must be a nonempty string without `=', and VALUE a string or nil."
+  (unless (and (proper-list-p environment)
+               (seq-every-p
+                (lambda (entry)
+                  (and (consp entry)
+                       (stringp (car entry))
+                       (not (string-empty-p (car entry)))
+                       (not (string-search "=" (car entry)))
+                       (or (null (cdr entry)) (stringp (cdr entry)))))
+                environment))
+    (error "Pilish: environment must be a (NAME . VALUE) alist: %S"
+           environment)))
+
+(defun pilish--set-launch-options (args environment)
+  "Make ARGS and ENVIRONMENT this session's own Pi launch options.
+See `pilish--launch-options'."
+  (setq pilish--launch-options (list :args args :environment environment)))
+
+(defun pilish--session-environment (chat-buf dir)
+  "Return the environment `pilish-session-environment-functions' supply.
+Each function receives CHAT-BUF and DIR."
+  (apply #'append
+         (mapcar (lambda (function)
+                   (condition-case-unless-debug err
+                       (let ((environment (funcall function chat-buf dir)))
+                         (pilish--check-environment environment)
+                         environment)
+                     (error
+                      (display-warning
+                       'pilish
+                       (format "Session environment function %S failed: %s"
+                               function (error-message-string err))
+                       :error)
+                      nil)))
+                 pilish-session-environment-functions)))
+
+(defun pilish--start-session-process (dir)
+  "Start a Pi process in DIR for the current chat buffer's session.
+The process takes the session's own arguments, then its own environment
+followed by what `pilish-session-environment-functions' return now."
+  (pilish--start-process
+   dir
+   (plist-get pilish--launch-options :args)
+   (append (plist-get pilish--launch-options :environment)
+           (pilish--session-environment (current-buffer) dir))))
+
 (defvar-local pilish--process-version nil
   "Detected pi CLI version for the current process.")
 
@@ -2933,22 +3000,28 @@ Returns t if available, nil otherwise."
            (executable-find program t))
          t)))
 
-(defun pilish--check-dependencies (&optional directory)
+(defun pilish--check-dependencies (&optional directory background)
   "Check all required dependencies.
 When DIRECTORY is non-nil, perform process dependency checks there.  Displays
-warnings for missing dependencies."
+warnings for missing dependencies.  BACKGROUND means nobody is there to
+answer: a missing Pi executable is an error rather than a warning, a
+`prompt' value of `pilish-essential-grammar-action' is an error rather
+than a question, and the optional grammars are not offered."
   (let ((directory (pilish--dependency-directory directory)))
     (unless (pilish--check-pi directory)
-      (display-warning 'pi (format "%s not found in %s. Install with: %s"
-                                   (car pilish-executable)
-                                   (if-let* ((remote-prefix (pilish--remote-prefix directory)))
-                                       (format "remote PATH (%s)" remote-prefix)
-                                     "PATH")
-                                   (pilish--pi-install-command))
-                       :error)))
-  (pilish--maybe-install-essential-grammars)
+      (let ((problem (format "%s not found in %s. Install with: %s"
+                             (car pilish-executable)
+                             (if-let* ((remote-prefix (pilish--remote-prefix directory)))
+                                 (format "remote PATH (%s)" remote-prefix)
+                               "PATH")
+                             (pilish--pi-install-command))))
+        (if background
+            (error "Pilish: %s" problem)
+          (display-warning 'pi problem :error)))))
+  (pilish--maybe-install-essential-grammars background)
   (pilish--maybe-warn-incompatible-markdown-grammar)
-  (pilish--maybe-install-optional-grammars))
+  (unless background
+    (pilish--maybe-install-optional-grammars)))
 
 ;;;; Startup Header
 

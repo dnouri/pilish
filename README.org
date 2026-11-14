@@ -1667,6 +1667,71 @@ parsing the transcript:
   its characters and its own =font-lock-face=: Markdown fontification
   does not hide its markup or turn it into links.
 
+** Starting sessions from Lisp
+
+=pilish-start-session= starts a session without showing it or asking
+anything, for packages that manage several Pi sessions, and
+=pilish-show-session= shows it later from anywhere.  It returns the chat
+buffer without waiting for Pi's initial state response or a saved
+session's resume to finish.  Returning is not a ready-to-submit signal,
+and the function provides no readiness callback.  Synchronous setup
+checks can still block, especially on remote file access.
+
+#+begin_src emacs-lisp
+;; The directory's default session, as M-x pilish would start it.
+(pilish-start-session "~/src/project/" nil)
+
+;; A named session with its own Pi arguments and environment.
+(pilish-start-session "~/src/project/" "reviewer"
+                      :args '("--thinking" "high")
+                      :environment '(("MY_EXTENSION_ROLE" . "review")))
+
+;; Resume a saved conversation; its recorded directory is the default.
+(pilish-start-session nil "resumed" :session-file "/path/to/session.jsonl")
+#+end_src
+
+The session behaves like one started interactively; =M-x pilish= (with
+a prefix argument and the name for a named session) finds it too.  Its
+arguments follow =pilish-extra-args=; like those, arguments that select
+Pi's mode or session (=--mode=, =--session=, =--continue=, =--resume=)
+break the RPC connection, so use =:session-file= to resume.  Its
+environment applies only to its own Pi processes.  =pilish-reload= keeps
+both.  Starting a session that already exists is an error, where
+=M-x pilish= would show it.  Dependencies are checked as for =M-x
+pilish=, without questions: a missing Pi executable is an error, and so
+are missing essential grammars unless =pilish-essential-grammar-action=
+is =auto= (install them) or =warn= (start after a warning).  Optional
+grammars are not offered.
+
+To give every session, interactive or not, extra environment, add a
+function to =pilish-session-environment-functions=.  It receives the
+chat buffer and the directory each time the session starts a Pi process,
+including reloads and respawns after exit, and returns an alist of
+=(NAME . VALUE)= entries; a nil value removes the variable.  It runs
+during process startup, so return promptly.  Use =:environment= for
+values specific to one launcher call; use the hook for policy shared by
+interactive and background sessions, or for values that change, such as
+tokens.  Explicit =:environment= entries take precedence, then hook
+entries in hook order.
+
+#+begin_src emacs-lisp
+(add-hook 'pilish-session-environment-functions
+          (lambda (chat _dir)
+            (list (cons "MY_PI_SESSION" (buffer-name chat)))))
+#+end_src
+
+Pi's own startup failure is reported later in the chat.  A rejected
+resume is reported in the echo area; the returned buffer is not proof
+that the saved session was selected successfully.
+
+Remote directories use the existing TRAMP launcher and remote path
+rules.  The new arguments follow the same argv path as interactive
+starts, and environment overrides are supplied through the launcher's
+=process-environment=.  Remote environment forwarding depends on the
+TRAMP method and configuration; this API does not install remote tools
+or change TRAMP's environment policy.  TRAMP can still prompt for
+authentication.
+
 #+html: <a id="installation-details"></a>
 * Installation details and upgrades
 
