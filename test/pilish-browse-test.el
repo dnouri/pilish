@@ -5149,8 +5149,8 @@ read) with no linked chat renders its link-error message."
 
 (ert-deftest pilish-test-browse-stub-actions-signal-user-error ()
   "Action seam contracts without a linked chat session.
-The switch seam's Phase 2 contract is the no-session error when no
-chat buffer is linked; labeling went live in Phase 3 and reports
+The switch seam opens the file in its own view, so an unreadable file
+signals before anything starts; labeling went live in Phase 3 and reports
 Cannot-label instead of signaling.  Navigate went live in Phase 4 —
 its guard contracts are pinned by the navigate tests below, so only
 the RET routing stays pinned here, a structural binding check."
@@ -5160,7 +5160,7 @@ the RET routing stays pinned here, a structural binding check."
                     (should-error
                      (pilish--browse-switch-session "/test/a.jsonl")
                      :type 'user-error))
-                   "No pi session to switch to")))
+                   "Session file is not readable: /test/a.jsonl")))
   ;; RET still routes the tree browser — mode map and node sections —
   ;; into the navigate command.
   (should (eq (lookup-key pilish-tree-browser-mode-map (kbd "RET"))
@@ -7010,14 +7010,116 @@ transitions."
       (kill-buffer chat-buf))))
 
 (ert-deftest pilish-test-switch-no-session ()
-  "Switching with no linked chat session signals a `user-error'."
+  "A browser without a chat validates the file before starting anything."
   (with-temp-buffer
     (pilish-session-browser-mode)
-    (should (equal (error-message-string
-                    (should-error
-                     (pilish--browse-switch-session "/test/a.jsonl")
-                     :type 'user-error))
-                   "No pi session to switch to"))))
+    (cl-letf (((symbol-function 'pilish--setup-session)
+               (lambda (&rest _) (ert-fail "Unreadable file started a session"))))
+      (should (equal (error-message-string
+                      (should-error
+                       (pilish--browse-switch-session "/test/a.jsonl")
+                       :type 'user-error))
+                     "Session file is not readable: /test/a.jsonl")))))
+
+(ert-deftest pilish-test-switch-without-chat-opens-own-view ()
+  "RET in a browser whose chat was killed opens the file in its own view.
+The default session's live chat keeps its conversation: the file starts
+in the first free session name, then in the default session once that
+is free, and a view that already has the file open is shown instead of
+starting another.  Each result becomes the browser's linked chat."
+  (let* ((project-dir (file-name-as-directory
+                       (make-temp-file "pilish-browse-own-view-" t)))
+         (file (expand-file-name "s.jsonl" project-dir))
+         (other-chat (pilish--get-or-create-buffer :chat project-dir))
+         (dead-chat (generate-new-buffer "*dead-chat*"))
+         (open nil)
+         (calls nil)
+         (created nil))
+    (unwind-protect
+        (progn
+          (pilish-test--write-session-file
+           file "hello" (directory-file-name project-dir))
+          (kill-buffer dead-chat)
+          (cl-letf (((symbol-function 'pilish--browse-live-session-chat-buffer)
+                     (lambda (_path) open))
+                    ((symbol-function 'pilish--check-dependencies) #'ignore)
+                    ((symbol-function 'pilish--setup-session)
+                     (lambda (dir &optional session)
+                       (push (list 'setup dir session) calls)
+                       (let ((chat (pilish--get-or-create-buffer :chat dir session)))
+                         (push chat created)
+                         (with-current-buffer chat
+                           (setq pilish--input-buffer
+                                 (pilish--get-or-create-buffer :input dir session)))
+                         (push pilish--input-buffer created)
+                         chat)))
+                    ((symbol-function 'pilish--display-buffers)
+                     (lambda (chat _input &optional _chat-only)
+                       (push (list 'display chat) calls)))
+                    ((symbol-function 'pilish--session-transition-ready-p)
+                     (lambda (&rest _) t))
+                    ((symbol-function 'pilish--resume-selected-session)
+                     (lambda (_proc chat path)
+                       (push (list 'resume chat path) calls))))
+            (with-temp-buffer
+              (pilish-session-browser-mode)
+              (setq pilish--chat-buffer dead-chat)
+              ;; The default session is taken by another live view.
+              (let ((chat (pilish--browse-switch-session file)))
+                (should (equal (buffer-local-value 'pilish--canonical-session-name chat) "2"))
+                (should (equal (nreverse calls)
+                               `((setup ,project-dir "2")
+                                 (display ,chat)
+                                 (resume ,chat ,file))))
+                (should (eq pilish--chat-buffer chat))
+                ;; A view that already has the file open is only shown.
+                (setq calls nil open chat pilish--chat-buffer dead-chat)
+                (should (eq (pilish--browse-switch-session file) chat))
+                (should (equal calls `((display ,chat))))
+                (should (eq pilish--chat-buffer chat)))
+              ;; Once the default session is free, the file starts there.
+              (kill-buffer other-chat)
+              (setq calls nil open nil pilish--chat-buffer dead-chat)
+              (let ((chat (pilish--browse-switch-session file)))
+                (should (equal (car (nreverse calls)) `(setup ,project-dir nil)))
+                (should (eq pilish--chat-buffer chat))))))
+      (mapc #'kill-buffer (cons other-chat created))
+      (delete-directory project-dir t))))
+
+(ert-deftest pilish-test-switch-without-chat-failure-keeps-browser-shown ()
+  "A failed open from a browser without a chat leaves the browser shown.
+The cwd check passes, so the browser window is dismissed; opening then
+fails in the dependency check.  The error propagates, the browser is
+back in its window and stays unlinked."
+  (let* ((project-dir (file-name-as-directory
+                       (make-temp-file "pilish-browse-own-view-fail-" t)))
+         (file (expand-file-name "s.jsonl" project-dir))
+         (dead-chat (generate-new-buffer "*dead-chat*"))
+         (browser (generate-new-buffer "*test-browser*")))
+    (unwind-protect
+        (progn
+          (pilish-test--write-session-file
+           file "hello" (directory-file-name project-dir))
+          (kill-buffer dead-chat)
+          (cl-letf (((symbol-function 'pilish--browse-live-session-chat-buffer)
+                     #'ignore)
+                    ((symbol-function 'pilish--check-dependencies)
+                     (lambda (_dir) (user-error "Missing dependency")))
+                    ((symbol-function 'pilish--setup-session)
+                     (lambda (&rest _) (error "Session must not start"))))
+            (save-window-excursion
+              (switch-to-buffer browser)
+              (pilish-session-browser-mode)
+              (setq pilish--chat-buffer dead-chat)
+              (should (equal (cadr (should-error
+                                    (pilish--browse-switch-session file)
+                                    :type 'user-error))
+                             "Missing dependency"))
+              (should (eq (window-buffer (selected-window)) browser))
+              (should (eq (buffer-local-value 'pilish--chat-buffer browser)
+                          dead-chat)))))
+      (kill-buffer browser)
+      (delete-directory project-dir t))))
 
 (ert-deftest pilish-test-quit-when-settled ()
   "--browse-quit-when-settled waits out the transition, then quits only

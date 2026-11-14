@@ -438,11 +438,17 @@ names an existing directory.  Interactively, prompt for an existing file.  In
 Dired, default to the regular file at point; otherwise, default to the current
 visited local regular readable .jsonl file when there is one."
   (interactive (list (pilish--read-session-file-name)))
+  (pilish--open-session-file-in-session session-file nil))
+
+(defun pilish--open-session-file-in-session (session-file session)
+  "Open SESSION-FILE as a live session in SESSION of its recorded cwd.
+SESSION nil names the directory's default session.  Show the session
+and return its chat buffer.  See `pilish-open-session-file'."
   (let* ((session-file (pilish--route-preserving-expand-file-name
                         session-file))
          (dir (pilish--session-file-cwd-or-error session-file)))
     (pilish--check-dependencies dir)
-    (let* ((chat-buf (pilish--setup-session dir))
+    (let* ((chat-buf (pilish--setup-session dir session))
            (input-buf (buffer-local-value 'pilish--input-buffer
                                           chat-buf))
            (proc (buffer-local-value 'pilish--process chat-buf)))
