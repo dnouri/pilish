@@ -344,7 +344,11 @@ Open the session browser with =C-c C-r=, =/resume=, or
 =M-x pilish-session-browser=.  It reads saved sessions from disk, so
 browsing, searching, renaming, and deleting work without a live Pi
 process.  Press =RET= to switch sessions, =r= to rename, =g= to
-refresh, =?= for the menu, and =q= to hide the browser.
+refresh, =?= for the menu, and =q= to hide the browser.  When the
+browser has no live chat, because that chat was killed or the browser
+was opened outside a session, =RET= opens the session in its own view,
+or shows the view that already has it open, without switching another
+view's conversation.
 
 By default, the browser shows this project's sessions in Threaded
 (fork families) view.  Press =t= to toggle All projects.  Press =s=
