@@ -250,7 +250,7 @@ and another transition may not be discarded."
              ((pilish--new-session-ready-p chat-buf)))
     (let ((generation
            (with-current-buffer chat-buf
-             (pilish--begin-session-transition proc))))
+             (pilish--begin-session-replacement proc))))
       (condition-case err
           (pilish--rpc-async
            proc '(:type "new_session")
@@ -370,7 +370,6 @@ Call this when starting a new session to ensure no stale state persists."
         pilish--cached-stats nil
         pilish--assistant-header-shown nil
         pilish--local-user-message nil
-        pilish--extension-widgets nil
         pilish--held-chat-notices nil
         pilish--working-message nil
         pilish--pre-compaction-status nil
@@ -384,7 +383,8 @@ Call this when starting a new session to ensure no stale state persists."
         pilish--pending-tool-overlay nil
         pilish--tool-block-order-counter 0
         pilish--thinking-block-order-counter 0)
-  (pilish--refresh-extension-widgets)
+  ;; The new session's extensions have set their widgets already.
+  (pilish--drop-stale-extension-ui)
   (pilish--set-activity-phase "idle" 'reset t)
   (pilish--clear-local-user-message-region)
   (pilish--invalidate-model-change)
@@ -530,7 +530,12 @@ second answer, in either order and whether or not they still belong to
 GENERATION, it finishes the transition when still current and then calls
 COMPLETION with the state response, the history response and the history's
 display (see `pilish--load-session-history').  Synchronous scheduling errors
-finish the transition before being re-signaled so the UI cannot stay wedged."
+finish the transition before being re-signaled so the UI cannot stay wedged.
+Every caller follows a successful replacement of Pi's extensions, so the
+widgets the replaced extensions left go first."
+  (when (buffer-live-p chat-buf)
+    (with-current-buffer chat-buf
+      (pilish--drop-stale-extension-ui)))
   (let ((latch (pilish--make-session-transition-latch
                 chat-buf proc generation 2
                 (when completion
@@ -708,7 +713,7 @@ transition is finished; SETTLE is then not called."
             (let ((new-proc (pilish--start-session-process dir)))
               (unless (processp new-proc)
                 (error "Pi: Failed to reload - pi did not start"))
-              (let ((generation (pilish--begin-session-transition new-proc)))
+              (let ((generation (pilish--begin-session-replacement new-proc)))
                 (condition-case err
                     (progn
                       (set-process-buffer new-proc chat-buf)
@@ -834,7 +839,7 @@ once its refreshes have answered or the reload did not take over."
                            (pilish--process-local-path selected-path)))
            (generation (when (buffer-live-p chat-buf)
                          (with-current-buffer chat-buf
-                           (pilish--begin-session-transition proc)))))
+                           (pilish--begin-session-replacement proc)))))
       (pilish--transition-rpc-async
        chat-buf generation proc
        (list :type "switch_session" :sessionPath session-path)
@@ -1430,7 +1435,7 @@ Captures chat and input buffers at call time (before the async RPC)."
          (input-buf (pilish--get-input-buffer))
          (generation (when (buffer-live-p chat-buf)
                        (with-current-buffer chat-buf
-                         (pilish--begin-session-transition proc)))))
+                         (pilish--begin-session-replacement proc)))))
     (pilish--transition-rpc-async chat-buf generation
       proc (list :type "fork" :entryId entry-id)
       (lambda (response)
