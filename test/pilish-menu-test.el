@@ -76,7 +76,7 @@
           pilish--aborted t
           pilish--extension-status '(("ext1" . "status"))
           pilish--working-message "Reading README..."
-          pilish--unsupported-extension-ui-methods-warned '("setWidget")
+          pilish--unsupported-extension-ui-methods-warned '("setTitle")
           pilish--message-start-marker (point-marker)
           pilish--streaming-marker (point-marker)
           pilish--thinking-marker (point-marker)

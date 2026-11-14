@@ -692,7 +692,7 @@ Pilish has basic support for Pi
 extensions.  Extension commands show up in slash completion and the
 transient menu, extension tools run normally, and extensions can use
 notifications, confirm/select/input prompts, multiline editor prompts,
-prefill the input buffer, and show status text.
+prefill the input buffer, and show status text and widgets.
 
 Notifications show in the echo area, where the next message replaces
 them.  To keep extension warnings and errors in the chat as well, set
@@ -709,8 +709,17 @@ or =C-c C-k= to cancel.  Killing the editor, changing its major mode,
 or stopping the session also cancels.  Closing the editor or Pi exiting
 restores the session windows; a mode change keeps the editor text buffer.
 
+Extension widgets made of text lines, such as a plan's progress, show
+above your prompt draft in the =pilish-extension-widget= face, in the
+order the extensions first set them.  An extension updates its widget
+in place and removes it; starting a new session removes them all.  They
+are never part of the draft, the sent prompt or the input history, and
+with a =fit= input window they add their rows to its height.  Pi's
+terminal places some widgets below its editor; Pilish shows those above
+the draft too.
+
 Rich TUI-specific extension UI is not supported in Emacs.
-Custom widgets, custom editor components, custom headers and footers,
+Component widgets, custom editor components, custom headers and footers,
 and other component-based views are unavailable or fall back.  Hover extension
 status text in the header line to see the exact =statusKey=, which you
 can use to change the font for that extension's status text using

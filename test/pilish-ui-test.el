@@ -3775,7 +3775,7 @@ Pi's isStreaming includes post-run processing, not just the low-level loop."
             (pilish-chat-mode)
             (setq pilish--state nil
                   pilish--unsupported-extension-ui-methods-warned
-                  '("setWidget")))
+                  '("setTitle")))
           (pilish--apply-state-response
            chat-buf
            '(:success t :data (:isStreaming :false
@@ -3783,10 +3783,10 @@ Pi's isStreaming includes post-run processing, not just the low-level loop."
                                :sessionFile "/tmp/new.jsonl")))
           (with-current-buffer chat-buf
             (should (equal pilish--unsupported-extension-ui-methods-warned
-                           '("setWidget"))))
+                           '("setTitle"))))
           (with-current-buffer chat-buf
             (setq pilish--unsupported-extension-ui-methods-warned
-                  '("setWidget")))
+                  '("setTitle")))
           (pilish--apply-state-response
            chat-buf
            '(:success t :data (:isStreaming :false
@@ -3794,7 +3794,7 @@ Pi's isStreaming includes post-run processing, not just the low-level loop."
                                :sessionFile "/tmp/newer.jsonl")))
           (with-current-buffer chat-buf
             (should (equal pilish--unsupported-extension-ui-methods-warned
-                           '("setWidget")))))
+                           '("setTitle")))))
       (kill-buffer chat-buf))))
 
 (ert-deftest pilish-test-apply-state-response-resets-extension-ui-warnings-on-session-change ()
@@ -3806,7 +3806,7 @@ Pi's isStreaming includes post-run processing, not just the low-level loop."
             (pilish-chat-mode)
             (setq pilish--state '(:session-id "old-session")
                   pilish--unsupported-extension-ui-methods-warned
-                  '("setWidget")))
+                  '("setTitle")))
           (pilish--apply-state-response
            chat-buf
            '(:success t :data (:isStreaming :false
@@ -4030,6 +4030,50 @@ Binds `chat-win', `input-win' and `input-buf' for use in BODY."
      input-buf (make-string (* 2 (window-body-width input-win)) ?x))
     (pilish-fit-input-window input-win)
     (should (= (window-body-height input-win) 3))))
+
+(ert-deftest pilish-test-fit-input-counts-extension-widgets ()
+  "Widget lines above the draft add their wrapped rows to the fitted height."
+  (pilish-test-with-fit-layout t
+    (pilish-test--set-draft input-buf "one\ntwo")
+    (pilish--set-extension-widget
+     "k" (list "short" (make-string (1+ (window-body-width input-win)) ?x)))
+    (pilish-fit-input-window input-win)
+    ;; Two draft lines and three widget rows.
+    (should (= (window-body-height input-win) 5))
+    (should (= (window-start input-win) 1))
+    (pilish--set-extension-widget "k" nil)
+    (pilish-fit-input-window input-win)
+    (should (= (window-body-height input-win) 2))))
+
+(ert-deftest pilish-test-fit-input-wraps-widgets-like-the-draft ()
+  "A widget line takes as many rows as the same line typed as the draft.
+This holds with and without `word-wrap', which can move whole words
+to rows of their own."
+  (pilish-test-with-fit-layout t
+    (let* ((width (window-body-width input-win))
+           (line (concat (make-string (- width 3) ?a) " bbbb "
+                         (make-string (- width 4) ?c))))
+      (dolist (wrap '(nil t))
+        (with-current-buffer input-buf (setq word-wrap wrap))
+        (pilish--set-extension-widget "k" nil)
+        (pilish-test--set-draft input-buf line)
+        (pilish-fit-input-window input-win)
+        (let ((rows (window-body-height input-win)))
+          (pilish-test--set-draft input-buf "")
+          (pilish--set-extension-widget "k" (list line))
+          (pilish-fit-input-window input-win)
+          ;; The widget rows and the empty draft line.
+          (should (= (window-body-height input-win) (1+ rows))))))))
+
+(ert-deftest pilish-test-fit-input-caps-extension-widgets ()
+  "Widgets taller than the cap leave the window at its maximum height."
+  (pilish-test-with-fit-layout t
+    (let ((total (+ (window-total-height chat-win)
+                    (window-total-height input-win))))
+      (pilish--set-extension-widget
+       "k" (mapcar #'number-to-string (number-sequence 1 total)))
+      (pilish-fit-input-window input-win)
+      (should (= (window-total-height input-win) (round (* 0.3 total)))))))
 
 (ert-deftest pilish-test-fit-input-stops-at-max-height ()
   "A draft taller than the cap scrolls within the capped window."
