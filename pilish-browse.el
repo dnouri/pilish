@@ -77,6 +77,8 @@
                   (path))
 (declare-function pilish--session-list-directory "pilish-menu"
                   (&optional chat-buf))
+(declare-function pilish--open-session-file-in-session "pilish"
+                  (session-file session))
 
 ;;;; Response Parsers
 
@@ -4654,11 +4656,43 @@ when it returns nil)."
         t)
     (not (pilish--session-transition-ready-p chat-buf action))))
 
+(defun pilish--browse-free-session-name (dir)
+  "Return the first session name of DIR without a chat buffer.
+That is nil, the default session, when it is free, else \"2\", \"3\", ..."
+  (if (not (pilish--find-session dir nil))
+      nil
+    (let ((number 2))
+      (while (pilish--find-session dir (number-to-string number))
+        (setq number (1+ number)))
+      (number-to-string number))))
+
+(defun pilish--browse-open-in-own-view (path)
+  "Open closed session file PATH in its own view and link this browser.
+The browser has no live chat to switch, so no other view's conversation
+changes: PATH starts in the first free session of its recorded cwd
+\(`pilish--browse-free-session-name').  The cwd is validated before the
+browser window is dismissed.  Return the chat buffer."
+  ;; `pilish' requires this file, but the autoloaded browser can run
+  ;; before it is loaded.
+  (require 'pilish)
+  (let ((browser (current-buffer))
+        (dir (pilish--session-file-cwd-or-error path)))
+    (when (eq (window-buffer) browser)
+      (quit-window))
+    (let ((chat-buf (pilish--open-session-file-in-session
+                     path (pilish--browse-free-session-name dir))))
+      (with-current-buffer browser
+        (setq pilish--chat-buffer chat-buf))
+      chat-buf)))
+
 (defun pilish--browse-switch-session (path)
-  "Activate a live owner of PATH, or resume PATH in the linked chat.
-For a closed session, guards require a live linked chat buffer or
-signal `user-error', require a live pi process or signal `user-error',
-and refuse an active session transition.
+  "Activate a live owner of PATH, or open or resume PATH.
+A live owner is shown without RPC; a browser without a live linked chat
+links to it.  For a closed session, a browser without a live linked
+chat, because that chat was killed or the browser was opened outside a
+session, opens PATH in its own view (`pilish--browse-open-in-own-view').
+Otherwise guards require a live pi process or signal `user-error', and
+refuse an active session transition.
 `pilish--browse-transition-refused-p' gates both an active
 transition, which keeps the status idle (without the explicit check a
 second RET would race the first switch), and the ready guard, which
@@ -4670,27 +4704,34 @@ out the transition and dismisses the browser window only when the chat
 landed on PATH; a failed switch leaves the browser open (menu already
 messaged).  No extra refresh logic: \\[pilish-browse-refresh]
 re-derives the \"current\" scope live and the entry point opens a fresh
-browser per project directory."
+browser per project directory.  Return the shown or opened chat
+buffer, or nil after a resume request."
   (if-let* ((owner (pilish--browse-live-session-chat-buffer path)))
-      (let ((browser-window (selected-window))
+      (let ((browser (current-buffer))
+            (browser-window (selected-window))
             (input-buf (buffer-local-value 'pilish--input-buffer owner)))
         (pilish--show-session-buffers owner input-buf)
+        (with-current-buffer browser
+          (unless (buffer-live-p pilish--chat-buffer)
+            (setq pilish--chat-buffer owner)))
         (when (and (window-live-p browser-window)
                    (with-current-buffer (window-buffer browser-window)
                      (derived-mode-p 'pilish-session-browser-mode
                                      'pilish-tree-browser-mode)))
           (save-selected-window
-            (quit-window nil browser-window))))
+            (quit-window nil browser-window)))
+        owner)
     (let ((chat-buf pilish--chat-buffer))
-      (unless (and chat-buf (buffer-live-p chat-buf))
-        (user-error "No pi session to switch to"))
-      (let ((proc (buffer-local-value 'pilish--process chat-buf)))
-        (unless (pilish--session-live-process-p proc)
-          (user-error "Pi process is not running"))
-        (unless (pilish--browse-transition-refused-p chat-buf "switch")
-          (pilish--resume-selected-session proc chat-buf path)
-          (pilish--browse-quit-when-settled
-           chat-buf (selected-window) path))))))
+      (if (not (buffer-live-p chat-buf))
+          (pilish--browse-open-in-own-view path)
+        (let ((proc (buffer-local-value 'pilish--process chat-buf)))
+          (unless (pilish--session-live-process-p proc)
+            (user-error "Pi process is not running"))
+          (unless (pilish--browse-transition-refused-p chat-buf "switch")
+            (pilish--resume-selected-session proc chat-buf path)
+            (pilish--browse-quit-when-settled
+             chat-buf (selected-window) path))
+          nil)))))
 
 (defun pilish--browse-poll-settled (chat-buf win path deadline)
   "Polling body of `pilish--browse-quit-when-settled'.
