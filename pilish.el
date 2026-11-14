@@ -226,7 +226,8 @@ Returns the chat buffer."
       (when new-session
         (pilish--display-startup-header)))
     (with-current-buffer input-buf
-      (setq default-directory dir)
+      (setq-local default-directory dir
+                  list-buffers-directory dir)
       (pilish--set-chat-buffer chat-buf))
     chat-buf))
 
