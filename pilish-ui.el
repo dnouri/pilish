@@ -998,11 +998,12 @@ recorded yet."
 (defun pilish--set-chat-session-identity (dir &optional session)
   "Record the stable session identity for the current chat buffer.
 DIR is the session directory and SESSION is the optional named-session suffix."
-  (setq pilish--canonical-buffer-name
-        (pilish--buffer-name :chat dir session)
-        pilish--canonical-session-directory dir
-        pilish--canonical-session-name session
-        default-directory dir))
+  (setq-local pilish--canonical-buffer-name
+              (pilish--buffer-name :chat dir session)
+              pilish--canonical-session-directory dir
+              pilish--canonical-session-name session
+              default-directory dir
+              list-buffers-directory dir))
 
 (defun pilish--restore-chat-buffer-read-only ()
   "Restore the read-only contract for transcript buffers after saving."
@@ -1320,7 +1321,8 @@ by session setup code."
            (pilish--set-chat-session-identity dir session))
           (:input
            (pilish-input-mode)
-           (setq default-directory dir)))))
+           (setq-local default-directory dir
+                       list-buffers-directory dir)))))
     buf))
 
 ;;;; Project Buffer Discovery
@@ -2220,7 +2222,8 @@ Return nil to abort the exit."
       (rename-buffer pilish--canonical-buffer-name))
     (when (buffer-live-p input-buf)
       (with-current-buffer input-buf
-        (setq default-directory dir)
+        (setq-local default-directory dir
+                    list-buffers-directory dir)
         (rename-buffer (pilish--buffer-name :input dir session))
         (pilish--set-chat-buffer chat-buf)))))
 

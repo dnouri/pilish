@@ -84,6 +84,61 @@ This ensures all files get code fences for consistent display."
       (when (buffer-live-p buf1)
         (kill-buffer buf1)))))
 
+(ert-deftest pilish-test-session-buffer-list-directory-on-creation ()
+  "Chat and input buffers expose local or remote directories to buffer lists."
+  (let ((original-default (default-value 'list-buffers-directory)))
+    (dolist (dir '("/tmp/pilish-test-buffer-list/"
+                   "/ssh:bastion|sudo:root@pi-host:/srv/project/"))
+      (dolist (session '(nil "feature"))
+        (dolist (type '(:chat :input))
+          (let ((buf (pilish--get-or-create-buffer type dir session)))
+            (unwind-protect
+                (with-current-buffer buf
+                  (should (local-variable-p 'list-buffers-directory))
+                  (should (equal list-buffers-directory dir))
+                  (should (equal default-directory dir))
+                  (should-not buffer-file-name))
+              (pilish-test--kill-live-buffers buf))))))
+    (should (equal (default-value 'list-buffers-directory) original-default))))
+
+(ert-deftest pilish-test-session-buffer-list-directory-on-reuse ()
+  "Session setup refreshes directory metadata in existing chat/input buffers."
+  (let ((dir (pilish-test--make-temp-directory "pilish-test-buffer-list-")))
+    (unwind-protect
+        (pilish-test-with-mock-session dir
+          (let* ((chat (pilish--find-session dir))
+                 (input (buffer-local-value 'pilish--input-buffer chat)))
+            (dolist (buf (list chat input))
+              (with-current-buffer buf
+                (setq-local list-buffers-directory "/tmp/stale/")))
+            (should (eq (pilish--setup-session dir) chat))
+            (should (eq (buffer-local-value 'pilish--input-buffer chat) input))
+            (dolist (buf (list chat input))
+              (with-current-buffer buf
+                (should (local-variable-p 'list-buffers-directory))
+                (should (equal list-buffers-directory dir))))))
+      (delete-directory dir t))))
+
+(ert-deftest pilish-test-session-buffer-list-directory-on-retarget ()
+  "Retargeting a session updates both buffers' directory metadata."
+  (let* ((dir (pilish-test--make-temp-directory "pilish-test-buffer-list-"))
+         (target (expand-file-name "other/" dir)))
+    (unwind-protect
+        (pilish-test-with-mock-session dir
+          (let* ((chat (pilish--find-session dir))
+                 (input (buffer-local-value 'pilish--input-buffer chat)))
+            (unwind-protect
+                (progn
+                  (with-current-buffer input
+                    (pilish--retarget-session-buffers target))
+                  (dolist (buf (list chat input))
+                    (with-current-buffer buf
+                      (should (local-variable-p 'list-buffers-directory))
+                      (should (equal list-buffers-directory target))
+                      (should (equal default-directory target)))))
+              (pilish-test--kill-live-buffers input chat))))
+      (delete-directory dir t))))
+
 ;;; Major Modes
 
 (ert-deftest pilish-test-chat-mode-is-read-only ()
