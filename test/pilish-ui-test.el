@@ -2106,6 +2106,37 @@ Buffer is read-only with `inhibit-read-only' used for insertion.
             (should (equal starts (when (= lines (1- height)) '(1))))
             (should (equal recenters (when (= lines height) '(-1))))))))))
 
+(ert-deftest pilish-test-restore-tail-window-keeps-end-above-scroll-margin ()
+  "A follower keeps its start only while the end stays above the margin.
+Redisplay recenters a window whose point is inside the bottom scroll
+margin, so a kept end there would leave the window half empty."
+  (save-window-excursion
+    (with-temp-buffer
+      (switch-to-buffer (current-buffer))
+      (let* ((window (selected-window))
+             (body (window-body-height window)))
+        (dotimes (_ (* 2 body)) (insert "line\n"))
+        (let ((scroll-margin 100)
+              (maximum-scroll-margin 0.25))
+          (should (= (pilish--window-bottom-margin window)
+                     (min (/ (1- body) 2) (truncate (* body 0.25))))))
+        (dolist (margin '(0 2))
+          (let ((scroll-margin margin)
+                (start (save-excursion
+                         (goto-char (point-max))
+                         (forward-line (- 1 body))
+                         (point)))
+                starts recenters)
+            (should (= (count-screen-lines start (point-max) t window) body))
+            (should (= (pilish--window-bottom-margin window) margin))
+            (cl-letf (((symbol-function 'set-window-start)
+                       (lambda (_win start &rest _) (push start starts)))
+                      ((symbol-function 'recenter)
+                       (lambda (row &rest _) (push row recenters))))
+              (pilish--restore-tail-window window start))
+            (should (equal starts (when (= margin 0) (list start))))
+            (should (equal recenters (when (= margin 2) '(-1))))))))))
+
 (ert-deftest pilish-test-scroll-preservation-keeps-reader-and-tail-points ()
   "An insertion keeps a nonselected reader and a follower on their text."
   (let ((chat (generate-new-buffer " *pilish-scroll-reader-and-tail*")))
