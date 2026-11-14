@@ -805,14 +805,27 @@ ARGS are this process's own arguments, appended last."
           (pilish--project-trust-args)
           args))
 
-(defun pilish--remote-start-command (command)
+(defun pilish--remote-start-command (command &optional environment)
   "Return a remote shell wrapper COMMAND that emits the ready marker.
-COMMAND is passed as `$0' and `$@' to preserve the original argv exactly."
-  (append (list "sh" "-c"
-                (format "printf '%%s\\n' %s; exec \"$0\" \"$@\""
-                        (shell-quote-argument
-                         pilish--remote-ready-marker)))
-          command))
+COMMAND is passed as `$0' and `$@' to preserve the original argv exactly.
+Explicitly unset names with nil values in ENVIRONMENT: TRAMP's direct-async
+launcher otherwise discards those entries instead of removing them remotely."
+  (let (seen unset)
+    (pcase-dolist (`(,name . ,value) environment)
+      (unless (member name seen)
+        (push name seen)
+        (unless value (push name unset))))
+    (append (list "sh" "-c"
+                  (concat
+                   (if unset
+                       (format "unset %s; "
+                               (mapconcat #'shell-quote-argument
+                                          (nreverse unset) " "))
+                     "")
+                   (format "printf '%%s\\n' %s; exec \"$0\" \"$@\""
+                           (shell-quote-argument
+                            pilish--remote-ready-marker))))
+            command)))
 
 (defun pilish--process-environment (overrides)
   "Return `process-environment' with OVERRIDES applied.
@@ -842,7 +855,7 @@ Returns the process object."
          (remote-start-p (pilish--remote-prefix directory))
          (command (pilish--pi-command args))
          (process-command (if remote-start-p
-                              (pilish--remote-start-command command)
+                              (pilish--remote-start-command command environment)
                             command))
          (stderr-buf (generate-new-buffer " *pilish-stderr*")))
     (condition-case err

@@ -172,6 +172,12 @@ A new session keeps ARGS and ENVIRONMENT as its own launch options (see
 questions, as for `pilish--check-dependencies'.
 Returns the chat buffer."
   (pilish--maybe-load-evil-integration)
+  ;; Install essential grammars before buffer creation runs Markdown modes.
+  (let ((existing (pilish--find-session dir session)))
+    (unless (and existing
+                 (with-current-buffer existing
+                   (and pilish--process (process-live-p pilish--process))))
+      (pilish--check-dependencies dir background)))
   (let* ((chat-buf (pilish--get-or-create-buffer :chat dir session))
          (input-buf (pilish--get-or-create-buffer :input dir session))
          (new-session nil))
@@ -181,7 +187,6 @@ Returns the chat buffer."
       (pilish--set-input-buffer input-buf)
       ;; Start process if not already running
       (unless (and pilish--process (process-live-p pilish--process))
-        (pilish--check-dependencies dir background)
         (unless pilish--launch-options
           (pilish--set-launch-options args environment))
         (pilish--set-process (pilish--start-session-process dir))
@@ -318,9 +323,11 @@ all setup is asynchronous."
              (buffer-local-value 'pilish--process chat-buf)
              chat-buf session-file))
           chat-buf)
-      (error
+      ((error quit)
        (let ((pilish-quit-without-confirmation t))
-         (dolist (buffer (list (pilish--find-session dir name)
+         (dolist (buffer (list (or (pilish--find-session dir name)
+                                   (get-buffer
+                                    (pilish--buffer-name :chat dir name)))
                                (get-buffer
                                 (pilish--buffer-name :input dir name))))
            (when (buffer-live-p buffer)

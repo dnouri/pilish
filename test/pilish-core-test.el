@@ -1318,13 +1318,14 @@ Display is handled by the display handler, not by state updates."
 
 ;;;; Executable Customization Tests
 
-(defun pilish-test--capture-process-launch (executable extra-args &optional trust-policy directory)
+(defun pilish-test--capture-process-launch (executable extra-args &optional trust-policy directory environment)
   "Return the launch plist that `--start-process' passes to make-process.
 Mocks `make-process' to capture all arguments, binding
 `pilish-executable' to EXECUTABLE,
 `pilish-extra-args' to EXTRA-ARGS,
 `pilish-project-trust-policy' to TRUST-POLICY or `approve',
-and starting in DIRECTORY or `/tmp/'."
+and starting in DIRECTORY or `/tmp/'.  ENVIRONMENT supplies per-process
+environment overrides."
   (let ((pilish-executable executable)
         (pilish-extra-args extra-args)
         (pilish-project-trust-policy (or trust-policy 'approve))
@@ -1339,7 +1340,8 @@ and starting in DIRECTORY or `/tmp/'."
                                      (list :captured-default-directory
                                            default-directory)))
                        dummy-proc)))
-            (ignore-errors (pilish--start-process (or directory "/tmp/"))))
+            (ignore-errors (pilish--start-process (or directory "/tmp/")
+                                                  nil environment)))
           captured)
       (when-let* ((stderr-buf (plist-get captured :stderr)))
         (when (buffer-live-p stderr-buf)
@@ -1457,14 +1459,18 @@ TRAMP hands every entry that differs from the global environment to
                    "/ssh:test:/home/me/proj/"))))
 
 (ert-deftest pilish-test-start-process-remote-wraps-command-with-ready-marker ()
-  "Remote start command emits a ready marker and preserves original argv."
+  "Remote start emits its marker, preserves argv, and explicitly unsets names."
   (let* ((launch (pilish-test--capture-process-launch
                   '("npx" "pi") '("-e" "/path/to/ext.ts")
-                  'approve "/ssh:test:/home/me/proj/"))
+                  'approve "/ssh:test:/home/me/proj/"
+                  '(("PILISH_DROP") ("PILISH_KEEP" . "yes")
+                    ("PILISH_DROP" . "later"))))
          (command (plist-get launch :command))
          (script (nth 2 command)))
     (should (equal (nth 0 command) "sh"))
     (should (equal (nth 1 command) "-c"))
+    (should (string-match-p "\\`unset PILISH_DROP; printf" script))
+    (should-not (string-match-p "unset.*PILISH_KEEP" script))
     (should (string-match-p (regexp-quote pilish--remote-ready-marker)
                             script))
     (should (string-match-p (regexp-quote "exec \"$0\" \"$@\"") script))

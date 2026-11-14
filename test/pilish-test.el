@@ -2120,7 +2120,7 @@ No buffer or process remains."
 
 (ert-deftest pilish-test-start-session-follows-essential-grammar-action ()
   "Background starts honor `pilish-essential-grammar-action' without asking.
-`warn' starts after a warning and `auto' installs before starting."
+`warn' starts after a warning and `auto' installs before Markdown modes run."
   (let ((root (pilish-test--make-temp-directory "pilish-test-bg-grammar-"))
         (missing '(markdown))
         (warnings nil)
@@ -2131,6 +2131,10 @@ No buffer or process remains."
                      (lambda () missing))
                     ((symbol-function 'pilish--install-grammars)
                      (lambda (grammars)
+                       (should-not
+                        (get-buffer (pilish-test--chat-buffer-name root "auto")))
+                       (should-not
+                        (get-buffer (pilish-test--input-buffer-name root "auto")))
                        (setq installed grammars missing nil)
                        (length grammars)))
                     ((symbol-function 'display-warning)
@@ -2158,6 +2162,33 @@ No buffer or process remains."
                            "Spawn failed")))
           (should-not (get-buffer (pilish-test--chat-buffer-name root)))
           (should-not (get-buffer (pilish-test--input-buffer-name root))))
+      (pilish-test--kill-session-buffers root)
+      (delete-directory root t))))
+
+(ert-deftest pilish-test-start-session-removes-buffers-when-start-is-interrupted ()
+  "Quitting startup leaves no buffers or live process behind."
+  (let ((root (pilish-test--make-temp-directory "pilish-test-bg-quit-")))
+    (unwind-protect
+        (pilish-test--with-background-startup
+          (let ((pilish-session-environment-functions
+                 (list (lambda (&rest _) (signal 'quit nil)))))
+            (should (equal '(quit)
+                           (condition-case err
+                               (pilish-start-session root nil)
+                             ((error quit) err)))))
+          (should-not (get-buffer (pilish-test--chat-buffer-name root)))
+          (should-not (get-buffer (pilish-test--input-buffer-name root)))
+          (should-not processes)
+          (cl-letf (((symbol-function 'pilish--rpc-async)
+                     (lambda (&rest _) (signal 'quit nil))))
+            (should (equal '(quit)
+                           (condition-case err
+                               (pilish-start-session root nil)
+                             ((error quit) err)))))
+          (should-not (get-buffer (pilish-test--chat-buffer-name root)))
+          (should-not (get-buffer (pilish-test--input-buffer-name root)))
+          (should (= 1 (length processes)))
+          (should-not (process-live-p (car processes))))
       (pilish-test--kill-session-buffers root)
       (delete-directory root t))))
 
