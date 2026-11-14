@@ -8756,14 +8756,64 @@ second one; md-ts-mode's teardown deletes it, so an update recreates it."
                         (overlays-in (point-min) (point-max))))))
         (should (equal (pilish-test--widget-string input) "two\n"))))))
 
-(ert-deftest pilish-test-new-session-clears-extension-widgets ()
-  "A new session drops the previous session's widgets with its statuses."
-  (pilish-test-with-rpc-session (chat input _proc _commands)
-    (with-current-buffer chat
-      (pilish-test--widget "k" '("line"))
-      (pilish--clear-chat-buffer)
-      (should-not pilish--extension-widgets))
-    (should-not (pilish-test--widget-string input))))
+(defun pilish-test--widgets-after-replacement (start type response)
+  "Return the widget text after START replaces the session and Pi answers.
+START receives the chat buffer and its process.  Before it runs, the chat
+shows widgets \"old\" and \"renewed\".  While the TYPE request waits,
+the new extensions set \"renewed\" and \"added\" from `session_start',
+as Pi's RPC mode does before it answers with RESPONSE."
+  (pilish-test-with-rpc-session (chat input proc _commands)
+    (let (callback new-proc)
+      (unwind-protect
+          (cl-letf (((symbol-function 'pilish--rpc-async)
+                     (lambda (_proc command cb)
+                       (when (equal (plist-get command :type) type)
+                         (setq callback cb))))
+                    ((symbol-function 'pilish--start-process)
+                     (lambda (_dir)
+                       (setq new-proc (start-process "pilish-test-new" nil "cat"))
+                       (set-process-query-on-exit-flag new-proc nil)
+                       new-proc))
+                    ((symbol-function 'pilish--session-file-cwd-or-error)
+                     (lambda (_file) temporary-file-directory))
+                    ((symbol-function 'message) #'ignore))
+            (with-current-buffer chat
+              (pilish--set-chat-session-identity temporary-file-directory)
+              (setq pilish--state '(:session-file "/tmp/current.jsonl"))
+              (pilish-test--widget "old" '("old"))
+              (pilish-test--widget "renewed" '("before"))
+              (funcall start chat proc)
+              (pilish-test--widget "renewed" '("after"))
+              (pilish-test--widget "added" '("added"))
+              (funcall callback (append '(:type "response") response))
+              (pilish-test--widget-string input)))
+        (when (process-live-p new-proc) (delete-process new-proc))))))
+
+(defconst pilish-test--session-replacements
+  `(("new_session" ,(lambda (_chat _proc) (pilish-new-session)))
+    ("switch_session"
+     ,(lambda (chat proc)
+        (pilish--resume-selected-session proc chat "/tmp/other.jsonl")))
+    ("fork" ,(lambda (_chat proc) (pilish--execute-fork proc "e1")))
+    ("switch_session" ,(lambda (_chat _proc) (pilish-reload))))
+  "Request types and starts of the commands that replace Pi's extensions.")
+
+(ert-deftest pilish-test-session-replacement-drops-stale-extension-widgets ()
+  "A replaced session keeps only the widgets its new extensions set.
+Pi's TUI clears every widget when it replaces its extensions; RPC sends
+nothing, and the new extensions set theirs before Pi answers."
+  (pcase-dolist (`(,type ,start) pilish-test--session-replacements)
+    (should (equal (pilish-test--widgets-after-replacement
+                    start type
+                    '(:success t :data (:cancelled :false :text "")))
+                   "after\nadded\n"))))
+
+(ert-deftest pilish-test-failed-session-replacement-keeps-extension-widgets ()
+  "A failed replacement leaves the extensions and all their widgets."
+  (pcase-dolist (`(,type ,start) pilish-test--session-replacements)
+    (should (equal (pilish-test--widgets-after-replacement
+                    start type '(:success :false :error "refused"))
+                   "old\nafter\nadded\n"))))
 
 (ert-deftest pilish-test-extension-ui-set-working-message ()
   "extension_ui_request setWorkingMessage stores working text."
