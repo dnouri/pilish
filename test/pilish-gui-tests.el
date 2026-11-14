@@ -817,7 +817,7 @@ the first widget row, shows the whole draft and has no empty rows."
                       (append (list :widget-rows (widget-rows)
                                     :widgets (with-current-buffer input-buf
                                                (overlay-get
-                                                pilish--extension-widget-overlay
+                                                (pilish--extension-widget-overlay)
                                                 'before-string)))
                               (pilish-gui-test--input-fit-state
                                input-win chat-win)))))

@@ -8678,8 +8678,8 @@ LINES is a list of strings; nil omits them, as Pi does to remove a widget."
 (defun pilish-test--widget-string (input)
   "Return the widget text shown above INPUT's draft, or nil."
   (with-current-buffer input
-    (and pilish--extension-widget-overlay
-         (overlay-get pilish--extension-widget-overlay 'before-string))))
+    (when-let* ((overlay (pilish--extension-widget-overlay)))
+      (overlay-get overlay 'before-string))))
 
 (ert-deftest pilish-test-extension-widgets-show-above-the-draft ()
   "String-line widgets show in key order, change in place and clear."
@@ -8719,20 +8719,42 @@ LINES is a list of strings; nil omits them, as Pi does to remove a widget."
       (goto-char (point-min))
       (insert "my ")
       (should (equal (buffer-string) "my draft"))
-      (should (= (overlay-start pilish--extension-widget-overlay) 1))
-      (should (= (overlay-end pilish--extension-widget-overlay) 1))
+      (should (= (overlay-start (pilish--extension-widget-overlay)) 1))
+      (should (= (overlay-end (pilish--extension-widget-overlay)) 1))
       (erase-buffer)
       (insert "sent")
       (pilish-send)
       (should (equal (buffer-string) ""))
       (should (equal (ring-elements pilish--input-ring) '("sent")))
-      (should (= (overlay-start pilish--extension-widget-overlay) 1))
+      (should (= (overlay-start (pilish--extension-widget-overlay)) 1))
       (should (equal (pilish-test--widget-string input) "keep me\n")))
     (should (equal (plist-get (seq-find (lambda (command)
                                           (equal (plist-get command :type) "prompt"))
                                         commands)
                               :message)
                    "sent"))))
+
+(ert-deftest pilish-test-extension-widgets-survive-input-mode-rerun ()
+  "After `pilish-input-mode' runs again, a widget update shows it once.
+The mode resets buffer-local variables.  Without Markdown highlighting
+the widget overlay survives, so an update must reuse it rather than add a
+second one; md-ts-mode's teardown deletes it, so an update recreates it."
+  (dolist (highlighting '(nil t))
+    (let ((pilish-input-markdown-highlighting highlighting))
+      (pilish-test-with-rpc-session (chat input _proc _commands)
+        (with-current-buffer chat
+          (pilish-test--widget "k" '("one")))
+        (with-current-buffer input
+          (pilish-input-mode)
+          (setq pilish--chat-buffer chat))
+        (with-current-buffer chat
+          (pilish-test--widget "k" '("two")))
+        (with-current-buffer input
+          (should (= 1 (cl-count-if
+                        (lambda (overlay)
+                          (overlay-get overlay 'pilish-extension-widgets))
+                        (overlays-in (point-min) (point-max))))))
+        (should (equal (pilish-test--widget-string input) "two\n"))))))
 
 (ert-deftest pilish-test-new-session-clears-extension-widgets ()
   "A new session drops the previous session's widgets with its statuses."

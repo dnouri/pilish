@@ -2045,8 +2045,14 @@ Keys are extension identifiers (strings), values are status text.")
   "Extension widgets of this session, in the order their keys first arrived.
 Elements are (KEY . LINES), LINES being sanitized single-line strings.")
 
-(defvar-local pilish--extension-widget-overlay nil
-  "Input buffer overlay showing the session's extension widgets, or nil.")
+(defun pilish--extension-widget-overlay ()
+  "Return the current input buffer's extension widget overlay, or nil.
+It is found by its property: re-running `pilish-input-mode' would reset
+a buffer-local variable holding it, while the overlay stays."
+  (save-restriction
+    (widen)
+    (seq-find (lambda (overlay) (overlay-get overlay 'pilish-extension-widgets))
+              (overlays-in (point-min) (point-min)))))
 
 (defface pilish-extension-widget
   '((t :inherit font-lock-doc-face))
@@ -2076,14 +2082,17 @@ They scroll with a draft too long for its window."
         (input pilish--input-buffer))
     (when (buffer-live-p input)
       (with-current-buffer input
-        (when (or lines pilish--extension-widget-overlay)
-          (unless pilish--extension-widget-overlay
-            (setq pilish--extension-widget-overlay
-                  (make-overlay (point-min) (point-min))))
-          (overlay-put pilish--extension-widget-overlay 'before-string
-                       (when lines
-                         (propertize (concat (string-join lines "\n") "\n")
-                                     'face 'pilish-extension-widget))))
+        (let ((overlay (pilish--extension-widget-overlay)))
+          (when (and lines (not overlay))
+            (setq overlay (save-restriction
+                            (widen)
+                            (make-overlay (point-min) (point-min))))
+            (overlay-put overlay 'pilish-extension-widgets t))
+          (when overlay
+            (overlay-put overlay 'before-string
+                         (when lines
+                           (propertize (concat (string-join lines "\n") "\n")
+                                       'face 'pilish-extension-widget)))))
         (pilish--schedule-fit-input-windows)))))
 
 (defun pilish--extension-widget-screen-lines (window)
@@ -2092,9 +2101,8 @@ Vertical motion measures the widget text in a scratch buffer with the
 input buffer's wrapping settings.  Counting characters would miss
 `word-wrap' and the column a text terminal keeps for continuation marks."
   (with-current-buffer (window-buffer window)
-    (let ((widgets (and pilish--extension-widget-overlay
-                        (overlay-get pilish--extension-widget-overlay
-                                     'before-string)))
+    (let ((widgets (when-let* ((overlay (pilish--extension-widget-overlay)))
+                     (overlay-get overlay 'before-string)))
           (wrap word-wrap)
           (truncate truncate-lines)
           (remapping face-remapping-alist))
@@ -2343,7 +2351,7 @@ Whether vertical motion from the buffer start counts the rows of the
 widget overlay string depends on the display, so the widgets are hidden
 while it counts; `pilish-fit-input-window' adds them separately."
   (with-current-buffer (window-buffer window)
-    (let* ((overlay pilish--extension-widget-overlay)
+    (let* ((overlay (pilish--extension-widget-overlay))
            (widgets (and overlay (overlay-get overlay 'before-string))))
       (unwind-protect
           (save-excursion
