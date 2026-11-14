@@ -2625,6 +2625,20 @@ selected window is deleted, select a chat window instead."
                     (chat-win (get-buffer-window chat-buf)))
           (select-window chat-win))))))
 
+(defun pilish--show-session-buffers (chat-buf input-buf)
+  "Show CHAT-BUF and INPUT-BUF, focusing input when both are visible.
+When `pilish-input-window-display' is `hidden', a freshly
+displayed session shows only the chat window and selects it."
+  (if (and (get-buffer-window-list chat-buf nil)
+           (get-buffer-window-list input-buf nil))
+      (pilish--focus-input-window chat-buf input-buf)
+    (pilish--display-buffers
+     chat-buf input-buf
+     (eq pilish-input-window-display 'hidden))
+    (when (eq pilish-input-window-display 'hidden)
+      (when-let* ((chat-win (get-buffer-window chat-buf)))
+        (select-window chat-win)))))
+
 (defun pilish--display-buffers (chat-buf input-buf &optional chat-only)
   "Ensure CHAT-BUF and INPUT-BUF are visible.
 When CHAT-ONLY is non-nil, show only the chat window.

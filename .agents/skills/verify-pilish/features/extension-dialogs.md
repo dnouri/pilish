@@ -42,6 +42,7 @@ Every test checks the prompt's major mode and retained draft text. Process exit 
 ## Gotchas
 
 - Fake-backed proof does not show that a real extension executed. A real `ctx.ui.editor` exchange needs a separate compatibility check.
-- Pi editor requests have no timeout or abort signal. The fake matches this behavior. Pilish Stop sends editor cancellation even while the extension command is non-streaming; it is not a no-op.
+- Pi editor requests have no timeout or abort signal. The fake matches this behavior. Pilish Stop sends editor cancellation while the extension command waits for acceptance without streaming. An editor opened while the session is idle is outside this recipe.
+- This file covers `ctx.ui.editor` only. Confirmation, selection, and single-line input dialogs, `set_editor_text`, and extension status messages are not mapped here.
 - Changing or reinitializing the editor's major mode cancels the request rather than continuing it in the new mode. The retained buffer is ordinary text and killing it sends no second response.
 - Process ownership isolation is covered by `pilish-test-extension-ui-editor-cleanup-is-process-owned` in `make test-render SELECTOR=extension-ui-editor`. A single-session GUI run does not prove another session's behavior.
