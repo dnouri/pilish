@@ -4530,9 +4530,9 @@ here."
       (pilish-session-browser)
       (unwind-protect
           (should (member "Pi: Press ? for available commands" messages))
-        (when-let ((buf (get-buffer
-                         (pilish--session-browser-buffer-name
-                          "/tmp/pi-test/"))))
+        (when-let* ((buf (get-buffer
+                          (pilish--session-browser-buffer-name
+                           "/tmp/pi-test/"))))
           (kill-buffer buf))))))
 
 (ert-deftest pilish-test-tree-browser-startup-message ()
@@ -4554,9 +4554,9 @@ checked, and the fetch seam stays stubbed out."
                    (lambda () "/tmp/pi-test/")))
           (pilish-tree-browser)
           (should (member "Pi: Press ? for available commands" messages)))
-      (when-let ((buf (get-buffer
-                       (pilish--tree-browser-buffer-name
-                        "/tmp/pi-test/"))))
+      (when-let* ((buf (get-buffer
+                        (pilish--tree-browser-buffer-name
+                         "/tmp/pi-test/"))))
         (kill-buffer buf))
       (kill-buffer chat-buf))))
 
