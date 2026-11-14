@@ -1732,6 +1732,48 @@ TRAMP method and configuration; this API does not install remote tools
 or change TRAMP's environment policy.  TRAMP can still prompt for
 authentication.
 
+** Reloading from Lisp
+
+=pilish-reload= accepts an optional =CALLBACK= when called from Lisp.
+Pilish calls it exactly once with the outcome: =nil= after the fresh
+Pi process owns the session, its state and history have both been
+refreshed, and the history is shown in the chat.  Otherwise it passes
+=(KIND . DETAIL)=, where =DETAIL= is the message shown to the user and
+=KIND= is one of:
+
+- =failed=: the reload could not start, Pi rejected the session switch,
+  or a state or history refresh failed.
+- =exited=: the fresh Pi exited while a reload request was pending.
+- =cancelled=: Pi cancelled the session switch.
+- =superseded=: a newer session change or a killed chat took over.
+- =history-not-shown=: the fresh Pi owns the session, but its history
+  was not redrawn because local chat activity, such as a prompt
+  awaiting Pi's echo, was pending.
+- =quit=: the reload was quit.
+
+Once Pi has accepted the session switch, the fresh process has replaced
+the old one whatever the outcome.  A reload has no timeout: while the
+fresh Pi is alive but silent, the reload stays pending, and a second
+reload supersedes it.
+
+The callback may run before =pilish-reload= returns, for example when
+the chat has no session file.  With a callback, errors are passed to
+it rather than signaled.  An error inside the callback becomes a
+warning and does not change the reload.  Without a callback,
+=pilish-reload= behaves as it does interactively.
+
+#+begin_src emacs-lisp
+(defun my-pi-reload-then-say-so ()
+  "Reload the current session and report when it is ready."
+  (interactive)
+  (pilish-reload
+   (lambda (outcome)
+     (pcase outcome
+       ('nil (message "Reload finished"))
+       (`(superseded . ,_) nil)
+       (`(,kind . ,detail) (message "Reload %s: %s" kind detail))))))
+#+end_src
+
 #+html: <a id="installation-details"></a>
 * Installation details and upgrades
 

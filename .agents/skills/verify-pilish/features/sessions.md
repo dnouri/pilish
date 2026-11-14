@@ -1,6 +1,6 @@
 # Browse and resume sessions
 
-The session and tree browsers support native folding, searching, copying, and scrolling. The session browser can resume a selected saved session and rebuild its history.
+The session and tree browsers support native folding, searching, copying, and scrolling. The session browser can resume a selected saved session and rebuild its history. Reload restarts Pi for the open session and rebuilds the same history.
 
 ## Sub-features
 
@@ -10,6 +10,7 @@ The session and tree browsers support native folding, searching, copying, and sc
 - `session-resume` selects a saved session in the real browser, invokes its switch command, and rebuilds the chat history.
 - `session-state-ownership` keeps a newly selected session's identity and header state when an older startup or thinking-level state response arrives.
 - `background-start` starts a new and a resumed session with `pilish-start-session`. Neither changes the window layout or sends a prompt; `pilish-show-session` later shows the resumed history.
+- `session-reload` restarts Pi for the open session, keeps the unsent draft, and rebuilds the chat history. A Lisp caller's reload callback reports each reload exactly once, including a fresh Pi that exits.
 
 ## How to get to it (user POV)
 
@@ -18,6 +19,7 @@ The session and tree browsers support native folding, searching, copying, and sc
 - Select a saved session and run `M-x pilish-session-browser-switch` to resume it.
 - Use `C-c C-n` for a new session while a background state query is outstanding.
 - Call `pilish-start-session` from Lisp, then show the session with `pilish-show-session`.
+- Run `M-x pilish-reload` in a session, or call `pilish-reload` with a callback from Lisp.
 
 ## Driving it with Pilish harnesses
 
@@ -31,7 +33,8 @@ Preconditions:
 - **Resume through the browser.** Run `./bench/run-reload-resume-bench.sh --scenario smoke -c 1 --out-dir "$RUN_DIR/reload-resume" 2>&1 | tee "$RUN_DIR/resume.log"`. Record `resume.exit`. The resume lane selects the target section, calls `pilish-session-browser-switch`, and checks rebuilt history.
 - **Keep the switched session current.** Run `G1_CAPTURE="$RUN_DIR/state-capture" ./test/run-gui-tests.sh --headless pilish-gui-test-session-switch-ignores-delayed-state 2>&1 | tee "$RUN_DIR/state-ownership.log"`. Record `state-ownership.exit`. Two native `C-c C-n` actions retain their current saved file and header state when older startup/thinking replies are released; the final prompt still receives a reply and preserves the unsent draft. Require `delayed-startup-state`, `delayed-thinking-state` and `switched-session-current` `.el` and `.png` evidence under `$RUN_DIR/state-capture`.
 - **Start sessions in the background.** Run `G1_CAPTURE="$RUN_DIR/background-capture" ./test/run-gui-tests.sh --headless pilish-gui-test-background-session-start-and-resume 2>&1 | tee "$RUN_DIR/background.log"`. Record `background.exit`. The layout and selected window stay unchanged, the background processes send no `prompt`, and the resumed chat shows the saved prompt once displayed. Require `.png` and `.el` files for `background-layout-unchanged` and `background-resumed-shown`.
-- **Check the proof.** Require zero statuses and nonempty logs. Require `.png` and `.el` files for `browser-pilish-session-browser-mode-folded`, `browser-pilish-session-browser-mode-unfolded`, `browser-pilish-tree-browser-mode-folded`, and `browser-pilish-tree-browser-mode-unfolded` under `$RUN_DIR/browser-capture`. Require at least one nonempty `result.json` under `$RUN_DIR/reload-resume`.
+- **Reload under a draft.** Run `G1_CAPTURE="$RUN_DIR/reload-capture" ./test/run-gui-tests.sh --headless pilish-gui-test-reload-keeps-draft-and-reports-once 2>&1 | tee "$RUN_DIR/reload.log"`. Record `reload.exit`. `M-x pilish-reload` replaces the process and keeps the draft; a Lisp reload reports `nil` once after its state and history refreshes finish; a reload whose fresh Pi exits reports one `exited` or `failed` outcome and keeps the working process.
+- **Check the proof.** Require zero statuses and nonempty logs. Require `.png` and `.el` files for `browser-pilish-session-browser-mode-folded`, `browser-pilish-session-browser-mode-unfolded`, `browser-pilish-tree-browser-mode-folded`, and `browser-pilish-tree-browser-mode-unfolded` under `$RUN_DIR/browser-capture`, for `background-layout-unchanged` and `background-resumed-shown` under `$RUN_DIR/background-capture`, and for `reload-interactive`, `reload-callback-success` and `reload-callback-failure` under `$RUN_DIR/reload-capture`. Require at least one nonempty `result.json` under `$RUN_DIR/reload-resume`.
 
 ## Gotchas
 
