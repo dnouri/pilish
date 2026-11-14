@@ -2139,6 +2139,51 @@ Buffer is read-only with `inhibit-read-only' used for insertion.
               (should (= (window-point tail) (point-max))))))
       (kill-buffer chat))))
 
+(ert-deftest pilish-test-scroll-back-command-stops-following ()
+  "A command that scrolls a follower back with its end in view makes it read.
+Pilish positioning the tail during a command keeps the window following."
+  (let ((chat (generate-new-buffer " *pilish-scroll-back*")))
+    (unwind-protect
+        (save-window-excursion
+          (delete-other-windows)
+          (switch-to-buffer chat)
+          (pilish-chat-mode)
+          (let ((inhibit-read-only t)
+                (window (selected-window))
+                (line (lambda (n)
+                        (save-excursion
+                          (goto-char (point-min))
+                          (forward-line (1- n))
+                          (point)))))
+            (dotimes (i 100) (insert (format "line %d\n" (1+ i))))
+            (set-window-point window (point-max))
+            (set-window-start window (funcall line 98))
+            (should (pilish--window-following-p window))
+            ;; A scroll command moves the start back; point stays at the end.
+            (pilish--record-command-followers)
+            (set-window-start window (funcall line 97))
+            (pilish--settle-command-followers)
+            (should-not pilish--command-followers)
+            (should-not (pilish--window-following-p window))
+            (should (= (window-point window) (funcall line 100)))
+            (should (= (window-start window) (funcall line 97)))
+            (pilish--append-to-chat "streamed output\n")
+            (should (= (window-start window) (funcall line 97)))
+            (should (= (window-point window) (funcall line 100)))
+            ;; Scrolling forward keeps a follower following.
+            (set-window-point window (point-max))
+            (pilish--record-command-followers)
+            (set-window-start window (funcall line 99))
+            (pilish--settle-command-followers)
+            (should (pilish--window-following-p window))
+            ;; Pilish moving a follower's start back is no scroll back.
+            (pilish--record-command-followers)
+            (pilish--restore-tail-window window (funcall line 101))
+            (should (< (window-start window) (funcall line 99)))
+            (pilish--settle-command-followers)
+            (should (pilish--window-following-p window))))
+      (kill-buffer chat))))
+
 (ert-deftest pilish-test-scroll-preservation-keeps-point-after-contraction ()
   "A deletion before point keeps a nonselected reader on the same text."
   (let ((chat (generate-new-buffer " *pilish-scroll-contraction*"))

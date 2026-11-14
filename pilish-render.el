@@ -7639,7 +7639,9 @@ section-aware old-position to new-position mapping."
            (if (plist-get window-state :following)
                (point-max)
              (funcall map-position
-                      (plist-get window-state :point)))))))))
+                      (plist-get window-state :point))))
+          (when (plist-get window-state :following)
+            (pilish--release-command-follower window)))))))
 
 (defun pilish--cool-tool-overlay-preserving-view (overlay)
   "Cool completed tool OVERLAY while mapping visible view positions.
@@ -10678,7 +10680,8 @@ nil for positions deleted by the rewrite."
           (if (plist-get window-state :tail-p)
               (progn
                 (goto-char point-max)
-                (recenter -1))
+                (recenter -1)
+                (pilish--release-command-follower win))
             (goto-char point)
             (let* ((body-height (max 1 (window-body-height win)))
                    (saved-start

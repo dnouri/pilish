@@ -1617,6 +1617,42 @@ and sending with \\`C-c C-c' returns it to one line."
       (should (= line-before (pilish-gui-test-top-line-number)))
       (should (pilish-gui-test-chat-contains "Scroll line 24 for second turn")))))
 
+(ert-deftest pilish-gui-test-wheel-scroll-back-keeps-end-visible ()
+  "A wheel scroll back that keeps the end in view stays put while output streams.
+Blank rows below the end, as after the chat window grows or
+`scroll-margin' recenters it, let a wheel scroll back keep the end and
+point visible.  The window must read, not follow."
+  (pilish-gui-test-with-fresh-session
+    (:backend fake :fake-scenario "scrolling-text")
+    (pilish-gui-test-send "first turn")
+    (let ((chat (plist-get pilish-gui-test--session :chat-buffer))
+          (window (pilish-gui-test-chat-window))
+          (mouse-wheel-scroll-amount '(1))
+          (mouse-wheel-progressive-speed nil))
+      (should (pilish-gui-test-window-point-at-end-p))
+      ;; Leave two blank rows below the end.
+      (set-window-start window (with-current-buffer chat
+                                 (save-excursion
+                                   (goto-char (window-start window))
+                                   (forward-line 2)
+                                   (point))))
+      (redisplay t)
+      (let ((start (window-start window)))
+        (should (pilish-gui-test-window-point-at-end-p))
+        (execute-kbd-macro
+         (vector `(wheel-up (,window ,start (0 . 0) 0))))
+        (redisplay t)
+        (with-current-buffer chat
+          (should (< (window-start window) start))
+          (should (pos-visible-in-window-p (point-max) window))
+          (should-not (pilish--window-following-p window))
+          (should (pos-visible-in-window-p (window-point window) window))))
+      (let ((scrolled (window-start window)))
+        (pilish-gui-test-send "second turn")
+        (should (= scrolled (window-start window)))
+        (should (pilish-gui-test-chat-contains
+                 "Scroll line 24 for second turn"))))))
+
 (ert-deftest pilish-gui-test-scroll-preserved-tool-use ()
   "Test scroll position is preserved while fake tool output arrives."
   (pilish-gui-test-with-fresh-session
