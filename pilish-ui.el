@@ -1209,6 +1209,8 @@ Reserve at least one left column and preserve each window's larger margins."
   (pilish--apply-header-line-location)
   (add-hook 'window-size-change-functions
             #'pilish--maybe-rebalance-windows)
+  (add-hook 'pre-command-hook #'pilish--record-command-followers)
+  (add-hook 'post-command-hook #'pilish--settle-command-followers)
   (add-hook 'kill-buffer-query-functions
             #'pilish--session-kill-buffer-query nil t)
   (add-hook 'kill-buffer-hook #'pilish--cleanup-on-kill nil t))
@@ -2592,6 +2594,16 @@ larger window when the selected one cannot be split."
 ;;
 ;; During streaming, windows "following" output (window-point at buffer end)
 ;; scroll to show new content. Windows where the user scrolled up stay put.
+;; A command can scroll a following window back while its end stays
+;; visible, as a wheel scroll does in a window with blank rows below the
+;; end.  Emacs then leaves point at the end, so the next output would pull
+;; the window back to the tail.  After such a command point moves off the
+;; end, and the window reads instead.  Pilish's own tail positioning during
+;; a command releases the window from this check.
+
+(defvar pilish--command-followers nil
+  "Alist of (WINDOW . START) for chat windows following when a command began.
+START is a marker at WINDOW's start then.")
 
 (defun pilish--window-following-p (window)
   "Return non-nil if WINDOW is following output (point at end of buffer)."
@@ -2662,8 +2674,54 @@ Return nil."
                      body-height))
             (set-window-start window start t)
           (recenter -1))))
-    (set-window-point window end))
+    (set-window-point window end)
+    (pilish--release-command-follower window))
   nil)
+
+(defun pilish--release-command-follower (window)
+  "Exclude WINDOW from the current command's scroll-back check.
+Call after Pilish itself positions following WINDOW."
+  (when-let* ((entry (assq window pilish--command-followers)))
+    (set-marker (cdr entry) nil)
+    (setq pilish--command-followers
+          (delq entry pilish--command-followers))))
+
+(defun pilish--release-command-followers ()
+  "Forget `pilish--command-followers' and detach its markers."
+  (dolist (entry pilish--command-followers)
+    (set-marker (cdr entry) nil))
+  (setq pilish--command-followers nil))
+
+(defun pilish--record-command-followers ()
+  "Remember the starts of chat windows that follow the output.
+Run from `pre-command-hook'."
+  (pilish--release-command-followers)
+  (walk-windows
+   (lambda (window)
+     (with-current-buffer (window-buffer window)
+       (when (and (derived-mode-p 'pilish-chat-mode)
+                  (pilish--window-following-p window))
+         (push (cons window (copy-marker (window-start window)))
+               pilish--command-followers))))
+   'no-minibuf t))
+
+(defun pilish--settle-command-followers ()
+  "Make followers that the command scrolled back read instead.
+Point moves to the start of the last nonblank line, or to the window
+start when that line starts above it.  Run from `post-command-hook'."
+  (pcase-dolist (`(,window . ,start) pilish--command-followers)
+    (when (and (window-live-p window)
+               (eq (window-buffer window) (marker-buffer start)))
+      (with-current-buffer (window-buffer window)
+        (when (and (< (window-start window) start)
+                   (pilish--window-following-p window))
+          (set-window-point
+           window
+           (save-excursion
+             (goto-char (point-max))
+             (skip-chars-backward " \t\n")
+             (max (line-beginning-position) (window-start window))))))))
+  (pilish--release-command-followers))
 
 (defvar pilish--viewport-construction-buffers nil
   "Buffers whose intermediate viewport updates are deferred in this stack.

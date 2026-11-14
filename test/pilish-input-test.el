@@ -6434,6 +6434,29 @@ Input keeps focus, and typing alone leaves the chat where it was."
                      (with-current-buffer chat (point-max))))
           (should (> (window-start window) 1)))))))
 
+(ert-deftest pilish-test-submit-keeps-underfilled-followers-following ()
+  "Returning followers to the end on submit is no scroll back.
+A follower whose end sits above blank rows is bottom-aligned and follows."
+  (pilish-test--with-scrolled-back-chat
+    (let ((pilish-jump-to-end-on-submit t)
+          (late-start (with-current-buffer chat
+                        (save-excursion
+                          (goto-char (point-max))
+                          (forward-line -2)
+                          (point)))))
+      (dolist (window chat-windows)
+        (set-window-start window late-start)
+        (set-window-point window (with-current-buffer chat (point-max))))
+      (insert "new prompt")
+      (pilish--record-command-followers)
+      (should (= (length pilish--command-followers) 2))
+      (pilish-test--submit-draft 'prompt)
+      (pilish--settle-command-followers)
+      (with-current-buffer chat
+        (dolist (window chat-windows)
+          (should (< (window-start window) late-start))
+          (should (pilish--window-following-p window)))))))
+
 (ert-deftest pilish-test-submit-keeps-chat-position-by-default ()
   "Without `pilish-jump-to-end-on-submit', a scrolled-back chat stays put."
   (dolist (kind '(prompt follow-up steer compacting-steer))
