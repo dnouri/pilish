@@ -2711,22 +2711,39 @@ BODY-HEIGHT and WINDOW select the geometry used for the count."
     (>= (pilish--count-screen-lines-up-to start point-max limit window)
         limit)))
 
+(defun pilish--window-bottom-margin (window)
+  "Return the rows at WINDOW's bottom that redisplay keeps point out of.
+The current buffer must be WINDOW's buffer.  This mirrors Emacs's
+`window_scroll_margin': `scroll-margin' clipped to
+`maximum-scroll-margin' of the body height and to less than half of it.
+Redisplay applies the margin at the end of the buffer too."
+  (if (<= scroll-margin 0)
+      0
+    (let* ((lines (/ (window-body-height window t) (default-line-height)))
+           (ratio (if (floatp maximum-scroll-margin)
+                      (min 0.5 (max 0.0 maximum-scroll-margin))
+                    0.25)))
+      (min scroll-margin (/ (1- lines) 2) (truncate (* lines ratio))))))
+
 (defun pilish--restore-tail-window (window start)
   "Restore following WINDOW using mapped candidate START.
 The current buffer must be WINDOW's buffer.  Keep START when it fills the
-window and leaves the end visible; otherwise bottom-align the end.
+window and leaves the end visible above the bottom scroll margin;
+otherwise bottom-align the end.  A kept end inside the margin would make
+redisplay recenter, leaving the window half empty.
 Preserve selection and the buffer's point when WINDOW is not selected.
 Return nil."
   (let ((end (point-max))
-        (body-height (max 1 (window-body-height window))))
+        (rows (max 1 (- (window-body-height window)
+                        (pilish--window-bottom-margin window)))))
     (save-excursion
       (with-selected-window window
         (goto-char end)
         (if (and (pilish--window-start-fills-window-within-one-row-p
-                  start end body-height window)
+                  start end rows window)
                  (<= (pilish--count-screen-lines-up-to
-                      start end (1+ body-height) window t)
-                     body-height))
+                      start end (1+ rows) window t)
+                     rows))
             (set-window-start window start t)
           (recenter -1))))
     (set-window-point window end))

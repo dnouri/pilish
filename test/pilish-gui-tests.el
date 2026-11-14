@@ -1617,6 +1617,24 @@ and sending with \\`C-c C-c' returns it to one line."
       (should (= line-before (pilish-gui-test-top-line-number)))
       (should (pilish-gui-test-chat-contains "Scroll line 24 for second turn")))))
 
+(ert-deftest pilish-gui-test-tail-stays-filled-with-scroll-margin ()
+  "A following chat stays filled after each turn with a `scroll-margin'.
+Redisplay keeps point out of the bottom margin by recentering, so a tail
+whose end Pilish left inside the margin ended the turn half empty."
+  (let ((scroll-margin 2))
+    (pilish-gui-test-with-fresh-session
+      (:backend fake :fake-scenario "scrolling-text")
+      (dolist (prompt '("first turn" "second turn" "third turn"))
+        (pilish-gui-test-send prompt)
+        (redisplay t)
+        (let ((window (pilish-gui-test-chat-window)))
+          (with-current-buffer (window-buffer window)
+            (should (pilish--window-following-p window))
+            (should (= 2 (pilish--window-bottom-margin window)))
+            (should (= (count-screen-lines (window-start window) (point-max)
+                                           t window)
+                       (- (window-body-height window) 2)))))))))
+
 (ert-deftest pilish-gui-test-scroll-preserved-tool-use ()
   "Test scroll position is preserved while fake tool output arrives."
   (pilish-gui-test-with-fresh-session
