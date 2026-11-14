@@ -1569,6 +1569,9 @@ cannot apply older session identity or header state over a newer session view.")
 (defvar-local pilish--stale-extension-widgets nil
   "Keys of the widgets left by extensions that Pi is replacing.")
 
+(defvar-local pilish--stale-extension-statuses nil
+  "Keys of the statuses left by extensions that Pi is replacing.")
+
 (defun pilish--set-session-transition-generation (generation)
   "Set session-transition GENERATION for the current chat buffer."
   (setq pilish--session-transition-generation generation))
@@ -1587,17 +1590,19 @@ Optional PROC may complete the transition before it becomes the current process.
   "Begin a session transition that replaces Pi's extensions.
 Return its generation, as `pilish--begin-session-transition' does with
 PROC.  New, resumed and forked sessions and reloads replace them; their
-widgets are marked stale, see `pilish--mark-extension-ui-stale'."
+widgets and statuses are marked stale, see
+`pilish--mark-extension-ui-stale'."
   (prog1 (pilish--begin-session-transition proc)
     (pilish--mark-extension-ui-stale)))
 
 (defun pilish--finish-session-transition (generation)
   "Mark session transition GENERATION finished when it is still current.
-Widgets a failed or cancelled replacement marked stale stay."
+Widgets and statuses a failed or cancelled replacement marked stale stay."
   (when (= generation pilish--session-transition-generation)
     (setq pilish--session-transition-active nil
           pilish--session-transition-process nil
-          pilish--stale-extension-widgets nil)
+          pilish--stale-extension-widgets nil
+          pilish--stale-extension-statuses nil)
     (pilish--reconcile-inactivity-timer)))
 
 (defun pilish--session-transition-active-p (&optional chat-buf)
@@ -2068,24 +2073,32 @@ a buffer-local variable holding it, while the overlay stays."
               (overlays-in (point-min) (point-min)))))
 
 (defun pilish--mark-extension-ui-stale ()
-  "Mark the current widgets as set by extensions Pi is about to replace.
+  "Mark the widgets and statuses as set by extensions Pi will replace.
 Pi replaces every extension when it starts, resumes or forks a session,
 and a reload starts another Pi.  Its RPC mode tells the client nothing
-about that.  The new extensions set their widgets from `session_start',
-before Pi answers the request, so a successful replacement drops only
-the widgets no extension set since this call, through
+about that.  The new extensions set their widgets and statuses from
+`session_start', before Pi answers the request, so a successful
+replacement drops only those no extension set since this call, through
 `pilish--drop-stale-extension-ui'.  A failed one keeps them all."
   (setq pilish--stale-extension-widgets
-        (mapcar #'car pilish--extension-widgets)))
+        (mapcar #'car pilish--extension-widgets)
+        pilish--stale-extension-statuses
+        (mapcar #'car pilish--extension-status)))
 
 (defun pilish--drop-stale-extension-ui ()
-  "Remove the widgets that `pilish--mark-extension-ui-stale' marked."
+  "Remove what `pilish--mark-extension-ui-stale' marked."
   (when pilish--stale-extension-widgets
     (dolist (key pilish--stale-extension-widgets)
       (setq pilish--extension-widgets
             (assoc-delete-all key pilish--extension-widgets)))
     (setq pilish--stale-extension-widgets nil)
-    (pilish--refresh-extension-widgets)))
+    (pilish--refresh-extension-widgets))
+  (when pilish--stale-extension-statuses
+    (dolist (key pilish--stale-extension-statuses)
+      (setq pilish--extension-status
+            (assoc-delete-all key pilish--extension-status)))
+    (setq pilish--stale-extension-statuses nil)
+    (force-mode-line-update t)))
 
 (defface pilish-extension-widget
   '((t :inherit font-lock-doc-face))

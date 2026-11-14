@@ -8756,12 +8756,21 @@ second one; md-ts-mode's teardown deletes it, so an update recreates it."
                         (overlays-in (point-min) (point-max))))))
         (should (equal (pilish-test--widget-string input) "two\n"))))))
 
+(defun pilish-test--status (key text)
+  "Deliver Pi's setStatus JSON for KEY with TEXT."
+  (pilish--handle-display-event
+   (pilish--parse-json-line
+    (json-serialize (list :type "extension_ui_request" :id "s"
+                          :method "setStatus" :statusKey key
+                          :statusText text)))))
+
 (defun pilish-test--widgets-after-replacement (start type response)
-  "Return the widget text after START replaces the session and Pi answers.
+  "Return widget text and statuses after START replaces the session.
 START receives the chat buffer and its process.  Before it runs, the chat
-shows widgets \"old\" and \"renewed\".  While the TYPE request waits,
-the new extensions set \"renewed\" and \"added\" from `session_start',
-as Pi's RPC mode does before it answers with RESPONSE."
+shows widgets and statuses \"old\" and \"renewed\".  While the TYPE
+request waits, the new extensions set \"renewed\" and \"added\" from
+`session_start', as Pi's RPC mode does before it answers with RESPONSE.
+The statuses are returned as an alist sorted by key."
   (pilish-test-with-rpc-session (chat input proc _commands)
     (let (callback new-proc)
       (unwind-protect
@@ -8780,13 +8789,17 @@ as Pi's RPC mode does before it answers with RESPONSE."
             (with-current-buffer chat
               (pilish--set-chat-session-identity temporary-file-directory)
               (setq pilish--state '(:session-file "/tmp/current.jsonl"))
-              (pilish-test--widget "old" '("old"))
-              (pilish-test--widget "renewed" '("before"))
+              (dolist (key '("old" "renewed"))
+                (pilish-test--widget key (list (concat key " before")))
+                (pilish-test--status key (concat key " before")))
               (funcall start chat proc)
-              (pilish-test--widget "renewed" '("after"))
-              (pilish-test--widget "added" '("added"))
+              (dolist (key '("renewed" "added"))
+                (pilish-test--widget key (list (concat key " after")))
+                (pilish-test--status key (concat key " after")))
               (funcall callback (append '(:type "response") response))
-              (pilish-test--widget-string input)))
+              (list (pilish-test--widget-string input)
+                    (sort (copy-sequence pilish--extension-status)
+                          (lambda (a b) (string< (car a) (car b)))))))
         (when (process-live-p new-proc) (delete-process new-proc))))))
 
 (defconst pilish-test--session-replacements
@@ -8799,21 +8812,26 @@ as Pi's RPC mode does before it answers with RESPONSE."
   "Request types and starts of the commands that replace Pi's extensions.")
 
 (ert-deftest pilish-test-session-replacement-drops-stale-extension-widgets ()
-  "A replaced session keeps only the widgets its new extensions set.
-Pi's TUI clears every widget when it replaces its extensions; RPC sends
-nothing, and the new extensions set theirs before Pi answers."
+  "A replaced session keeps only the widgets and statuses its new extensions set.
+Pi's TUI clears every widget and status when it replaces its extensions;
+RPC sends nothing, and the new extensions set theirs before Pi answers."
   (pcase-dolist (`(,type ,start) pilish-test--session-replacements)
     (should (equal (pilish-test--widgets-after-replacement
                     start type
                     '(:success t :data (:cancelled :false :text "")))
-                   "after\nadded\n"))))
+                   '("renewed after\nadded after\n"
+                     (("added" . "added after")
+                      ("renewed" . "renewed after")))))))
 
 (ert-deftest pilish-test-failed-session-replacement-keeps-extension-widgets ()
-  "A failed replacement leaves the extensions and all their widgets."
+  "A failed replacement leaves the extensions with their widgets and statuses."
   (pcase-dolist (`(,type ,start) pilish-test--session-replacements)
     (should (equal (pilish-test--widgets-after-replacement
                     start type '(:success :false :error "refused"))
-                   "old\nafter\nadded\n"))))
+                   '("old before\nrenewed after\nadded after\n"
+                     (("added" . "added after")
+                      ("old" . "old before")
+                      ("renewed" . "renewed after")))))))
 
 (ert-deftest pilish-test-extension-ui-set-working-message ()
   "extension_ui_request setWorkingMessage stores working text."

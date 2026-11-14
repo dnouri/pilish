@@ -1600,6 +1600,8 @@ buffer."
   "Handle setStatus method from EVENT."
   (let ((key (plist-get event :statusKey))
         (text (plist-get event :statusText)))
+    (setq pilish--stale-extension-statuses
+          (delete key pilish--stale-extension-statuses))
     (when text
       (setq text (ansi-color-filter-apply
                   (pilish--render-safe-string text))))
