@@ -771,6 +771,81 @@ and sending with \\`C-c C-c' returns it to one line."
       (set-frame-size nil width height)
       (sit-for 0.1))))
 
+(ert-deftest pilish-gui-test-input-fit-shows-extension-widgets ()
+  "Extension widget lines show above a fitted draft and rewrap with the frame.
+The fake does not emit setWidget, so the test feeds Pi's JSON lines
+through the session process's own filter.  Each fitted window starts at
+the first widget row, shows the whole draft and has no empty rows."
+  (let ((pilish-input-window-height 'fit)
+        (pilish-input-window-max-height 0.5)
+        (width (frame-width))
+        (height (frame-height)))
+    (unwind-protect
+        (progn
+          (set-frame-size nil 104 45)
+          (sit-for 0.1)
+          (pilish-gui-test-with-fresh-session
+            (:backend fake :fake-scenario "prompt-lifecycle")
+            (let* ((input-buf (plist-get pilish-gui-test--session :input-buffer))
+                   (proc (plist-get pilish-gui-test--session :process))
+                   (input-win (pilish-gui-test-input-window))
+                   (chat-win (pilish-gui-test-chat-window))
+                   (progress (mapconcat #'identity (make-list 30 "step") " ")))
+              (cl-labels
+                  ((widget (lines)
+                     (funcall (process-filter proc) proc
+                              (concat
+                               (json-serialize
+                                (append
+                                 (list :type "extension_ui_request" :id "w"
+                                       :method "setWidget" :widgetKey "plan")
+                                 (and lines (list :widgetLines (vconcat lines)))))
+                               "\n")))
+                   (widget-rows ()
+                     ;; The draft's first character follows the widget rows.
+                     (cdr (posn-col-row (posn-at-point 1 input-win))))
+                   (check (name draft-rows)
+                     (pilish-gui-test--settle-input-fit input-buf)
+                     (should (= (window-start input-win) 1))
+                     (should (= (window-body-height input-win)
+                                (+ (widget-rows) draft-rows)))
+                     (should (pos-visible-in-window-p
+                              (with-current-buffer input-buf (point-max))
+                              input-win))
+                     (pilish-gui-test--large-evidence
+                      name
+                      (append (list :widget-rows (widget-rows)
+                                    :widgets (with-current-buffer input-buf
+                                               (overlay-get
+                                                (pilish--extension-widget-overlay)
+                                                'before-string)))
+                              (pilish-gui-test--input-fit-state
+                               input-win chat-win)))))
+                (select-window input-win)
+                (execute-kbd-macro (kbd "o n e RET t w o"))
+                (widget (list "Plan: 2 of 5" progress))
+                (check "widget-wide" 2)
+                (should (>= (widget-rows) 3))
+                (let ((wide-rows (widget-rows)))
+                  (set-frame-width nil 54)
+                  (should (pilish-test-wait-until
+                           (lambda ()
+                             (redisplay t)
+                             (> (widget-rows) wide-rows))
+                           pilish-test-gui-timeout pilish-test-poll-interval)))
+                (check "widget-narrow" 2)
+                (execute-kbd-macro (kbd "C-c C-c"))
+                (should (pilish-gui-test-wait-for-idle))
+                (should (pilish-gui-test-chat-contains "Fake reply for: one"))
+                (should (equal (with-current-buffer input-buf (buffer-string)) ""))
+                (check "widget-after-send" 1)
+                (widget nil)
+                (pilish-gui-test--settle-input-fit input-buf)
+                (should (= (window-body-height input-win) 1))
+                (should (= (widget-rows) 0))))))
+      (set-frame-size nil width height)
+      (sit-for 0.1))))
+
 (ert-deftest pilish-gui-test-input-fit-with-hide-after-send ()
   "Fitting composes with both on-demand and hidden input display."
   (let ((pilish-input-window-height 'fit))

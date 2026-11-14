@@ -1566,6 +1566,12 @@ cannot apply older session identity or header state over a newer session view.")
 (defvar-local pilish--session-transition-process nil
   "Process allowed to complete the active session transition.")
 
+(defvar-local pilish--stale-extension-widgets nil
+  "Keys of the widgets left by extensions that Pi is replacing.")
+
+(defvar-local pilish--stale-extension-statuses nil
+  "Keys of the statuses left by extensions that Pi is replacing.")
+
 (defun pilish--set-session-transition-generation (generation)
   "Set session-transition GENERATION for the current chat buffer."
   (setq pilish--session-transition-generation generation))
@@ -1580,11 +1586,23 @@ Optional PROC may complete the transition before it becomes the current process.
           pilish--session-transition-process proc)
     next))
 
+(defun pilish--begin-session-replacement (&optional proc)
+  "Begin a session transition that replaces Pi's extensions.
+Return its generation, as `pilish--begin-session-transition' does with
+PROC.  New, resumed and forked sessions and reloads replace them; their
+widgets and statuses are marked stale, see
+`pilish--mark-extension-ui-stale'."
+  (prog1 (pilish--begin-session-transition proc)
+    (pilish--mark-extension-ui-stale)))
+
 (defun pilish--finish-session-transition (generation)
-  "Mark session transition GENERATION finished when it is still current."
+  "Mark session transition GENERATION finished when it is still current.
+Widgets and statuses a failed or cancelled replacement marked stale stay."
   (when (= generation pilish--session-transition-generation)
     (setq pilish--session-transition-active nil
-          pilish--session-transition-process nil)
+          pilish--session-transition-process nil
+          pilish--stale-extension-widgets nil
+          pilish--stale-extension-statuses nil)
     (pilish--reconcile-inactivity-timer)))
 
 (defun pilish--session-transition-active-p (&optional chat-buf)
@@ -2041,6 +2059,112 @@ canonical history, so rebuilding now would erase that visible turn."
   "Alist of extension status messages for header-line display.
 Keys are extension identifiers (strings), values are status text.")
 
+(defvar-local pilish--extension-widgets nil
+  "Extension widgets of this session, in the order their keys first arrived.
+Elements are (KEY . LINES), LINES being sanitized single-line strings.")
+
+(defun pilish--extension-widget-overlay ()
+  "Return the current input buffer's extension widget overlay, or nil.
+It is found by its property: re-running `pilish-input-mode' would reset
+a buffer-local variable holding it, while the overlay stays."
+  (save-restriction
+    (widen)
+    (seq-find (lambda (overlay) (overlay-get overlay 'pilish-extension-widgets))
+              (overlays-in (point-min) (point-min)))))
+
+(defun pilish--mark-extension-ui-stale ()
+  "Mark the widgets and statuses as set by extensions Pi will replace.
+Pi replaces every extension when it starts, resumes or forks a session,
+and a reload starts another Pi.  Its RPC mode tells the client nothing
+about that.  The new extensions set their widgets and statuses from
+`session_start', before Pi answers the request, so a successful
+replacement drops only those no extension set since this call, through
+`pilish--drop-stale-extension-ui'.  A failed one keeps them all."
+  (setq pilish--stale-extension-widgets
+        (mapcar #'car pilish--extension-widgets)
+        pilish--stale-extension-statuses
+        (mapcar #'car pilish--extension-status)))
+
+(defun pilish--drop-stale-extension-ui ()
+  "Remove what `pilish--mark-extension-ui-stale' marked."
+  (when pilish--stale-extension-widgets
+    (dolist (key pilish--stale-extension-widgets)
+      (setq pilish--extension-widgets
+            (assoc-delete-all key pilish--extension-widgets)))
+    (setq pilish--stale-extension-widgets nil)
+    (pilish--refresh-extension-widgets))
+  (when pilish--stale-extension-statuses
+    (dolist (key pilish--stale-extension-statuses)
+      (setq pilish--extension-status
+            (assoc-delete-all key pilish--extension-status)))
+    (setq pilish--stale-extension-statuses nil)
+    (force-mode-line-update t)))
+
+(defface pilish-extension-widget
+  '((t :inherit font-lock-doc-face))
+  "Face for extension widget lines above the prompt draft."
+  :group 'pilish)
+
+(defun pilish--set-extension-widget (key lines)
+  "Show LINES as extension widget KEY, or remove the widget when LINES is nil.
+Run in the chat buffer.  A key keeps its position when its widget changes."
+  (setq pilish--stale-extension-widgets
+        (delete key pilish--stale-extension-widgets))
+  (let ((widget (assoc key pilish--extension-widgets)))
+    (cond ((null lines)
+           (setq pilish--extension-widgets
+                 (assoc-delete-all key pilish--extension-widgets)))
+          (widget (setcdr widget lines))
+          (t (setq pilish--extension-widgets
+                   (append pilish--extension-widgets
+                           (list (cons key lines)))))))
+  (pilish--refresh-extension-widgets))
+
+(defun pilish--refresh-extension-widgets ()
+  "Show the current chat buffer's widgets above its input buffer's draft.
+They live in the before-string of an empty overlay at the input buffer's
+start, so the draft, the sent text and the input history never hold them.
+They scroll with a draft too long for its window."
+  (let ((lines (mapcan (lambda (widget) (copy-sequence (cdr widget)))
+                       pilish--extension-widgets))
+        (input pilish--input-buffer))
+    (when (buffer-live-p input)
+      (with-current-buffer input
+        (let ((overlay (pilish--extension-widget-overlay)))
+          (when (and lines (not overlay))
+            (setq overlay (save-restriction
+                            (widen)
+                            (make-overlay (point-min) (point-min))))
+            (overlay-put overlay 'pilish-extension-widgets t))
+          (when overlay
+            (overlay-put overlay 'before-string
+                         (when lines
+                           (propertize (concat (string-join lines "\n") "\n")
+                                       'face 'pilish-extension-widget)))))
+        (pilish--schedule-fit-input-windows)))))
+
+(defun pilish--extension-widget-screen-lines (window)
+  "Return the screen lines the widgets above input WINDOW's draft take.
+Vertical motion measures the widget text in a scratch buffer with the
+input buffer's wrapping settings.  Counting characters would miss
+`word-wrap' and the column a text terminal keeps for continuation marks."
+  (with-current-buffer (window-buffer window)
+    (let ((widgets (when-let* ((overlay (pilish--extension-widget-overlay)))
+                     (overlay-get overlay 'before-string)))
+          (wrap word-wrap)
+          (truncate truncate-lines)
+          (remapping face-remapping-alist))
+      (if (not widgets)
+          0
+        (with-temp-buffer
+          (setq word-wrap wrap
+                truncate-lines truncate
+                face-remapping-alist remapping)
+          (insert widgets)
+          (goto-char (point-min))
+          ;; The text ends in a newline, so moving to its end counts rows.
+          (vertical-motion (buffer-size) window))))))
+
 (defvar-local pilish--held-chat-notices nil
   "Chat notices waiting for streaming or compaction to end, newest first.")
 
@@ -2270,11 +2394,19 @@ Resize only when INPUT-WIN is directly below CHAT-WIN and
 
 (defun pilish--input-draft-lines (window limit)
   "Return the screen lines of WINDOW's draft, counting at most LIMIT.
-A trailing newline starts a line of its own, since point can be there."
+A trailing newline starts a line of its own, since point can be there.
+Whether vertical motion from the buffer start counts the rows of the
+widget overlay string depends on the display, so the widgets are hidden
+while it counts; `pilish-fit-input-window' adds them separately."
   (with-current-buffer (window-buffer window)
-    (save-excursion
-      (goto-char (point-min))
-      (1+ (vertical-motion (max 0 (1- limit)) window)))))
+    (let* ((overlay (pilish--extension-widget-overlay))
+           (widgets (and overlay (overlay-get overlay 'before-string))))
+      (unwind-protect
+          (save-excursion
+            (when widgets (overlay-put overlay 'before-string nil))
+            (goto-char (point-min))
+            (1+ (vertical-motion (max 0 (1- limit)) window)))
+        (when widgets (overlay-put overlay 'before-string widgets))))))
 
 (defun pilish--fit-input-chat-window (input-win)
   "Return the chat window directly above INPUT-WIN, or nil."
@@ -2298,9 +2430,9 @@ height of INPUT-WIN and CHAT-WIN, which bounds it."
   "Resize INPUT-WIN to fit its draft when `pilish-input-window-height' is `fit'.
 INPUT-WIN must be directly below its chat window; other layouts and
 height settings are left alone.  The height covers the draft's screen
-lines plus any header and mode lines the window shows, up to
-`pilish-input-window-max-height'.  A height preserved with
-`window-preserve-size' moves to the new size."
+lines, the extension widgets above it and any header and mode lines
+the window shows, up to `pilish-input-window-max-height'.  A height
+preserved with `window-preserve-size' moves to the new size."
   (when-let* (((eq pilish-input-window-height 'fit))
               (chat-win (pilish--fit-input-chat-window input-win)))
     (let* ((geometry (pilish--fit-input-geometry input-win chat-win))
@@ -2311,8 +2443,11 @@ lines plus any header and mode lines the window shows, up to
                     (round (* pilish-input-window-max-height total))
                   pilish-input-window-max-height))
            (cap (max (1+ chrome) (min cap (- total window-min-height))))
+           (widget-lines (pilish--extension-widget-screen-lines input-win))
            ;; One line beyond the cap tells whether the draft overflows.
-           (lines (pilish--input-draft-lines input-win (- (1+ cap) chrome)))
+           (lines (+ widget-lines
+                     (pilish--input-draft-lines
+                      input-win (- (1+ cap) chrome widget-lines))))
            ;; Ignoring INPUT-WIN's own limits allows less than
            ;; `window-min-height' and moves a preserved size; the chat
            ;; window's limits still bound the change.
