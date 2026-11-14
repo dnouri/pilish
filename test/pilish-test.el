@@ -2169,6 +2169,8 @@ the session's own options, and another session of the same directory gets
 none of them."
   (let* ((root (pilish-test--make-temp-directory "pilish-test-bg-env-"))
          (global-environment (copy-sequence process-environment))
+         ;; Batch ERT enables debugging on Emacs 29; exercise the warning path.
+         (debug-on-error nil)
          (calls nil)
          (warnings nil)
          (pilish-session-environment-functions
