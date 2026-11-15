@@ -447,12 +447,10 @@
        (pilish--history-add "Recalled prompt from history")
        (insert draft)
        (goto-char (point-max))
-       (push '(history-search
-               "M-x pilish-history-isearch-backward RET Recalled RET")
+       (push '(history-search "M-r Recalled RET")
              pilish-gui-test--large-trace)
        (execute-kbd-macro
-        (vconcat (kbd "M-x pilish-history-isearch-backward RET")
-                 "Recalled" (kbd "RET")))
+        (vconcat (kbd "M-r") "Recalled" (kbd "RET")))
        (should (equal (buffer-string) "Recalled prompt from history"))
        (should (= pilish--input-ring-index 0))
        (should (equal pilish--input-saved draft))
