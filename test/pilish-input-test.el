@@ -3165,6 +3165,7 @@ This ensures history loads correctly when callback runs in arbitrary context."
     (pilish-input-mode)
     (should (eq (key-binding (kbd "M-p")) 'pilish-previous-input))
     (should (eq (key-binding (kbd "M-n")) 'pilish-next-input))
+    (should (eq (key-binding (kbd "M-r")) 'pilish-history-isearch-backward))
     (should (eq (key-binding (kbd "C-r")) 'isearch-backward))))
 
 (ert-deftest pilish-test-history-isolated-per-buffer ()

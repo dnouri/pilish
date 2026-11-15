@@ -26,8 +26,8 @@
 ;;; Commentary:
 
 ;; Input buffer features for Pilish: prompt composition,
-;; history navigation (comint/eshell-style M-p/M-n), explicit incremental
-;; history search, file reference completion (@),
+;; history navigation (comint/eshell-style M-p/M-n), incremental
+;; history search (M-r), file reference completion (@),
 ;; path completion (Tab), slash command completion, message queuing
 ;; (follow-up and steering), and send/abort commands.
 ;;
@@ -40,7 +40,7 @@
 ;;   `pilish-next-input'            History forward (M-n)
 ;;   `pilish-input-previous-message' Navigate previous chat message
 ;;   `pilish-input-next-message'    Navigate next chat message
-;;   `pilish-history-isearch-backward'  History search (M-x)
+;;   `pilish-history-isearch-backward'  History search (M-r)
 ;;   `pilish-queue-steering'        Steering message (C-c C-s)
 ;;   `pilish-queue-followup'        Follow-up message (M-RET)
 
