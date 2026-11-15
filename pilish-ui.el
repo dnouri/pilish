@@ -1236,7 +1236,6 @@ removing the instructional header that would otherwise appear."
     (define-key map (kbd "M-n") #'pilish-next-input)
     (define-key map (kbd "<C-up>") #'pilish-previous-input)
     (define-key map (kbd "<C-down>") #'pilish-next-input)
-    (define-key map (kbd "C-r") #'pilish-history-isearch-backward)
     ;; Explicit steering and follow-up; C-c C-c follows `pilish-send-while-busy'.
     (define-key map (kbd "C-c C-s") #'pilish-queue-steering)
     (define-key map (kbd "M-RET") #'pilish-queue-followup)

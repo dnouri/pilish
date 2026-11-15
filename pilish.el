@@ -65,7 +65,7 @@
 ;;     C-c C-p        Open menu
 ;;     C-c C-r        Browse sessions
 ;;     M-p / M-n      History navigation
-;;     C-r            Incremental history search (like readline)
+;;     C-r            Incremental search within the draft
 ;;     TAB            Path/file completion
 ;;     @              File reference (search project files)
 ;;
