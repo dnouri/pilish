@@ -80,5 +80,6 @@ Preconditions:
 - Receipt geometry is verified at 104 and 54 columns and in unequal sibling windows. Very narrow layouts are outside this recipe.
 - Saved reports omit live stream estimates and transient return receipts. Saved tool results with `durationMs` restore recorded execution times. The saved-conversations recipe drives the snapshot inspector.
 - A return receipt measures local wall-clock observation from the first `agent_start` through accepted `agent_settled`, not Pi's monotonic tool clock. The fake scenario paces both clocks but executes no real tool.
+- The tool-block journey owns selected-chat following through timing-row edits. Run `pilish-gui-test-selected-chat-follows-tool-duration` from that recipe to prove that viewport contract.
 - The fake emits `notify` only during a streamed reply. Holding during compaction, release at process exit and the idle path are unit-tested (`make test-render SELECTOR=notify-in-chat`).
 - Unit tests check that custom metadata is absent from native hover properties, native chat help still works, and provisional thinking details survive finalization. These keyboard journeys do not prove physical PGTK hover.
