@@ -2008,6 +2008,33 @@ buffer end so the next streamed turn still follows automatically."
     (should (pilish-gui-test-at-end-p))
     (should (pilish-gui-test-chat-contains "Scroll line 24 for second turn"))))
 
+(ert-deftest pilish-gui-test-selected-chat-follows-tool-duration ()
+  "A selected chat follows output when a tool duration footer appears."
+  (let ((pilish-jump-to-answer nil))
+    (pilish-gui-test-with-fresh-session
+      (:backend fake :fake-scenario "tool-duration")
+      (pilish-gui-test-send "Watch from the chat" t)
+      (let ((window (pilish-gui-test-chat-window)))
+        (select-window window)
+        (goto-char (point-max))
+        (recenter -1)
+        (should
+         (pilish-test-wait-until
+          (lambda ()
+            (with-current-buffer (window-buffer window)
+              pilish--running-tool-blocks))
+          pilish-test-gui-timeout pilish-test-poll-interval
+          (plist-get pilish-gui-test--session :process)))
+        (redisplay)
+        (should (pilish-gui-test-window-point-at-end-p))
+        (should (pilish-gui-test-at-end-p))
+        (should (pilish-gui-test-wait-for-idle))
+        (should (pilish-gui-test-wait-for-chat-settled))
+        (redisplay)
+        (should (pilish-gui-test-window-point-at-end-p))
+        (should (pilish-gui-test-at-end-p))
+        (should (pilish-gui-test-chat-contains "Duration fixture complete."))))))
+
 (defun pilish-gui-test--last-answer-start ()
   "Return the start of the newest fake answer's first line in the chat."
   (with-current-buffer (plist-get pilish-gui-test--session :chat-buffer)
