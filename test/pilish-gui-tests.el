@@ -398,6 +398,78 @@
                     :commands (reverse pilish-gui-test--large-trace))))))
       (delete-file file))))
 
+(ert-deftest pilish-gui-test-input-isearch-does-not-recall-history ()
+  "C-r searches the draft without replacing it with a history entry."
+  (let ((pilish-gui-test--large-trace nil))
+    (pilish-gui-test-with-fresh-session
+     (:backend fake :fake-scenario "prompt-lifecycle")
+     (let ((input (plist-get pilish-gui-test--session :input-buffer))
+           (draft "Keep this draft: the needle remains here."))
+       (select-window (get-buffer-window input))
+       (pilish--history-add "Recalled prompt from history")
+       (insert draft)
+       (goto-char (point-max))
+       (push '(local-search "C-r needle RET") pilish-gui-test--large-trace)
+       (execute-kbd-macro (vconcat (kbd "C-r") "needle" (kbd "RET")))
+       (should (equal (buffer-string) draft))
+       (should (looking-at-p "needle"))
+       (pilish-gui-test--large-evidence
+        "input-isearch-in-draft"
+        (list :input (buffer-string) :point (point)
+              :history-active pilish--history-isearch-active
+              :commands (reverse pilish-gui-test--large-trace)))
+       (goto-char (point-max))
+       (push '(history-only-query "C-r Recalled RET")
+             pilish-gui-test--large-trace)
+       ;; Native failing isearch rings the bell, which `execute-kbd-macro'
+       ;; reports as a user error.  Accept the failed search afterwards.
+       (condition-case nil
+           (execute-kbd-macro (vconcat (kbd "C-r") "Recalled" (kbd "RET")))
+         (user-error nil))
+       (when isearch-mode
+         (execute-kbd-macro (kbd "RET")))
+       (pilish-gui-test--large-evidence
+        "input-isearch-history-only-query"
+        (list :input (buffer-string) :expected-draft draft
+              :history-active pilish--history-isearch-active
+              :commands (reverse pilish-gui-test--large-trace)))
+       (should (equal (buffer-string) draft))
+       (should-not pilish--history-isearch-active)))))
+
+(ert-deftest pilish-gui-test-history-isearch-restores-draft-with-next-input ()
+  "Explicit history recall keeps the unsent draft recoverable with M-n."
+  (let ((pilish-gui-test--large-trace nil))
+    (pilish-gui-test-with-fresh-session
+     (:backend fake :fake-scenario "prompt-lifecycle")
+     (let ((input (plist-get pilish-gui-test--session :input-buffer))
+           (draft "An unsent draft that must survive history recall."))
+       (select-window (get-buffer-window input))
+       (pilish--history-add "Recalled prompt from history")
+       (insert draft)
+       (goto-char (point-max))
+       (push '(history-search
+               "M-x pilish-history-isearch-backward RET Recalled RET")
+             pilish-gui-test--large-trace)
+       (execute-kbd-macro
+        (vconcat (kbd "M-x pilish-history-isearch-backward RET")
+                 "Recalled" (kbd "RET")))
+       (should (equal (buffer-string) "Recalled prompt from history"))
+       (should (= pilish--input-ring-index 0))
+       (should (equal pilish--input-saved draft))
+       (pilish-gui-test--large-evidence
+        "history-isearch-recalled"
+        (list :input (buffer-string) :saved-draft pilish--input-saved
+              :ring-index pilish--input-ring-index
+              :commands (reverse pilish-gui-test--large-trace)))
+       (push '(restore-draft "M-n") pilish-gui-test--large-trace)
+       (execute-kbd-macro (kbd "M-n"))
+       (should (equal (buffer-string) draft))
+       (should-not pilish--input-ring-index)
+       (pilish-gui-test--large-evidence
+        "history-isearch-draft-restored"
+        (list :input (buffer-string) :ring-index pilish--input-ring-index
+              :commands (reverse pilish-gui-test--large-trace)))))))
+
 (ert-deftest pilish-gui-test-session-switch-ignores-delayed-state ()
   "Native New Session survives delayed startup and thinking-state responses."
   (let ((dispatch (symbol-function 'pilish--dispatch-response))

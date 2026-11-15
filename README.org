@@ -188,9 +188,16 @@ character to search project files and insert a file reference.  Project
 file completion respects =.gitignore= in a Git repository.  An =@= in
 text such as an email address does not trigger completion.
 
-Use =M-p= and =M-n= to move through prompt history, or =C-r= to search
-it incrementally.  When Pilish loads or resumes a session, the saved
-user prompts join these history commands automatically.
+Use =M-p= and =M-n= to move through prompt history.  Run
+=M-x pilish-history-isearch-backward= to search it incrementally.  After
+accepting a recalled prompt, =M-n= moves through newer entries and then
+restores your unfinished draft; =C-g= during the search instead restores
+the text present when the search started.
+
+=C-r= and =C-s= keep their ordinary Emacs meaning: incremental search
+within the current draft, never prompt-history recall.  When Pilish loads
+or resumes a session, the saved user prompts join the history commands
+automatically.
 
 ** Send, steer, queue, and abort
 
@@ -865,7 +872,8 @@ The main buffers:
 | =C-c C-p a i=             | menu         | Attach or replace one prompt image          |
 | =C-u C-c C-p a i=         | menu         | Clear the attached prompt image             |
 | =M-p= / =M-n=             | input        | Prompt history (=C-↑= / =C-↓= also work)    |
-| =C-r=                     | input        | Incremental prompt-history search           |
+| =C-r= / =C-s=             | input        | Search within the current draft             |
+| =M-x pilish-history-isearch-backward= | input | Search prompt history; =M-n= restores draft |
 | =TAB=                     | input        | Complete paths and =/= commands             |
 | =M-<prior>= / =M-<next>=  | input        | Scroll the linked chat window               |
 | =TAB=                     | chat         | Toggle summary line, thinking, tool, or turn |
