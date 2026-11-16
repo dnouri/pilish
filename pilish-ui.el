@@ -1981,7 +1981,7 @@ Follow-ups are processed in FIFO order: first pushed, first sent."
   (reverse pilish--followup-queue))
 
 (defun pilish--queued-prompt-groups (&optional chat-buf)
-  "Return CHAT-BUF's known queued prompts as (FOLLOW-UPS STEERING).
+  "Return the queued prompt groups of CHAT-BUF as (FOLLOW-UPS STEERING).
 When CHAT-BUF is nil, inspect the current buffer.  FOLLOW-UPS are Pi's
 reported follow-ups, then local follow-ups in FIFO order; STEERING is
 Pi's reported steering.  An unavailable backend snapshot contributes no

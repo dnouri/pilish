@@ -344,7 +344,7 @@ still mock the RPC boundary, so the process is never used for I/O."
   (let ((root (pilish-test--make-temp-directory "pilish-accessor-exists-"))
         chat input)
     (unwind-protect
-        (cl-letf (((symbol-function 'pilish--start-process) (lambda (_) nil))
+        (cl-letf (((symbol-function 'pilish--start-process) (lambda (&rest _) nil))
                   ((symbol-function 'pilish--check-dependencies) #'ignore))
           (setq chat (pilish--setup-session root "feature")
                 input (pilish-session-input-buffer chat))
