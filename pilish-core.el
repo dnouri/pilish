@@ -274,6 +274,31 @@ This is a pure string helper; do not use it around real file I/O."
         (abbreviate-file-name path))
     (abbreviate-file-name path)))
 
+(defun pilish--canonical-session-path (path &optional memo anchor)
+  "Return PATH's canonical spelling for session identity.
+Remote spellings keep their full TRAMP route as the identity — never
+resolved, so no remote filesystem is contacted and distinct routes
+stay distinct identities.  Local spellings resolve symlinks along
+the whole path through `file-truename', so alias spellings of one
+file — a symlinked sessions directory or a symlinked session file
+itself — denote one family.  A spelling `file-truename' cannot
+resolve, such as a symlink cycle, keeps its lexical form instead of
+signaling — like pi's realpath fallback.  MEMO, when non-nil, is a
+hash table caching canonical spellings across calls; ANCHOR, when
+non-nil, anchors relative spellings as
+`pilish--route-preserving-expand-file-name' does."
+  (when (stringp path)
+    (let ((expanded (pilish--route-preserving-expand-file-name path anchor)))
+      (if (pilish--remote-prefix-for-path expanded)
+          expanded
+        (let ((memo (or memo (make-hash-table :test 'equal))))
+          (or (gethash expanded memo)
+              (puthash expanded
+                       (condition-case nil
+                           (file-truename expanded)
+                         (error expanded))
+                       memo)))))))
+
 (defun pilish--ensure-compatible-remote-path (path &optional anchor)
   "Signal `user-error' when remote PATH is incompatible with ANCHOR.
 ANCHOR defaults to `default-directory'.  Remote PATH must use the same TRAMP
