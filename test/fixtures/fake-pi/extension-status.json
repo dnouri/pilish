@@ -1,0 +1,21 @@
+{
+  "description": "Extension-like slash command that sets two statuses and emits one visible custom message.",
+  "commands": [
+    {
+      "name": "test-status",
+      "description": "Trigger fake extension statuses",
+      "source": "extension",
+      "sourceInfo": { "scope": "project", "path": "test-extension.ts" }
+    }
+  ],
+  "prompt": {
+    "type": "custom_message",
+    "command_name": "/test-status",
+    "statuses": [
+      { "key": "git", "text": "synced" },
+      { "key": "plan", "text": "\u001b[38;5;226m\u23f8 plan\u001b[39m" },
+      { "key": "stale" }
+    ],
+    "message_text": "Statuses set"
+  }
+}
