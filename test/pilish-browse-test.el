@@ -6924,6 +6924,109 @@ gone for the session browser (the tree browser keeps it until Phase 3)."
 
 ;;;; Phase 2: Switch
 
+(ert-deftest pilish-test-switch-live-session-displays-owner ()
+  "A live target is activated without guarding or resuming the source.
+An unlinked, stopped, or same-owner source does not block activation."
+  (let* ((chat (generate-new-buffer " *test-switch-live-chat*"))
+         (input (generate-new-buffer " *test-switch-live-input*"))
+         (source (generate-new-buffer " *test-switch-live-source*"))
+         (proc (start-process "pi-switch-live-test" nil "sleep" "30"))
+         (path "/tmp/pilish-test-switch-live-session.jsonl")
+         (pilish-input-window-display 'always))
+    (set-process-query-on-exit-flag proc nil)
+    (process-put proc 'pilish-chat-buffer chat)
+    (unwind-protect
+        (save-window-excursion
+          (with-current-buffer chat
+            (setq pilish--process proc
+                  pilish--input-buffer input
+                  pilish--state (list :session-file path :isStreaming t)
+                  pilish--session-transition-active t))
+          (with-current-buffer source
+            (setq pilish--session-transition-active t))
+          (dolist (linked (list nil source chat))
+            (delete-other-windows)
+            (pilish-test--with-browse-link linked
+              (switch-to-buffer (current-buffer))
+              (cl-letf (((symbol-function 'pilish--browse-transition-refused-p)
+                         (lambda (&rest _) (ert-fail "Live activation guarded")))
+                        ((symbol-function 'pilish--resume-selected-session)
+                         (lambda (&rest _) (ert-fail "Live activation resumed")))
+                        ((symbol-function 'pilish--browse-quit-when-settled)
+                         (lambda (&rest _) (ert-fail "Live activation polled")))
+                        ((symbol-function 'quit-window)
+                         (lambda (&rest _) (ert-fail "Target window dismissed"))))
+                (pilish--browse-switch-session path))
+              (should (get-buffer-window chat))
+              (should (eq (window-buffer (selected-window)) input))
+              (should (= 2 (length (window-list nil 'no-mini))))))
+          (select-window (get-buffer-window chat))
+          (pilish-test--with-browse-link source
+            (pop-to-buffer (current-buffer))
+            (pilish--browse-switch-session path)
+            (should (eq (window-buffer (selected-window)) input)))
+          (should (= 2 (length (window-list nil 'no-mini)))))
+      (delete-process proc)
+      (kill-buffer chat)
+      (kill-buffer input)
+      (kill-buffer source))))
+
+(ert-deftest pilish-test-switch-live-session-quits-only-browser-window ()
+  "Activation dismisses the captured browser, never a repurposed window."
+  (let ((chat (generate-new-buffer " *test-switch-live-owner*"))
+        (input (generate-new-buffer " *test-switch-live-draft*")))
+    (unwind-protect
+        (save-window-excursion
+          (with-current-buffer chat
+            (setq pilish--input-buffer input))
+          (dolist (mode '(pilish-session-browser-mode pilish-tree-browser-mode
+                         fundamental-mode dead))
+            (delete-other-windows)
+            (with-temp-buffer
+              (pilish-session-browser-mode)
+              (switch-to-buffer (current-buffer))
+              (let ((browser-window (selected-window))
+                    (target-window (split-window-right))
+                    (quit-calls nil))
+                (set-window-buffer target-window chat)
+                (cl-letf (((symbol-function 'pilish--browse-live-session-chat-buffer)
+                           (lambda (_) chat))
+                          ((symbol-function 'pilish--show-session-buffers)
+                           (lambda (owner draft)
+                             (should (eq owner chat))
+                             (should (eq draft input))
+                             (if (eq mode 'dead)
+                                 (delete-window browser-window)
+                               (funcall mode))
+                             (select-window target-window)))
+                          ((symbol-function 'quit-window)
+                           (lambda (&rest args) (push args quit-calls))))
+                  (pilish--browse-switch-session "/tmp/live-session.jsonl"))
+                (should (equal quit-calls
+                               (when (memq mode '(pilish-session-browser-mode
+                                                  pilish-tree-browser-mode))
+                                 (list (list nil browser-window)))))
+                (should (eq (selected-window) target-window))
+                (should (eq (window-buffer target-window) chat))))))
+      (kill-buffer chat)
+      (kill-buffer input))))
+
+(ert-deftest pilish-test-switch-live-session-display-error-does-not-resume ()
+  "A failed live display surfaces its error without a cold resume."
+  (with-temp-buffer
+    (let ((owner (current-buffer)))
+      (cl-letf (((symbol-function 'pilish--browse-live-session-chat-buffer)
+                 (lambda (_) owner))
+                ((symbol-function 'pilish--show-session-buffers)
+                 (lambda (&rest _) (error "Display failed")))
+                ((symbol-function 'pilish--resume-selected-session)
+                 (lambda (&rest _) (ert-fail "Display error resumed"))))
+        (should (equal (error-message-string
+                        (should-error
+                         (pilish--browse-switch-session "/tmp/live.jsonl")
+                         :type 'error))
+                       "Display failed"))))))
+
 (ert-deftest pilish-test-switch-calls-resume ()
   "--browse-switch-session guards, then delegates to the resume flow.
 The busy guard runs first with (CHAT-BUF \"switch\"); the delegation

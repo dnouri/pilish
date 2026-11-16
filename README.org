@@ -188,9 +188,17 @@ character to search project files and insert a file reference.  Project
 file completion respects =.gitignore= in a Git repository.  An =@= in
 text such as an email address does not trigger completion.
 
-Use =M-p= and =M-n= to move through prompt history, or =C-r= to search
-it incrementally.  When Pilish loads or resumes a session, the saved
-user prompts join these history commands automatically.
+Use =M-p= and =M-n= to move through prompt history.  Press =M-r= to
+search prompt history incrementally.  The command is also available as
+=M-x pilish-history-isearch-backward=.  After accepting a recalled prompt,
+=M-n= moves through newer entries and then restores your unfinished draft;
+=C-g= during the search instead restores the text present when the search
+started.
+
+=C-r= and =C-s= keep their ordinary Emacs meaning: incremental search
+within the current draft, never prompt-history recall.  When Pilish loads
+or resumes a session, the saved user prompts join the history commands
+automatically.
 
 ** Send, steer, queue, and abort
 
@@ -345,6 +353,11 @@ Open the session browser with =C-c C-r=, =/resume=, or
 browsing, searching, renaming, and deleting work without a live Pi
 process.  Press =RET= to switch sessions, =r= to rename, =g= to
 refresh, =?= for the menu, and =q= to hide the browser.
+
+If the selected session is already live in this Emacs, =RET= displays
+its existing chat and input without resuming it again.  Otherwise,
+Pilish resumes the selected file through the chat that opened the
+browser.
 
 By default, the browser shows this project's sessions in Threaded
 (fork families) view.  Press =t= to toggle All projects.  Press =s=
@@ -860,7 +873,8 @@ The main buffers:
 | =C-c C-p a i=             | menu         | Attach or replace one prompt image          |
 | =C-u C-c C-p a i=         | menu         | Clear the attached prompt image             |
 | =M-p= / =M-n=             | input        | Prompt history (=C-↑= / =C-↓= also work)    |
-| =C-r=                     | input        | Incremental prompt-history search           |
+| =C-r= / =C-s=             | input        | Search within the current draft             |
+| =M-r=                     | input        | Search prompt history; =M-n= restores draft |
 | =TAB=                     | input        | Complete paths and =/= commands             |
 | =M-<prior>= / =M-<next>=  | input        | Scroll the linked chat window               |
 | =TAB=                     | chat         | Toggle summary line, thinking, tool, or turn |
@@ -1565,6 +1579,94 @@ session identity themselves.  Errors are reported as warnings without
 skipping the remaining observers (unless =debug-on-error= is enabled).
 With no observers, display behavior is unchanged.
 
+** Session inspection API
+
+Integrations can inspect session buffers without starting Pi or changing
+windows.  =pilish-session-chat-buffer= resolves a chat or linked input
+buffer; =pilish-session-input-buffer= and =pilish-session-process= return
+its existing input and process.  Each accepts a buffer or buffer name,
+defaulting to the current buffer.  Missing, dead, unrelated and read-only
+snapshot buffers return nil.  A stopped chat is still a session; its
+process may have exited, so check =process-live-p= before using it.
+
+The same buffer argument works with =pilish-session-directory=, =-name=
+(the Emacs session suffix), =-title= (Pi's conversation title), =-file=
+(Pi's session file, not a saved Markdown transcript), =-model=,
+=-context-usage=, =-queued-prompts=, =-running-tools=,
+=-extension-status= and =-busy-p=.  These report the latest observed state
+without RPC or disk reads.  Data results are independent copies, including
+nested strings, lists, vectors and hash tables of any length or depth;
+shared and circular structure is copied as such.  Metadata and queue strings
+omit text properties; extension-status strings retain them and copy their
+nested data values.  Buffer and process accessors return the actual handles,
+not copies.  Queue order matches the header:
+backend follow-ups, local follow-ups in FIFO order, then steering.  An
+unreported backend queue is unknown, not necessarily empty.
+
+=-running-tools= lists unfinished root tool call IDs from the live registry
+in unspecified order: announced or executing calls with an observed ID.
+Argument-streaming previews without authoritative IDs are not listed;
+completed, cooled and saved-history blocks do not count.  =-busy-p= uses an
+observed-work policy: pending prompts, session/model changes, compaction,
+non-idle activity, known queues or unfinished tools count.  It is broader
+than the internal send-readiness predicate and is not a fresh backend query.
+Unknown work is not proof of idleness.  It copies nothing, so a mode line
+or tab bar can call it on every refresh.
+
+=pilish-session-exists-p= takes a directory and optional session name
+(nil for the default session) and checks for the session's chat buffer,
+even when Pi is stopped; every existing session can be inspected with the
+accessors above.  It does not resolve directory symlinks, and it is
+autoloaded, so it can be called before Pilish is loaded.
+
+#+begin_src emacs-lisp
+(let ((chat (pilish-session-chat-buffer)))
+  (when chat
+    (list (pilish-session-title chat)
+          (plist-get (pilish-session-model chat) :id)
+          (pilish-session-busy-p chat))))
+#+end_src
+
+** Extension status hooks
+
+To show extension statuses somewhere else, such as a tab bar or a
+session list, read them with =pilish-session-extension-status= and
+follow changes with =pilish-extension-status-functions=.  Each function
+receives:
+
+#+begin_src emacs-lisp
+(CHAT-BUFFER KEY TEXT)
+#+end_src
+
+=KEY= is the =statusKey= and =TEXT= the new text without ANSI colors,
+or nil when the status was cleared.  Setting a status to its current
+text and properties calls nothing.  Starting a new session clears every
+status and calls the functions once per cleared key.  The functions run after the
+change, so the accessor already returns =TEXT=.
+
+The functions run synchronously while Pilish handles Pi's events, usually
+from its process filter.  Return promptly, and do not wait for Pi or
+submit prompts, start, reload or switch sessions from a function; use a
+timer for such work.  An error in one function becomes a warning and the
+others still run.  A function that kills =CHAT-BUFFER= ends the
+notification with a warning naming it.
+
+=(pilish-session-extension-status BUFFER KEY)= returns one status's
+text; without =KEY= it returns an alist of all statuses in header-line
+order.  =BUFFER= is optional and follows the session inspection API above:
+chat, linked input, either buffer's name, or the current buffer by default.
+Both return independent copies, including text properties and their nested
+data values (for example a face plist).  Each observer receives its own
+copies, so it cannot alter another observer's arguments or the session.
+
+#+begin_src emacs-lisp
+(defun my-pi-message-plan-mode (chat key text)
+  (when (equal key "plan-mode")
+    (message "%s: %s" (buffer-name chat) (or text "plan mode off"))))
+
+(add-hook 'pilish-extension-status-functions #'my-pi-message-plan-mode)
+#+end_src
+
 ** Activity phase hooks
 
 For custom UI changes tied to activity, add functions to
@@ -1698,6 +1800,113 @@ parsing the transcript:
 - Text a package inserts with the =pilish-literal-text= property keeps
   its characters and its own =font-lock-face=: Markdown fontification
   does not hide its markup or turn it into links.
+
+** Starting sessions from Lisp
+
+=pilish-start-session= starts a session without showing it or asking
+anything, for packages that manage several Pi sessions, and
+=pilish-show-session= shows it later from anywhere.  It returns the chat
+buffer without waiting for Pi's initial state response or a saved
+session's resume to finish.  Returning is not a ready-to-submit signal,
+and the function provides no readiness callback.  Synchronous setup
+checks can still block, especially on remote file access.
+
+#+begin_src emacs-lisp
+;; The directory's default session, as M-x pilish would start it.
+(pilish-start-session "~/src/project/" nil)
+
+;; A named session with its own Pi arguments and environment.
+(pilish-start-session "~/src/project/" "reviewer"
+                      :args '("--thinking" "high")
+                      :environment '(("MY_EXTENSION_ROLE" . "review")))
+
+;; Resume a saved conversation; its recorded directory is the default.
+(pilish-start-session nil "resumed" :session-file "/path/to/session.jsonl")
+#+end_src
+
+The session behaves like one started interactively; =M-x pilish= (with
+a prefix argument and the name for a named session) finds it too.  Its
+arguments follow =pilish-extra-args=; like those, arguments that select
+Pi's mode or session (=--mode=, =--session=, =--continue=, =--resume=)
+break the RPC connection, so use =:session-file= to resume.  Its
+environment applies only to its own Pi processes.  =pilish-reload= keeps
+both.  Starting a session that already exists is an error, where
+=M-x pilish= would show it.  Dependencies are checked as for =M-x
+pilish=, without questions: a missing Pi executable is an error, and so
+are missing essential grammars unless =pilish-essential-grammar-action=
+is =auto= (install them) or =warn= (start after a warning).  Optional
+grammars are not offered.
+
+To give every session, interactive or not, extra environment, add a
+function to =pilish-session-environment-functions=.  It receives the
+chat buffer and the directory each time the session starts a Pi process,
+including reloads and respawns after exit, and returns an alist of
+=(NAME . VALUE)= entries; a nil value removes the variable.  It runs
+during process startup, so return promptly.  Use =:environment= for
+values specific to one launcher call; use the hook for policy shared by
+interactive and background sessions, or for values that change, such as
+tokens.  Explicit =:environment= entries take precedence, then hook
+entries in hook order.
+
+#+begin_src emacs-lisp
+(add-hook 'pilish-session-environment-functions
+          (lambda (chat _dir)
+            (list (cons "MY_PI_SESSION" (buffer-name chat)))))
+#+end_src
+
+Pi's own startup failure is reported later in the chat.  A rejected
+resume is reported in the echo area; the returned buffer is not proof
+that the saved session was selected successfully.
+
+Remote directories use the existing TRAMP launcher and remote path
+rules.  The new arguments follow the same argv path as interactive
+starts, and environment overrides are supplied through the launcher's
+=process-environment=.  Remote environment forwarding depends on the
+TRAMP method and configuration; this API does not install remote tools
+or change TRAMP's environment policy.  TRAMP can still prompt for
+authentication.
+
+** Reloading from Lisp
+
+=pilish-reload= accepts an optional =CALLBACK= when called from Lisp.
+Pilish calls it exactly once with the outcome: =nil= after the fresh
+Pi process owns the session, its state and history have both been
+refreshed, and the history is shown in the chat.  Otherwise it passes
+=(KIND . DETAIL)=, where =DETAIL= is the message shown to the user and
+=KIND= is one of:
+
+- =failed=: the reload could not start, Pi rejected the session switch,
+  or a state or history refresh failed.
+- =exited=: the fresh Pi exited while a reload request was pending.
+- =cancelled=: Pi cancelled the session switch.
+- =superseded=: a newer session change or a killed chat took over.
+- =history-not-shown=: the fresh Pi owns the session, but its history
+  was not redrawn because local chat activity, such as a prompt
+  awaiting Pi's echo, was pending.
+- =quit=: the reload was quit.
+
+Once Pi has accepted the session switch, the fresh process has replaced
+the old one whatever the outcome.  A reload has no timeout: while the
+fresh Pi is alive but silent, the reload stays pending, and a second
+reload supersedes it.
+
+The callback may run before =pilish-reload= returns, for example when
+the chat has no session file.  With a callback, errors are passed to
+it rather than signaled.  An error inside the callback becomes a
+warning and does not change the reload.  Without a callback,
+=pilish-reload= behaves as it does interactively.
+
+#+begin_src emacs-lisp
+(defun my-pi-reload-then-say-so ()
+  "Reload the current session and report when it is ready."
+  (interactive)
+  (pilish-reload
+   (lambda (outcome)
+     (pcase outcome
+       ('nil (message "Reload finished"))
+       (`(superseded . ,_) nil)
+       (`(,kind . ,detail) (message "Reload %s: %s" kind detail))))))
+#+end_src
 
 #+html: <a id="installation-details"></a>
 * Installation details and upgrades

@@ -27,10 +27,11 @@ prompt behaviors:
     debugging.
 
 ``custom_message``
-    A slash command that optionally emits one visible custom message without a
-    full assistant turn.  It can also rename the session and change the
-    thinking level the way an extension's ``pi.setSessionName`` and
-    ``pi.setThinkingLevel`` do, with Pi's change events.
+    A slash command that optionally sets extension statuses and emits one
+    visible custom message without a full assistant turn.  It can also rename
+    the session and change the thinking level the way an extension's
+    ``pi.setSessionName`` and ``pi.setThinkingLevel`` do, with Pi's change
+    events.
 
 ``tool_stream``
     Emits the streamed tool-call and tool-execution event surface, then ends
@@ -132,6 +133,7 @@ class CustomMessagePrompt:
     message_text: str | None = None
     session_name: str | None = None
     thinking_level: str | None = None
+    statuses: tuple[tuple[str, str | None], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -305,6 +307,10 @@ def load_scenario(path: Path, name: str) -> Scenario:
             message_text=prompt_data.get("message_text"),
             session_name=prompt_data.get("session_name"),
             thinking_level=prompt_data.get("thinking_level"),
+            statuses=tuple(
+                (str(status["key"]), status.get("text"))
+                for status in prompt_data.get("statuses", [])
+            ),
         )
     elif prompt_type == "tool_stream":
         duration_ms = prompt_data.get("duration_ms")
@@ -853,7 +859,18 @@ class FakePiHarness:
         command_text: str,
         behavior: CustomMessagePrompt,
     ) -> None:
-        """Run a slash command that may emit one visible custom message."""
+        """Run a slash command that may set statuses, metadata and one custom message."""
+        for key, text in behavior.statuses:
+            # Like Pi's RPC mode, a cleared status omits `statusText'.
+            request: JsonDict = {
+                "type": "extension_ui_request",
+                "id": f"status-{uuid.uuid4().hex[:8]}",
+                "method": "setStatus",
+                "statusKey": key,
+            }
+            if text is not None:
+                request["statusText"] = text
+            self._write_json(request)
         if behavior.session_name is not None:
             # Pi's setSessionName appends the entry, then reports the name.
             self._append_session_entry(

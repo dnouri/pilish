@@ -3165,7 +3165,8 @@ This ensures history loads correctly when callback runs in arbitrary context."
     (pilish-input-mode)
     (should (eq (key-binding (kbd "M-p")) 'pilish-previous-input))
     (should (eq (key-binding (kbd "M-n")) 'pilish-next-input))
-    (should (eq (key-binding (kbd "C-r")) 'pilish-history-isearch-backward))))
+    (should (eq (key-binding (kbd "M-r")) 'pilish-history-isearch-backward))
+    (should (eq (key-binding (kbd "C-r")) 'isearch-backward))))
 
 (ert-deftest pilish-test-history-isolated-per-buffer ()
   "Input history is isolated per buffer, not shared globally.
@@ -3268,7 +3269,7 @@ Regression test for #27: history was shared across all sessions."
               (should (equal (buffer-string) "unfinished draft")))))
       (pilish-test--kill-live-buffers input))))
 
-;;; History Isearch (C-r incremental search)
+;;; Explicit History Isearch
 
 (ert-deftest pilish-test-history-isearch-empty-history-errors ()
   "pilish-history-isearch-backward errors with empty history."
@@ -3285,7 +3286,8 @@ Regression test for #27: history was shared across all sessions."
     ;; Mock isearch-backward to avoid actually starting isearch
     (cl-letf (((symbol-function 'isearch-backward) #'ignore))
       (pilish-history-isearch-backward))
-    (should (equal pilish--history-isearch-saved-input "my current input"))))
+    (should (equal pilish--history-isearch-saved-input "my current input"))
+    (should (equal pilish--input-saved "my current input"))))
 
 (ert-deftest pilish-test-history-isearch-sets-active-flag ()
   "pilish-history-isearch-backward sets the active flag."
@@ -3323,6 +3325,80 @@ Regression test for #27: history was shared across all sessions."
       (pilish--history-isearch-end))
     (should (equal (buffer-string) "chosen history item"))
     (should-not pilish--history-isearch-active)))
+
+(ert-deftest pilish-test-history-isearch-accepted-match-shares-navigation ()
+  "An accepted match leaves the draft recoverable through ordinary navigation."
+  (with-temp-buffer
+    (pilish-input-mode)
+    (pilish--history-add "chosen history item")
+    (insert "original input")
+    (setq pilish--history-isearch-active t
+          pilish--history-isearch-saved-input "original input"
+          pilish--history-isearch-index 0
+          pilish--input-saved "original input")
+    (erase-buffer)
+    (insert "chosen history item")
+    (let ((isearch-mode-end-hook-quit nil))
+      (pilish--history-isearch-end))
+    (should (equal (buffer-string) "chosen history item"))
+    (should (= pilish--input-ring-index 0))
+    (should (equal pilish--input-saved "original input"))
+    (pilish-next-input)
+    (should (equal (buffer-string) "original input"))
+    (should-not pilish--input-ring-index)))
+
+(ert-deftest pilish-test-history-isearch-suspension-defers-navigation-commit ()
+  "Suspending isearch neither clears the draft nor commits a history index."
+  (with-temp-buffer
+    (pilish-input-mode)
+    (pilish--history-add "chosen history item")
+    (insert "original input")
+    (setq pilish--history-isearch-active t
+          pilish--history-isearch-saved-input "original input"
+          pilish--history-isearch-index 0
+          pilish--input-saved "original input")
+    (let ((isearch-suspended t)
+          (isearch-mode-end-hook-quit nil))
+      (pilish--history-isearch-end))
+    (should pilish--history-isearch-active)
+    (should (= pilish--history-isearch-index 0))
+    (should-not pilish--input-ring-index)
+    (should (equal pilish--input-saved "original input"))
+    (let ((isearch-suspended nil)
+          (isearch-mode-end-hook-quit nil))
+      (pilish--history-isearch-end))
+    (should (= pilish--input-ring-index 0))
+    (pilish-next-input)
+    (should (equal (buffer-string) "original input"))))
+
+(ert-deftest pilish-test-history-isearch-quit-keeps-prior-navigation ()
+  "Quitting after starting inside history restores that navigation position."
+  (with-temp-buffer
+    (pilish-input-mode)
+    (pilish--history-add "entry history item")
+    (pilish--history-add "newer history item")
+    (insert "entry history item")
+    (setq pilish--history-isearch-active t
+          pilish--history-isearch-saved-input "entry history item"
+          pilish--history-isearch-index 0
+          pilish--input-ring-index 1
+          pilish--input-saved "original input")
+    (let ((isearch-suspended t)
+          (isearch-mode-end-hook-quit nil))
+      (pilish--history-isearch-end))
+    (should (= pilish--input-ring-index 1))
+    (erase-buffer)
+    (insert "newer history item")
+    (let ((isearch-suspended nil)
+          (isearch-mode-end-hook-quit t))
+      (pilish--history-isearch-end))
+    (should (equal (buffer-string) "entry history item"))
+    (should (= pilish--input-ring-index 1))
+    (should (equal pilish--input-saved "original input"))
+    (pilish-next-input)
+    (should (equal (buffer-string) "newer history item"))
+    (pilish-next-input)
+    (should (equal (buffer-string) "original input"))))
 
 (ert-deftest pilish-test-history-isearch-goto-index ()
   "pilish--history-isearch-goto loads history item into buffer."

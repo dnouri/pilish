@@ -1318,13 +1318,14 @@ Display is handled by the display handler, not by state updates."
 
 ;;;; Executable Customization Tests
 
-(defun pilish-test--capture-process-launch (executable extra-args &optional trust-policy directory)
+(defun pilish-test--capture-process-launch (executable extra-args &optional trust-policy directory environment)
   "Return the launch plist that `--start-process' passes to make-process.
 Mocks `make-process' to capture all arguments, binding
 `pilish-executable' to EXECUTABLE,
 `pilish-extra-args' to EXTRA-ARGS,
 `pilish-project-trust-policy' to TRUST-POLICY or `approve',
-and starting in DIRECTORY or `/tmp/'."
+and starting in DIRECTORY or `/tmp/'.  ENVIRONMENT supplies per-process
+environment overrides."
   (let ((pilish-executable executable)
         (pilish-extra-args extra-args)
         (pilish-project-trust-policy (or trust-policy 'approve))
@@ -1339,7 +1340,8 @@ and starting in DIRECTORY or `/tmp/'."
                                      (list :captured-default-directory
                                            default-directory)))
                        dummy-proc)))
-            (ignore-errors (pilish--start-process (or directory "/tmp/"))))
+            (ignore-errors (pilish--start-process (or directory "/tmp/")
+                                                  nil environment)))
           captured)
       (when-let* ((stderr-buf (plist-get captured :stderr)))
         (when (buffer-live-p stderr-buf)
@@ -1374,6 +1376,75 @@ and starting in DIRECTORY or `/tmp/'."
                             :command)
                  '("pi" "--mode" "rpc" "--no-approve"))))
 
+(ert-deftest pilish-test-start-process-appends-per-process-args ()
+  "Per-process arguments follow every global argument."
+  (let ((pilish-executable '("pi"))
+        (pilish-extra-args '("-e" "/ext.ts"))
+        (pilish-project-trust-policy 'approve)
+        (captured nil)
+        (dummy-proc (start-process "pilish-capture-args" nil "cat")))
+    (unwind-protect
+        (cl-letf (((symbol-function 'make-process)
+                   (lambda (&rest args) (setq captured args) dummy-proc)))
+          (pilish--start-process "/tmp/" '("--model" "m"))
+          (should (equal (plist-get captured :command)
+                         '("pi" "--mode" "rpc" "-e" "/ext.ts" "--approve"
+                           "--model" "m"))))
+      (when-let* ((stderr-buf (plist-get captured :stderr)))
+        (kill-buffer stderr-buf))
+      (delete-process dummy-proc))))
+
+(ert-deftest pilish-test-start-process-environment-reaches-only-that-process ()
+  "Per-process environment overrides reach Pi and leave Emacs unchanged.
+An earlier entry wins over a later one, and a nil value unsets.  `TZ'
+reaches Pi without changing this Emacs's time zone, which `setenv' would."
+  (let* ((dir (pilish-test--make-temp-directory "pilish-test-env-"))
+         (out (expand-file-name "env.out" dir))
+         (global-environment (copy-sequence process-environment))
+         (process-environment (cons "PILISH_TEST_UNSET=global"
+                                    process-environment))
+         (pilish-executable
+          (list "sh" "-c"
+                (format (concat "printf '%%s|%%s|%%s|%%s\\n' \"$PILISH_TEST_A\" "
+                                "\"${PILISH_TEST_UNSET-unset}\" \"$TZ\" \"$*\" > %s")
+                        (shell-quote-argument out))
+                "pi"))
+         (pilish-extra-args nil)
+         (pilish-project-trust-policy 'default)
+         (zone (current-time-zone))
+         (proc nil))
+    (unwind-protect
+        (progn
+          (setq proc (pilish--start-process
+                      dir '("--extra")
+                      '(("PILISH_TEST_A" . "first")
+                        ("PILISH_TEST_A" . "second")
+                        ("PILISH_TEST_UNSET")
+                        ("TZ" . "UTC-14"))))
+          (should (pilish-test-wait-for-process-exit proc))
+          (should (equal (with-temp-buffer
+                           (insert-file-contents out)
+                           (buffer-string))
+                         "first|unset|UTC-14|--mode rpc --extra\n"))
+          (should (equal (current-time-zone) zone))
+          (should-not (getenv "PILISH_TEST_A"))
+          (should (equal (getenv "PILISH_TEST_UNSET") "global"))
+          (should (equal (cdr process-environment) global-environment)))
+      (when (processp proc)
+        (pilish--cleanup-process-stderr-buffer proc)
+        (delete-process proc))
+      (delete-directory dir t))))
+
+(ert-deftest pilish-test-process-environment-keeps-one-entry-per-name ()
+  "Overrides replace existing entries and keep only the first per name.
+TRAMP hands every entry that differs from the global environment to
+`env', where a later duplicate would win."
+  (let ((process-environment '("A=old" "B=keep" "C=old")))
+    (should (equal (pilish--process-environment
+                    '(("A" . "new") ("A" . "later") ("C")))
+                   '("A=new" "C" "B=keep")))
+    (should (equal process-environment '("A=old" "B=keep" "C=old")))))
+
 (ert-deftest pilish-test-start-process-captures-stderr-separately ()
   "start-process routes stderr away from the JSON-RPC stdout pipe."
   (let ((launch (pilish-test--capture-process-launch '("pi") nil)))
@@ -1388,14 +1459,18 @@ and starting in DIRECTORY or `/tmp/'."
                    "/ssh:test:/home/me/proj/"))))
 
 (ert-deftest pilish-test-start-process-remote-wraps-command-with-ready-marker ()
-  "Remote start command emits a ready marker and preserves original argv."
+  "Remote start emits its marker, preserves argv, and explicitly unsets names."
   (let* ((launch (pilish-test--capture-process-launch
                   '("npx" "pi") '("-e" "/path/to/ext.ts")
-                  'approve "/ssh:test:/home/me/proj/"))
+                  'approve "/ssh:test:/home/me/proj/"
+                  '(("PILISH_DROP") ("PILISH_KEEP" . "yes")
+                    ("PILISH_DROP" . "later"))))
          (command (plist-get launch :command))
          (script (nth 2 command)))
     (should (equal (nth 0 command) "sh"))
     (should (equal (nth 1 command) "-c"))
+    (should (string-match-p "\\`unset PILISH_DROP; printf" script))
+    (should-not (string-match-p "unset.*PILISH_KEEP" script))
     (should (string-match-p (regexp-quote pilish--remote-ready-marker)
                             script))
     (should (string-match-p (regexp-quote "exec \"$0\" \"$@\"") script))

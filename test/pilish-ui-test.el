@@ -84,6 +84,61 @@ This ensures all files get code fences for consistent display."
       (when (buffer-live-p buf1)
         (kill-buffer buf1)))))
 
+(ert-deftest pilish-test-session-buffer-list-directory-on-creation ()
+  "Chat and input buffers expose local or remote directories to buffer lists."
+  (let ((original-default (default-value 'list-buffers-directory)))
+    (dolist (dir '("/tmp/pilish-test-buffer-list/"
+                   "/ssh:bastion|sudo:root@pi-host:/srv/project/"))
+      (dolist (session '(nil "feature"))
+        (dolist (type '(:chat :input))
+          (let ((buf (pilish--get-or-create-buffer type dir session)))
+            (unwind-protect
+                (with-current-buffer buf
+                  (should (local-variable-p 'list-buffers-directory))
+                  (should (equal list-buffers-directory dir))
+                  (should (equal default-directory dir))
+                  (should-not buffer-file-name))
+              (pilish-test--kill-live-buffers buf))))))
+    (should (equal (default-value 'list-buffers-directory) original-default))))
+
+(ert-deftest pilish-test-session-buffer-list-directory-on-reuse ()
+  "Session setup refreshes directory metadata in existing chat/input buffers."
+  (let ((dir (pilish-test--make-temp-directory "pilish-test-buffer-list-")))
+    (unwind-protect
+        (pilish-test-with-mock-session dir
+          (let* ((chat (pilish--find-session dir))
+                 (input (buffer-local-value 'pilish--input-buffer chat)))
+            (dolist (buf (list chat input))
+              (with-current-buffer buf
+                (setq-local list-buffers-directory "/tmp/stale/")))
+            (should (eq (pilish--setup-session dir) chat))
+            (should (eq (buffer-local-value 'pilish--input-buffer chat) input))
+            (dolist (buf (list chat input))
+              (with-current-buffer buf
+                (should (local-variable-p 'list-buffers-directory))
+                (should (equal list-buffers-directory dir))))))
+      (delete-directory dir t))))
+
+(ert-deftest pilish-test-session-buffer-list-directory-on-retarget ()
+  "Retargeting a session updates both buffers' directory metadata."
+  (let* ((dir (pilish-test--make-temp-directory "pilish-test-buffer-list-"))
+         (target (expand-file-name "other/" dir)))
+    (unwind-protect
+        (pilish-test-with-mock-session dir
+          (let* ((chat (pilish--find-session dir))
+                 (input (buffer-local-value 'pilish--input-buffer chat)))
+            (unwind-protect
+                (progn
+                  (with-current-buffer input
+                    (pilish--retarget-session-buffers target))
+                  (dolist (buf (list chat input))
+                    (with-current-buffer buf
+                      (should (local-variable-p 'list-buffers-directory))
+                      (should (equal list-buffers-directory target))
+                      (should (equal default-directory target)))))
+              (pilish-test--kill-live-buffers input chat))))
+      (delete-directory dir t))))
+
 ;;; Major Modes
 
 (ert-deftest pilish-test-chat-mode-is-read-only ()
@@ -309,7 +364,7 @@ This ensures all files get code fences for consistent display."
         (make-backup-files nil))
     (unwind-protect
         (cl-letf (((symbol-function 'project-current) (lambda (&rest _) nil))
-                  ((symbol-function 'pilish--start-process) (lambda (_) nil)))
+                  ((symbol-function 'pilish--start-process) (lambda (&rest _) nil)))
           (setq chat (pilish--setup-session root nil)
                 input (buffer-local-value 'pilish--input-buffer chat))
           (setq file (pilish-test--write-chat-buffer
@@ -578,7 +633,7 @@ Closes the category from issue #234: any instance without a usable
   (let ((default-directory "/tmp/pilish-test-proc1/")
         (fake-proc 'mock-process))
     (cl-letf (((symbol-function 'project-current) (lambda (&rest _) nil))
-              ((symbol-function 'pilish--start-process) (lambda (_) fake-proc))
+              ((symbol-function 'pilish--start-process) (lambda (&rest _) fake-proc))
               ((symbol-function 'pilish--display-buffers) #'ignore))
       (unwind-protect
           (progn
@@ -593,7 +648,7 @@ Closes the category from issue #234: any instance without a usable
   (let ((default-directory "/tmp/pilish-test-proc2/")
         (fake-proc 'mock-process))
     (cl-letf (((symbol-function 'project-current) (lambda (&rest _) nil))
-              ((symbol-function 'pilish--start-process) (lambda (_) fake-proc))
+              ((symbol-function 'pilish--start-process) (lambda (&rest _) fake-proc))
               ((symbol-function 'pilish--display-buffers) #'ignore))
       (unwind-protect
           (progn
@@ -609,7 +664,7 @@ Closes the category from issue #234: any instance without a usable
         (all-frames-args nil))
     (make-directory root t)
     (cl-letf (((symbol-function 'project-current) (lambda (&rest _) nil))
-              ((symbol-function 'pilish--start-process) (lambda (_) nil)))
+              ((symbol-function 'pilish--start-process) (lambda (&rest _) nil)))
       (unwind-protect
           (let* ((chat (pilish--setup-session root nil))
                  (input (buffer-local-value 'pilish--input-buffer chat))
@@ -656,7 +711,7 @@ Closes the category from issue #234: any instance without a usable
   (let ((root "/tmp/pilish-test-dedicated/"))
     (make-directory root t)
     (cl-letf (((symbol-function 'project-current) (lambda (&rest _) nil))
-              ((symbol-function 'pilish--start-process) (lambda (_) nil)))
+              ((symbol-function 'pilish--start-process) (lambda (&rest _) nil)))
       (unwind-protect
           (let* ((chat (pilish--setup-session root nil))
                  (input (buffer-local-value 'pilish--input-buffer chat)))
@@ -672,7 +727,7 @@ Closes the category from issue #234: any instance without a usable
   (let ((root "/tmp/pilish-test-display-chat-only/"))
     (make-directory root t)
     (cl-letf (((symbol-function 'project-current) (lambda (&rest _) nil))
-              ((symbol-function 'pilish--start-process) (lambda (_) nil)))
+              ((symbol-function 'pilish--start-process) (lambda (&rest _) nil)))
       (unwind-protect
           (let* ((chat (pilish--setup-session root nil))
                  (input (buffer-local-value 'pilish--input-buffer chat)))
@@ -688,7 +743,7 @@ Closes the category from issue #234: any instance without a usable
   (let ((root "/tmp/pilish-test-open-input-split/"))
     (make-directory root t)
     (cl-letf (((symbol-function 'project-current) (lambda (&rest _) nil))
-              ((symbol-function 'pilish--start-process) (lambda (_) nil)))
+              ((symbol-function 'pilish--start-process) (lambda (&rest _) nil)))
       (unwind-protect
           (let* ((chat (pilish--setup-session root nil))
                  (input (buffer-local-value 'pilish--input-buffer chat)))
@@ -778,7 +833,7 @@ window; the default still splits below the chat."
   (let ((root "/tmp/pilish-test-open-input-focus/"))
     (make-directory root t)
     (cl-letf (((symbol-function 'project-current) (lambda (&rest _) nil))
-              ((symbol-function 'pilish--start-process) (lambda (_) nil)))
+              ((symbol-function 'pilish--start-process) (lambda (&rest _) nil)))
       (unwind-protect
           (let* ((chat (pilish--setup-session root nil))
                  (input (buffer-local-value 'pilish--input-buffer chat)))
@@ -798,7 +853,7 @@ The gesture works without the Evil integration, mirroring
   (let ((root "/tmp/pilish-test-chat-i-open-input/"))
     (make-directory root t)
     (cl-letf (((symbol-function 'project-current) (lambda (&rest _) nil))
-              ((symbol-function 'pilish--start-process) (lambda (_) nil)))
+              ((symbol-function 'pilish--start-process) (lambda (&rest _) nil)))
       (unwind-protect
           (let* ((chat (pilish--setup-session root nil))
                  (input (buffer-local-value 'pilish--input-buffer chat)))
@@ -828,7 +883,7 @@ The gesture works without the Evil integration, mirroring
         (pilish-input-window-display 'on-demand))
     (make-directory root t)
     (cl-letf (((symbol-function 'project-current) (lambda (&rest _) nil))
-              ((symbol-function 'pilish--start-process) (lambda (_) nil))
+              ((symbol-function 'pilish--start-process) (lambda (&rest _) nil))
               ((symbol-function 'pilish--prepare-and-send) #'ignore))
       (unwind-protect
           (let* ((chat (pilish--setup-session root nil))
@@ -849,7 +904,7 @@ The gesture works without the Evil integration, mirroring
         (pilish-input-window-display 'always))
     (make-directory root t)
     (cl-letf (((symbol-function 'project-current) (lambda (&rest _) nil))
-              ((symbol-function 'pilish--start-process) (lambda (_) nil))
+              ((symbol-function 'pilish--start-process) (lambda (&rest _) nil))
               ((symbol-function 'pilish--prepare-and-send) #'ignore))
       (unwind-protect
           (let* ((chat (pilish--setup-session root nil))
@@ -864,22 +919,27 @@ The gesture works without the Evil integration, mirroring
         (delete-other-windows)))))
 
 (ert-deftest pilish-test-show-session-buffers-hidden-launches-chat-only ()
-  "A fresh session launches chat-only when display is `hidden'.
-`pilish--show-session-buffers' honors
-`pilish-input-window-display', so a `hidden' session starts
-without an input window."
+  "A fresh session launches chat-only when display is `hidden'."
   (let ((root "/tmp/pilish-test-show-hidden/")
         (pilish-input-window-display 'hidden))
     (make-directory root t)
     (cl-letf (((symbol-function 'project-current) (lambda (&rest _) nil))
-              ((symbol-function 'pilish--start-process) (lambda (_) nil)))
+              ((symbol-function 'pilish--start-process) (lambda (&rest _) nil)))
       (unwind-protect
           (let* ((chat (pilish--setup-session root nil))
                  (input (buffer-local-value 'pilish--input-buffer chat)))
             (delete-other-windows)
             (pilish--show-session-buffers chat input)
             (should (get-buffer-window chat))
-            (should-not (get-buffer-window input)))
+            (should-not (get-buffer-window input))
+            (should (eq (selected-window) (get-buffer-window chat)))
+            (with-temp-buffer
+              (let ((other-window (split-window-right)))
+                (set-window-buffer other-window (current-buffer))
+                (select-window other-window))
+              (pilish--show-session-buffers chat input)
+              (should-not (get-buffer-window input))
+              (should (eq (selected-window) (get-buffer-window chat)))))
         (pilish-test--kill-session-buffers root)
         (delete-other-windows)))))
 
@@ -889,7 +949,7 @@ without an input window."
         (pilish-input-window-display 'hidden))
     (make-directory root t)
     (cl-letf (((symbol-function 'project-current) (lambda (&rest _) nil))
-              ((symbol-function 'pilish--start-process) (lambda (_) nil))
+              ((symbol-function 'pilish--start-process) (lambda (&rest _) nil))
               ((symbol-function 'pilish--prepare-and-send) #'ignore))
       (unwind-protect
           (let* ((chat (pilish--setup-session root nil))
@@ -910,7 +970,7 @@ without an input window."
         (all-frames-args nil))
     (make-directory root t)
     (cl-letf (((symbol-function 'project-current) (lambda (&rest _) nil))
-              ((symbol-function 'pilish--start-process) (lambda (_) nil)))
+              ((symbol-function 'pilish--start-process) (lambda (&rest _) nil)))
       (unwind-protect
           (progn
             (delete-other-windows)
@@ -1900,7 +1960,7 @@ Buffer is read-only with `inhibit-read-only' used for insertion.
         (original-default (default-value 'other-window-scroll-buffer)))
     (make-directory root t)
     (cl-letf (((symbol-function 'project-current) (lambda (&rest _) nil))
-              ((symbol-function 'pilish--start-process) (lambda (_) nil))
+              ((symbol-function 'pilish--start-process) (lambda (&rest _) nil))
               ((symbol-function 'pilish--display-buffers) #'ignore))
       (unwind-protect
           (progn
@@ -1924,7 +1984,7 @@ Buffer is read-only with `inhibit-read-only' used for insertion.
     (make-directory root-a t)
     (make-directory root-b t)
     (cl-letf (((symbol-function 'project-current) (lambda (&rest _) nil))
-              ((symbol-function 'pilish--start-process) (lambda (_) nil))
+              ((symbol-function 'pilish--start-process) (lambda (&rest _) nil))
               ((symbol-function 'pilish--display-buffers) #'ignore))
       (unwind-protect
           (progn
@@ -3615,7 +3675,7 @@ Catches wiring bugs like requiring deleted modules."
         (optional-called nil))
     (cl-letf (((symbol-function 'pilish--check-pi) (lambda (&optional _directory) t))
               ((symbol-function 'pilish--maybe-install-essential-grammars)
-               (lambda () (setq essential-called t)))
+               (lambda (&optional _background) (setq essential-called t)))
               ((symbol-function 'pilish--maybe-warn-incompatible-markdown-grammar)
                (lambda () (setq compatibility-called t)))
               ((symbol-function 'pilish--maybe-install-optional-grammars)
@@ -3963,7 +4023,8 @@ Pi's isStreaming includes post-run processing, not just the low-level loop."
       (with-current-buffer input
         (rename-buffer (pilish--buffer-name :input "/tmp/" name)))
       (cl-letf (((symbol-function 'pilish--check-dependencies) #'ignore)
-                ((symbol-function 'pilish--start-process) (lambda (_dir) proc))
+                ((symbol-function 'pilish--start-process)
+                 (lambda (_dir &optional _args _environment) proc))
                 ((symbol-function 'pilish--fetch-commands) #'ignore))
         (should (eq (pilish--setup-session "/tmp/" name) chat)))
       (let ((startup-request (car commands)))

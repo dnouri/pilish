@@ -172,6 +172,352 @@ still mock the RPC boundary, so the process is never used for I/O."
               (should (string-match-p "Linked answer" (buffer-string)))))
         (when (buffer-live-p observer) (kill-buffer observer))))))
 
+;;; Public Session Inspection
+
+(ert-deftest pilish-test-session-accessors-resolve-chat-and-input-without-display ()
+  "Both buffer types expose the same copied data without selecting a window."
+  (let* ((buffers (pilish-test--make-open-session-command-buffers))
+         (chat (car buffers)) (input (cadr buffers)) (proc (caddr buffers))
+         (window (selected-window))
+         (current (current-buffer)))
+    (unwind-protect
+        (progn
+          (with-current-buffer chat
+            (pilish--set-chat-session-identity "/tmp/project/" "feature")
+            (setq pilish--session-name "Conversation"
+                  pilish--state '(:session-file "/tmp/session.jsonl"
+                                  :model (:id "model" :provider "provider"))
+                  pilish--cached-stats '(:contextUsage (:percent 12 :tokens 42))
+                  pilish--status 'idle))
+          (dolist (buffer (list chat input (buffer-name chat) (buffer-name input)))
+            (should (eq (pilish-session-chat-buffer buffer) chat))
+            (should (eq (pilish-session-input-buffer buffer) input))
+            (should (eq (pilish-session-process buffer) proc))
+            (should (equal (pilish-session-directory buffer) "/tmp/project/"))
+            (should (equal (pilish-session-name buffer) "feature"))
+            (should (equal (pilish-session-title buffer) "Conversation"))
+            (should (equal (pilish-session-file buffer) "/tmp/session.jsonl"))
+            (should (equal (pilish-session-model buffer)
+                           '(:id "model" :provider "provider")))
+            (should (equal (pilish-session-context-usage buffer)
+                           '(:percent 12 :tokens 42)))
+            (should-not (pilish-session-queued-prompts buffer))
+            (should-not (pilish-session-busy-p buffer)))
+          (with-current-buffer input
+            (should (eq (pilish-session-chat-buffer) chat))
+            (should (eq (pilish-session-input-buffer) input))
+            (should (equal (pilish-session-title) "Conversation")))
+          (should (eq (selected-window) window))
+          (should (eq (current-buffer) current)))
+      (pilish-test--kill-live-buffers input chat))))
+
+(ert-deftest pilish-test-session-accessors-copy-nested-data-and-queue-text ()
+  "Changing returned containers or strings cannot change session state."
+  (let* ((buffers (pilish-test--make-open-session-command-buffers))
+         (chat (car buffers)) (input (cadr buffers)) (proc (caddr buffers)))
+    (unwind-protect
+        (progn
+          (with-current-buffer chat
+            (pilish--set-chat-session-identity
+             (copy-sequence "/tmp/project/") (copy-sequence "feature"))
+            (setq pilish--session-name (copy-sequence "Title")
+                  pilish--state
+                  (list :session-file (copy-sequence "/tmp/session.jsonl")
+                        :model (list :id (copy-sequence "model")
+                                     :input (vector (copy-sequence "text"))
+                                     :cost (list :input 1)))
+                  pilish--cached-stats
+                  (list :contextUsage (list :percent 12 :tokens 42))
+                  pilish--followup-queue (list (copy-sequence "new local")
+                                              (copy-sequence "old local"))))
+          (process-put proc 'pilish-queue-snapshot
+                       (list :followUp (vector (copy-sequence "backend"))
+                             :steering (vector (copy-sequence "steer"))))
+          (let ((model (pilish-session-model chat))
+                (usage (pilish-session-context-usage chat))
+                (queue (pilish-session-queued-prompts chat)))
+            (should (equal queue '("backend" "old local" "new local" "steer")))
+            (aset (plist-get model :id) 0 ?X)
+            (aset (aref (plist-get model :input) 0) 0 ?X)
+            (aset (plist-get model :input) 0 "other")
+            (setf (plist-get (plist-get model :cost) :input) 999
+                  (plist-get usage :percent) 99)
+            (dolist (text queue) (aset text 0 ?X))
+            (setcar queue "replaced")
+            (should (equal (pilish-session-model chat)
+                           '(:id "model" :input ["text"] :cost (:input 1))))
+            (should (= (plist-get (pilish-session-context-usage chat) :percent) 12))
+            (should (equal (pilish-session-queued-prompts chat)
+                           '("backend" "old local" "new local" "steer"))))
+          (dolist (accessor '(pilish-session-directory pilish-session-name
+                              pilish-session-title pilish-session-file))
+            (let ((before (funcall accessor chat)))
+              (aset (funcall accessor chat) 0 ?X)
+              (should (equal before (funcall accessor chat))))))
+      (pilish-test--kill-live-buffers input chat))))
+
+(ert-deftest pilish-test-session-accessors-return-nil-for-non-session-buffers ()
+  "Missing, dead, unrelated and snapshot buffers never resolve as live chats."
+  (let ((dead (generate-new-buffer " *pilish-accessor-dead*"))
+        (snapshot (generate-new-buffer " *pilish-accessor-snapshot*")))
+    (kill-buffer dead)
+    (unwind-protect
+        (progn
+          (with-current-buffer snapshot (pilish-snapshot-mode))
+          (with-temp-buffer
+            ;; A stale link in a non-session buffer must not be trusted.
+            (setq-local pilish--chat-buffer snapshot)
+            (dolist (buffer (list dead " *pilish-no-such-buffer*" snapshot
+                                  (current-buffer) nil))
+              (dolist (accessor '(pilish-session-chat-buffer
+                                  pilish-session-input-buffer pilish-session-process
+                                  pilish-session-directory pilish-session-name
+                                  pilish-session-title pilish-session-file
+                                  pilish-session-model pilish-session-context-usage
+                                  pilish-session-queued-prompts pilish-session-busy-p
+                                  pilish-session-running-tools
+                                  pilish-session-extension-status))
+                (should-not (funcall accessor buffer))))))
+      (kill-buffer snapshot))))
+
+(ert-deftest pilish-test-session-accessors-distinguish-stopped-and-missing-session ()
+  "Stopped chats remain inspectable; deleted input/chat links return nil."
+  (let* ((buffers (pilish-test--make-open-session-command-buffers))
+         (chat (car buffers)) (input (cadr buffers)) (proc (caddr buffers)))
+    (unwind-protect
+        (progn
+          (with-current-buffer chat
+            (pilish--set-chat-session-identity "/tmp/project/")
+            (setq pilish--status 'idle pilish--state nil))
+          (delete-process proc)
+          (should (eq (pilish-session-chat-buffer input) chat))
+          (should (eq (pilish-session-process input) proc))
+          (should-not (process-live-p (pilish-session-process input)))
+          (should-not (pilish-session-name chat))
+          (should-not (pilish-session-title chat))
+          (should-not (pilish-session-model chat))
+          (should-not (pilish-session-context-usage chat))
+          (should-not (pilish-session-busy-p chat))
+          (with-current-buffer input (setq pilish--chat-buffer nil))
+          (should-not (pilish-session-input-buffer chat))
+          (should-not (pilish-session-chat-buffer input))
+          (with-current-buffer input (setq pilish--chat-buffer chat))
+          (kill-buffer input)
+          (should-not (pilish-session-input-buffer chat))
+          (kill-buffer chat)
+          (should-not (pilish-session-chat-buffer chat)))
+      (pilish-test--kill-live-buffers input chat))))
+
+(ert-deftest pilish-test-session-accessors-busy-includes-pending-and-queued-work ()
+  "The public busy predicate includes non-streaming work and known queues."
+  (let* ((buffers (pilish-test--make-open-session-command-buffers))
+         (chat (car buffers)) (input (cadr buffers)) (proc (caddr buffers)))
+    (unwind-protect
+        (with-current-buffer chat
+          (setq pilish--status 'idle)
+          (should-not (pilish-session-busy-p input))
+          (dolist (status '(sending streaming compacting))
+            (setq pilish--status status)
+            (should (eq (pilish-session-busy-p input) t)))
+          (setq pilish--status 'idle
+                pilish--prompt-wait (pilish--make-prompt-wait :process proc))
+          (should (pilish-session-busy-p input))
+          (setq pilish--prompt-wait nil pilish--activity-phase "running")
+          (should (pilish-session-busy-p input))
+          (setq pilish--activity-phase "idle" pilish--followup-queue '("waiting"))
+          (should (pilish-session-busy-p input))
+          (setq pilish--followup-queue nil)
+          ;; An observed empty backend queue is idle, not queued work.
+          (process-put proc 'pilish-queue-snapshot '(:followUp [] :steering []))
+          (should-not (pilish-session-busy-p input))
+          (process-put proc 'pilish-queue-snapshot '(:followUp [] :steering ["steer"]))
+          (should (pilish-session-busy-p input))
+          (process-put proc 'pilish-queue-snapshot '(:followUp ["backend"] :steering []))
+          (should (pilish-session-busy-p input))
+          (delete-process proc)
+          (should-not (pilish-session-queued-prompts input))
+          (should-not (pilish-session-busy-p input)))
+      (pilish-test--kill-live-buffers input chat))))
+
+(ert-deftest pilish-test-session-accessors-exists-uses-canonical-directory-and-name ()
+  "Existence includes stopped and renamed chats but not other sessions."
+  (let ((root (pilish-test--make-temp-directory "pilish-accessor-exists-"))
+        chat input)
+    (unwind-protect
+        (cl-letf (((symbol-function 'pilish--start-process) (lambda (&rest _) nil))
+                  ((symbol-function 'pilish--check-dependencies) #'ignore))
+          (setq chat (pilish--setup-session root "feature")
+                input (pilish-session-input-buffer chat))
+          (should (eq (pilish-session-exists-p (directory-file-name root) "feature") t))
+          (should-not (pilish-session-exists-p root))
+          (should-not (pilish-session-exists-p root "another"))
+          (with-current-buffer chat
+            (rename-buffer " *pilish-renamed-transcript*")
+            (setq default-directory "/tmp/"))
+          (should (equal (pilish-session-directory input) root))
+          (should (pilish-session-exists-p root "feature"))
+          ;; An input without a live chat is not an inspectable session.
+          (with-temp-buffer
+            (rename-buffer (pilish--buffer-name :input root))
+            (pilish-input-mode)
+            (should-not (pilish-session-chat-buffer (current-buffer)))
+            (should-not (pilish-session-exists-p root))))
+      (pilish-test--kill-live-buffers input chat)
+      (delete-directory root t))))
+
+(ert-deftest pilish-test-session-accessors-status-properties-are-isolated ()
+  "Status text keeps its faces without sharing their mutable data."
+  (let* ((buffers (pilish-test--make-open-session-command-buffers))
+         (chat (car buffers)) (input (cadr buffers))
+         (color (copy-sequence "green"))
+         (face (list :foreground color))
+         (help (vector (copy-sequence "details")))
+         (extra (make-hash-table :test 'equal))
+         seen)
+    (puthash "state" (list (copy-sequence "ready")) extra)
+    (unwind-protect
+        (progn
+          (with-current-buffer chat
+            (setq-local pilish-extension-status-functions
+                        (list (lambda (_buffer key text)
+                                (aset key 0 ?X)
+                                (aset text 0 ?X)
+                                (aset (plist-get (get-text-property 0 'face text)
+                                                 :foreground) 0 ?X)
+                                (aset (aref (get-text-property 0 'help-echo text) 0) 0 ?X)
+                                (aset (car (gethash "state" (get-text-property 0 'data text))) 0 ?X)
+                                (set-buffer input))
+                              (lambda (_buffer key text)
+                                (should (eq (current-buffer) chat))
+                                (push (cons key text) seen))))
+            (pilish--set-extension-status
+             "git" (propertize "synced" 'face face 'help-echo help 'data extra)))
+          (should (equal (caar seen) "git"))
+          (should (equal (cdar seen) "synced"))
+          (should (equal (get-text-property 0 'face (cdar seen))
+                         '(:foreground "green")))
+          (dolist (buffer (list chat input (buffer-name chat) (buffer-name input)))
+            (let* ((all (pilish-session-extension-status buffer))
+                   (text (pilish-session-extension-status buffer "git")))
+              (should (equal (cdar all) text))
+              (should (equal (get-text-property 0 'face text)
+                             '(:foreground "green")))
+              (should (equal (get-text-property 0 'help-echo text) ["details"]))
+              (should (equal (gethash "state" (get-text-property 0 'data text))
+                             '("ready")))
+              (should-not (eq (get-text-property 0 'data (cdar all))
+                              (get-text-property 0 'data text)))
+              (aset (plist-get (get-text-property 0 'face text) :foreground) 0 ?X)
+              (aset (aref (get-text-property 0 'help-echo text) 0) 0 ?X)
+              (aset (car (gethash "state" (get-text-property 0 'data text))) 0 ?X)
+              (setcar all '("replaced" . "value"))))
+          (with-current-buffer input
+            (should (equal (pilish-session-extension-status) '(("git" . "synced")))))
+          (should (equal color "green"))
+          (should (equal help ["details"]))
+          (should (equal (gethash "state" extra) '("ready")))
+          ;; Property-only updates are observable, identical repeats are not.
+          (with-current-buffer chat
+            (setq-local pilish-extension-status-functions
+                        (list (lambda (_buffer key text) (push (cons key text) seen))))
+            (let ((text (propertize "synced" 'face (list :foreground "blue"))))
+              (pilish--set-extension-status "git" text)
+              (pilish--set-extension-status "git" text)))
+          (should (= (length seen) 2)))
+      (pilish-test--kill-live-buffers input chat))))
+
+(ert-deftest pilish-test-session-accessors-copy-long-deep-and-circular-data ()
+  "Copies of long, deep, shared and circular data complete and stay independent."
+  (let* ((long (make-list 100000 'x))
+         (deep (let ((value "bottom"))
+                 (dotimes (_ 100000) (setq value (list value)))
+                 value))
+         (cycle (list (copy-sequence "a") (copy-sequence "b")))
+         (shared (copy-sequence "shared"))
+         (key (list (copy-sequence "key")))
+         (table (make-hash-table :test #'equal))
+         (text (propertize "status" 'data (list long cycle (vector shared shared) table))))
+    (setcdr (cdr cycle) cycle)
+    (puthash key deep table)
+    (with-temp-buffer
+      (pilish-chat-mode)
+      (pilish--set-extension-status "k" text)
+      (let* ((copy (pilish-session-extension-status nil "k"))
+             (data (get-text-property 0 'data copy)))
+        (should (equal copy "status"))
+        ;; Long lists keep their length.
+        (should (= (length (nth 0 data)) 100000))
+        (should-not (eq (nth 0 data) long))
+        ;; Cycles stay cycles of independent strings.
+        (let ((copied-cycle (nth 1 data)))
+          (should (eq (cddr copied-cycle) copied-cycle))
+          (should (equal (car copied-cycle) "a"))
+          (aset (car copied-cycle) 0 ?X)
+          (should (equal (car cycle) "a")))
+        ;; Shared elements stay shared within the copy only.
+        (let ((vector (nth 2 data)))
+          (should (eq (aref vector 0) (aref vector 1)))
+          (should-not (eq (aref vector 0) shared)))
+        ;; Hash keys are looked up by their completed copies; depth is unbounded.
+        (let ((copied-deep (gethash '("key") (nth 3 data))))
+          (should copied-deep)
+          (should-not (eq copied-deep deep))
+          (dotimes (_ 100000) (setq copied-deep (car copied-deep)))
+          (should (equal copied-deep "bottom")))))))
+
+(ert-deftest pilish-test-session-accessors-running-tools-use-live-registry ()
+  "Live tool IDs are copied; finished and history blocks do not count."
+  (let* ((buffers (pilish-test--make-open-session-command-buffers))
+         (chat (car buffers)) (input (cadr buffers)))
+    (unwind-protect
+        (with-current-buffer chat
+          (setq pilish--status 'idle pilish--activity-phase "idle")
+          (should-not (pilish-session-running-tools input))
+          (pilish--display-tool-start "bash" '(:command "true") (copy-sequence "t1"))
+          (pilish--display-tool-start "bash" '(:command "true") (copy-sequence "t2"))
+          (dolist (buffer (list chat input (buffer-name chat) (buffer-name input) nil))
+            (let ((ids (pilish-session-running-tools buffer)))
+              (should (equal (sort ids #'string<) '("t1" "t2")))
+              (aset (car ids) 0 ?X)
+              (setcar ids "replaced")))
+          (should (pilish-session-busy-p input))
+          (let ((finished (gethash "t2" pilish--live-tool-blocks)))
+            (pilish--display-tool-end "bash" '(:command "true")
+                                      '((:type "text" :text "done")) nil nil finished)
+            (should (overlay-buffer (pilish--tool-block-overlay finished)))
+            (should (equal (pilish-session-running-tools input) '("t1"))))
+          (pilish--finalize-live-tool-blocks 'pilish-tool-block-error)
+          (should-not (pilish-session-running-tools input))
+          (should-not (pilish-session-busy-p input))
+          (pilish--display-session-history
+           [(:role "assistant" :content [(:type "toolCall" :id "old" :name "bash"
+                                          :arguments (:command "true"))])
+             (:role "toolResult" :toolCallId "old" :toolName "bash"
+                    :content [(:type "text" :text "saved")])])
+          (should-not (pilish-session-running-tools input)))
+      (pilish-test--kill-live-buffers input chat))))
+
+(ert-deftest pilish-test-session-accessors-running-tools-wait-for-call-id ()
+  "Argument previews are not counted until an authoritative ID is known."
+  (with-temp-buffer
+    (pilish-chat-mode)
+    (pilish--handle-display-event '(:type "agent_start"))
+    (pilish--handle-display-event
+     '(:type "message_start" :message (:role "assistant" :content [])))
+    (pilish-test--send-assistant-message-update
+     '(:type "toolcall_start" :contentIndex 0 :id "provisional" :toolName "bash"))
+    (pilish-test--send-assistant-message-update
+     '(:type "toolcall_delta" :contentIndex 0 :delta "{\"command\":\"true\"}"))
+    (pilish--flush-stream-deltas)
+    (should-not (pilish-session-running-tools))
+    (should (pilish-session-busy-p))
+    (pilish-test--send-assistant-message-update
+     '(:type "toolcall_end" :contentIndex 0
+       :toolCall (:type "toolCall" :id "authoritative" :name "bash"
+                        :arguments (:command "true"))))
+    (should (equal (pilish-session-running-tools) '("authoritative")))
+    (pilish--finalize-live-tool-blocks 'pilish-tool-block-error)))
+
 ;;; Main Entry Point
 
 (ert-deftest pilish-test-pilish-creates-chat-buffer ()
@@ -975,7 +1321,7 @@ still mock the RPC boundary, so the process is never used for I/O."
         (make-backup-files nil))
     (unwind-protect
         (cl-letf (((symbol-function 'project-current) (lambda (&rest _) nil))
-                  ((symbol-function 'pilish--start-process) (lambda (_) nil))
+                  ((symbol-function 'pilish--start-process) (lambda (&rest _) nil))
                   ((symbol-function 'pilish--display-buffers) #'ignore)
                   ((symbol-function 'pilish--check-dependencies) #'ignore))
           (setq chat (pilish--setup-session root nil)
@@ -1007,7 +1353,7 @@ still mock the RPC boundary, so the process is never used for I/O."
       (with-current-buffer input
         (rename-buffer (pilish--buffer-name :input "/tmp/" name)))
       (cl-letf (((symbol-function 'pilish--check-dependencies) #'ignore)
-                ((symbol-function 'pilish--start-process) (lambda (_dir) proc))
+                ((symbol-function 'pilish--start-process) (lambda (&rest _) proc))
                 ((symbol-function 'pilish--fetch-commands) #'ignore))
         (should (eq (pilish--setup-session "/tmp/" name) chat)))
       (let ((startup-request (car commands)))
@@ -1042,7 +1388,7 @@ still mock the RPC boundary, so the process is never used for I/O."
         (chat nil))
     (unwind-protect
         (cl-letf (((symbol-function 'project-current) (lambda (&rest _) nil))
-                  ((symbol-function 'pilish--start-process) (lambda (_) proc))
+                  ((symbol-function 'pilish--start-process) (lambda (&rest _) proc))
                   ((symbol-function 'pilish--fetch-commands) (lambda (&rest _) nil))
                   ((symbol-function 'pilish--rpc-async)
                    (lambda (_proc cmd callback)
@@ -1076,7 +1422,7 @@ still mock the RPC boundary, so the process is never used for I/O."
           (set-process-query-on-exit-flag new-proc nil)
           (cl-letf (((symbol-function 'project-current) (lambda (&rest _) nil))
                     ((symbol-function 'pilish--start-process)
-                     (lambda (_) old-proc))
+                     (lambda (&rest _) old-proc))
                     ((symbol-function 'pilish--fetch-commands)
                      (lambda (&rest _) nil))
                     ((symbol-function 'pilish--rpc-async)
@@ -1133,7 +1479,7 @@ still mock the RPC boundary, so the process is never used for I/O."
           (should (pilish-test-wait-for-process-exit proc))
           (cl-letf (((symbol-function 'project-current) (lambda (&rest _) nil))
                     ((symbol-function 'pilish--start-process)
-                     (lambda (_) proc))
+                     (lambda (&rest _) proc))
                     ((symbol-function 'pilish--fetch-commands)
                      (lambda (&rest _) nil))
                     ((symbol-function 'pilish--rpc-async)
@@ -1170,7 +1516,7 @@ still mock the RPC boundary, so the process is never used for I/O."
         (chat nil))
     (unwind-protect
         (cl-letf (((symbol-function 'project-current) (lambda (&rest _) nil))
-                  ((symbol-function 'pilish--start-process) (lambda (_) proc))
+                  ((symbol-function 'pilish--start-process) (lambda (&rest _) proc))
                   ((symbol-function 'pilish--fetch-commands) (lambda (&rest _) nil))
                   ((symbol-function 'pilish--rpc-async)
                    (lambda (_proc cmd callback)
@@ -1198,7 +1544,7 @@ still mock the RPC boundary, so the process is never used for I/O."
         (display-called nil))
     (make-directory root t)
     (cl-letf (((symbol-function 'project-current) (lambda (&rest _) nil))
-              ((symbol-function 'pilish--start-process) (lambda (_) nil)))
+              ((symbol-function 'pilish--start-process) (lambda (&rest _) nil)))
       (unwind-protect
           (progn
             (delete-other-windows)
@@ -1226,7 +1572,7 @@ still mock the RPC boundary, so the process is never used for I/O."
         (display-called nil))
     (make-directory root t)
     (cl-letf (((symbol-function 'project-current) (lambda (&rest _) nil))
-              ((symbol-function 'pilish--start-process) (lambda (_) nil)))
+              ((symbol-function 'pilish--start-process) (lambda (&rest _) nil)))
       (unwind-protect
           (progn
             (delete-other-windows)
@@ -1254,7 +1600,7 @@ still mock the RPC boundary, so the process is never used for I/O."
     (make-directory root t)
     (make-directory sub t)
     (cl-letf (((symbol-function 'project-current) (lambda (&rest _) nil))
-              ((symbol-function 'pilish--start-process) (lambda (_) nil)))
+              ((symbol-function 'pilish--start-process) (lambda (&rest _) nil)))
       (unwind-protect
           (progn
             (with-temp-buffer
@@ -1292,7 +1638,7 @@ must decide whether this is a no-op."
         (display-called nil))
     (make-directory root t)
     (cl-letf (((symbol-function 'project-current) (lambda (&rest _) nil))
-              ((symbol-function 'pilish--start-process) (lambda (_) nil)))
+              ((symbol-function 'pilish--start-process) (lambda (&rest _) nil)))
       (unwind-protect
           (progn
             (delete-other-windows)
@@ -1317,7 +1663,7 @@ must decide whether this is a no-op."
   (let ((root "/tmp/pilish-test-chat-restore/"))
     (make-directory root t)
     (cl-letf (((symbol-function 'project-current) (lambda (&rest _) nil))
-              ((symbol-function 'pilish--start-process) (lambda (_) nil)))
+              ((symbol-function 'pilish--start-process) (lambda (&rest _) nil)))
       (unwind-protect
           (progn
             (delete-other-windows)
@@ -1339,7 +1685,7 @@ must decide whether this is a no-op."
   (let ((root "/tmp/pilish-test-input-restore/"))
     (make-directory root t)
     (cl-letf (((symbol-function 'project-current) (lambda (&rest _) nil))
-              ((symbol-function 'pilish--start-process) (lambda (_) nil)))
+              ((symbol-function 'pilish--start-process) (lambda (&rest _) nil)))
       (unwind-protect
           (progn
             (delete-other-windows)
@@ -1368,7 +1714,7 @@ must decide whether this is a no-op."
          (default-chat (pilish-test--chat-buffer-name root))
          (default-input (pilish-test--input-buffer-name root)))
     (cl-letf (((symbol-function 'project-current) (lambda (&rest _) nil))
-              ((symbol-function 'pilish--start-process) (lambda (_) nil))
+              ((symbol-function 'pilish--start-process) (lambda (&rest _) nil))
               ((symbol-function 'pilish--display-buffers)
                (lambda (chat _input &rest _) (setq displayed chat))))
       (unwind-protect
@@ -1401,7 +1747,7 @@ must decide whether this is a no-op."
         (make-backup-files nil))
     (unwind-protect
         (cl-letf (((symbol-function 'project-current) (lambda (&rest _) nil))
-                  ((symbol-function 'pilish--start-process) (lambda (_) nil))
+                  ((symbol-function 'pilish--start-process) (lambda (&rest _) nil))
                   ((symbol-function 'pilish--display-buffers) #'ignore)
                   ((symbol-function 'pilish--check-dependencies) #'ignore))
           (setq default-chat (pilish--setup-session root nil)
@@ -1431,7 +1777,7 @@ must decide whether this is a no-op."
   "\\[universal-argument] \\[pilish] creates a named session."
   (let ((root "/tmp/pilish-test-named/"))
     (cl-letf (((symbol-function 'project-current) (lambda (&rest _) nil))
-              ((symbol-function 'pilish--start-process) (lambda (_) nil))
+              ((symbol-function 'pilish--start-process) (lambda (&rest _) nil))
               ((symbol-function 'pilish--display-buffers) #'ignore)
               ((symbol-function 'read-string) (lambda (&rest _) "my-session")))
       (let ((current-prefix-arg '(4))
@@ -1447,7 +1793,7 @@ must decide whether this is a no-op."
   (let ((root "/tmp/pilish-test-small-window/"))
     (make-directory root t)
     (cl-letf (((symbol-function 'project-current) (lambda (&rest _) nil))
-              ((symbol-function 'pilish--start-process) (lambda (_) nil)))
+              ((symbol-function 'pilish--start-process) (lambda (&rest _) nil)))
       (unwind-protect
           (progn
             (delete-other-windows)
@@ -1475,7 +1821,7 @@ must decide whether this is a no-op."
   (let ((root "/tmp/pilish-test-input-only-rerun/"))
     (make-directory root t)
     (cl-letf (((symbol-function 'project-current) (lambda (&rest _) nil))
-              ((symbol-function 'pilish--start-process) (lambda (_) nil)))
+              ((symbol-function 'pilish--start-process) (lambda (&rest _) nil)))
       (unwind-protect
           (progn
             (delete-other-windows)
@@ -1506,7 +1852,7 @@ must decide whether this is a no-op."
     (make-directory root t)
     (make-directory sub t)
     (cl-letf (((symbol-function 'project-current) (lambda (&rest _) nil))
-              ((symbol-function 'pilish--start-process) (lambda (_) nil))
+              ((symbol-function 'pilish--start-process) (lambda (&rest _) nil))
               ((symbol-function 'pilish--check-dependencies) #'ignore))
       (unwind-protect
           (progn
@@ -1563,7 +1909,7 @@ must decide whether this is a no-op."
     (make-directory root t)
     (make-directory sub t)
     (cl-letf (((symbol-function 'project-current) (lambda (&rest _) nil))
-              ((symbol-function 'pilish--start-process) (lambda (_) nil))
+              ((symbol-function 'pilish--start-process) (lambda (&rest _) nil))
               ((symbol-function 'pilish--check-dependencies) #'ignore)
               ((symbol-function 'pilish--display-buffers)
                (lambda (chat _input &rest _)
@@ -1594,7 +1940,7 @@ must decide whether this is a no-op."
     (make-directory root t)
     (make-directory sub t)
     (cl-letf (((symbol-function 'project-current) (lambda (&rest _) nil))
-              ((symbol-function 'pilish--start-process) (lambda (_) nil))
+              ((symbol-function 'pilish--start-process) (lambda (&rest _) nil))
               ((symbol-function 'pilish--check-dependencies) #'ignore)
               ;; If toggle consulted project-buffers here, it would pick sub.
               ((symbol-function 'pilish-project-buffers)
@@ -1639,7 +1985,7 @@ must decide whether this is a no-op."
         (make-backup-files nil))
     (unwind-protect
         (cl-letf (((symbol-function 'project-current) (lambda (&rest _) nil))
-                  ((symbol-function 'pilish--start-process) (lambda (_) nil))
+                  ((symbol-function 'pilish--start-process) (lambda (&rest _) nil))
                   ((symbol-function 'pilish--display-buffers) #'ignore)
                   ((symbol-function 'pilish--check-dependencies) #'ignore))
           (setq chat (pilish--setup-session root nil)
@@ -1671,7 +2017,7 @@ must decide whether this is a no-op."
                    (lambda (&rest _) 'mock-project))
                   ((symbol-function 'project-root)
                    (lambda (_project) root))
-                  ((symbol-function 'pilish--start-process) (lambda (_) nil))
+                  ((symbol-function 'pilish--start-process) (lambda (&rest _) nil))
                   ((symbol-function 'pilish--check-dependencies) #'ignore)
                   ((symbol-function 'pilish--display-buffers) #'ignore))
           (with-temp-buffer
@@ -1718,7 +2064,7 @@ must decide whether this is a no-op."
         (make-backup-files nil))
     (unwind-protect
         (cl-letf (((symbol-function 'project-current) (lambda (&rest _) nil))
-                  ((symbol-function 'pilish--start-process) (lambda (_) nil))
+                  ((symbol-function 'pilish--start-process) (lambda (&rest _) nil))
                   ((symbol-function 'pilish--check-dependencies) #'ignore)
                   ((symbol-function 'pilish--display-buffers)
                    (lambda (chat-buf input-buf &rest _)
@@ -1747,7 +2093,7 @@ must decide whether this is a no-op."
         (make-backup-files nil))
     (unwind-protect
         (cl-letf (((symbol-function 'project-current) (lambda (&rest _) nil))
-                  ((symbol-function 'pilish--start-process) (lambda (_) nil))
+                  ((symbol-function 'pilish--start-process) (lambda (&rest _) nil))
                   ((symbol-function 'pilish--check-dependencies) #'ignore))
           (delete-other-windows)
           (switch-to-buffer "*scratch*")
@@ -1796,7 +2142,7 @@ must decide whether this is a no-op."
         (hide-called nil))
     (make-directory root t)
     (cl-letf (((symbol-function 'project-current) (lambda (&rest _) nil))
-              ((symbol-function 'pilish--start-process) (lambda (_) nil))
+              ((symbol-function 'pilish--start-process) (lambda (&rest _) nil))
               ((symbol-function 'pilish--check-dependencies) #'ignore))
       (unwind-protect
           (progn
@@ -1827,7 +2173,7 @@ must decide whether this is a no-op."
         (input nil))
     (make-directory root t)
     (cl-letf (((symbol-function 'project-current) (lambda (&rest _) nil))
-              ((symbol-function 'pilish--start-process) (lambda (_) nil))
+              ((symbol-function 'pilish--start-process) (lambda (&rest _) nil))
               ((symbol-function 'pilish--check-dependencies) #'ignore))
       (unwind-protect
           (progn
@@ -1857,7 +2203,7 @@ must decide whether this is a no-op."
         (input nil))
     (make-directory root t)
     (cl-letf (((symbol-function 'project-current) (lambda (&rest _) nil))
-              ((symbol-function 'pilish--start-process) (lambda (_) nil))
+              ((symbol-function 'pilish--start-process) (lambda (&rest _) nil))
               ((symbol-function 'pilish--check-dependencies) #'ignore))
       (unwind-protect
           (progn
@@ -1988,6 +2334,338 @@ must decide whether this is a no-op."
                    (plist-get result :after-major-markdown-remap)))
     (should (equal (plist-get result :before-treesit-markdown-remap)
                    (plist-get result :after-treesit-markdown-remap)))))
+
+;;;; Background sessions
+
+(defvar pilish-test--background-launches nil
+  "Recorded (DIRECTORY ARGS ENVIRONMENT) of mocked process starts.")
+
+(defvar pilish-test--background-commands nil
+  "RPC command types sent by mocked background sessions, oldest first.")
+
+(defmacro pilish-test--with-background-startup (&rest body)
+  "Run BODY with mocked Pi startup that fails on any user interaction.
+Process starts land in `pilish-test--background-launches' and RPC
+commands in `pilish-test--background-commands'."
+  (declare (indent 0) (debug t))
+  `(let ((pilish-test--background-launches nil)
+         (pilish-test--background-commands nil)
+         (processes nil))
+     (cl-letf* (((symbol-function 'project-current) (lambda (&rest _) nil))
+                ((symbol-function 'pilish--check-pi) (lambda (&rest _) t))
+                ((symbol-function 'pilish--missing-essential-grammars)
+                 (lambda () nil))
+                ((symbol-function 'pilish--maybe-install-optional-grammars)
+                 (lambda () (error "Optional grammars offered")))
+                ((symbol-function 'pilish--display-buffers)
+                 (lambda (&rest _) (error "Session displayed")))
+                ((symbol-function 'y-or-n-p)
+                 (lambda (&rest _) (error "Prompted")))
+                ((symbol-function 'yes-or-no-p)
+                 (lambda (&rest _) (error "Prompted")))
+                ((symbol-function 'read-from-minibuffer)
+                 (lambda (&rest _) (error "Prompted")))
+                ((symbol-function 'pilish--fetch-commands) #'ignore)
+                ((symbol-function 'pilish--rpc-async)
+                 (lambda (_proc command &rest _)
+                   (setq pilish-test--background-commands
+                         (append pilish-test--background-commands
+                                 (list command)))))
+                ((symbol-function 'pilish--start-process)
+                 (lambda (dir &optional args environment)
+                   (push (list dir args environment)
+                         pilish-test--background-launches)
+                   (car (push (make-pipe-process :name "pilish-test-bg"
+                                                 :noquery t
+                                                 :sentinel #'ignore)
+                              processes)))))
+       (unwind-protect
+           (progn ,@body)
+         (dolist (proc processes)
+           (when (process-live-p proc)
+             (delete-process proc)))))))
+
+(ert-deftest pilish-test-start-session-leaves-layout-and-sends-no-prompt ()
+  "Background sessions start without display, prompts or a Pi prompt.
+A nil name selects the directory default; a string names the session."
+  (let ((root (pilish-test--make-temp-directory "pilish-test-bg-start-"))
+        default named)
+    (unwind-protect
+        (pilish-test--with-background-startup
+          (let ((config (current-window-configuration))
+                (selected (window-buffer (selected-window))))
+            (setq default (pilish-start-session root nil)
+                  named (pilish-start-session root "worker"))
+            (should (compare-window-configurations
+                     config (current-window-configuration)))
+            (should (eq selected (window-buffer (selected-window)))))
+          (should (equal (buffer-name default)
+                         (pilish-test--chat-buffer-name root)))
+          (should (equal (buffer-name named)
+                         (pilish-test--chat-buffer-name root "worker")))
+          (should (eq (pilish--find-session root) default))
+          (dolist (chat (list default named))
+            (should-not (get-buffer-window chat t))
+            (let ((input (buffer-local-value 'pilish--input-buffer chat)))
+              (should (buffer-live-p input))
+              (should (eq (buffer-local-value 'pilish--chat-buffer input)
+                          chat))
+              (should-not (get-buffer-window input t)))
+            (should (process-live-p
+                     (buffer-local-value 'pilish--process chat))))
+          (should (equal (mapcar #'car pilish-test--background-launches)
+                         (list root root)))
+          (should-not (seq-find
+                       (lambda (command)
+                         (member (plist-get command :type)
+                                 '("prompt" "steer" "follow_up")))
+                       pilish-test--background-commands))
+          (should (equal (plist-get (car pilish-test--background-commands)
+                                    :type)
+                         "get_state")))
+      (pilish-test--kill-session-buffers root)
+      (pilish-test--kill-session-buffers root "worker")
+      (delete-directory root t))))
+
+(ert-deftest pilish-test-start-session-refuses-existing-or-invalid-session ()
+  "An existing session, an empty name or a missing directory is an error."
+  (let ((root (pilish-test--make-temp-directory "pilish-test-bg-exists-")))
+    (unwind-protect
+        (pilish-test--with-background-startup
+          (let ((chat (pilish-start-session root "one")))
+            (should-error (pilish-start-session root "one"))
+            (should (buffer-live-p chat))
+            (should (= 1 (length pilish-test--background-launches))))
+          (should-error (pilish-start-session root ""))
+          (should-error (pilish-start-session (expand-file-name "missing/" root)
+                                              nil))
+          (should-not (get-buffer (pilish-test--chat-buffer-name root))))
+      (pilish-test--kill-session-buffers root "one")
+      (delete-directory root t))))
+
+(ert-deftest pilish-test-start-session-fails-without-prerequisites ()
+  "Missing Pi, or essential grammars it may not ask about, fail cleanly.
+No buffer or process remains."
+  (let ((root (pilish-test--make-temp-directory "pilish-test-bg-deps-")))
+    (unwind-protect
+        (pilish-test--with-background-startup
+          (cl-letf (((symbol-function 'pilish--check-pi) (lambda (&rest _) nil)))
+            (should (string-match-p
+                     "not found"
+                     (cadr (should-error (pilish-start-session root nil))))))
+          (cl-letf (((symbol-function 'pilish--missing-essential-grammars)
+                     (lambda () '(markdown))))
+            (let ((pilish-essential-grammar-action 'prompt))
+              (should (string-match-p
+                       "grammars missing: markdown"
+                       (cadr (should-error (pilish-start-session root nil)))))))
+          (should-not pilish-test--background-launches)
+          (should-not (get-buffer (pilish-test--chat-buffer-name root)))
+          (should-not (get-buffer (pilish-test--input-buffer-name root))))
+      (delete-directory root t))))
+
+(ert-deftest pilish-test-start-session-follows-essential-grammar-action ()
+  "Background starts honor `pilish-essential-grammar-action' without asking.
+`warn' starts after a warning and `auto' installs before Markdown modes run."
+  (let ((root (pilish-test--make-temp-directory "pilish-test-bg-grammar-"))
+        (missing '(markdown))
+        (warnings nil)
+        (installed nil))
+    (unwind-protect
+        (pilish-test--with-background-startup
+          (cl-letf (((symbol-function 'pilish--missing-essential-grammars)
+                     (lambda () missing))
+                    ((symbol-function 'pilish--install-grammars)
+                     (lambda (grammars)
+                       (should-not
+                        (get-buffer (pilish-test--chat-buffer-name root "auto")))
+                       (should-not
+                        (get-buffer (pilish-test--input-buffer-name root "auto")))
+                       (setq installed grammars missing nil)
+                       (length grammars)))
+                    ((symbol-function 'display-warning)
+                     (lambda (_type message &rest _) (push message warnings))))
+            (let ((pilish-essential-grammar-action 'warn))
+              (should (buffer-live-p (pilish-start-session root "warn")))
+              (should (string-match-p "markdown" (car warnings)))
+              (should-not installed))
+            (let ((pilish-essential-grammar-action 'auto))
+              (should (buffer-live-p (pilish-start-session root "auto")))
+              (should (equal installed '(markdown))))
+            (should (= 2 (length pilish-test--background-launches)))))
+      (pilish-test--kill-session-buffers root "warn")
+      (pilish-test--kill-session-buffers root "auto")
+      (delete-directory root t))))
+
+(ert-deftest pilish-test-start-session-removes-buffers-when-start-fails ()
+  "A failing process start leaves no half-created session behind."
+  (let ((root (pilish-test--make-temp-directory "pilish-test-bg-fail-")))
+    (unwind-protect
+        (pilish-test--with-background-startup
+          (cl-letf (((symbol-function 'pilish--start-process)
+                     (lambda (&rest _) (error "Spawn failed"))))
+            (should (equal (cadr (should-error (pilish-start-session root nil)))
+                           "Spawn failed")))
+          (should-not (get-buffer (pilish-test--chat-buffer-name root)))
+          (should-not (get-buffer (pilish-test--input-buffer-name root))))
+      (pilish-test--kill-session-buffers root)
+      (delete-directory root t))))
+
+(ert-deftest pilish-test-start-session-removes-buffers-when-start-is-interrupted ()
+  "Quitting startup leaves no buffers or live process behind."
+  (let ((root (pilish-test--make-temp-directory "pilish-test-bg-quit-")))
+    (unwind-protect
+        (pilish-test--with-background-startup
+          (let ((pilish-session-environment-functions
+                 (list (lambda (&rest _) (signal 'quit nil)))))
+            (should (equal '(quit)
+                           (condition-case err
+                               (pilish-start-session root nil)
+                             ((error quit) err)))))
+          (should-not (get-buffer (pilish-test--chat-buffer-name root)))
+          (should-not (get-buffer (pilish-test--input-buffer-name root)))
+          (should-not processes)
+          (cl-letf (((symbol-function 'pilish--rpc-async)
+                     (lambda (&rest _) (signal 'quit nil))))
+            (should (equal '(quit)
+                           (condition-case err
+                               (pilish-start-session root nil)
+                             ((error quit) err)))))
+          (should-not (get-buffer (pilish-test--chat-buffer-name root)))
+          (should-not (get-buffer (pilish-test--input-buffer-name root)))
+          (should (= 1 (length processes)))
+          (should-not (process-live-p (car processes))))
+      (pilish-test--kill-session-buffers root)
+      (delete-directory root t))))
+
+(ert-deftest pilish-test-session-launch-options-apply-to-every-spawn ()
+  "Explicit environment wins over hooks; options persist without leaking.
+Environment functions run for every spawn, so a respawn gets their current
+values, and a failing or malformed function only warns.  A respawn reuses
+the session's own options, and another session of the same directory gets
+none of them."
+  (let* ((root (pilish-test--make-temp-directory "pilish-test-bg-env-"))
+         (global-environment (copy-sequence process-environment))
+         ;; Batch ERT enables debugging on Emacs 29; exercise the warning path.
+         (debug-on-error nil)
+         (calls nil)
+         (warnings nil)
+         (pilish-session-environment-functions
+          (list (lambda (chat dir)
+                  (push (list chat dir) calls)
+                  (list (cons "PILISH_A" "hook")
+                        (cons "PILISH_B" (format "hook-%d" (length calls)))))
+                (lambda (_chat _dir) (error "Broken hook"))
+                (lambda (_chat _dir) '(("BAD=NAME" . "x"))))))
+    (unwind-protect
+        (pilish-test--with-background-startup
+          (cl-letf (((symbol-function 'display-warning)
+                     (lambda (_type message &rest _) (push message warnings))))
+            (let ((chat (pilish-start-session
+                         root "env" :args '("--model" "m")
+                         :environment '(("PILISH_A" . "explicit")))))
+              (should (equal calls (list (list chat root))))
+              (should (= 2 (length warnings)))
+              (should (string-match-p "Broken hook" (cadr warnings)))
+              (should (string-match-p "BAD=NAME" (car warnings)))
+              (should (equal (car pilish-test--background-launches)
+                             (list root '("--model" "m")
+                                   '(("PILISH_A" . "explicit")
+                                     ("PILISH_A" . "hook")
+                                     ("PILISH_B" . "hook-1")))))
+              ;; The process dies; reopening the session respawns it with its
+              ;; own options and the functions' current values.
+              (delete-process (buffer-local-value 'pilish--process chat))
+              (pilish--setup-session root "env" :background t)
+              (should (= 2 (length calls)))
+              (should (equal (car pilish-test--background-launches)
+                             (list root '("--model" "m")
+                                   '(("PILISH_A" . "explicit")
+                                     ("PILISH_A" . "hook")
+                                     ("PILISH_B" . "hook-2")))))
+              (pilish-start-session root "other")
+              (should (equal (car pilish-test--background-launches)
+                             (list root nil
+                                   '(("PILISH_A" . "hook")
+                                     ("PILISH_B" . "hook-3")))))
+              (should (equal process-environment global-environment)))))
+      (pilish-test--kill-session-buffers root "env")
+      (pilish-test--kill-session-buffers root "other")
+      (delete-directory root t))))
+
+(ert-deftest pilish-test-start-session-resumes-session-file ()
+  "A session file resumes in its recorded directory, which must match."
+  (let* ((root (pilish-test--make-temp-directory "pilish-test-bg-resume-"))
+         (other (pilish-test--make-temp-directory "pilish-test-bg-other-"))
+         (file (expand-file-name "saved.jsonl" root)))
+    (pilish-test--write-session-file file "Saved prompt" root)
+    (unwind-protect
+        (pilish-test--with-background-startup
+          (should-error (pilish-start-session other nil :session-file file))
+          (should-not pilish-test--background-launches)
+          (should-not (get-buffer (pilish-test--chat-buffer-name other)))
+          ;; An explicit directory that names the recorded one is accepted.
+          (let ((chat (pilish-start-session (directory-file-name root) "explicit"
+                                            :session-file file)))
+            (should (equal (buffer-name chat)
+                           (pilish-test--chat-buffer-name root "explicit")))
+            (should (equal (caar pilish-test--background-launches) root)))
+          (let ((chat (pilish-start-session nil "resumed" :session-file file)))
+            (should (equal (buffer-name chat)
+                           (pilish-test--chat-buffer-name root "resumed")))
+            (should (equal (caar pilish-test--background-launches) root))
+            (let ((switch (seq-find
+                           (lambda (command)
+                             (equal (plist-get command :type)
+                                    "switch_session"))
+                           pilish-test--background-commands)))
+              (should (equal (plist-get switch :sessionPath) file)))
+            (should-not (seq-find
+                         (lambda (command)
+                           (equal (plist-get command :type) "prompt"))
+                         pilish-test--background-commands))))
+      (pilish-test--kill-session-buffers root "explicit")
+      (pilish-test--kill-session-buffers root "resumed")
+      (delete-directory root t)
+      (delete-directory other t))))
+
+(ert-deftest pilish-test-start-session-validates-args-and-environment ()
+  "Malformed ARGS or ENVIRONMENT are refused before anything starts."
+  (let ((root (pilish-test--make-temp-directory "pilish-test-bg-validate-")))
+    (unwind-protect
+        (pilish-test--with-background-startup
+          (should-error (pilish-start-session root nil :args "--model"))
+          (should-error (pilish-start-session root nil :args '("--model" 1)))
+          (should-error (pilish-start-session root nil :environment '("A=b")))
+          (should-error (pilish-start-session root nil
+                                              :environment '(("A=B" . "c"))))
+          (should-error (pilish-start-session root nil
+                                              :environment '(("A" . 1))))
+          (should-not pilish-test--background-launches)
+          (should-not (get-buffer (pilish-test--chat-buffer-name root))))
+      (delete-directory root t))))
+
+(ert-deftest pilish-test-show-session-displays-background-session ()
+  "`pilish-show-session' displays a background session from anywhere.
+It does not depend on `default-directory' and starts no process."
+  (let ((root (pilish-test--make-temp-directory "pilish-test-bg-show-"))
+        (displayed nil))
+    (unwind-protect
+        (pilish-test--with-background-startup
+          (let ((chat (pilish-start-session root "shown")))
+            (cl-letf (((symbol-function 'pilish--display-buffers)
+                       (lambda (chat-buf input-buf &rest _)
+                         (setq displayed (list chat-buf input-buf)))))
+              (let ((default-directory temporary-file-directory))
+                (should (eq (pilish-show-session chat) chat))))
+            (should (equal displayed
+                           (list chat (buffer-local-value
+                                       'pilish--input-buffer chat))))
+            (should (= 1 (length pilish-test--background-launches)))
+            (with-temp-buffer
+              (should-error (pilish-show-session (current-buffer))))))
+      (pilish-test--kill-session-buffers root "shown")
+      (delete-directory root t))))
 
 (provide 'pilish-test)
 ;;; pilish-test.el ends here

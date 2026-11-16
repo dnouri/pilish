@@ -443,7 +443,7 @@ Automatically cleans up chat and input buffers."
   `(let ((default-directory ,dir))
      (cl-letf (((symbol-function 'project-current) (lambda (&rest _) nil))
                ((symbol-function 'pilish--check-dependencies) #'ignore)
-               ((symbol-function 'pilish--start-process) (lambda (_) nil))
+               ((symbol-function 'pilish--start-process) (lambda (&rest _) nil))
                ((symbol-function 'pilish--display-buffers) #'ignore))
        (unwind-protect
            (progn (pilish) ,@body)

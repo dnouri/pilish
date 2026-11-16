@@ -959,7 +959,7 @@ the settled rendered buffer."
                proc
                (lambda (count) (setq history-count count))
                chat-buf
-               (lambda (_response) (setq history-complete t)))
+               (lambda (_response _display) (setq history-complete t)))
               (unless (pilish-sd-bench--wait-until
                        (lambda ()
                          (and history-complete

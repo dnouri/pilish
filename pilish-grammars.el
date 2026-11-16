@@ -321,11 +321,12 @@ chat buffer to render properly.
                  (const :tag "Warn only (never install)" warn))
   :group 'pilish)
 
-(defun pilish--maybe-install-essential-grammars ()
+(defun pilish--maybe-install-essential-grammars (&optional background)
   "Handle missing essential grammars.
-Behavior comes from `pilish-essential-grammar-action'.
-Respects `noninteractive' (batch mode always skips)."
-  (unless noninteractive
+Behavior comes from `pilish-essential-grammar-action'.  BACKGROUND
+means nobody can answer, so `prompt' signals an error instead of asking.
+Batch mode skips the check unless BACKGROUND."
+  (unless (and noninteractive (not background))
     (let ((missing (pilish--missing-essential-grammars)))
       (when missing
         (let* ((names (mapconcat #'symbol-name missing ", "))
@@ -333,9 +334,13 @@ Respects `noninteractive' (batch mode always skips)."
                 (pcase pilish-essential-grammar-action
                   ('auto t)
                   ('prompt
-                   (y-or-n-p
-                    (format "Essential grammars (%s) missing — install now? "
-                            names)))
+                   (if background
+                       (error "Pilish: essential tree-sitter grammars missing: \
+%s; run M-x pilish-install-grammars or set `pilish-essential-grammar-action'"
+                              names)
+                     (y-or-n-p
+                      (format "Essential grammars (%s) missing — install now? "
+                              names))))
                   ('warn nil))))
           (if should-install
               (progn

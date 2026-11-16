@@ -27,7 +27,7 @@
 
 ;; Input buffer features for Pilish: prompt composition,
 ;; history navigation (comint/eshell-style M-p/M-n), incremental
-;; history search (readline-style C-r), file reference completion (@),
+;; history search (M-r), file reference completion (@),
 ;; path completion (Tab), slash command completion, message queuing
 ;; (follow-up and steering), and send/abort commands.
 ;;
@@ -40,7 +40,7 @@
 ;;   `pilish-next-input'            History forward (M-n)
 ;;   `pilish-input-previous-message' Navigate previous chat message
 ;;   `pilish-input-next-message'    Navigate next chat message
-;;   `pilish-history-isearch-backward'  History search (C-r)
+;;   `pilish-history-isearch-backward'  History search (M-r)
 ;;   `pilish-queue-steering'        Steering message (C-c C-s)
 ;;   `pilish-queue-followup'        Follow-up message (M-RET)
 
@@ -67,7 +67,7 @@
   "Non-nil when history isearch is active.")
 
 (defvar-local pilish--history-isearch-saved-input nil
-  "Saved input before starting history isearch.")
+  "Input to restore when quitting history isearch.")
 
 (defvar-local pilish--history-isearch-index nil
   "Current history index during isearch.")
@@ -151,12 +151,15 @@ appending duplicate copies."
 
 (defun pilish-history-isearch-backward ()
   "Search input history backward using isearch.
-Incrementally search through history with matches appearing
-directly in the input buffer, like readline."
+Incrementally search through history with matches appearing directly in
+the input buffer.  Accepting a match leaves the original draft available
+to `pilish-next-input'; quitting restores the input present on entry."
   (interactive)
   (let ((ring (pilish--input-ring)))
     (when (ring-empty-p ring)
       (user-error "No history"))
+    (unless pilish--input-ring-index
+      (setq pilish--input-saved (buffer-string)))
     (setq pilish--history-isearch-active t
           pilish--history-isearch-saved-input (buffer-string)
           pilish--history-isearch-index nil)
@@ -178,17 +181,24 @@ directly in the input buffer, like readline."
 
 (defun pilish--history-isearch-end ()
   "Clean up after history isearch ends.
-Restore original input if isearch was quit, keep history item if accepted."
+Restore the input present on entry if isearch was quit.  After acceptance,
+share a recalled item's position with ordinary history navigation so
+`pilish-next-input' can restore the original draft."
   (setq isearch-message-prefix-add nil)
   (setq-local isearch-search-fun-function #'isearch-search-fun-default)
   (setq-local isearch-wrap-function nil)
   (setq-local isearch-push-state-function nil)
   (kill-local-variable 'isearch-lazy-count)
   (remove-hook 'isearch-mode-end-hook #'pilish--history-isearch-end t)
-  (when isearch-mode-end-hook-quit
-    (delete-region (point-min) (point-max))
-    (insert (or pilish--history-isearch-saved-input "")))
   (unless isearch-suspended
+    (if isearch-mode-end-hook-quit
+        (progn
+          (delete-region (point-min) (point-max))
+          (insert (or pilish--history-isearch-saved-input "")))
+      (when pilish--history-isearch-index
+        (setq pilish--input-ring-index pilish--history-isearch-index)))
+    (unless pilish--input-ring-index
+      (setq pilish--input-saved nil))
     (setq pilish--history-isearch-active nil
           pilish--history-isearch-saved-input nil
           pilish--history-isearch-index nil)))
