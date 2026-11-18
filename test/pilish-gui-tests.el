@@ -291,7 +291,8 @@
           (pilish-test--kill-live-buffers browser target-input target-chat))))))
 
 (ert-deftest pilish-gui-test-seed-history-from-opened-session ()
-  "Open and reload saved prompts, restore a draft, and resend a recalled prompt."
+  "Open and reload saved prompts, restore a draft, and resend a recalled prompt.
+A reload while browsing history keeps the draft that `M-n' restores."
   (let ((pilish-gui-test--large-trace nil)
         (file (make-temp-file "pilish-gui-seed-history-" nil ".jsonl")))
     (unwind-protect
@@ -371,6 +372,27 @@
                     :commands (reverse pilish-gui-test--large-trace)))
              (pilish-gui-test--large-command (kbd "M-p") 'pilish-previous-input)
              (should (equal (buffer-string) first))
+             (let ((old-proc (buffer-local-value 'pilish--process chat)))
+               (execute-kbd-macro (kbd "M-x pilish-reload RET"))
+               (push '(reload "M-x pilish-reload RET")
+                     pilish-gui-test--large-trace)
+               (should (pilish-test-wait-until
+                        (lambda ()
+                          (with-current-buffer chat
+                            (and (not (eq pilish--process old-proc))
+                                 (process-live-p pilish--process)
+                                 (not (pilish--session-transition-active-p))
+                                 (string-match-p latest (buffer-string)))))
+                        8 0.01)))
+             (select-window (get-buffer-window input))
+             (should (equal (buffer-string) first))
+             (should (equal pilish--input-saved draft))
+             (pilish-gui-test--large-evidence
+              "seed-history-browsing-reloaded"
+              (list :input (buffer-string) :saved-draft pilish--input-saved
+                    :ring-index pilish--input-ring-index
+                    :history (ring-elements pilish--input-ring)
+                    :commands (reverse pilish-gui-test--large-trace)))
              (pilish-gui-test--large-command (kbd "M-n") 'pilish-next-input)
              (should (equal (buffer-string) latest))
              (pilish-gui-test--large-command (kbd "M-n") 'pilish-next-input)

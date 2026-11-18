@@ -198,7 +198,8 @@ started.
 =C-r= and =C-s= keep their ordinary Emacs meaning: incremental search
 within the current draft, never prompt-history recall.  When Pilish loads
 or resumes a session, the saved user prompts join the history commands
-automatically.
+automatically; a reload while you browse history keeps the recalled prompt,
+and =M-n= still restores your unfinished draft.
 
 ** Send, steer, queue, and abort
 
