@@ -2220,23 +2220,6 @@ canonical history, so rebuilding now would erase that visible turn."
        (not (pilish--command-pending-p (pilish--get-process) "compact"))
        (null pilish--local-user-message)))
 
-(defun pilish-session-chat-buffer (&optional buffer)
-  "Return the session chat linked to BUFFER, or nil outside a session.
-BUFFER is a buffer or buffer name, defaulting to the current buffer.
-Dead, missing, unrelated and saved snapshot buffers return nil.  An input
-buffer resolves to its live chat even when Pi has stopped.  No process is
-started and no window is displayed or selected."
-  (when-let* ((buffer (get-buffer (or buffer (current-buffer))))
-              ((buffer-live-p buffer)))
-    (with-current-buffer buffer
-      (cond
-       ((derived-mode-p 'pilish-chat-mode) buffer)
-       ((and (derived-mode-p 'pilish-input-mode)
-             (buffer-live-p pilish--chat-buffer)
-             (with-current-buffer pilish--chat-buffer
-               (derived-mode-p 'pilish-chat-mode)))
-        pilish--chat-buffer)))))
-
 (defun pilish--copy-session-value (value &optional properties)
   "Copy session data VALUE, including nested strings, vectors and hash tables.
 String properties are omitted unless PROPERTIES is non-nil; in that case
@@ -2331,18 +2314,6 @@ prompts or starting, reloading or switching sessions; defer such work
 with a timer."
   :type 'hook
   :group 'pilish)
-
-(defun pilish-session-extension-status (&optional buffer key)
-  "Return a copy of BUFFER's extension status, or nil without a session.
-BUFFER follows `pilish-session-chat-buffer'.  With KEY, return that
-status's text; without KEY, return an alist of (KEY . TEXT) in header-line
-order.  Text properties, including faces, are retained; their nested data
-values are copied too.  Changing returned data cannot change the session.
-`pilish-extension-status-functions' reports changes.  No RPC is sent."
-  (when-let* ((chat (pilish-session-chat-buffer buffer)))
-    (let ((statuses (buffer-local-value 'pilish--extension-status chat)))
-      (pilish--copy-session-value
-       (if key (cdr (assoc key statuses)) statuses) t))))
 
 (defun pilish--run-extension-status-functions (key text)
   "Run `pilish-extension-status-functions' for KEY and TEXT in this buffer.
