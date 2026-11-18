@@ -477,6 +477,73 @@ reload without a change must not notify."
       (delete-file link)
       (delete-directory real t))))
 
+(ert-deftest pilish-gui-test-symlinked-directory-reuses-session-pair ()
+  "A session started through a symlinked directory keeps one buffer pair.
+Pi records the resolved cwd in the saved file, so opening that file and
+running `pilish' from the resolved directory reach the session through
+another spelling of its directory."
+  (let* ((real (file-name-as-directory
+                (file-truename (make-temp-file "pilish-alias-project-" t))))
+         (link (file-name-as-directory
+                (concat (directory-file-name real) "-link")))
+         (source (find-file-noselect (expand-file-name "notes.txt" real))))
+    (make-symbolic-link (directory-file-name real) (directory-file-name link))
+    (setq pilish-gui-test--failure-snapshot nil)
+    (pilish-gui-test-end-session)
+    (unwind-protect
+        (progn
+          (pilish-gui-test-start-session
+           link '(:backend fake :fake-scenario "prompt-lifecycle"))
+          (let* ((chat (plist-get pilish-gui-test--session :chat-buffer))
+                 (input (plist-get pilish-gui-test--session :input-buffer))
+                 (process (plist-get pilish-gui-test--session :process))
+                 (backend (plist-get pilish-gui-test--session :backend))
+                 (pilish-executable (plist-get backend :executable))
+                 (pilish-extra-args (plist-get backend :extra-args))
+                 (file (with-current-buffer chat
+                         (plist-get pilish--state :session-file)))
+                 (pairs (lambda ()
+                          (seq-filter
+                           (lambda (buffer)
+                             (with-current-buffer buffer
+                               (and (derived-mode-p 'pilish-chat-mode
+                                                    'pilish-input-mode)
+                                    (file-equal-p default-directory real))))
+                           (buffer-list)))))
+            (pilish-gui-test-send "Remember this aliased session")
+            ;; Precondition: Pi saved the resolved spelling, not the link.
+            (should (equal (file-name-as-directory
+                            (pilish--session-file-cwd-or-error file))
+                           real))
+            (should (eq (pilish-open-session-file file) chat))
+            (should (pilish-test-wait-until
+                     (lambda ()
+                       (with-current-buffer chat
+                         (not (pilish--session-transition-active-p))))
+                     8 0.01 process))
+            (with-current-buffer source
+              (cl-letf (((symbol-function 'project-current)
+                         (lambda (&rest _) nil)))
+                (call-interactively #'pilish)))
+            (should (eq (window-buffer (pilish-gui-test-chat-window)) chat))
+            (should (eq (buffer-local-value 'pilish--process chat) process))
+            (should (equal (buffer-name chat) (pilish--buffer-name :chat link)))
+            (should (equal (buffer-name input) (pilish--buffer-name :input link)))
+            (should (equal (sort (mapcar #'buffer-name (funcall pairs)) #'string<)
+                           (sort (list (buffer-name chat) (buffer-name input))
+                                 #'string<)))
+            (pilish-gui-test--large-evidence
+             "alias-directory-one-pair"
+             (list :link link :real real :saved-cwd real
+                   :pair (mapcar #'buffer-name (funcall pairs))))))
+      (pilish-gui-test--capture-failure-snapshot)
+      (pilish-gui-test-end-session)
+      (when (buffer-live-p source)
+        (with-current-buffer source (set-buffer-modified-p nil))
+        (kill-buffer source))
+      (ignore-errors (delete-file (directory-file-name link)))
+      (delete-directory real t))))
+
 (ert-deftest pilish-gui-test-input-isearch-does-not-recall-history ()
   "C-r searches the draft without replacing it with a history entry."
   (let ((pilish-gui-test--large-trace nil))
