@@ -2052,6 +2052,81 @@ must decide whether this is a no-op."
       (cl-letf (((symbol-function 'project-current) (lambda (&rest _) nil)))
         (should (null (pilish-project-buffers)))))))
 
+(defun pilish-test--make-aliased-directory (prefix)
+  "Return (REAL . LINK): a new directory and a symlink to it, both with slashes.
+PREFIX names the directory; REAL is already resolved through `file-truename'."
+  (let* ((real (file-truename (pilish-test--make-temp-directory prefix)))
+         (link (concat (directory-file-name real) "-link")))
+    (make-symbolic-link (directory-file-name real) link)
+    (cons real (file-name-as-directory link))))
+
+(defun pilish-test--delete-aliased-directory (dirs)
+  "Delete the directory and symlink of DIRS from `pilish-test--make-aliased-directory'."
+  (ignore-errors (delete-file (directory-file-name (cdr dirs))))
+  (ignore-errors (delete-directory (car dirs) t)))
+
+(defun pilish-test--session-pairs-in (dir)
+  "Return the chat and input buffers whose directory resolves to DIR."
+  (let ((truename (file-truename dir)))
+    (seq-filter
+     (lambda (buffer)
+       (with-current-buffer buffer
+         (and (derived-mode-p 'pilish-chat-mode 'pilish-input-mode)
+              (equal (file-truename default-directory) truename))))
+     (buffer-list))))
+
+(ert-deftest pilish-test-session-lookup-matches-symlink-aliases ()
+  "A session opened through one spelling of a directory is found through another.
+Both orders: opened through the symlink and found through the resolved
+path (Pi records the resolved cwd), and the reverse.  Default and named
+sessions stay distinct, and setting up through the other spelling reuses
+the pair and keeps its first spelling."
+  (dolist (order '(link-first real-first))
+    (let* ((dirs (pilish-test--make-aliased-directory "pilish-test-alias-"))
+           (first (if (eq order 'link-first) (cdr dirs) (car dirs)))
+           (second (if (eq order 'link-first) (car dirs) (cdr dirs)))
+           default-chat named-chat)
+      (unwind-protect
+          (cl-letf (((symbol-function 'project-current) (lambda (&rest _) nil))
+                    ((symbol-function 'pilish--start-process)
+                     (lambda (&rest _) nil))
+                    ((symbol-function 'pilish--check-dependencies) #'ignore))
+            (setq default-chat (pilish--setup-session first)
+                  named-chat (pilish--setup-session first "feature"))
+            (should (eq (pilish--find-session second) default-chat))
+            (should (eq (pilish--find-session second "feature") named-chat))
+            (should-not (pilish--find-session second "other"))
+            (should (eq (pilish-session-exists-p second) t))
+            (should (eq (pilish-session-exists-p second "feature") t))
+            (let ((default-directory second))
+              (should (equal (sort (pilish-project-buffers)
+                                   (lambda (a b)
+                                     (string< (buffer-name a) (buffer-name b))))
+                             (sort (list default-chat named-chat)
+                                   (lambda (a b)
+                                     (string< (buffer-name a)
+                                              (buffer-name b)))))))
+            (let ((inputs (mapcar #'pilish-session-input-buffer
+                                  (list default-chat named-chat))))
+              (should (eq (pilish--setup-session second) default-chat))
+              (should (eq (pilish--setup-session second "feature") named-chat))
+              (should (equal (mapcar #'pilish-session-input-buffer
+                                     (list default-chat named-chat))
+                             inputs))
+              (should (equal (buffer-name default-chat)
+                             (pilish-test--chat-buffer-name first)))
+              (should (equal (buffer-name (car inputs))
+                             (pilish-test--input-buffer-name first)))
+              (should (equal (pilish-session-directory default-chat) first))
+              (should (= (length (pilish-test--session-pairs-in first)) 4)))
+            ;; A background start through the other spelling is refused.
+            (should-error (pilish-start-session second nil)))
+        (pilish-test--kill-session-buffers first)
+        (pilish-test--kill-session-buffers first "feature")
+        (pilish-test--kill-session-buffers second)
+        (pilish-test--kill-session-buffers second "feature")
+        (pilish-test--delete-aliased-directory dirs)))))
+
 (ert-deftest pilish-test-toggle-finds-saved-session-after-write-file ()
   "`pilish-toggle' still finds a saved chat buffer."
   (let ((root (pilish-test--make-temp-directory
@@ -2628,6 +2703,22 @@ none of them."
       (pilish-test--kill-session-buffers root "resumed")
       (delete-directory root t)
       (delete-directory other t))))
+
+(ert-deftest pilish-test-start-session-accepts-alias-of-recorded-directory ()
+  "A symlink to a session file's recorded directory names that directory."
+  (let* ((dirs (pilish-test--make-aliased-directory "pilish-test-bg-alias-"))
+         (file (expand-file-name "saved.jsonl" (car dirs))))
+    (pilish-test--write-session-file file "Saved prompt" (car dirs))
+    (unwind-protect
+        (pilish-test--with-background-startup
+          (let ((chat (pilish-start-session (cdr dirs) "alias"
+                                            :session-file file)))
+            (should (equal (buffer-name chat)
+                           (pilish-test--chat-buffer-name (cdr dirs) "alias")))
+            (should (equal (caar pilish-test--background-launches)
+                           (cdr dirs)))))
+      (pilish-test--kill-session-buffers (cdr dirs) "alias")
+      (pilish-test--delete-aliased-directory dirs))))
 
 (ert-deftest pilish-test-start-session-validates-args-and-environment ()
   "Malformed ARGS or ENVIRONMENT are refused before anything starts."

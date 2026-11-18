@@ -3110,6 +3110,41 @@ replaced by the resumed or forked history."
       (delete-directory old-dir t)
       (delete-directory new-dir t))))
 
+(ert-deftest pilish-test-retarget-session-buffers-keeps-alias-spelling ()
+  "Resuming in another spelling of the session's directory renames nothing.
+Pi records the resolved cwd, so a session opened through a symlink would
+otherwise move to the resolved spelling on every resume."
+  (let* ((real (file-truename (pilish-test--make-temp-directory
+                               "pilish-test-retarget-alias-")))
+         (link (file-name-as-directory
+                (concat (directory-file-name real) "-link")))
+         (chat-buf (generate-new-buffer "*pilish-test-retarget-alias-chat*"))
+         (input-buf (generate-new-buffer "*pilish-test-retarget-alias-input*")))
+    (make-symbolic-link (directory-file-name real) (directory-file-name link))
+    (unwind-protect
+        (progn
+          (with-current-buffer chat-buf
+            (pilish-chat-mode)
+            (pilish--set-chat-session-identity link "side")
+            (rename-buffer pilish--canonical-buffer-name)
+            (pilish--set-input-buffer input-buf))
+          (with-current-buffer input-buf
+            (pilish-input-mode)
+            (rename-buffer (pilish--buffer-name :input link "side"))
+            (pilish--set-chat-buffer chat-buf))
+          (with-current-buffer chat-buf
+            (pilish--retarget-session-buffers real)
+            (should (equal (pilish--chat-session-directory) link))
+            (should (equal (buffer-name)
+                           (pilish--buffer-name :chat link "side"))))
+          (with-current-buffer input-buf
+            (should (equal default-directory link))
+            (should (equal (buffer-name)
+                           (pilish--buffer-name :input link "side")))))
+      (pilish-test--kill-live-buffers input-buf chat-buf)
+      (ignore-errors (delete-file (directory-file-name link)))
+      (delete-directory real t))))
+
 (ert-deftest pilish-test-resume-selected-session-switches-session-and-rebuilds-history ()
   "Resuming a selected session refreshes chat history and session state."
   (let* ((dir (pilish-test--make-temp-directory

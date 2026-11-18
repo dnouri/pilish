@@ -257,8 +257,9 @@ NAME nil means the directory's default session.  Stopped sessions count;
 no process is started.  The chat is found by its session identity, so a
 chat renamed or visiting a transcript still counts; an input buffer
 without a live chat does not.  Every session that exists can be inspected
-with the other session accessors.  DIRECTORY is expanded with a trailing
-slash, not resolved through symlinks, matching Pilish's normal lookup."
+with the other session accessors.  DIRECTORY matches the session's
+directory through any symlink alias of it, as Pilish's own lookup does;
+remote directories match as written."
   (and (pilish--find-session (pilish--normalize-directory directory) name)
        t))
 
@@ -285,10 +286,14 @@ Evil states apply to them."
 A new session keeps ARGS and ENVIRONMENT as its own launch options (see
 `pilish--launch-options').  BACKGROUND means nobody is there to answer
 questions, as for `pilish--check-dependencies'.
+An existing session reached through another spelling of DIR, such as a
+symlink alias, keeps its own spelling.
 Returns the chat buffer."
   (pilish--maybe-load-evil-integration)
-  ;; Install essential grammars before buffer creation runs Markdown modes.
   (let ((existing (pilish--find-session dir session)))
+    (when existing
+      (setq dir (pilish--chat-session-directory existing)))
+    ;; Install essential grammars before buffer creation runs Markdown modes.
     (unless (and existing
                  (with-current-buffer existing
                    (and pilish--process (process-live-p pilish--process))))
@@ -420,7 +425,9 @@ all setup is asynchronous."
                     (t (error "Pilish: a session needs a directory")))))
     (unless (file-directory-p dir)
       (error "Pilish: not a directory: %s" dir))
-    (when (and recorded-dir (not (equal recorded-dir dir)))
+    (when (and recorded-dir
+               (not (equal (pilish--session-directory-key recorded-dir)
+                           (pilish--session-directory-key dir))))
       (error "Pilish: session file %s belongs to %s, not %s"
              session-file recorded-dir dir))
     (when (or (pilish--find-session dir name)
