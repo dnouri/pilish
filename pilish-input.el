@@ -127,7 +127,12 @@ Restores saved input when moving past newest entry."
 MESSAGES is a vector of message plists, oldest first.  Only visible user
 text becomes a history entry, newest first, and local entries absent from
 MESSAGES stay older.  Repeated loads keep the same history rather than
-appending duplicate copies."
+appending duplicate copies.
+
+The input text and the draft saved by history navigation stay as they
+are.  While navigating, the position moves to the recalled entry's newest
+copy in the merged history, or to the oldest entry when the history limit
+evicted it, so `pilish-next-input' still leads back to the draft."
   (when (and (buffer-live-p input-buffer)
              (vectorp messages))
     (let (prompts)
@@ -138,14 +143,19 @@ appending duplicate copies."
             (push text prompts))))
       (setq prompts (nreverse prompts))
       (with-current-buffer input-buffer
-        (let ((older (seq-remove
+        (let ((recalled (and pilish--input-ring-index
+                             (ring-ref (pilish--input-ring)
+                                       pilish--input-ring-index)))
+              (older (seq-remove
                       (lambda (entry) (member entry prompts))
                       (reverse (ring-elements (pilish--input-ring))))))
-          (setq pilish--input-ring (make-ring pilish--input-ring-size)
-                pilish--input-ring-index nil
-                pilish--input-saved nil)
+          (setq pilish--input-ring (make-ring pilish--input-ring-size))
           (dolist (entry (append older prompts))
-            (pilish--history-add entry)))))))
+            (pilish--history-add entry))
+          (when recalled
+            (setq pilish--input-ring-index
+                  (or (ring-member pilish--input-ring recalled)
+                      (1- (ring-length pilish--input-ring))))))))))
 
 ;;;; History Isearch
 
