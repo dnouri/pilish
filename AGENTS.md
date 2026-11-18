@@ -14,7 +14,7 @@ Pilish communicates with the Pi CLI through JSON-over-stdio RPC.
 
 ## Architecture and ownership
 
-- `pilish.el` starts sessions. `pilish-core.el` owns the process protocol. `pilish-ui.el` owns shared session state and disclosure behavior. `pilish-render.el` owns streaming, tool display, and cooling.
+- `pilish.el` starts sessions. `pilish-core.el` owns the process protocol. `pilish-ui.el` owns shared session state and disclosure behavior. `pilish-session.el` owns the public session API for integrations; hooks stay with the modules that run them. `pilish-render.el` owns streaming, tool display, and cooling.
 - `pilish-jsonl.el` reads Pi's saved data. `pilish-browse.el` owns session and tree browsers. `pilish-snapshot.el` owns independent read-only saved-conversation observers.
 - Keep internal `require` dependencies acyclic. `pilish-ui.el` does not depend on `pilish-jsonl.el`. `pilish-menu.el` and `pilish-input.el` are siblings. `pilish-evil.el` is an optional leaf integration.
 - Use the accessors in `pilish-ui.el` for cross-module state mutations. Direct `setq` is fine for state owned within a module.
