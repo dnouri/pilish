@@ -96,7 +96,9 @@
     (puthash "tool-2" (pilish--make-tool-block :tool-call-id "tool-2"
                                                :overlay (make-overlay 1 1) :order 1)
              pilish--live-tool-blocks)
-    ;; Clear the buffer
+    ;; Clear the buffer after starting a new session, which marks the
+    ;; replaced extensions' statuses stale.
+    (pilish--mark-extension-ui-stale)
     (pilish--clear-chat-buffer)
     ;; All session state should be reset
     (should (null pilish--session-name))

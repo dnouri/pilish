@@ -1650,9 +1650,11 @@ receives:
 
 =KEY= is the =statusKey= and =TEXT= the new text without ANSI colors,
 or nil when the status was cleared.  Setting a status to its current
-text and properties calls nothing.  Starting a new session clears every
-status and calls the functions once per cleared key.  The functions run after the
-change, so the accessor already returns =TEXT=.
+text and properties calls nothing.  A new, resumed or forked session and
+a reload replace Pi's extensions: the statuses the new extensions do not
+set again are cleared, and the functions are called once per cleared
+key.  The functions run after the change, so the accessor already
+returns =TEXT=.
 
 The functions run synchronously while Pilish handles Pi's events, usually
 from its process filter.  Return promptly, and do not wait for Pi or
