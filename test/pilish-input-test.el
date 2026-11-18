@@ -3269,6 +3269,55 @@ Regression test for #27: history was shared across all sessions."
               (should (equal (buffer-string) "unfinished draft")))))
       (pilish-test--kill-live-buffers input))))
 
+(ert-deftest pilish-test-seed-history-while-browsing-keeps-draft ()
+  "Seeding during navigation maps the recalled entry to its newest copy.
+The edited recall, point and the saved draft stay, and the position
+follows the recalled entry's text, not its old index or the edited text."
+  (with-temp-buffer
+    (pilish-input-mode)
+    (dolist (prompt '("A" "B" "A"))
+      (pilish--history-add prompt))
+    (insert "draft")
+    (dotimes (_ 3)
+      (pilish-previous-input))
+    (should (= pilish--input-ring-index 2))
+    (should (equal (buffer-string) "A"))
+    (insert "!")
+    (goto-char 2)
+    (pilish--seed-input-history
+     (current-buffer) [(:role "user" :content "A")
+                       (:role "user" :content "B")
+                       (:role "user" :content "A")])
+    (should (equal (ring-elements pilish--input-ring) '("A" "B" "A")))
+    (should (equal (buffer-string) "A!"))
+    (should (= (point) 2))
+    (should (= pilish--input-ring-index 0))
+    (pilish-next-input)
+    (should (equal (buffer-string) "draft"))
+    (should-not pilish--input-ring-index)))
+
+(ert-deftest pilish-test-seed-history-evicting-recalled-entry-keeps-draft ()
+  "A recalled entry evicted by seeding leaves navigation at the oldest entry."
+  (let ((pilish--input-ring-size 2))
+    (with-temp-buffer
+      (pilish-input-mode)
+      (pilish--history-add "a")
+      (pilish--history-add "b")
+      (insert "draft")
+      (pilish-previous-input)
+      (pilish-previous-input)
+      (should (equal (buffer-string) "a"))
+      (pilish--seed-input-history
+       (current-buffer) [(:role "user" :content "x")
+                         (:role "user" :content "y")])
+      (should (equal (ring-elements pilish--input-ring) '("y" "x")))
+      (should (equal (buffer-string) "a"))
+      (should (= pilish--input-ring-index 1))
+      (pilish-next-input)
+      (should (equal (buffer-string) "y"))
+      (pilish-next-input)
+      (should (equal (buffer-string) "draft")))))
+
 ;;; Explicit History Isearch
 
 (ert-deftest pilish-test-history-isearch-empty-history-errors ()
