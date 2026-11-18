@@ -38,6 +38,8 @@
 ;;   `pilish-quit'                  Close session
 ;;   `pilish-previous-input'        History backward (M-p)
 ;;   `pilish-next-input'            History forward (M-n)
+;;   `pilish-input-history-up'      Pi-style <up> history
+;;   `pilish-input-history-down'    Pi-style <down> history
 ;;   `pilish-input-previous-message' Navigate previous chat message
 ;;   `pilish-input-next-message'    Navigate next chat message
 ;;   `pilish-history-isearch-backward'  History search (M-r)
@@ -146,6 +148,96 @@ appending duplicate copies."
                 pilish--input-saved nil)
           (dolist (entry (append older prompts))
             (pilish--history-add entry)))))))
+
+;;;; Pi-style arrow history
+
+(defcustom pilish-input-arrow-history nil
+  "Non-nil means <up> and <down> browse prompt history at the draft's edges.
+<up> on the first screen line of the input acts as `pilish-previous-input'
+when the draft is empty or point is at its start, and while the input
+equals the recalled prompt; elsewhere on that line it moves point to the
+start.  <down> on the last screen line acts as `pilish-next-input' while
+the input equals the recalled prompt, which finally restores the draft;
+otherwise it moves point to the end.  Screen lines count wrapped
+continuation lines.  On other lines, with no history, during an
+incremental search, in a narrowed input and for shifted arrows, both keys
+keep their usual bindings.  The arrows say nothing at either end of
+history.
+
+The arrows share their history position and saved draft with `M-p',
+`M-n' and `M-r'.  While the input differs from the recalled prompt, the
+arrows only move point, and `M-n' still continues from the recalled
+prompt's position and restores the saved draft.  Undoing the edits makes
+the arrows browse again."
+  :type 'boolean
+  :group 'pilish)
+
+(defun pilish--input-unedited-recall-p ()
+  "Return non-nil if the input is an unedited recalled prompt."
+  (and pilish--input-ring-index
+       (equal (buffer-string)
+              (ring-ref (pilish--input-ring) pilish--input-ring-index))))
+
+(defun pilish--input-on-first-screen-line-p ()
+  "Return non-nil when point is on the input's first screen line."
+  (save-excursion
+    (vertical-motion 0)
+    (bobp)))
+
+(defun pilish--input-on-last-screen-line-p ()
+  "Return non-nil when point is on the input's last screen line."
+  (save-excursion
+    (zerop (vertical-motion 1))))
+
+(defun pilish--input-arrow-history-p ()
+  "Return non-nil when an arrow being looked up may act on prompt history."
+  (let ((keys (this-single-command-raw-keys)))
+    (and pilish-input-arrow-history
+         (derived-mode-p 'pilish-input-mode)
+         ;; Emacs resolves the command before an arrow ends isearch, so
+         ;; history here would act on the search's preview.
+         (not isearch-mode)
+         ;; Recall saves only the accessible text as the draft.
+         (not (buffer-narrowed-p))
+         ;; An unbound S-<up> is looked up as <up>; leave it to
+         ;; shift-selection.
+         (not (and (> (length keys) 0)
+                   (memq 'shift
+                         (event-modifiers (aref keys (1- (length keys)))))))
+         (not (ring-empty-p (pilish--input-ring))))))
+
+(defun pilish--input-arrow-up-filter (command)
+  "Return COMMAND when <up> should act on prompt history, else nil."
+  (and (pilish--input-arrow-history-p)
+       (pilish--input-on-first-screen-line-p)
+       command))
+
+(defun pilish--input-arrow-down-filter (command)
+  "Return COMMAND when <down> should act on prompt history, else nil."
+  (and (pilish--input-arrow-history-p)
+       (pilish--input-on-last-screen-line-p)
+       command))
+
+(defun pilish-input-history-up ()
+  "Recall the previous prompt from the input's first screen line.
+See `pilish-input-arrow-history'."
+  (interactive)
+  (when (and (if pilish--input-ring-index
+                 (pilish--input-unedited-recall-p)
+               (bobp))
+             ;; Silent at the oldest entry, unlike `pilish-previous-input'.
+             (< (if pilish--input-ring-index (1+ pilish--input-ring-index) 0)
+                (ring-length (pilish--input-ring))))
+    (pilish-previous-input))
+  (goto-char (point-min)))
+
+(defun pilish-input-history-down ()
+  "Show the next prompt from the input's last screen line.
+See `pilish-input-arrow-history'."
+  (interactive)
+  (if (pilish--input-unedited-recall-p)
+      (pilish-next-input)
+    (goto-char (point-max))))
 
 ;;;; History Isearch
 

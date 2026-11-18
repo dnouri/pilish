@@ -200,6 +200,19 @@ within the current draft, never prompt-history recall.  When Pilish loads
 or resumes a session, the saved user prompts join the history commands
 automatically.
 
+Set =pilish-input-arrow-history= to let =↑= / =↓= browse prompt history
+from the draft's edges, as in Pi's editor.  =↑= on the first screen line
+acts as =M-p= when the input is empty, point is at its start, or a
+recalled prompt is shown as it was recalled; =↓= on the last screen line
+acts as =M-n= in that case too, until your draft returns.  Wrapped lines
+count as screen lines, so on other lines, including the earlier rows of
+a long wrapped line, the arrows move point.  The arrows share the
+history position of =M-p=, =M-n= and =M-r=, and say nothing at either
+end of history.  While the input differs from the recalled prompt, they
+only move point; =M-n= still restores your draft, and undoing your edits
+lets the arrows browse again.  During an incremental search, in a
+narrowed input and with =Shift=, the arrows keep their usual bindings.
+
 ** Send, steer, queue, and abort
 
 Press =C-c C-c= (=M-x pilish-send=) to send.  If Pi is already working,
@@ -578,6 +591,10 @@ Input buffer (normal state):
 | =q=   | close input window |
 | =?=   | transient menu     |
 
+With =pilish-input-arrow-history=, =↑= / =↓= browse prompt history
+from the draft's first or last screen line in normal and insert state;
+elsewhere they keep their usual bindings.
+
 Session and tree browser buffers start in motion state as well.  Evil's
 =j= / =k= move line-wise.  Magit's section motions remain on =n= / =p=
 (and =M-n= / =M-p=) and skip folded rows.  =TAB= / =S-TAB= and =^= use
@@ -875,6 +892,7 @@ The main buffers:
 | =M-p= / =M-n=             | input        | Prompt history (=C-↑= / =C-↓= also work)    |
 | =C-r= / =C-s=             | input        | Search within the current draft             |
 | =M-r=                     | input        | Search prompt history; =M-n= restores draft |
+| =↑= / =↓=                 | input        | Pi-style prompt history, if enabled         |
 | =TAB=                     | input        | Complete paths and =/= commands             |
 | =M-<prior>= / =M-<next>=  | input        | Scroll the linked chat window               |
 | =TAB=                     | chat         | Toggle summary line, thinking, tool, or turn |

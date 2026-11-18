@@ -3107,6 +3107,277 @@ This ensures history loads correctly when callback runs in arbitrary context."
 
 ;;; Input History
 
+;; Pi-style arrows: `pilish-input-arrow-history'
+
+(defmacro pilish-test--with-arrow-input (text &rest body)
+  "Run BODY in a displayed input buffer holding TEXT with history old, new."
+  (declare (indent 1) (debug t))
+  `(let ((buf (generate-new-buffer "*pilish-test-arrows*"))
+         (pilish-input-arrow-history t))
+     (unwind-protect
+         (save-window-excursion
+           (set-window-buffer (selected-window) buf)
+           (with-current-buffer buf
+             (pilish-input-mode)
+             (setq truncate-lines nil)
+             (pilish--history-add "old")
+             (pilish--history-add "new")
+             (insert ,text)
+             ,@body))
+       (kill-buffer buf))))
+
+(defun pilish-test--arrow (key)
+  "Run the command KEY is bound to in the current input buffer."
+  (call-interactively (key-binding key)))
+
+(ert-deftest pilish-test-arrow-history-browses-from-empty-input ()
+  "<up> recalls prompts with point at the start; <down> returns to the draft."
+  (pilish-test--with-arrow-input ""
+    (pilish-test--arrow [up])
+    (should (equal (buffer-string) "new"))
+    (should (bobp))
+    (pilish-test--arrow [up])
+    (should (equal (buffer-string) "old"))
+    (pilish-test--arrow [down])
+    (should (equal (buffer-string) "new"))
+    (pilish-test--arrow [down])
+    (should (equal (buffer-string) ""))))
+
+(ert-deftest pilish-test-arrow-history-moves-within-draft-first ()
+  "Inside a draft the arrows move point; history starts from its start."
+  (pilish-test--with-arrow-input "line one\nline two"
+    ;; Last line: <up> keeps its usual binding.
+    (should (eq (key-binding [up]) #'previous-line))
+    (goto-char 4)
+    (pilish-test--arrow [up])
+    (should (= (point) (point-min)))
+    (should (equal (buffer-string) "line one\nline two"))
+    (pilish-test--arrow [up])
+    (should (equal (buffer-string) "new"))
+    (pilish-test--arrow [down])
+    (should (equal (buffer-string) "line one\nline two"))
+    (goto-char (point-min))
+    (should (eq (key-binding [down]) #'next-line))
+    (goto-char (point-max))
+    (pilish-test--arrow [down])
+    (should (equal (buffer-string) "line one\nline two"))
+    (should (eobp))))
+
+(ert-deftest pilish-test-arrow-history-counts-wrapped-screen-lines ()
+  "A wrapped line's rows count: only its first and last rows browse."
+  (pilish-test--with-arrow-input (make-string (* 3 (window-body-width)) ?x)
+    ;; Point at the end sits on the last of several screen rows.
+    (should (> (count-screen-lines (point-min) (point-max)) 1))
+    (should (eq (key-binding [up]) #'previous-line))
+    (should (eq (key-binding [down]) #'pilish-input-history-down))
+    (goto-char (point-min))
+    (should (eq (key-binding [up]) #'pilish-input-history-up))
+    (should (eq (key-binding [down]) #'next-line))
+    ;; A middle row of the same logical line keeps both usual bindings.
+    (vertical-motion 1)
+    (should-not (bobp))
+    (should (eq (key-binding [up]) #'previous-line))
+    (should (eq (key-binding [down]) #'next-line))))
+
+(ert-deftest pilish-test-arrow-history-edited-recall-keeps-saved-draft ()
+  "After editing a recalled prompt the arrows only move point.
+The draft saved before browsing stays saved, and `M-n' restores it."
+  (pilish-test--with-arrow-input "draft"
+    (goto-char (point-min))
+    (pilish-test--arrow [up])
+    (should (equal (buffer-string) "new"))
+    (goto-char (point-max))
+    (insert " edited")
+    (goto-char (point-min))
+    (pilish-test--arrow [down])
+    (should (equal (buffer-string) "new edited"))
+    (should (eobp))
+    (goto-char 3)
+    (pilish-test--arrow [up])
+    (should (bobp))
+    (pilish-test--arrow [up])
+    (should (equal (buffer-string) "new edited"))
+    (should (bobp))
+    (should (equal pilish--input-saved "draft"))
+    (should (= pilish--input-ring-index 0))
+    (pilish-next-input)
+    (should (equal (buffer-string) "draft"))
+    (should-not pilish--input-ring-index)))
+
+(ert-deftest pilish-test-arrow-history-silent-at-history-ends ()
+  "The arrows signal nothing at the oldest entry or past the draft."
+  (pilish-test--with-arrow-input ""
+    (pilish-test--arrow [up])
+    (pilish-test--arrow [up])
+    (should (equal (buffer-string) "old"))
+    (pilish-test--arrow [up])
+    (should (equal (buffer-string) "old"))
+    (should (bobp))
+    (should (= pilish--input-ring-index 1))
+    (pilish-test--arrow [down])
+    (pilish-test--arrow [down])
+    (should (equal (buffer-string) ""))
+    (should-not pilish--input-ring-index)
+    (pilish-test--arrow [down])
+    (should (equal (buffer-string) ""))
+    (should-not pilish--input-ring-index)))
+
+(ert-deftest pilish-test-arrow-history-empty-ring-falls-through ()
+  "With no history the arrows keep their usual bindings everywhere."
+  (let ((buf (generate-new-buffer "*pilish-test-arrows-empty*"))
+        (pilish-input-arrow-history t))
+    (unwind-protect
+        (save-window-excursion
+          (set-window-buffer (selected-window) buf)
+          (with-current-buffer buf
+            (pilish-input-mode)
+            (should (eq (key-binding [up]) #'previous-line))
+            (should (eq (key-binding [down]) #'next-line))
+            (insert "draft")
+            (goto-char (point-min))
+            (should (eq (key-binding [up]) #'previous-line))
+            (should (eq (key-binding [down]) #'next-line))))
+      (kill-buffer buf))))
+
+(ert-deftest pilish-test-arrow-history-shares-navigation-with-meta-keys ()
+  "The arrows, `M-p' and `M-n' move one history position over one draft."
+  (pilish-test--with-arrow-input "draft"
+    (goto-char (point-min))
+    (pilish-test--arrow [up])
+    (should (equal (buffer-string) "new"))
+    (pilish-previous-input)
+    (should (equal (buffer-string) "old"))
+    (pilish-test--arrow [down])
+    (should (equal (buffer-string) "new"))
+    (pilish-next-input)
+    (should (equal (buffer-string) "draft"))
+    (should-not pilish--input-ring-index)
+    (pilish-previous-input)
+    (pilish-test--arrow [down])
+    (should (equal (buffer-string) "draft"))))
+
+(ert-deftest pilish-test-arrow-history-continues-from-history-isearch ()
+  "After an accepted history search the arrows continue from its match.
+<down> walks newer entries back to the draft and <up> continues older."
+  (pcase-dolist (`(,index ,match ,key ,expected)
+                 '((1 "old" [down] ("new" "draft"))
+                   (0 "new" [up] ("old"))))
+    (pilish-test--with-arrow-input "draft"
+      (setq pilish--history-isearch-active t
+            pilish--history-isearch-saved-input "draft"
+            pilish--history-isearch-index index
+            pilish--input-saved "draft")
+      (erase-buffer)
+      (insert match)
+      (let ((isearch-mode-end-hook-quit nil))
+        (pilish--history-isearch-end))
+      (dolist (text expected)
+        (goto-char (if (equal key [up]) (point-min) (point-max)))
+        (pilish-test--arrow key)
+        (should (equal (buffer-string) text))))))
+
+(defun pilish-test--arrow-keys (keys)
+  "Type KEYS as one keyboard macro; an arrow's buffer-edge signal ends it."
+  (condition-case nil
+      (execute-kbd-macro keys)
+    ((beginning-of-buffer end-of-buffer)
+     ;; An aborted macro leaves its keys as the current raw keys, which
+     ;; later `key-binding' calls would see; replace them.
+     (let ((overriding-terminal-local-map
+            (define-keymap "<f35>" #'ignore)))
+       (execute-kbd-macro [f35])))))
+
+(ert-deftest pilish-test-arrow-history-declines-during-isearch ()
+  "An arrow that ends an isearch never browses history.
+Emacs looks the arrow up before isearch ends, so a history command would
+act on the search's state.  `C-r' within the draft keeps the draft, and
+an arrow inside `M-r' that does not end the search leaves the draft for
+`M-n' to restore once the match is accepted."
+  (pilish-test--with-arrow-input "draft"
+    (let ((isearch-mode " Isearch"))
+      (goto-char (point-min))
+      (should (eq (key-binding [up]) #'previous-line))
+      (goto-char (point-max))
+      (should (eq (key-binding [down]) #'next-line)))
+    (pilish-test--arrow-keys (vconcat (kbd "C-r") "draft" [up]))
+    (should-not isearch-mode)
+    (should (equal (buffer-string) "draft"))
+    (should-not pilish--input-ring-index)
+    ;; With `search-exit-option' nil the arrow runs inside the search;
+    ;; the macro's end then accepts the match.
+    (let ((search-exit-option nil))
+      (pilish-test--arrow-keys (vconcat (kbd "M-r") "old" [up])))
+    (should-not isearch-mode)
+    (should (equal (buffer-string) "old"))
+    (should (equal pilish--input-saved "draft"))
+    (pilish-next-input)
+    (pilish-next-input)
+    (should (equal (buffer-string) "draft"))))
+
+(ert-deftest pilish-test-arrow-history-declines-in-narrowed-input ()
+  "A narrowed input keeps the usual arrows, so no recall saves a part."
+  (pilish-test--with-arrow-input "before\nmiddle\nafter"
+    (narrow-to-region 8 14)
+    (goto-char (point-min))
+    (should (eq (key-binding [up]) #'previous-line))
+    (should (eq (key-binding [down]) #'next-line))
+    (pilish-test--arrow-keys [up])
+    (widen)
+    (should (equal (buffer-string) "before\nmiddle\nafter"))
+    (should-not pilish--input-ring-index)
+    (goto-char (point-min))
+    (pilish-test--arrow-keys [up])
+    (should (equal (buffer-string) "new"))
+    (pilish-next-input)
+    (should (equal (buffer-string) "before\nmiddle\nafter"))))
+
+(ert-deftest pilish-test-arrow-history-shifted-arrows-select ()
+  "S-<up> and S-<down> keep shift-selection instead of browsing."
+  (pilish-test--with-arrow-input "line one\nline two"
+    (let ((shift-select-mode t))
+      (goto-char (point-min))
+      (forward-char 4)
+      (pilish-test--arrow-keys [S-up])
+      (should (equal (buffer-string) "line one\nline two"))
+      (should-not pilish--input-ring-index)
+      (should (region-active-p))
+      (deactivate-mark)
+      (goto-char (point-max))
+      (pilish-test--arrow-keys [S-down])
+      (should (equal (buffer-string) "line one\nline two"))
+      (should (region-active-p))
+      (deactivate-mark)
+      ;; Recalled prompts stay put too: S-<down> does not restore the draft.
+      (goto-char (point-min))
+      (pilish-test--arrow-keys [up])
+      (should (equal (buffer-string) "new"))
+      (pilish-test--arrow-keys [S-down])
+      (should (equal (buffer-string) "new"))
+      (should (region-active-p)))))
+
+(ert-deftest pilish-test-arrow-history-undone-edit-browses-again ()
+  "An edit undone back to the recalled prompt lets <down> restore the draft."
+  (pilish-test--with-arrow-input "draft"
+    (buffer-enable-undo)
+    (goto-char (point-min))
+    (pilish-test--arrow-keys [up])
+    (should (equal (buffer-string) "new"))
+    (pilish-test--arrow-keys (vconcat (kbd "C-e") "!" [down]))
+    (should (equal (buffer-string) "new!"))
+    (pilish-test--arrow-keys (kbd "C-/"))
+    (should (equal (buffer-string) "new"))
+    (goto-char (point-max))
+    (pilish-test--arrow-keys [down])
+    (should (equal (buffer-string) "draft"))
+    (should-not pilish--input-ring-index)))
+
+(ert-deftest pilish-test-arrow-history-off-keeps-movement ()
+  "Without `pilish-input-arrow-history' the arrows keep their bindings."
+  (pilish-test--with-arrow-input ""
+    (let ((pilish-input-arrow-history nil))
+      (should (eq (key-binding [up]) #'previous-line))
+      (should (eq (key-binding [down]) #'next-line)))))
+
 (ert-deftest pilish-test-history-add-to-ring ()
   "pilish--history-add adds input to ring."
   (let ((pilish--input-ring nil))

@@ -370,6 +370,9 @@ options `pilish-evil-chat-state',
     (kbd "RET") #'pilish-tree-browser-navigate)
   (evil-define-key* 'normal pilish-input-mode-map
     (kbd "RET") #'pilish-send
+    ;; Evil's motion map would otherwise shadow the input map's arrows.
+    [up] pilish--input-arrow-up-binding
+    [down] pilish--input-arrow-down-binding
     "q" #'pilish-evil-close-input
     "?" #'pilish-menu)
   (when pilish-evil-copy-raw-markdown
