@@ -376,7 +376,7 @@ Later resumes remain visible but have no button or link face."
         (let* ((fence (make-string width ?~))
                (guard (propertize (concat fence "\n") 'pilish-conversation-guard t 'display "")))
           (propertize (concat guard text "\n" guard)
-                      'pilish-conversation-tree t 'pilish-no-fontify t))))))
+                      'pilish-conversation-tree t))))))
 
 (provide 'pilish-conversations)
 ;;; pilish-conversations.el ends here

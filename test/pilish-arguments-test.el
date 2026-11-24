@@ -1269,6 +1269,8 @@ established file actions keep authority over real path references only."
           (should (get-text-property (point) 'pilish-argument-guard))
           (should (looking-at "[~`]\\{3,\\}$"))))
       (pilish-toggle-tool-section)
+      ;; Jit-lock hides the output's fences once a window shows them.
+      (font-lock-ensure)
       (should (string-match-p "\nCHILD\nShow less\n" (pilish-arguments-test--visible-text)))
       (pilish-arguments-test--goto-text "Show less")
       (should (equal (pilish-arguments-test--gutter (point)) "▾")))))
@@ -1734,7 +1736,6 @@ established file actions keep authority over real path references only."
                                     (list (get-text-property pos 'pilish-argument-guard)
                                           (get-text-property pos 'pilish-argument-literal)
                                           (get-text-property pos 'display)
-                                          (get-text-property pos 'pilish-no-fontify)
                                           (mapcar
                                            (lambda (prop)
                                              (let ((prefix (get-text-property pos prop)))
@@ -2136,7 +2137,6 @@ established file actions keep authority over real path references only."
                 (dotimes (offset (length value))
                   (let ((position (+ (point) offset)))
                     (should (get-text-property position 'pilish-argument-literal))
-                    (should (get-text-property position 'pilish-no-fontify))
                     (should-not (button-at position))
                     (should-not (invisible-p position))))
                 (pilish-arguments-test--goto-text "link")
@@ -2168,7 +2168,6 @@ established file actions keep authority over real path references only."
       (should (equal original (pilish--visible-text start end)))
       (pilish-arguments-test--goto-text "launch")
       (should (get-text-property (point) 'pilish-argument-literal))
-      (should (get-text-property (point) 'pilish-no-fontify))
       (should (get-text-property (point) 'rear-nonsticky))
       (should-not (button-at (point)))
       (set-marker inside nil))))
