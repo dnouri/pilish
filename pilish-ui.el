@@ -991,8 +991,8 @@ Raw copying keeps Markdown characters but strips internal render properties."
 
 (defvar-local pilish--canonical-buffer-name nil
   "Stable session buffer name for this chat buffer.
-A chat buffer may also be backed by a transcript file, but session lookup
-still uses this name to find the live conversation.")
+A chat buffer may also be backed by a transcript file and renamed for it;
+this name stays the session's own.")
 
 (defvar-local pilish--canonical-session-directory nil
   "Stable session directory for this chat buffer.
@@ -1001,6 +1001,13 @@ when the buffer is also backed by a transcript file elsewhere.")
 
 (defvar-local pilish--canonical-session-name nil
   "Optional named-session suffix for this chat buffer.")
+
+(defvar-local pilish--session-directory-lookup-key nil
+  "The `pilish--session-directory-key' of this chat's session directory.
+Computed once when the directory is recorded: resolving a local path
+costs file system calls per component, and session lookup compares every
+chat.  Pi's working directory was resolved when its process started, so
+the key stays that directory's even if a symlink in it changes later.")
 
 (defvar pilish--chat-buffer)
 
@@ -1030,6 +1037,8 @@ DIR is the session directory and SESSION is the optional named-session suffix."
   (setq-local pilish--canonical-buffer-name
               (pilish--buffer-name :chat dir session)
               pilish--canonical-session-directory dir
+              pilish--session-directory-lookup-key
+              (pilish--session-directory-key dir)
               pilish--canonical-session-name session
               default-directory dir
               list-buffers-directory dir))
@@ -1318,19 +1327,44 @@ Uses abbreviated directory for readability in buffer lists."
         (format "*pilish-%s:%s<%s>*" type-str abbrev-dir session)
       (format "*pilish-%s:%s*" type-str abbrev-dir))))
 
-(defun pilish--find-session (dir &optional session)
-  "Find existing chat buffer for DIR and SESSION.
-Matches the chat buffer's stable session identity, even when the buffer is
-also visiting a transcript file and therefore has a different live name."
-  (let ((target-name (pilish--buffer-name :chat dir session)))
-    (cl-find-if
+(defun pilish--session-directory-key (dir &optional memo)
+  "Return the spelling that identifies session directory DIR in lookups.
+This is DIR's `pilish--canonical-session-path' with a trailing slash:
+symlink aliases of a local directory share one key, and remote routes
+stay as written without contacting the remote host.  MEMO is passed to
+`pilish--canonical-session-path'."
+  (pilish--route-preserving-file-name-as-directory
+   (pilish--canonical-session-path (pilish--normalize-directory dir) memo)))
+
+(defun pilish--session-chat-buffers (dir)
+  "Return the live chat buffers of sessions in DIR, most recent first.
+A chat matches by its stable session directory, compared through
+`pilish--session-directory-key', so a session opened through one
+spelling of a directory is found through any other spelling of it."
+  (let* ((memo (make-hash-table :test 'equal))
+         (key (pilish--session-directory-key dir memo)))
+    (cl-remove-if-not
      (lambda (buf)
        (and (buffer-live-p buf)
             (with-current-buffer buf
               (and (derived-mode-p 'pilish-chat-mode)
-                   (equal (pilish--chat-session-buffer-name)
-                          target-name)))))
+                   (stringp (pilish--chat-session-directory))
+                   (equal (or pilish--session-directory-lookup-key
+                              (pilish--session-directory-key
+                               (pilish--chat-session-directory) memo))
+                          key)))))
      (buffer-list))))
+
+(defun pilish--find-session (dir &optional session)
+  "Find existing chat buffer for DIR and SESSION.
+Matches the chat buffer's stable session identity, even when the buffer is
+also visiting a transcript file and therefore has a different live name.
+Directories match as in `pilish--session-chat-buffers'."
+  (let ((session (and session (not (string-empty-p session)) session)))
+    (cl-find-if
+     (lambda (buf)
+       (equal (pilish--chat-session-name buf) session))
+     (pilish--session-chat-buffers dir))))
 
 (defun pilish--get-or-create-buffer (type dir &optional session)
   "Get or create buffer of TYPE for DIR and optional SESSION.
@@ -1365,21 +1399,10 @@ Returns an expanded absolute path with a trailing slash."
 (defun pilish-project-buffers ()
   "Return pi chat buffers for the current project directory.
 Matches buffers by their stable session directory, not by the live buffer name
-or transcript file location.  Returns a list ordered by `buffer-list'
+or transcript file location; symlink aliases of the directory match too (see
+`pilish--session-chat-buffers').  Returns a list ordered by `buffer-list'
 recency, with the most recent buffer first."
-  (let ((target-dir (pilish--normalize-directory
-                     (pilish--session-directory))))
-    (cl-remove-if-not
-     (lambda (buf)
-       (and (buffer-live-p buf)
-            (with-current-buffer buf
-              (and (derived-mode-p 'pilish-chat-mode)
-                   (stringp (pilish--chat-session-directory))
-                   (string=
-                    (pilish--normalize-directory
-                     (pilish--chat-session-directory))
-                    target-dir)))))
-     (buffer-list))))
+  (pilish--session-chat-buffers (pilish--session-directory)))
 
 ;;;; Window Hiding
 
@@ -2515,7 +2538,9 @@ Return nil to abort the exit."
           #'pilish--session-kill-emacs-query)
 
 (defun pilish--retarget-session-buffers (dir)
-  "Retarget the current chat/input session buffers to DIR."
+  "Retarget the current chat/input session buffers to DIR.
+When DIR is another spelling of the session's current directory, keep the
+current spelling, so the buffers are not renamed."
   (let* ((chat-buf (pilish--get-chat-buffer))
          (session (and (buffer-live-p chat-buf)
                        (pilish--chat-session-name chat-buf)))
@@ -2527,6 +2552,8 @@ Return nil to abort the exit."
       (user-error "No pi session buffer"))
     (when (and existing (not (eq existing chat-buf)))
       (user-error "Pi session already open for: %s" dir))
+    (when existing
+      (setq dir (pilish--chat-session-directory chat-buf)))
     (with-current-buffer chat-buf
       (pilish--set-chat-session-identity dir session)
       (rename-buffer pilish--canonical-buffer-name))

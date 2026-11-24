@@ -327,7 +327,11 @@ To resume a file as a live session instead, use
 
 *** Manage live sessions
 
-Each project directory gets its own session automatically.  Run
+Each project directory gets its own session automatically.  Symlink
+aliases of a local directory share it: a session started through one
+spelling keeps that spelling and is reused through any other, for example
+when =pilish-open-session-file= opens a file whose recorded cwd is the
+resolved path.  Remote directories match as written.  Run
 =M-x pilish= again from a Pilish buffer to restore missing windows
 or focus the input window when both are visible.  =M-x pilish-toggle=
 hides and shows the session windows in the current frame.
@@ -1616,8 +1620,8 @@ or tab bar can call it on every refresh.
 =pilish-session-exists-p= takes a directory and optional session name
 (nil for the default session) and checks for the session's chat buffer,
 even when Pi is stopped; every existing session can be inspected with the
-accessors above.  It does not resolve directory symlinks, and it is
-autoloaded, so it can be called before Pilish is loaded.
+accessors above.  A symlink alias of the session's directory finds it,
+and it is autoloaded, so it can be called before Pilish is loaded.
 
 #+begin_src emacs-lisp
 (let ((chat (pilish-session-chat-buffer)))
