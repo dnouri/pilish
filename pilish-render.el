@@ -1605,6 +1605,22 @@ buffer."
                   (pilish--render-safe-string text))))
     (pilish--set-extension-status key text)))
 
+(defun pilish--extension-ui-set-widget (event)
+  "Handle setWidget method from EVENT.
+Pi's RPC mode sends a widget's string lines, or none to remove it; it
+never sends component widgets.  Every widget shows above the draft,
+whatever its `widgetPlacement': the input buffer's line motion and
+window fitting assume the draft ends the buffer."
+  (let ((lines (plist-get event :widgetLines)))
+    (pilish--set-extension-widget
+     (plist-get event :widgetKey)
+     (when (vectorp lines)
+       (mapcan (lambda (line)
+                 (split-string
+                  (ansi-color-filter-apply (pilish--render-safe-string line))
+                  "\n"))
+               lines)))))
+
 ;; Pi RPC currently suppresses this method; retain client protocol support.
 (defun pilish--extension-ui-set-working-message (event)
   "Handle setWorkingMessage method from EVENT."
@@ -1659,6 +1675,7 @@ Dispatches to appropriate handler based on method."
       ("editor"         (pilish--extension-ui-editor event proc))
       ("set_editor_text" (pilish--extension-ui-set-editor-text event))
       ("setStatus"      (pilish--extension-ui-set-status event))
+      ("setWidget"      (pilish--extension-ui-set-widget event))
       ("setWorkingMessage" (pilish--extension-ui-set-working-message event))
       (_                (pilish--extension-ui-unsupported event proc)))))
 

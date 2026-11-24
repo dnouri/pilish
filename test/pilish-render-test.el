@@ -8777,7 +8777,8 @@ since we don't display them locally. Let pi's message_start handle it."
         (should (equal warnings
                        '("Extension status function pilish-test--status-killer \
 killed  *chat*; later functions skipped"))))
-      ;; Clearing several statuses stops at the first key whose function kills.
+      ;; Dropping several stale statuses stops at the first key whose
+      ;; function kills.
       (setq warnings nil calls nil)
       (let ((chat (generate-new-buffer " *chat*"))
             (other (generate-new-buffer " *other*")))
@@ -8790,10 +8791,241 @@ killed  *chat*; later functions skipped"))))
                                   (push (cons (buffer-name buffer) key) calls)
                                   (set-buffer other)
                                   (kill-buffer buffer))))
-              (pilish--clear-extension-statuses))
+              (pilish--mark-extension-ui-stale)
+              (pilish--drop-stale-extension-ui))
           (kill-buffer other))
         (should (equal calls '((" *chat*" . "a"))))
         (should (= (length warnings) 1))))))
+
+(ert-deftest pilish-test-extension-status-functions-follow-stale-drop ()
+  "Dropping stale statuses reports each one that was not set again, once.
+A status a function sets again while hearing of another one's removal is
+not reported as cleared afterwards."
+  (with-temp-buffer
+    (pilish-chat-mode)
+    (let ((chat (current-buffer))
+          calls)
+      (setq-local pilish-extension-status-functions
+                  (list (lambda (buffer key text)
+                          (push (cons key text) calls)
+                          (when (and (equal key "b") (null text))
+                            (with-current-buffer buffer
+                              (pilish--set-extension-status "a" "back"))))))
+      (dolist (key '("a" "b" "kept"))
+        (pilish--set-extension-status key "before"))
+      (pilish--mark-extension-ui-stale)
+      (pilish--set-extension-status "kept" "after")
+      (setq calls nil)
+      (pilish--drop-stale-extension-ui)
+      ;; Header-line order: "b" goes first and its function sets "a" again.
+      (should (equal (reverse calls) '(("b") ("a" . "back"))))
+      (should (equal (pilish-session-extension-status chat)
+                     '(("a" . "back") ("kept" . "after"))))
+      ;; Nothing is stale any more.
+      (setq calls nil)
+      (pilish--drop-stale-extension-ui)
+      (should-not calls))))
+
+(defun pilish-test--widget (key &optional lines placement)
+  "Deliver Pi's setWidget JSON for KEY with LINES and PLACEMENT.
+LINES is a list of strings; nil omits them, as Pi does to remove a widget."
+  (pilish--handle-display-event
+   (pilish--parse-json-line
+    (json-serialize
+     (append (list :type "extension_ui_request" :id "w" :method "setWidget"
+                   :widgetKey key)
+             (and lines (list :widgetLines (vconcat lines)))
+             (and placement (list :widgetPlacement placement)))))))
+
+(defun pilish-test--widget-string (input)
+  "Return the widget text shown above INPUT's draft, or nil."
+  (with-current-buffer input
+    (when-let* ((overlay (pilish--extension-widget-overlay)))
+      (overlay-get overlay 'before-string))))
+
+(ert-deftest pilish-test-extension-widgets-show-above-the-draft ()
+  "String-line widgets show in key order, change in place and clear."
+  (pilish-test-with-rpc-session (chat input _proc commands)
+    (cl-letf (((symbol-function 'message)
+               (lambda (&rest _) (ert-fail "setWidget must not warn"))))
+      (with-current-buffer chat
+        (pilish-test--widget "b" '("\e[31mone\e[0m" "two\nthree"))
+        (pilish-test--widget "a" '("four"))
+        (should (equal-including-properties
+                 (pilish-test--widget-string input)
+                 (propertize "one\ntwo\nthree\nfour\n"
+                             'face 'pilish-extension-widget)))
+        (pilish-test--widget "b" '("five"))
+        (should (equal (pilish-test--widget-string input) "five\nfour\n"))
+        (pilish-test--widget "b")
+        (should (equal (pilish-test--widget-string input) "four\n"))
+        (pilish-test--widget "a" '())
+        (should-not (pilish-test--widget-string input))))
+    ;; setWidget is fire-and-forget: nothing answers it.
+    (should-not commands)))
+
+(ert-deftest pilish-test-extension-widget-below-editor-shows-above ()
+  "A belowEditor widget shows above the draft too."
+  (pilish-test-with-rpc-session (chat input _proc _commands)
+    (with-current-buffer chat
+      (pilish-test--widget "k" '("line") "belowEditor"))
+    (should (equal (pilish-test--widget-string input) "line\n"))))
+
+(ert-deftest pilish-test-extension-widget-stays-out-of-the-draft ()
+  "Widgets stay above draft edits and never reach the prompt or history."
+  (pilish-test-with-rpc-session (chat input _proc commands)
+    (with-current-buffer chat
+      (pilish-test--widget "k" '("keep me")))
+    (with-current-buffer input
+      (insert "draft")
+      (goto-char (point-min))
+      (insert "my ")
+      (should (equal (buffer-string) "my draft"))
+      (should (= (overlay-start (pilish--extension-widget-overlay)) 1))
+      (should (= (overlay-end (pilish--extension-widget-overlay)) 1))
+      (erase-buffer)
+      (insert "sent")
+      (pilish-send)
+      (should (equal (buffer-string) ""))
+      (should (equal (ring-elements pilish--input-ring) '("sent")))
+      (should (= (overlay-start (pilish--extension-widget-overlay)) 1))
+      (should (equal (pilish-test--widget-string input) "keep me\n")))
+    (should (equal (plist-get (seq-find (lambda (command)
+                                          (equal (plist-get command :type) "prompt"))
+                                        commands)
+                              :message)
+                   "sent"))))
+
+(ert-deftest pilish-test-extension-widget-stays-out-of-history-search ()
+  "History isearch neither saves nor replaces the widgets above the draft.
+Its previews replace the whole draft, and quitting or `M-n' after
+accepting restores the draft below the unchanged widget."
+  (pilish-test-with-rpc-session (chat input _proc _commands)
+    (with-current-buffer chat
+      (pilish-test--widget "k" '("keep me")))
+    (with-current-buffer input
+      (pilish--history-add "older prompt")
+      (insert "draft")
+      (dolist (quit '(t nil))
+        (cl-letf (((symbol-function 'isearch-backward) #'ignore))
+          (pilish-history-isearch-backward))
+        (should (equal pilish--history-isearch-saved-input "draft"))
+        (pilish--history-isearch-goto 0)
+        (should (equal (buffer-string) "older prompt"))
+        (should (equal (pilish-test--widget-string input) "keep me\n"))
+        (let ((isearch-mode-end-hook-quit quit))
+          (pilish--history-isearch-end))
+        (unless quit
+          (should (equal (buffer-string) "older prompt"))
+          (pilish-next-input))
+        (should (equal (buffer-string) "draft"))
+        (should (equal (pilish-test--widget-string input) "keep me\n"))
+        (should (= (point-min)
+                   (overlay-start
+                    (car (seq-filter
+                          (lambda (overlay)
+                            (overlay-get overlay 'before-string))
+                          (overlays-in (point-min) (point-min))))))))
+      (should (equal (ring-elements pilish--input-ring) '("older prompt"))))))
+
+(ert-deftest pilish-test-extension-widgets-survive-input-mode-rerun ()
+  "After `pilish-input-mode' runs again, a widget update shows it once.
+The mode resets buffer-local variables.  Without Markdown highlighting
+the widget overlay survives, so an update must reuse it rather than add a
+second one; md-ts-mode's teardown deletes it, so an update recreates it."
+  (dolist (highlighting '(nil t))
+    (let ((pilish-input-markdown-highlighting highlighting))
+      (pilish-test-with-rpc-session (chat input _proc _commands)
+        (with-current-buffer chat
+          (pilish-test--widget "k" '("one")))
+        (with-current-buffer input
+          (pilish-input-mode)
+          (setq pilish--chat-buffer chat))
+        (with-current-buffer chat
+          (pilish-test--widget "k" '("two")))
+        (with-current-buffer input
+          (should (= 1 (cl-count-if
+                        (lambda (overlay)
+                          (overlay-get overlay 'pilish-extension-widgets))
+                        (overlays-in (point-min) (point-max))))))
+        (should (equal (pilish-test--widget-string input) "two\n"))))))
+
+(defun pilish-test--status (key text)
+  "Deliver Pi's setStatus JSON for KEY with TEXT."
+  (pilish--handle-display-event
+   (pilish--parse-json-line
+    (json-serialize (list :type "extension_ui_request" :id "s"
+                          :method "setStatus" :statusKey key
+                          :statusText text)))))
+
+(defun pilish-test--widgets-after-replacement (start type response)
+  "Return widget text and statuses after START replaces the session.
+START receives the chat buffer and its process.  Before it runs, the chat
+shows widgets and statuses \"old\" and \"renewed\".  While the TYPE
+request waits, the new extensions set \"renewed\" and \"added\" from
+`session_start', as Pi's RPC mode does before it answers with RESPONSE.
+The statuses are returned as an alist sorted by key."
+  (pilish-test-with-rpc-session (chat input proc _commands)
+    (let (callback new-proc)
+      (unwind-protect
+          (cl-letf (((symbol-function 'pilish--rpc-async)
+                     (lambda (_proc command cb)
+                       (when (equal (plist-get command :type) type)
+                         (setq callback cb))))
+                    ((symbol-function 'pilish--start-process)
+                     (lambda (&rest _)
+                       (setq new-proc (start-process "pilish-test-new" nil "cat"))
+                       (set-process-query-on-exit-flag new-proc nil)
+                       new-proc))
+                    ((symbol-function 'pilish--session-file-cwd-or-error)
+                     (lambda (_file) temporary-file-directory))
+                    ((symbol-function 'message) #'ignore))
+            (with-current-buffer chat
+              (pilish--set-chat-session-identity temporary-file-directory)
+              (setq pilish--state '(:session-file "/tmp/current.jsonl"))
+              (dolist (key '("old" "renewed"))
+                (pilish-test--widget key (list (concat key " before")))
+                (pilish-test--status key (concat key " before")))
+              (funcall start chat proc)
+              (dolist (key '("renewed" "added"))
+                (pilish-test--widget key (list (concat key " after")))
+                (pilish-test--status key (concat key " after")))
+              (funcall callback (append '(:type "response") response))
+              (list (pilish-test--widget-string input)
+                    (sort (copy-sequence pilish--extension-status)
+                          (lambda (a b) (string< (car a) (car b)))))))
+        (when (process-live-p new-proc) (delete-process new-proc))))))
+
+(defconst pilish-test--session-replacements
+  `(("new_session" ,(lambda (_chat _proc) (pilish-new-session)))
+    ("switch_session"
+     ,(lambda (chat proc)
+        (pilish--resume-selected-session proc chat "/tmp/other.jsonl")))
+    ("fork" ,(lambda (_chat proc) (pilish--execute-fork proc "e1")))
+    ("switch_session" ,(lambda (_chat _proc) (pilish-reload))))
+  "Request types and starts of the commands that replace Pi's extensions.")
+
+(ert-deftest pilish-test-session-replacement-drops-stale-extension-widgets ()
+  "A replaced session keeps only the widgets and statuses its new extensions set.
+Pi's TUI clears every widget and status when it replaces its extensions;
+RPC sends nothing, and the new extensions set theirs before Pi answers."
+  (pcase-dolist (`(,type ,start) pilish-test--session-replacements)
+    (should (equal (pilish-test--widgets-after-replacement
+                    start type
+                    '(:success t :data (:cancelled :false :text "")))
+                   '("renewed after\nadded after\n"
+                     (("added" . "added after")
+                      ("renewed" . "renewed after")))))))
+
+(ert-deftest pilish-test-failed-session-replacement-keeps-extension-widgets ()
+  "A failed replacement leaves the extensions with their widgets and statuses."
+  (pcase-dolist (`(,type ,start) pilish-test--session-replacements)
+    (should (equal (pilish-test--widgets-after-replacement
+                    start type '(:success :false :error "refused"))
+                   '("old before\nrenewed after\nadded after\n"
+                     (("added" . "added after")
+                      ("old" . "old before")
+                      ("renewed" . "renewed after")))))))
 
 (ert-deftest pilish-test-extension-ui-set-working-message ()
   "extension_ui_request setWorkingMessage stores working text."
@@ -8872,28 +9104,27 @@ See https://github.com/dnouri/pilish/issues/176."
         (let ((pilish--process t))
           (pilish--handle-extension-ui-request
            '(:type "extension_ui_request"
-             :id "req-widget-1"
-             :method "setWidget"
-             :widgetKey "my-ext"
-             :widgetLines ["Line 1"]))
-          (pilish--handle-extension-ui-request
-           '(:type "extension_ui_request"
-             :id "req-widget-2"
-             :method "setWidget"
-             :widgetKey "my-ext"
-             :widgetLines ["Line 2"]))
-          (pilish--handle-extension-ui-request
-           '(:type "extension_ui_request"
-             :id "req-title"
+             :id "req-title-1"
              :method "setTitle"
-             :title "pi - project")))))
+             :title "pi - project"))
+          (pilish--handle-extension-ui-request
+           '(:type "extension_ui_request"
+             :id "req-title-2"
+             :method "setTitle"
+             :title "pi - other project"))
+          (pilish--handle-extension-ui-request
+           '(:type "extension_ui_request"
+             :id "req-unknown"
+             :method "someNewFancyWidget")))))
     (should (= (length warnings-logged) 2))
-    (should (= 1 (cl-count-if (lambda (m) (string-match-p "setWidget" m))
-                              warnings-logged)))
     (should (= 1 (cl-count-if (lambda (m) (string-match-p "setTitle" m))
                               warnings-logged)))
-    ;; setWidget and setTitle are fire-and-forget RPC methods.
-    (should (null responses-sent))))
+    (should (= 1 (cl-count-if (lambda (m) (string-match-p "someNewFancyWidget" m))
+                              warnings-logged)))
+    ;; setTitle is a fire-and-forget RPC method; unknown methods are cancelled.
+    (should (equal (mapcar (lambda (response) (plist-get response :id))
+                           responses-sent)
+                   '("req-unknown")))))
 
 (ert-deftest pilish-test-extension-ui-unsupported-warnings-are-buffer-local ()
   "Unsupported extension UI warning dedupe is isolated by chat buffer."
@@ -8915,19 +9146,17 @@ See https://github.com/dnouri/pilish/issues/176."
               (let ((pilish--process t))
                 (pilish--handle-extension-ui-request
                  '(:type "extension_ui_request"
-                   :id "req-widget"
-                   :method "setWidget"
-                   :widgetKey "my-ext"
-                   :widgetLines ["Line 1"])))))
+                   :id "req-title"
+                   :method "setTitle"
+                   :title "pi - project")))))
           (with-current-buffer buf-a
             (let ((pilish--process t))
               (pilish--handle-extension-ui-request
                '(:type "extension_ui_request"
-                 :id "req-widget-again"
-                 :method "setWidget"
-                 :widgetKey "my-ext"
-                 :widgetLines ["Line 2"]))))
-          (should (= 2 (cl-count-if (lambda (m) (string-match-p "setWidget" m))
+                 :id "req-title-again"
+                 :method "setTitle"
+                 :title "pi - other project"))))
+          (should (= 2 (cl-count-if (lambda (m) (string-match-p "setTitle" m))
                                     warnings-logged))))
       (when (buffer-live-p buf-a) (kill-buffer buf-a))
       (when (buffer-live-p buf-b) (kill-buffer buf-b)))))
