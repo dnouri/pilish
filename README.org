@@ -1056,40 +1056,23 @@ replacement may require a toggle or history reload.
 (pilish-terminal-image-mode 1)
 #+end_src
 
-Kitty and Ghostty text-terminal frames with 24-bit colour can display
-PNG previews through the Kitty graphics protocol's Unicode placeholders.
-JPEG, GIF and WebP need ImageMagick (=magick= or =convert=); only the
-first animation frame is used.  Conversion runs in the background, two
-images at a time, with ImageMagick resource limits, a 10-second timeout
-and a 16 MiB output cap; the preview appears when it finishes.  SVG and
-unsupported formats keep the label, as do unsuccessful conversions.
-Update errors, including failed terminal writes, are reported in
-=*Messages*=.
-Disabling the mode restores the labels without changing the chat text or
-other windows' graphical previews.
+Kitty and Ghostty text terminals with 24-bit color then draw PNG
+previews in place of the label.  JPEG, GIF and WebP previews need
+ImageMagick (=magick= or =convert=) and are converted in the
+background, so they appear once converted; only the first frame of an
+animation is shown.  SVG, other formats and failed conversions keep the
+label, and errors such as a failed terminal write are reported in
+=*Messages*=.  Previews fit the terminal window and resize and scroll
+with the text.  Turning the mode off restores the labels; turn it off
+and on again to resend images a terminal has lost.
 
-Previews in live chats and saved-conversation views fit the terminal
-window, resize and scroll with the text.  Each size of an image is
-stored once per terminal, so differently sized windows and chats do not
-affect each other; a resize stores the image again at the new size.
-Images that no window on a terminal shows any more are deleted from it,
-and disabling the mode deletes all of them.  Newly connected terminals
-receive their own copy.  Only images near a visible window are prepared.
-Protocol writes are synchronous.  Image ids are random 32-bit numbers:
-a terminal's image storage is shared with other programs, so a
-collision with their images is unlikely but possible.  If a terminal
-resets or evicts its image storage, reconnect the terminal client to
-resend its previews.
-
-Capability comes from the frame's =tty-type=, not Emacs's environment:
-=xterm-ghostty=, =xterm-kitty= and their suffixed variants qualify
-(=pilish-terminal-image-types=).  Over plain =ssh=, the remote side must
-report one of those types (its terminfo installed) and the terminal must
-accept the protocol through the connection; this has not been tested.
-Standard =mosh= and
-=tmux= terminal types keep the label: they do not provide this direct
-protocol path.  Do not disguise an unsupported terminal by changing
-its reported type.
+A frame qualifies when its terminal type (=tty-type=) matches
+=pilish-terminal-image-types=: by default =xterm-ghostty=,
+=xterm-kitty= and their suffixed variants.  Over plain =ssh= the
+remote side must report one of those types, which needs its terminfo
+installed; this is untested.  =mosh= and =tmux= keep the label because
+they do not pass the protocol through, and changing the reported
+terminal type does not help.
 
 #+html: <a id="scrolling-answers"></a>
 ** Scrolling and answer placement
