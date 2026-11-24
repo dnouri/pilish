@@ -361,7 +361,10 @@ refresh, =?= for the menu, and =q= to hide the browser.
 If the selected session is already live in this Emacs, =RET= displays
 its existing chat and input without resuming it again.  Otherwise,
 Pilish resumes the selected file through the chat that opened the
-browser.
+browser.  When the browser has no live chat, because that chat was
+killed or the browser was opened outside a session, =RET= opens the
+session in its own view instead, without switching another view's
+conversation, and the browser links to the view it shows.
 
 By default, the browser shows this project's sessions in Threaded
 (fork families) view.  Press =t= to toggle All projects.  Press =s=
