@@ -607,7 +607,7 @@ BINDING-SPEC is (DIR CHAT-NAME INPUT-NAME PROC).  DIR is evaluated once."
       (should (= prompt-count 1))
       (should-not (get-buffer chat-name))
       (should-not (get-buffer input-name))
-      (should-not (process-live-p proc)))))
+      (should (pilish-test-wait-for-process-exit proc)))))
 
 (ert-deftest pilish-test-kill-chat-kills-input ()
   "Killing chat buffer also kills input buffer."
@@ -855,7 +855,7 @@ Environment functions run again, so reload picks up their current values."
               (pilish-reload)
               (should (eq pilish--process old-proc))
               (should (process-live-p old-proc))
-              (should-not (process-live-p new-proc))
+              (should (pilish-test-wait-for-process-exit new-proc))
               (should-not (pilish--session-transition-active-p))
               (should (equal shown-message
                              "Pi: Failed to reload - nope")))))
@@ -895,7 +895,7 @@ Environment functions run again, so reload picks up their current values."
               (pilish-reload)
               (should (eq pilish--process old-proc))
               (should (process-live-p old-proc))
-              (should-not (process-live-p new-proc))
+              (should (pilish-test-wait-for-process-exit new-proc))
               (should-not (pilish--session-transition-active-p))
               (should (equal shown-message "Pi: Reload cancelled")))))
       (when (and old-proc (process-live-p old-proc))
@@ -1658,7 +1658,7 @@ unanswered.  SETUP is passed to `pilish-test--with-reload-chat', whose
          (should (process-live-p second-proc))
          (pilish-test--reload-respond
           first-proc "switch_session" pilish-test--reload-switched)
-         (should-not (process-live-p first-proc))
+         (should (pilish-test-wait-for-process-exit first-proc))
          (should (process-live-p second-proc))
          (should (process-live-p old-proc))
          (should (eq pilish--process old-proc))
@@ -1667,7 +1667,7 @@ unanswered.  SETUP is passed to `pilish-test--with-reload-chat', whose
          ;; The newer reload still owns its independent completion/cleanup.
          (pilish-test--reload-respond
           second-proc "switch_session" '(:success :false :error "declined"))
-         (should-not (process-live-p second-proc))
+         (should (pilish-test-wait-for-process-exit second-proc))
          (should (eq pilish--process old-proc))
          (should-not (pilish--session-transition-active-p)))))))
 
@@ -1696,7 +1696,7 @@ unanswered.  SETUP is passed to `pilish-test--with-reload-chat', whose
                  (should-error (pilish-reload)))
                (should-not (pilish--session-transition-active-p))
                (let ((failed-proc (car pilish-test--reload-processes)))
-                 (should-not (process-live-p failed-proc))
+                 (should (pilish-test-wait-for-process-exit failed-proc))
                  (should (= 0 (hash-table-count
                                (pilish--get-pending-requests failed-proc)))))
                (should (eq pilish--process old-proc))
@@ -1759,7 +1759,7 @@ unanswered.  SETUP is passed to `pilish-test--with-reload-chat', whose
          (pilish-test--reload-respond
           new-proc "switch_session" pilish-test--reload-switched)
          (should (eq pilish--process new-proc))
-         (should-not (process-live-p old-proc))
+         (should (pilish-test-wait-for-process-exit old-proc))
          (should-not outcomes)
          (pilish-test--reload-respond new-proc "get_state"
                                       pilish-test--reload-state)
@@ -1917,7 +1917,7 @@ Return (OUTCOMES-BEFORE-STATE OUTCOMES TRANSITION-ACTIVE HISTORY-SHOWN)."
            (should (equal first
                           '((superseded
                              . "Reload superseded by another session change"))))
-           (should-not (process-live-p first-proc))
+           (should (pilish-test-wait-for-process-exit first-proc))
            (should (eq pilish--process old-proc))
            (should (process-live-p old-proc))
            (should-not second)
@@ -1949,7 +1949,7 @@ Return (OUTCOMES-BEFORE-STATE OUTCOMES TRANSITION-ACTIVE HISTORY-SHOWN)."
          (should (equal outcomes
                         '((superseded
                            . "Reload superseded by another session change"))))
-         (should-not (process-live-p new-proc)))))))
+         (should (pilish-test-wait-for-process-exit new-proc)))))))
 
 (ert-deftest pilish-test-reload-callback-error-does-not-hide-failure ()
   "A failing callback is reported without undoing the reload's own cleanup."
@@ -1971,7 +1971,7 @@ Return (OUTCOMES-BEFORE-STATE OUTCOMES TRANSITION-ACTIVE HISTORY-SHOWN)."
                           "Pi: Failed to reload - nope"))
            (should (equal warnings
                           '((pilish "Reload callback failed: Callback broke"))))
-           (should-not (process-live-p new-proc))
+           (should (pilish-test-wait-for-process-exit new-proc))
            (should (eq pilish--process old-proc))
            (should (process-live-p old-proc))
            (should-not (pilish--session-transition-active-p))))))))
@@ -1984,13 +1984,15 @@ Return (OUTCOMES-BEFORE-STATE OUTCOMES TRANSITION-ACTIVE HISTORY-SHOWN)."
                 (lambda (&rest _) (error "Pipe closed"))))
        (should-error (pilish-reload))
        (should-not (pilish--session-transition-active-p))
-       (should-not (process-live-p (car pilish-test--reload-processes)))
+       (should (pilish-test-wait-for-process-exit
+                (car pilish-test--reload-processes)))
        (should (eq pilish--process old-proc))
        (let ((outcomes nil))
          (pilish-reload (lambda (outcome) (push outcome outcomes)))
          (should (equal outcomes '((failed . "Failed to reload - Pipe closed"))))
          (should-not (pilish--session-transition-active-p))
-         (should-not (process-live-p (car pilish-test--reload-processes))))
+         (should (pilish-test-wait-for-process-exit
+                  (car pilish-test--reload-processes))))
        (let ((outcomes nil)
              (quit-signaled nil))
          (cl-letf (((symbol-function 'pilish--rpc-async)
@@ -2001,7 +2003,8 @@ Return (OUTCOMES-BEFORE-STATE OUTCOMES TRANSITION-ACTIVE HISTORY-SHOWN)."
          (should quit-signaled)
          (should (equal outcomes '((quit . "Reload quit"))))
          (should-not (pilish--session-transition-active-p))
-         (should-not (process-live-p (car pilish-test--reload-processes)))
+         (should (pilish-test-wait-for-process-exit
+                  (car pilish-test--reload-processes)))
          (should (eq pilish--process old-proc)))))))
 
 ;;; Session-switch write failures

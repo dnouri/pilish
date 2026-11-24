@@ -400,16 +400,15 @@
 
 (ert-deftest pilish-gui-test-session-identity-observes-new-and-resume ()
   "Observers follow new-session, resume and buffer rename across path spellings.
-The fake's session store is reached through a symlinked $TMPDIR, as on macOS,
-and the fake reports resolved saved-file spellings after every switch, so a
-reload without a change must not notify."
+The fake's session directory is reached through a symlink, as macOS's
+$TMPDIR is, and the fake reports resolved saved-file spellings after every
+switch, so a reload without a change must not notify."
   (let* ((real (file-name-as-directory
                 (file-truename (make-temp-file "pilish-identity-" t))))
          (link (concat (directory-file-name real) "-link"))
          (dir (file-name-as-directory (expand-file-name "project" real)))
          (store (file-name-as-directory (expand-file-name "store" link)))
-         (process-environment (cons (concat "TMPDIR=" store)
-                                    process-environment))
+         (pilish-test--fake-pi-session-dir store)
          (seen nil)
          (pilish-session-identity-functions
           (list (lambda (_chat &rest identity) (push identity seen)))))
@@ -4036,7 +4035,7 @@ Return observations suitable for the graphical evidence file."
         (execute-kbd-macro (kbd "M-x pilish-reload RET"))
         (wait (lambda () (and (not (eq (current-process) first-proc))
                               (settled-p) (history-p))))
-        (should-not (process-live-p first-proc))
+        (should (pilish-test-wait-for-process-exit first-proc))
         (should (equal (with-current-buffer input (buffer-string)) draft))
         (capture "reload-interactive")
         ;; A Lisp caller hears about the reload exactly once.
@@ -4054,7 +4053,7 @@ Return observations suitable for the graphical evidence file."
           (should (equal outcomes
                          '((:outcome nil :process-changed t
                             :history-shown t :transition-active nil))))
-          (should-not (process-live-p second-proc))
+          (should (pilish-test-wait-for-process-exit second-proc))
           (should (process-live-p (current-process)))
           (should (equal (with-current-buffer input (buffer-string)) draft))
           (capture "reload-callback-success"))
@@ -4461,7 +4460,7 @@ Return observations suitable for the graphical evidence file."
                                   (and (not (eq pilish--process proc))
                                        (not (pilish--session-transition-active-p))
                                        (string-match-p "Took 2m 5s" (buffer-string))))))
-               (should-not (process-live-p proc))
+               (should (pilish-test-wait-for-process-exit proc))
                (setq proc (buffer-local-value 'pilish--process chat))
                (setf (plist-get pilish-gui-test--session :process) proc)
                (should (member "tool-duration" (process-command proc)))
