@@ -54,6 +54,17 @@
 ;; terminal types qualify, which also leaves
 ;; `mosh', `tmux' and similar intermediaries with the label: they do not
 ;; pass the protocol through and do not report these types.
+;;
+;; This file is Pilish's own client for the protocol.  Emacs does not
+;; provide one: its terminal redisplay gives each screen line the same
+;; one-cell height, and an image needs taller lines.  Programs that
+;; show images in a terminal each carry their own client.  The Emacs
+;; Lisp one, `kitty-graphics.el' as of November 2026, sizes an image
+;; once per overlay, signals an error on a terminal without the
+;; protocol and is in no ELPA archive.  A chat needs one image at the
+;; size of each of its windows, the label on every other terminal and
+;; bounded conversion of agent-supplied files.  Should a package in an
+;; ELPA archive offer those, this file can shrink to its glue.
 
 ;;; Code:
 
