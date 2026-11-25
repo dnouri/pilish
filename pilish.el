@@ -65,6 +65,7 @@
 ;;     C-c C-p        Open menu
 ;;     C-c C-r        Browse sessions
 ;;     M-p / M-n      History navigation
+;;     <up> / <down>  Pi-style history with `pilish-input-arrow-history'
 ;;     M-r            Incremental prompt-history search
 ;;     C-r            Incremental search within the draft
 ;;     TAB            Path/file completion
