@@ -3491,7 +3491,7 @@ than a question, and the optional grammars are not offered."
 
 ;;;; Startup Header
 
-(defconst pilish-version "3.4.5"
+(defconst pilish-version "3.5.0"
   "Version of Pilish.")
 
 (defconst pilish--version-probe-delay 0.1
