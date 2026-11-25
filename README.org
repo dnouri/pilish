@@ -228,7 +228,8 @@ The chat renders Markdown with syntax highlighting for code, file
 operations, and edit diffs.  Commands stream their output live, and
 long tool output collapses to a preview.  Wide pipe tables wrap to fit
 the window without changing the Markdown text.  Images appear inline in
-graphical Emacs and as type-and-size placeholders in terminals.
+graphical Emacs and as type-and-size placeholders in terminals.  Enable
+=pilish-terminal-image-mode= for inline previews in Kitty or Ghostty.
 
 Click a left-margin caret or press =TAB= in a section to expand or
 collapse tools, completed thinking, startup details, or browser rows.
@@ -1046,8 +1047,32 @@ decoder cost is not bounded by the source-byte cap.  See [[file:#more-options][A
 preview settings that bound what renders.  A chat rendered before
 any graphical client connects keeps its image previews: graphical
 frames show the images and terminal frames show the labels without a
-history reload.  Resizing previews or applying a later extension
+history reload.  Resizing graphical previews or applying a later extension
 replacement may require a toggle or history reload.
+
+*Terminal display* is opt-in:
+
+#+begin_src emacs-lisp
+(pilish-terminal-image-mode 1)
+#+end_src
+
+Kitty and Ghostty text terminals with 24-bit color then draw PNG
+previews in place of the label.  JPEG, GIF and WebP previews need
+ImageMagick (=magick= or =convert=) and are converted in the
+background, so they appear once converted; only the first frame of an
+animation is shown.  SVG, other formats and failed conversions keep the
+label, and errors such as a failed terminal write are reported in
+=*Messages*=.  Previews fit the terminal window and resize and scroll
+with the text.  Turning the mode off restores the labels; turn it off
+and on again to resend images a terminal has lost.
+
+A frame qualifies when its terminal type (=tty-type=) matches
+=pilish-terminal-image-types=: by default =xterm-ghostty=,
+=xterm-kitty= and their suffixed variants.  Over plain =ssh= the
+remote side must report one of those types, which needs its terminfo
+installed; this is untested.  =mosh= and =tmux= keep the label because
+they do not pass the protocol through, and changing the reported
+terminal type does not help.
 
 #+html: <a id="scrolling-answers"></a>
 ** Scrolling and answer placement
