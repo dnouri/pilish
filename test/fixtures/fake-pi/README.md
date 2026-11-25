@@ -48,8 +48,13 @@ A raw prompt during streaming must explicitly carry
 `streamingBehavior: "steer"` to queue text into the same single slot. Missing
 behavior fails; `"followUp"` is unsupported, as is the `follow_up` command.
 The slot holds the last accepted text. `pendingMessageCount` stays 1 until it
-is taken/cleared, including across message persistence. This does not change
-Pilish's ordinary prompt sends or add an extension engine.
+is taken/cleared, including across message persistence. Accepted steering emits
+`queue_update` with that text before its response; replacement shows only the
+newest text. Delivery emits the current slot immediately before the user echo
+(normally empty, unless a newer steer arrived). Clearing or discarding the slot
+emits an empty snapshot too. Handled or
+rejected input leaves the queue unchanged and emits no snapshot. This does not
+change Pilish's ordinary prompt sends or add an extension engine.
 
 ## `extension_dialog`
 
