@@ -1608,6 +1608,29 @@ done"))
       (when (process-live-p proc)
         (delete-process proc)))))
 
+(ert-deftest pilish-test-wait-for-process-exit-runs-sentinel ()
+  "Waiting for an already exited process also lets its sentinel finish.
+The exit status is visible before the sentinel has answered pending
+requests; callers wait for the exit and then assert on those effects."
+  (let* ((pilish-executable (pilish-test-fake-pi-executable))
+         (pilish-extra-args (pilish-test-fake-pi-extra-args "prompt-lifecycle"))
+         (proc (pilish--start-process default-directory))
+         (response nil)
+         (deadline (+ (float-time) 10)))
+    (unwind-protect
+        (progn
+          (puthash "req_1" (lambda (r) (setq response r))
+                   (pilish--get-pending-requests proc))
+          (pilish--terminate-process proc)
+          ;; Observe the exit without any process-output wait, so the
+          ;; sentinel that answers req_1 has not run yet.
+          (while (and (process-live-p proc) (< (float-time) deadline)))
+          (should (eq (process-status proc) 'exit))
+          (should (pilish-test-wait-for-process-exit proc))
+          (should (eq (plist-get response :processExit) t)))
+      (when (process-live-p proc)
+        (delete-process proc)))))
+
 (ert-deftest pilish-test-process-exit-includes-exit-code ()
   "Process exit errors include the process exit code."
   (let ((fake-proc (start-process "pilish-exit-code" nil

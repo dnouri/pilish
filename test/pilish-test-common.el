@@ -294,12 +294,21 @@ Returns the predicate value, or nil on timeout."
 
 (defun pilish-test-wait-for-process-exit (process &optional timeout)
   "Wait until PROCESS is no longer live, up to TIMEOUT seconds.
-Returns non-nil if the process exits before the timeout."
-  (pilish-test-wait-until
-   (lambda () (not (process-live-p process)))
-   (or timeout pilish-test-short-wait)
-   pilish-test-poll-interval
-   process))
+Returns non-nil if the process exits before the timeout.  The exit is
+visible before the process sentinel has run, so after the exit this waits
+once more for any process output, which runs the sentinel.  Waiting on
+PROCESS itself would return at once once it is dead."
+  (let ((exited (pilish-test-wait-until
+                 (lambda () (not (process-live-p process)))
+                 (or timeout pilish-test-short-wait)
+                 pilish-test-poll-interval
+                 process)))
+    (when exited
+      ;; The child's status change is recorded as soon as SIGCHLD is handled;
+      ;; the sentinel that answers pending requests and releases buffers
+      ;; runs on the next process-output wait.
+      (accept-process-output nil 0.01))
+    exited))
 
 ;;;; Toolcall Streaming Helpers
 
